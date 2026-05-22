@@ -3,6 +3,7 @@ const files = @import("files.zig");
 
 const Allocator = std.mem.Allocator;
 const chat_max_tokens = 256;
+const chat_temperature = 0.2;
 
 pub const Config = struct {
     base_url: []const u8 = "http://127.0.0.1:30000/v1",
@@ -51,7 +52,12 @@ pub fn call(allocator: Allocator, io: std.Io, cfg: Config, model: []const u8, to
         .extra_headers = &headers,
         .response_writer = &response.writer,
     });
-    if (@intFromEnum(result.status) < 200 or @intFromEnum(result.status) >= 300) return error.ProviderRequestFailed;
+    if (@intFromEnum(result.status) < 200 or @intFromEnum(result.status) >= 300) {
+        const response_body = response.written();
+        const preview = response_body[0..@min(response_body.len, 1200)];
+        std.debug.print("provider request failed: status={d}\n{s}\n", .{ @intFromEnum(result.status), preview });
+        return error.ProviderRequestFailed;
+    }
     return parseAssistantTurn(allocator, response.written());
 }
 
@@ -116,7 +122,7 @@ fn freeCall(allocator: Allocator, tool_call: ToolCall) void {
 fn writeChatRequest(allocator: Allocator, out: *std.ArrayList(u8), model: []const u8, tools_json: []const u8, messages: []const Message, require_tool: bool) !void {
     try out.appendSlice(allocator, "{\"model\":");
     try files.appendJsonString(allocator, out, model);
-    try out.print(allocator, ",\"stream\":false,\"max_tokens\":{d},\"messages\":[", .{chat_max_tokens});
+    try out.print(allocator, ",\"stream\":false,\"temperature\":{d:.2},\"max_tokens\":{d},\"messages\":[", .{ chat_temperature, chat_max_tokens });
     for (messages, 0..) |msg, i| {
         if (i != 0) try out.append(allocator, ',');
         try out.appendSlice(allocator, "{\"role\":");

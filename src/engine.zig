@@ -52,7 +52,10 @@ pub fn run(allocator: Allocator, io: std.Io, home: []const u8, user_prompt: []co
 
         if (turn.tool_calls.len == 0) {
             const response = parseExpectedResponse(allocator, turn.text) catch |err| {
-                if (expect_corrections >= final_json_repair_attempts) return err;
+                if (expect_corrections >= final_json_repair_attempts) {
+                    try reportFinalOutputError(allocator, session.path, err, turn.text);
+                    return err;
+                }
                 expect_corrections += 1;
                 const correction = try std.fmt.allocPrint(allocator,
                     \\Your previous output did not match the Circuitry expect schema.
@@ -82,6 +85,14 @@ pub fn run(allocator: Allocator, io: std.Io, home: []const u8, user_prompt: []co
         }
     }
     return error.TooManyToolTurns;
+}
+
+fn reportFinalOutputError(allocator: Allocator, session_path: []const u8, err: anyerror, raw: []const u8) !void {
+    const preview = raw[0..@min(raw.len, 2000)];
+    std.debug.print("final output parse failed: {s}\nraw assistant output:\n{s}\n", .{ @errorName(err), preview });
+    const event = try std.fmt.allocPrint(allocator, "{s}\nraw assistant output:\n{s}", .{ @errorName(err), preview });
+    defer allocator.free(event);
+    try sessions.appendEvent(allocator, session_path, "assistant_error", event);
 }
 
 fn recoverContext(allocator: Allocator, io: std.Io, cfg: provider.Config, model_alias: []const u8, context_prompt: []const u8, user_prompt: []const u8, session_log: []const u8) ![]u8 {
