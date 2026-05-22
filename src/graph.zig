@@ -17,7 +17,6 @@ pub fn validateText(text: []const u8) !void {
     try requireContains(text, "    tools:");
     try requireContains(text, "    expect:");
     try requireContains(text, "      response: str");
-    try requireContains(text, "      done: bool");
     try requireContains(text, "    instructions: |");
 }
 

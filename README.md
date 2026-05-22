@@ -171,10 +171,9 @@ The assistant's final output is governed by graph `expect`:
 ```yaml
 expect:
   response: str
-  done: bool
 ```
 
-Zinc validates the model's final JSON against that contract and prints only `response`. If the model emits invalid final JSON, Zinc asks once for a valid `expect` response instead of accepting formatting slop.
+Zinc validates the model's final JSON against that contract and prints only `response`. If the model emits invalid final JSON, Zinc asks once for a valid `expect` response instead of accepting formatting slop. Tool calls, not a `done` flag, drive continued work inside a turn.
 
 ## Tools, prompt packs, and Circuitry authoring
 
@@ -208,7 +207,7 @@ request_circuitry_run
 
 Prompt packs live in `prompts/` from source and are installed to `~/.local/share/zinc/prompts/`. `prompts/circuitry-author.md` is injected when the graph asks for Circuitry tools or mentions `circuitry-author`, teaching the agent v0.2.99 resource/link graph authoring rules.
 
-Tool trust model: tools execute on the local machine from the current working directory, and path-taking tools can mutate files. Grant `write`, `edit`, and `bash` only to graphs that should be allowed to change local state.
+Tool trust model: tools execute on the local machine from the current working directory, and path-taking tools can mutate files. Bash is the general interface to local and network state; grant `write`, `edit`, and `bash` only to graphs that should be allowed to change local state.
 
 ## Cleanup
 

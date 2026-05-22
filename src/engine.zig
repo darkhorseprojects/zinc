@@ -56,7 +56,7 @@ pub fn run(allocator: Allocator, io: std.Io, home: []const u8, user_prompt: []co
                 expect_corrections += 1;
                 const correction = try std.fmt.allocPrint(allocator,
                     \\Your previous output did not match the Circuitry expect schema.
-                    \\Output ONLY valid JSON: {{"response": string, "done": true}}
+                    \\Output ONLY valid JSON: {{"response": string}}
                     \\Do not add markdown or commentary.
                     \\Previous output:
                     \\{s}
@@ -128,15 +128,12 @@ fn parseExpectedResponse(allocator: Allocator, raw: []const u8) ![]u8 {
     defer parsed.deinit();
     const object = if (parsed.value == .object) parsed.value.object else return error.ExpectedOutputNotObject;
     const response = object.get("response") orelse return error.ExpectedResponseMissing;
-    const done = object.get("done") orelse return error.ExpectedDoneMissing;
     if (response != .string) return error.ExpectedResponseNotString;
-    if (done != .bool) return error.ExpectedDoneNotBool;
-    if (!done.bool) return error.ExpectedDoneFalse;
     return allocator.dupe(u8, response.string);
 }
 
 test "expected response parser strips only the response" {
-    const response = try parseExpectedResponse(std.testing.allocator, "{\"response\":\"ok\",\"done\":true}");
+    const response = try parseExpectedResponse(std.testing.allocator, "{\"response\":\"ok\"}");
     defer std.testing.allocator.free(response);
     try std.testing.expectEqualStrings("ok", response);
 }

@@ -185,7 +185,7 @@ fn compileGraphFile(allocator: Allocator, graph_path: []const u8, out_path: []co
         \\{s}
         \\
         \\Expected output:
-        \\Return ONLY valid JSON matching: {{"response": str, "done": bool}}
+        \\Return ONLY valid JSON matching: {{"response": str}}
     , .{instructions});
     if (graph.wantsCircuitryPrompt(text, tools)) {
         const pack = try config.readPromptPack(allocator, home, "circuitry-author.md");
@@ -208,6 +208,6 @@ fn compileGraphFile(allocator: Allocator, graph_path: []const u8, out_path: []co
     try files.appendJsonString(allocator, &compiled, context_prompt.items);
     try compiled.appendSlice(allocator, ",\"prompt\":");
     try files.appendJsonString(allocator, &compiled, prompt.items);
-    try compiled.appendSlice(allocator, ",\"expect\":{\"response\":\"str\",\"done\":\"bool\"},\"session_log\":{\"source_dir\":\".zinc/sessions\",\"max_bytes\":65536}}\n");
+    try compiled.appendSlice(allocator, ",\"expect\":{\"response\":\"str\"},\"session_log\":{\"source_dir\":\".zinc/sessions\",\"max_bytes\":65536}}\n");
     try files.write(out_path, compiled.items);
 }
