@@ -62,23 +62,17 @@ Zinc reads config in this order:
 .zinc/config.toml
 zinc.toml
 ~/.config/zinc/config.toml
-built-in defaults
+installed defaults
 ```
 
 The current scalar runtime keys are:
 
 ```toml
-provider_base_url = "http://127.0.0.1:30000/v1"
-provider_authorization = "Bearer zinc"
-chat_max_tokens = 8192
-chat_temperature = 0.2
-max_tool_turns = 16
-contract_retry_limit = 1
-contract_error_preview_bytes = 2000
-session_log_bytes = 65536
-default_model = "gemma-heretic"
 graph = "graphs/zinc-loop.circuitry.yaml"
 compiled_plan = ".zinc/compiled/plan.json"
+provider_base_url = "http://127.0.0.1:30000/v1"
+max_retries = 5
+default_model = "gemma-heretic"
 ```
 
 Model config uses TOML tables:
@@ -95,9 +89,7 @@ fit_ctx = 8192
 vram_allocation_percent = 87.5
 ```
 
-`chat_max_tokens` is the model output cap for each provider call. It is not the context length. If this is too low, the model can be cut off mid-JSON.
-
-`contract_retry_limit` controls how many clean retries Zinc gives the model after Zinc rejects final output that does not match graph `expect`.
+`max_retries` is Zinc's cap for retryable one-off turn failures, such as invalid final JSON or transient provider errors. It does not create graph branches.
 
 ## model server
 
@@ -166,7 +158,7 @@ session log + current user turn
   -> final {"response":"..."}
 ```
 
-`zn run` and bare `zn "prompt"` refresh the compiled plan before running. The context recovery node sees the recent session JSONL tail and returns compact context for the assistant. The assistant receives that context as untrusted data.
+`zn run` and bare `zn "prompt"` refresh the compiled plan before running. The context recovery node sees the session JSONL and returns compact context for the assistant. The assistant receives that context as untrusted data.
 
 Zinc can also run a graph path for one root turn:
 
@@ -188,7 +180,7 @@ expect:
   response: str
 ```
 
-Zinc parses the model output as JSON and prints only `response`. If final output is invalid, Zinc records a runtime contract failure, shows the rejected output preview, and asks for a clean retry. It does not accept markdown wrapped around the final answer.
+Zinc parses the model output as JSON and prints only `response`. If final output is invalid, Zinc records a runtime contract failure and retries the turn cleanly until `max_retries` is spent. It does not accept markdown wrapped around the final answer.
 
 Tool calls keep a turn going. Final JSON ends the turn.
 

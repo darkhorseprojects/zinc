@@ -2,29 +2,18 @@ const std = @import("std");
 const files = @import("files.zig");
 const graph = @import("graph.zig");
 const layout = @import("layout.zig");
-const provider = @import("provider.zig");
 
 const Allocator = std.mem.Allocator;
 
 const default_provider_base_url = "http://127.0.0.1:30000/v1";
-const default_provider_authorization = "Bearer zinc";
-const default_chat_max_tokens = 8192;
-const default_chat_temperature = 0.2;
-const default_max_tool_turns = 16;
-const default_contract_retry_limit = 1;
-const default_contract_error_preview_bytes = 2000;
-const default_session_log_bytes = 65536;
+const default_max_retries = 5;
 
 pub const RuntimeConfig = struct {
-    chat: provider.ChatConfig,
-    max_tool_turns: usize,
-    contract_retry_limit: usize,
-    contract_error_preview_bytes: usize,
-    session_log_bytes: usize,
+    provider_base_url: []u8,
+    max_retries: usize,
 
     pub fn deinit(self: RuntimeConfig, allocator: Allocator) void {
-        allocator.free(self.chat.base_url);
-        allocator.free(self.chat.authorization);
+        allocator.free(self.provider_base_url);
     }
 };
 
@@ -39,28 +28,10 @@ pub const RuntimePaths = struct {
 };
 
 pub fn loadRuntimeConfig(allocator: Allocator, home: []const u8) !RuntimeConfig {
-    var runtime = RuntimeConfig{
-        .chat = .{
-            .base_url = try readStringDefault(allocator, home, "provider_base_url", default_provider_base_url),
-            .max_tokens = default_chat_max_tokens,
-            .temperature = default_chat_temperature,
-            .authorization = undefined,
-        },
-        .max_tool_turns = default_max_tool_turns,
-        .contract_retry_limit = default_contract_retry_limit,
-        .contract_error_preview_bytes = default_contract_error_preview_bytes,
-        .session_log_bytes = default_session_log_bytes,
+    return .{
+        .provider_base_url = try readStringDefault(allocator, home, "provider_base_url", default_provider_base_url),
+        .max_retries = try readUsizeDefault(allocator, home, "max_retries", default_max_retries),
     };
-    errdefer allocator.free(runtime.chat.base_url);
-    runtime.chat.authorization = try readStringDefault(allocator, home, "provider_authorization", default_provider_authorization);
-    errdefer allocator.free(runtime.chat.authorization);
-    runtime.chat.max_tokens = try readUsizeDefault(allocator, home, "chat_max_tokens", default_chat_max_tokens);
-    runtime.chat.temperature = try readFloatDefault(allocator, home, "chat_temperature", default_chat_temperature);
-    runtime.max_tool_turns = try readUsizeDefault(allocator, home, "max_tool_turns", default_max_tool_turns);
-    runtime.contract_retry_limit = try readUsizeDefault(allocator, home, "contract_retry_limit", default_contract_retry_limit);
-    runtime.contract_error_preview_bytes = try readUsizeDefault(allocator, home, "contract_error_preview_bytes", default_contract_error_preview_bytes);
-    runtime.session_log_bytes = try readUsizeDefault(allocator, home, "session_log_bytes", default_session_log_bytes);
-    return runtime;
 }
 
 pub fn loadRuntimePaths(allocator: Allocator, home: []const u8) !RuntimePaths {
@@ -72,29 +43,27 @@ pub fn loadRuntimePaths(allocator: Allocator, home: []const u8) !RuntimePaths {
 
     const global_config = try layout.configPath(allocator, home);
     defer allocator.free(global_config);
-    if (try readScalarPath(allocator, global_config, "graph")) |value| {
-        allocator.free(paths.graph);
-        paths.graph = value;
-    }
-    if (try readScalarPath(allocator, global_config, "compiled_plan")) |value| {
-        allocator.free(paths.compiled_plan);
-        paths.compiled_plan = value;
-    }
+    try applyPathConfig(allocator, &paths, global_config);
     if (files.exists("graphs/zinc-loop.circuitry.yaml")) |_| {
         allocator.free(paths.graph);
         allocator.free(paths.compiled_plan);
         paths.graph = try allocator.dupe(u8, "graphs/zinc-loop.circuitry.yaml");
         paths.compiled_plan = try allocator.dupe(u8, ".zinc/compiled/plan.json");
     } else |_| {}
-    if (try readScalarPath(allocator, ".zinc/config.toml", "graph")) |value| {
+    try applyPathConfig(allocator, &paths, "zinc.toml");
+    try applyPathConfig(allocator, &paths, ".zinc/config.toml");
+    return paths;
+}
+
+fn applyPathConfig(allocator: Allocator, paths: *RuntimePaths, config_path: []const u8) !void {
+    if (try readScalarPath(allocator, config_path, "graph")) |value| {
         allocator.free(paths.graph);
         paths.graph = value;
     }
-    if (try readScalarPath(allocator, ".zinc/config.toml", "compiled_plan")) |value| {
+    if (try readScalarPath(allocator, config_path, "compiled_plan")) |value| {
         allocator.free(paths.compiled_plan);
         paths.compiled_plan = value;
     }
-    return paths;
 }
 
 pub fn resolveConfiguredModelId(allocator: Allocator, home: []const u8) ![]u8 {
@@ -155,15 +124,6 @@ pub fn readUsizeDefault(allocator: Allocator, home: []const u8, key: []const u8,
     };
     defer allocator.free(raw);
     return std.fmt.parseInt(usize, raw, 10) catch error.InvalidConfigValue;
-}
-
-pub fn readFloatDefault(allocator: Allocator, home: []const u8, key: []const u8, default_value: f64) !f64 {
-    const raw = readConfigScalar(allocator, home, key) catch |err| switch (err) {
-        error.ConfigKeyNotFound => return default_value,
-        else => return err,
-    };
-    defer allocator.free(raw);
-    return std.fmt.parseFloat(f64, raw) catch error.InvalidConfigValue;
 }
 
 fn readConfigScalar(allocator: Allocator, home: []const u8, key: []const u8) ![]u8 {

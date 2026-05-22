@@ -11,8 +11,6 @@ pub const Plan = struct {
     model_alias: []u8,
     tools: [][]u8,
     tools_json: []u8,
-    session_source: []u8,
-    session_max_bytes: usize,
 
     pub fn deinit(self: Plan, allocator: Allocator) void {
         allocator.free(self.prompt);
@@ -22,7 +20,6 @@ pub const Plan = struct {
         for (self.tools) |tool| allocator.free(tool);
         allocator.free(self.tools);
         allocator.free(self.tools_json);
-        allocator.free(self.session_source);
     }
 
     pub fn allowsTool(self: Plan, name: []const u8) bool {
@@ -37,7 +34,6 @@ pub fn load(allocator: Allocator, path: []const u8) !Plan {
     var parsed = try std.json.parseFromSlice(std.json.Value, allocator, text, .{});
     defer parsed.deinit();
     const root = parsed.value.object;
-    const session_log = root.get("session_log").?.object;
     const model = root.get("model") orelse return error.BadRuntimePlan;
     const model_object = model.object;
     const tools_value = root.get("tools") orelse return error.BadRuntimePlan;
@@ -52,8 +48,6 @@ pub fn load(allocator: Allocator, path: []const u8) !Plan {
         .model_alias = try allocator.dupe(u8, (model_object.get("alias") orelse return error.BadRuntimePlan).string),
         .tools = tool_names,
         .tools_json = tools_json,
-        .session_source = try allocator.dupe(u8, (session_log.get("source_dir") orelse return error.BadRuntimePlan).string),
-        .session_max_bytes = @intCast((session_log.get("max_bytes") orelse return error.BadRuntimePlan).integer),
     };
 }
 

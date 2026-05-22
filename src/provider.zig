@@ -3,11 +3,12 @@ const files = @import("files.zig");
 
 const Allocator = std.mem.Allocator;
 
-pub const ChatConfig = struct {
+pub const Request = struct {
     base_url: []const u8,
-    max_tokens: usize,
-    temperature: f64,
     authorization: []const u8,
+    model: []const u8,
+    tools_json: []const u8,
+    messages: []const Message,
 };
 
 pub const Message = struct {
@@ -29,12 +30,12 @@ pub const AssistantTurn = struct {
     tool_calls: []ToolCall,
 };
 
-pub fn call(allocator: Allocator, io: std.Io, cfg: ChatConfig, model: []const u8, tools_json: []const u8, messages: []const Message) !AssistantTurn {
+pub fn call(allocator: Allocator, io: std.Io, request: Request) !AssistantTurn {
     var body: std.ArrayList(u8) = .empty;
     defer body.deinit(allocator);
-    try writeChatRequest(allocator, &body, cfg, model, tools_json, messages);
+    try writeChatRequest(allocator, &body, request);
 
-    const url = try std.fmt.allocPrint(allocator, "{s}/chat/completions", .{cfg.base_url});
+    const url = try std.fmt.allocPrint(allocator, "{s}/chat/completions", .{request.base_url});
     defer allocator.free(url);
 
     var response = std.Io.Writer.Allocating.init(allocator);
@@ -44,7 +45,7 @@ pub fn call(allocator: Allocator, io: std.Io, cfg: ChatConfig, model: []const u8
 
     const headers = [_]std.http.Header{
         .{ .name = "content-type", .value = "application/json" },
-        .{ .name = "authorization", .value = cfg.authorization },
+        .{ .name = "authorization", .value = request.authorization },
     };
     const result = try client.fetch(.{
         .location = .{ .url = url },
@@ -134,11 +135,11 @@ fn freeCall(allocator: Allocator, tool_call: ToolCall) void {
     allocator.free(tool_call.arguments);
 }
 
-fn writeChatRequest(allocator: Allocator, out: *std.ArrayList(u8), cfg: ChatConfig, model: []const u8, tools_json: []const u8, messages: []const Message) !void {
+fn writeChatRequest(allocator: Allocator, out: *std.ArrayList(u8), request: Request) !void {
     try out.appendSlice(allocator, "{\"model\":");
-    try files.appendJsonString(allocator, out, model);
-    try out.print(allocator, ",\"stream\":false,\"temperature\":{d:.2},\"max_tokens\":{d},\"messages\":[", .{ cfg.temperature, cfg.max_tokens });
-    for (messages, 0..) |msg, i| {
+    try files.appendJsonString(allocator, out, request.model);
+    try out.appendSlice(allocator, ",\"stream\":false,\"messages\":[");
+    for (request.messages, 0..) |msg, i| {
         if (i != 0) try out.append(allocator, ',');
         try out.appendSlice(allocator, "{\"role\":");
         try files.appendJsonString(allocator, out, msg.role);
@@ -169,7 +170,7 @@ fn writeChatRequest(allocator: Allocator, out: *std.ArrayList(u8), cfg: ChatConf
         try out.append(allocator, '}');
     }
     try out.appendSlice(allocator, "],\"tools\":");
-    try out.appendSlice(allocator, tools_json);
+    try out.appendSlice(allocator, request.tools_json);
     try out.append(allocator, '}');
 }
 

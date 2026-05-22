@@ -42,13 +42,7 @@ cat > "$HOME/.config/zinc/config.toml" <<EOF_CONFIG
 graph = "$share_dir/graphs/zinc-loop.circuitry.yaml"
 compiled_plan = "$share_dir/compiled/plan.json"
 provider_base_url = "http://127.0.0.1:30000/v1"
-provider_authorization = "Bearer zinc"
-chat_max_tokens = 8192
-chat_temperature = 0.2
-max_tool_turns = 16
-contract_retry_limit = 1
-contract_error_preview_bytes = 2000
-session_log_bytes = 65536
+max_retries = 5
 default_model = "gemma-heretic"
 
 [models.gemma-heretic]

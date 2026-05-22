@@ -43,31 +43,12 @@ pub fn open(allocator: Allocator, resume_id: ?[]const u8, continue_last: bool) !
     return .{ .id = id, .path = path };
 }
 
-pub fn readLog(allocator: Allocator, session_path: []const u8, max_bytes: usize) ![]u8 {
-    if (max_bytes == 0) return allocator.dupe(u8, "");
-    const fd = std.posix.openat(std.posix.AT.FDCWD, session_path, .{ .ACCMODE = .RDONLY }, 0) catch return allocator.dupe(u8, "");
-    defer _ = std.os.linux.close(fd);
-
-    const end_rc = std.os.linux.lseek(fd, 0, std.os.linux.SEEK.END);
-    if (std.os.linux.errno(end_rc) != .SUCCESS) return error.ReadFailed;
-    const file_size: usize = @intCast(end_rc);
-    const start: usize = file_size -| max_bytes;
-    const seek_rc = std.os.linux.lseek(fd, @intCast(start), std.os.linux.SEEK.SET);
-    if (std.os.linux.errno(seek_rc) != .SUCCESS) return error.ReadFailed;
-
-    var out: std.ArrayList(u8) = .empty;
-    errdefer out.deinit(allocator);
-    if (start != 0) try out.appendSlice(allocator, "[session log truncated to recent tail]\n");
-    var remaining = @min(file_size - start, max_bytes);
-    var buffer: [8192]u8 = undefined;
-    while (remaining != 0) {
-        const take = @min(buffer.len, remaining);
-        const n = try files.linuxRead(fd, buffer[0..take]);
-        if (n == 0) break;
-        try out.appendSlice(allocator, buffer[0..n]);
-        remaining -= n;
-    }
-    return out.toOwnedSlice(allocator);
+pub fn readLog(allocator: Allocator, session_path: []const u8) ![]u8 {
+    return files.readLimited(allocator, session_path, std.math.maxInt(usize)) catch |err| switch (err) {
+        error.FileNotFound => try allocator.dupe(u8, ""),
+        error.ReadFailed => try allocator.dupe(u8, ""),
+        else => err,
+    };
 }
 
 pub fn appendEvent(allocator: Allocator, path: []const u8, role: []const u8, content: []const u8) !void {
@@ -150,8 +131,8 @@ fn validateId(id: []const u8) !void {
     }
 }
 
-test "session log respects zero byte budget" {
-    const log = try readLog(std.testing.allocator, "missing-session.jsonl", 0);
+test "missing session log reads empty" {
+    const log = try readLog(std.testing.allocator, "missing-session.jsonl");
     defer std.testing.allocator.free(log);
     try std.testing.expectEqualStrings("", log);
 }
