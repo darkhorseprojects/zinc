@@ -7,6 +7,7 @@ pub const Request = struct {
     base_url: []const u8,
     authorization: []const u8,
     model: []const u8,
+    temperature: f64,
     tools_json: []const u8,
     messages: []const Message,
 };
@@ -56,6 +57,7 @@ pub fn call(allocator: Allocator, io: std.Io, request: Request) !AssistantTurn {
     });
     if (@intFromEnum(result.status) < 200 or @intFromEnum(result.status) >= 300) {
         const response_body = response.written();
+        if (result.status == .service_unavailable and std.mem.indexOf(u8, response_body, "Loading model") != null) return error.ProviderLoadingModel;
         const preview = response_body[0..@min(response_body.len, 1200)];
         std.debug.print("provider request failed: status={d}\n{s}\n", .{ @intFromEnum(result.status), preview });
         return error.ProviderRequestFailed;
@@ -138,7 +140,7 @@ fn freeCall(allocator: Allocator, tool_call: ToolCall) void {
 fn writeChatRequest(allocator: Allocator, out: *std.ArrayList(u8), request: Request) !void {
     try out.appendSlice(allocator, "{\"model\":");
     try files.appendJsonString(allocator, out, request.model);
-    try out.appendSlice(allocator, ",\"stream\":false,\"messages\":[");
+    try out.print(allocator, ",\"temperature\":{d},\"stream\":false,\"messages\":[", .{request.temperature});
     for (request.messages, 0..) |msg, i| {
         if (i != 0) try out.append(allocator, ',');
         try out.appendSlice(allocator, "{\"role\":");

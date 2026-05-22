@@ -110,6 +110,15 @@ pub fn readModelValue(allocator: Allocator, home: []const u8, model_id: []const 
     return error.ModelConfigKeyNotFound;
 }
 
+pub fn readModelF64Default(allocator: Allocator, home: []const u8, model_id: []const u8, key: []const u8, default_value: f64) !f64 {
+    const raw = readModelValue(allocator, home, model_id, key) catch |err| switch (err) {
+        error.ModelConfigKeyNotFound => return default_value,
+        else => return err,
+    };
+    defer allocator.free(raw);
+    return std.fmt.parseFloat(f64, raw) catch error.InvalidConfigValue;
+}
+
 pub fn readStringDefault(allocator: Allocator, home: []const u8, key: []const u8, default_value: []const u8) ![]u8 {
     return readConfigScalar(allocator, home, key) catch |err| switch (err) {
         error.ConfigKeyNotFound => try allocator.dupe(u8, default_value),

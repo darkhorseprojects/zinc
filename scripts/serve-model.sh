@@ -81,12 +81,18 @@ cache_type_k="$(model_value "$model_name" cache_type_k)"
 cache_type_v="$(model_value "$model_name" cache_type_v)"
 fit_ctx="$(model_value "$model_name" fit_ctx)"
 vram_allocation_percent="$(model_value "$model_name" vram_allocation_percent)"
+reasoning="$(model_value "$model_name" reasoning)"
+reasoning_format="$(model_value "$model_name" reasoning_format)"
+reasoning_budget="$(model_value "$model_name" reasoning_budget)"
 
 : "${engine:=llama-cpp-turboquant}"
 : "${cache_type_k:=q8_0}"
 : "${cache_type_v:=q8_0}"
 : "${fit_ctx:=8192}"
 : "${vram_allocation_percent:=87.5}"
+: "${reasoning:=auto}"
+: "${reasoning_format:=deepseek}"
+: "${reasoning_budget:=-1}"
 
 if [[ -z "$alias" || -z "$hf_repo" || -z "$hf_file" ]]; then
   echo "model '$model_name' is missing alias, hf_repo, or hf_file in Zinc config" >&2
@@ -141,5 +147,6 @@ exec "$server" \
   --jinja \
   --cache-ram 0 \
   --log-colors off \
-  --reasoning off \
-  --reasoning-format none
+  --reasoning "$reasoning" \
+  --reasoning-format "$reasoning_format" \
+  --reasoning-budget "$reasoning_budget"

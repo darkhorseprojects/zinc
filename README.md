@@ -88,6 +88,9 @@ cache_type_v = "turbo3"
 fit_ctx = 8192
 vram_allocation_percent = 87.5
 temperature = 0.5
+reasoning = "auto"
+reasoning_format = "deepseek"
+reasoning_budget = -1
 ```
 
 `max_retries` is Zinc's cap for clean turn-correction retries, such as invalid final JSON or unavailable tool calls. Transient provider failures are retried immediately before they surface. Neither case creates graph branches.
@@ -109,6 +112,7 @@ uses alias gemma-4-96e-a4b-heretic-tq
 fits at least 8192 tokens of context
 caps VRAM by vram_allocation_percent
 uses q8_0 K cache and turbo3 V cache
+lets llama.cpp auto-enable Gemma thinking and returns thoughts as reasoning_content
 runs one server slot
 ```
 

@@ -162,6 +162,7 @@ fn compileGraphFile(allocator: Allocator, graph_path: []const u8, out_path: []co
     defer allocator.free(model_alias);
     const model_repo = try config.readModelValue(allocator, home, model_id, "hf_repo");
     defer allocator.free(model_repo);
+    const model_temperature = try config.readModelF64Default(allocator, home, model_id, "temperature", 0.5);
     const tools = try graph.readTools(allocator, text, "assistant");
     defer graph.freeStringList(allocator, tools);
     for (tools) |tool| if (!tool_registry.contains(tool)) return error.UnknownTool;
@@ -199,6 +200,7 @@ fn compileGraphFile(allocator: Allocator, graph_path: []const u8, out_path: []co
     try files.appendJsonString(allocator, &compiled, model_id);
     try compiled.appendSlice(allocator, ",\"alias\":");
     try files.appendJsonString(allocator, &compiled, model_alias);
+    try compiled.print(allocator, ",\"temperature\":{d}", .{model_temperature});
     try compiled.appendSlice(allocator, "},\"tools\":[");
     for (tools, 0..) |tool, i| {
         if (i != 0) try compiled.append(allocator, ',');

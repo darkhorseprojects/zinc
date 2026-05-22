@@ -8,16 +8,21 @@ const Allocator = std.mem.Allocator;
 pub fn start(allocator: Allocator, io: std.Io, home: []const u8, model_arg: ?[]const u8) !void {
     const pid_path = try layout.statePath(allocator, home, "server.pid");
     defer allocator.free(pid_path);
-    if (try readLivePid(allocator, pid_path)) |pid| {
-        std.debug.print("Zinc server already up: pid {d}\n", .{pid});
-        return;
-    }
     const model_id = if (model_arg) |model| blk: {
         try requireSafeModelId(model);
         break :blk try allocator.dupe(u8, model);
     } else try config.resolveConfiguredModelId(allocator, home);
     defer allocator.free(model_id);
     try requireSafeModelId(model_id);
+
+    const runtime = try config.loadRuntimeConfig(allocator, home);
+    defer runtime.deinit(allocator);
+
+    if (try readLivePid(allocator, pid_path)) |pid| {
+        try waitUntilReady(allocator, io, runtime.provider_base_url, pid);
+        std.debug.print("Zinc server ready: pid {d}, model {s}\n", .{ pid, model_id });
+        return;
+    }
 
     const script = try findServeScript(allocator, home);
     defer allocator.free(script);
@@ -42,7 +47,10 @@ pub fn start(allocator: Allocator, io: std.Io, home: []const u8, model_arg: ?[]c
     if (pid_text.len == 0) return error.ServerStartFailed;
     const pid = try std.fmt.parseInt(std.posix.pid_t, pid_text, 10);
     sleepMillis(250);
-    if (!pidAlive(pid)) return error.ServerStartFailed;
+    if (!pidAlive(allocator, pid)) return error.ServerStartFailed;
+
+    try waitUntilReady(allocator, io, runtime.provider_base_url, pid);
+
     const pid_file = try std.fmt.allocPrint(allocator, "{d}\n", .{pid});
     defer allocator.free(pid_file);
     try files.write(pid_path, pid_file);
@@ -56,7 +64,7 @@ pub fn stop(allocator: Allocator, home: []const u8) !void {
         std.debug.print("Zinc server is not up\n", .{});
         return;
     };
-    if (!pidAlive(pid)) {
+    if (!pidAlive(allocator, pid)) {
         removeFile(pid_path);
         std.debug.print("Zinc server was not running\n", .{});
         return;
@@ -67,17 +75,14 @@ pub fn stop(allocator: Allocator, home: []const u8) !void {
     }
 
     try std.posix.kill(pid, .TERM);
-    var attempts: usize = 0;
-    while (attempts < 50) : (attempts += 1) {
-        sleepMillis(100);
-        if (!pidAlive(pid)) {
-            removeFile(pid_path);
-            std.debug.print("Zinc server down\n", .{});
-            return;
-        }
+    if (waitUntilStopped(allocator, pid, 5000)) {
+        removeFile(pid_path);
+        std.debug.print("Zinc server down\n", .{});
+        return;
     }
 
     try std.posix.kill(pid, .KILL);
+    if (!waitUntilStopped(allocator, pid, 5000)) return error.ServerStopFailed;
     removeFile(pid_path);
     std.debug.print("Zinc server down after SIGKILL\n", .{});
 }
@@ -99,7 +104,7 @@ fn findServeScript(allocator: Allocator, home: []const u8) ![]u8 {
 
 fn readLivePid(allocator: Allocator, path: []const u8) !?std.posix.pid_t {
     const pid = try readStoredPid(allocator, path) orelse return null;
-    if (pidAlive(pid) and pidLooksLikeZincServer(allocator, pid)) return pid;
+    if (pidAlive(allocator, pid) and pidLooksLikeZincServer(allocator, pid)) return pid;
     removeFile(path);
     return null;
 }
@@ -112,6 +117,44 @@ fn readStoredPid(allocator: Allocator, path: []const u8) !?std.posix.pid_t {
     return std.fmt.parseInt(std.posix.pid_t, trimmed, 10) catch null;
 }
 
+fn waitUntilReady(allocator: Allocator, io: std.Io, base_url: []const u8, pid: std.posix.pid_t) !void {
+    var attempts: usize = 0;
+    while (true) : (attempts += 1) {
+        if (!pidAlive(allocator, pid)) return error.ServerStartFailed;
+        const status = readinessProbe(allocator, io, base_url);
+        if (status >= 200 and status < 300) return;
+        if (status >= 400 and status < 500) return error.ServerReadinessFailed;
+        if (attempts != 0 and attempts % 10 == 0) std.debug.print("Zinc server still loading model...\n", .{});
+        sleepMillis(1000);
+    }
+}
+
+fn readinessProbe(allocator: Allocator, io: std.Io, base_url: []const u8) u16 {
+    const url = std.fmt.allocPrint(allocator, "{s}/models", .{base_url}) catch return 0;
+    defer allocator.free(url);
+
+    var response = std.Io.Writer.Allocating.init(allocator);
+    defer response.deinit();
+    var client = std.http.Client{ .allocator = allocator, .io = io };
+    defer client.deinit();
+
+    const result = client.fetch(.{
+        .location = .{ .url = url },
+        .method = .GET,
+        .response_writer = &response.writer,
+    }) catch return 0;
+    return @intFromEnum(result.status);
+}
+
+fn waitUntilStopped(allocator: Allocator, pid: std.posix.pid_t, timeout_ms: usize) bool {
+    var waited: usize = 0;
+    while (waited < timeout_ms) : (waited += 100) {
+        sleepMillis(100);
+        if (!pidAlive(allocator, pid)) return true;
+    }
+    return !pidAlive(allocator, pid);
+}
+
 fn pidLooksLikeZincServer(allocator: Allocator, pid: std.posix.pid_t) bool {
     const path = std.fmt.allocPrint(allocator, "/proc/{d}/cmdline", .{pid}) catch return false;
     defer allocator.free(path);
@@ -120,9 +163,15 @@ fn pidLooksLikeZincServer(allocator: Allocator, pid: std.posix.pid_t) bool {
     return std.mem.indexOf(u8, cmdline, "llama-server") != null or std.mem.indexOf(u8, cmdline, "serve-model.sh") != null;
 }
 
-fn pidAlive(pid: std.posix.pid_t) bool {
+fn pidAlive(allocator: Allocator, pid: std.posix.pid_t) bool {
     std.posix.kill(pid, @as(std.posix.SIG, @enumFromInt(0))) catch return false;
-    return true;
+    const stat_path = std.fmt.allocPrint(allocator, "/proc/{d}/stat", .{pid}) catch return true;
+    defer allocator.free(stat_path);
+    const stat = files.readLimited(allocator, stat_path, 512) catch return true;
+    defer allocator.free(stat);
+    const close_paren = std.mem.lastIndexOfScalar(u8, stat, ')') orelse return true;
+    const rest = std.mem.trim(u8, stat[close_paren + 1 ..], " ");
+    return rest.len == 0 or rest[0] != 'Z';
 }
 
 fn sleepMillis(ms: usize) void {

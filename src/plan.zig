@@ -9,6 +9,7 @@ pub const Plan = struct {
     context_prompt: []u8,
     model_id: []u8,
     model_alias: []u8,
+    temperature: f64,
     tools: [][]u8,
     tools_json: []u8,
 
@@ -46,8 +47,17 @@ pub fn load(allocator: Allocator, path: []const u8) !Plan {
         .context_prompt = try allocator.dupe(u8, (root.get("context_prompt") orelse return error.BadRuntimePlan).string),
         .model_id = try allocator.dupe(u8, (model_object.get("id") orelse return error.BadRuntimePlan).string),
         .model_alias = try allocator.dupe(u8, (model_object.get("alias") orelse return error.BadRuntimePlan).string),
+        .temperature = try readF64(model_object.get("temperature") orelse return error.BadRuntimePlan),
         .tools = tool_names,
         .tools_json = tools_json,
+    };
+}
+
+fn readF64(value: std.json.Value) !f64 {
+    return switch (value) {
+        .float => value.float,
+        .integer => @floatFromInt(value.integer),
+        else => error.BadRuntimePlan,
     };
 }
 

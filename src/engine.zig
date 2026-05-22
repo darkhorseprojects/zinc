@@ -42,7 +42,7 @@ pub fn run(allocator: Allocator, io: std.Io, home: []const u8, user_prompt: []co
 
     const session_log = try sessions.readLog(allocator, session.path);
     defer allocator.free(session_log);
-    const recovered_context = try recoverContext(allocator, io, runtime.provider_base_url, runtime.max_retries, session.path, plan.model_alias, plan.context_prompt, user_prompt, session_log);
+    const recovered_context = try recoverContext(allocator, io, runtime.provider_base_url, runtime.max_retries, session.path, plan.model_alias, plan.temperature, plan.context_prompt, user_prompt, session_log);
     defer allocator.free(recovered_context);
     try sessions.appendEvent(allocator, session.path, "user", user_prompt);
     try sessions.rememberLast(session);
@@ -58,6 +58,7 @@ pub fn run(allocator: Allocator, io: std.Io, home: []const u8, user_prompt: []co
             .base_url = runtime.provider_base_url,
             .authorization = local_auth_header,
             .model = plan.model_alias,
+            .temperature = plan.temperature,
             .tools_json = plan.tools_json,
             .messages = messages.items,
         });
@@ -167,7 +168,7 @@ fn buildContextToolRetryPrompt(allocator: Allocator) ![]u8 {
     );
 }
 
-fn recoverContext(allocator: Allocator, io: std.Io, provider_base_url: []const u8, max_retries: usize, session_path: []const u8, model_alias: []const u8, context_prompt: []const u8, user_prompt: []const u8, session_log: []const u8) ![]u8 {
+fn recoverContext(allocator: Allocator, io: std.Io, provider_base_url: []const u8, max_retries: usize, session_path: []const u8, model_alias: []const u8, temperature: f64, context_prompt: []const u8, user_prompt: []const u8, session_log: []const u8) ![]u8 {
     var messages: std.ArrayList(provider.Message) = .empty;
     defer messages.deinit(allocator);
     defer provider.freeMessages(allocator, messages.items);
@@ -189,6 +190,7 @@ fn recoverContext(allocator: Allocator, io: std.Io, provider_base_url: []const u
             .base_url = provider_base_url,
             .authorization = local_auth_header,
             .model = model_alias,
+            .temperature = temperature,
             .tools_json = "[]",
             .messages = messages.items,
         });
@@ -211,6 +213,11 @@ fn callProviderWithTransientRetries(allocator: Allocator, io: std.Io, session_pa
     var attempts: usize = 0;
     while (true) {
         return provider.call(allocator, io, request) catch |err| {
+            if (err == error.ProviderLoadingModel) {
+                try sessions.appendRuntimeError(allocator, session_path, phase, RuntimeEvent.retryable_failure, @errorName(err), "provider is still loading the model; waiting before retry");
+                sleepMillis(1000);
+                continue;
+            }
             if (!isTransientProviderError(err) or attempts >= max_retries) return err;
             attempts += 1;
             try sessions.appendRuntimeError(allocator, session_path, phase, RuntimeEvent.retryable_failure, @errorName(err), "provider call failed; retrying immediately");
@@ -222,6 +229,7 @@ fn callProviderWithTransientRetries(allocator: Allocator, io: std.Io, session_pa
 fn isTransientProviderError(err: anyerror) bool {
     return switch (err) {
         error.ProviderRequestFailed,
+        error.ProviderLoadingModel,
         error.ConnectionRefused,
         error.ConnectionResetByPeer,
         error.BrokenPipe,
@@ -229,6 +237,18 @@ fn isTransientProviderError(err: anyerror) bool {
         => true,
         else => false,
     };
+}
+
+fn sleepMillis(ms: usize) void {
+    var request = std.os.linux.timespec{ .sec = @intCast(ms / 1000), .nsec = @intCast((ms % 1000) * std.time.ns_per_ms) };
+    while (true) {
+        var remaining: std.os.linux.timespec = undefined;
+        const rc = std.os.linux.nanosleep(&request, &remaining);
+        const errno = std.os.linux.errno(rc);
+        if (errno == .SUCCESS) return;
+        if (errno != .INTR) return;
+        request = remaining;
+    }
 }
 
 fn parseExpectedResponse(allocator: Allocator, raw: []const u8) ![]u8 {
