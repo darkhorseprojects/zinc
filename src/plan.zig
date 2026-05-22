@@ -6,6 +6,7 @@ const Allocator = std.mem.Allocator;
 
 pub const Plan = struct {
     prompt: []u8,
+    context_prompt: []u8,
     model_id: []u8,
     model_alias: []u8,
     tools: [][]u8,
@@ -15,6 +16,7 @@ pub const Plan = struct {
 
     pub fn deinit(self: Plan, allocator: Allocator) void {
         allocator.free(self.prompt);
+        allocator.free(self.context_prompt);
         allocator.free(self.model_id);
         allocator.free(self.model_alias);
         for (self.tools) |tool| allocator.free(tool);
@@ -35,7 +37,7 @@ pub fn load(allocator: Allocator, path: []const u8) !Plan {
     var parsed = try std.json.parseFromSlice(std.json.Value, allocator, text, .{});
     defer parsed.deinit();
     const root = parsed.value.object;
-    const projection = root.get("session_projection").?.object;
+    const session_log = root.get("session_log").?.object;
     const model = root.get("model") orelse return error.BadRuntimePlan;
     const model_object = model.object;
     const tools_value = root.get("tools") orelse return error.BadRuntimePlan;
@@ -45,12 +47,13 @@ pub fn load(allocator: Allocator, path: []const u8) !Plan {
     const tools_json = try buildToolsJson(allocator, tool_names);
     return .{
         .prompt = try allocator.dupe(u8, (root.get("prompt") orelse return error.BadRuntimePlan).string),
+        .context_prompt = try allocator.dupe(u8, (root.get("context_prompt") orelse return error.BadRuntimePlan).string),
         .model_id = try allocator.dupe(u8, (model_object.get("id") orelse return error.BadRuntimePlan).string),
         .model_alias = try allocator.dupe(u8, (model_object.get("alias") orelse return error.BadRuntimePlan).string),
         .tools = tool_names,
         .tools_json = tools_json,
-        .session_source = try allocator.dupe(u8, (projection.get("source_dir") orelse return error.BadRuntimePlan).string),
-        .session_max_bytes = @intCast((projection.get("max_bytes") orelse return error.BadRuntimePlan).integer),
+        .session_source = try allocator.dupe(u8, (session_log.get("source_dir") orelse return error.BadRuntimePlan).string),
+        .session_max_bytes = @intCast((session_log.get("max_bytes") orelse return error.BadRuntimePlan).integer),
     };
 }
 

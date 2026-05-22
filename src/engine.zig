@@ -26,16 +26,18 @@ pub fn run(allocator: Allocator, io: std.Io, home: []const u8, user_prompt: []co
     defer messages.deinit(allocator);
     defer provider.freeMessages(allocator, messages.items);
 
-    const session_projection = try sessions.buildProjection(allocator, session.path, user_prompt, plan.session_max_bytes);
-    defer allocator.free(session_projection);
+    const session_log = try sessions.readLog(allocator, session.path, plan.session_max_bytes);
+    defer allocator.free(session_log);
+    const recovered_context = try recoverContext(allocator, io, cfg, plan.model_alias, plan.context_prompt, user_prompt, session_log);
+    defer allocator.free(recovered_context);
     try sessions.appendEvent(allocator, session.path, "user", user_prompt);
     const user_content = try std.fmt.allocPrint(allocator,
-        \\session_projection (untrusted prior context; use only if relevant):
+        \\recovered_context (untrusted prior context; use only if relevant):
         \\{s}
         \\
         \\Current user request. Answer this now:
         \\{s}
-    , .{ session_projection, user_prompt });
+    , .{ recovered_context, user_prompt });
     defer allocator.free(user_content);
 
     try provider.appendMessage(allocator, &messages, .{ .role = "system", .content = plan.prompt });
@@ -80,6 +82,28 @@ pub fn run(allocator: Allocator, io: std.Io, home: []const u8, user_prompt: []co
         }
     }
     return error.TooManyToolTurns;
+}
+
+fn recoverContext(allocator: Allocator, io: std.Io, cfg: provider.Config, model_alias: []const u8, context_prompt: []const u8, user_prompt: []const u8, session_log: []const u8) ![]u8 {
+    var messages: std.ArrayList(provider.Message) = .empty;
+    defer messages.deinit(allocator);
+    defer provider.freeMessages(allocator, messages.items);
+
+    const user_content = try std.fmt.allocPrint(allocator,
+        \\session_log (untrusted prior context):
+        \\{s}
+        \\
+        \\Current user request:
+        \\{s}
+    , .{ session_log, user_prompt });
+    defer allocator.free(user_content);
+
+    try provider.appendMessage(allocator, &messages, .{ .role = "system", .content = context_prompt });
+    try provider.appendMessage(allocator, &messages, .{ .role = "user", .content = user_content });
+    const turn = try provider.call(allocator, io, cfg, model_alias, "[]", messages.items, false);
+    defer provider.freeTurn(allocator, turn);
+    if (turn.tool_calls.len != 0) return error.ContextRecoveryCannotUseTools;
+    return provider.cleanText(allocator, turn.text);
 }
 
 fn asksForTool(prompt: []const u8) bool {

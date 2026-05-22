@@ -43,26 +43,10 @@ pub fn open(allocator: Allocator, resume_id: ?[]const u8, continue_last: bool) !
     return .{ .id = id, .path = path };
 }
 
-pub fn buildProjection(allocator: Allocator, session_path: []const u8, user_prompt: []const u8, max_bytes: usize) ![]u8 {
+pub fn readLog(allocator: Allocator, session_path: []const u8, max_bytes: usize) ![]u8 {
     if (max_bytes == 0) return allocator.dupe(u8, "");
-    const text = files.readLimited(allocator, session_path, 512 * 1024) catch return allocator.dupe(u8, "");
-    defer allocator.free(text);
-    if (text.len == 0) return allocator.dupe(u8, "");
-
-    var out: std.ArrayList(u8) = .empty;
-    errdefer out.deinit(allocator);
-    try out.appendSlice(allocator, "Relevant session projection:\n");
-
-    try appendKeywordLines(allocator, &out, text, user_prompt, max_bytes);
-    try appendRecentTail(allocator, &out, text, max_bytes);
-
-    if (out.items.len > max_bytes) {
-        const start = out.items.len - max_bytes;
-        const trimmed = try allocator.dupe(u8, out.items[start..]);
-        out.deinit(allocator);
-        return trimmed;
-    }
-    return out.toOwnedSlice(allocator);
+    const text = files.readLimited(allocator, session_path, max_bytes) catch return allocator.dupe(u8, "");
+    return text;
 }
 
 pub fn appendEvent(allocator: Allocator, path: []const u8, role: []const u8, content: []const u8) !void {
@@ -114,47 +98,8 @@ fn validateId(id: []const u8) !void {
     }
 }
 
-fn appendKeywordLines(allocator: Allocator, out: *std.ArrayList(u8), session: []const u8, prompt: []const u8, max_bytes: usize) !void {
-    var words = std.mem.tokenizeAny(u8, prompt, " \t\r\n.,:;!?()[]{}<>\\/\"'");
-    var lines = std.mem.splitScalar(u8, session, '\n');
-    while (lines.next()) |line| {
-        if (line.len == 0) continue;
-        var matched = false;
-        words.reset();
-        while (words.next()) |word| {
-            if (word.len < 4) continue;
-            if (std.ascii.indexOfIgnoreCase(line, word) != null) {
-                matched = true;
-                break;
-            }
-        }
-        if (!matched) continue;
-        try appendCappedLine(allocator, out, line, max_bytes);
-    }
-}
-
-fn appendRecentTail(allocator: Allocator, out: *std.ArrayList(u8), session: []const u8, max_bytes: usize) !void {
-    const tail_len = @min(session.len, @min(max_bytes / 2, 2048));
-    if (tail_len == 0) return;
-    try out.appendSlice(allocator, "Recent session tail:\n");
-    var tail = session[session.len - tail_len ..];
-    if (std.mem.indexOfScalar(u8, tail, '\n')) |first_newline| tail = tail[first_newline + 1 ..];
-    var lines = std.mem.splitScalar(u8, tail, '\n');
-    while (lines.next()) |line| {
-        if (line.len != 0) try appendCappedLine(allocator, out, line, max_bytes);
-    }
-}
-
-fn appendCappedLine(allocator: Allocator, out: *std.ArrayList(u8), line: []const u8, max_bytes: usize) !void {
-    if (out.items.len >= max_bytes) return;
-    const remaining = max_bytes - out.items.len;
-    const take = @min(line.len, remaining -| 1);
-    try out.appendSlice(allocator, line[0..take]);
-    if (out.items.len < max_bytes) try out.append(allocator, '\n');
-}
-
-test "projection respects zero byte budget" {
-    const projection = try buildProjection(std.testing.allocator, "missing-session.jsonl", "hello", 0);
-    defer std.testing.allocator.free(projection);
-    try std.testing.expectEqualStrings("", projection);
+test "session log respects zero byte budget" {
+    const log = try readLog(std.testing.allocator, "missing-session.jsonl", 0);
+    defer std.testing.allocator.free(log);
+    try std.testing.expectEqualStrings("", log);
 }

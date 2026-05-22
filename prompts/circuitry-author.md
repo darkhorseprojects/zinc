@@ -6,10 +6,10 @@ Contract:
 graph source + runtime inputs -> node outputs/errors
 ```
 
-Use Circuitry v0.2 authored graph shape:
+Use Circuitry v0.2.99 authored graph shape:
 
 ```yaml
-circuitry: "0.2"
+circuitry: "0.2.99"
 title: Example workflow
 runtime:
   provider: zinc
@@ -32,11 +32,28 @@ resources:
       Read the brief and output JSON matching expect.
 ```
 
+Linked files split one logical graph into swappable pieces:
+
+```yaml
+circuitry: "0.2.99"
+links:
+  - ./context-recovery.circuitry.yaml
+resources:
+  user_turn:
+    type: text
+    value: ""
+  assistant:
+    type: agent
+    inputs: [user_turn, recovered_context]
+```
+
 Rules:
 
 - authored files use top-level `resources:` only
 - do not create top-level `nodes:`, `edges:`, `agents:`, or `inputs:`
 - edges are derived from executable resource `inputs:` lists
+- `links:` paths are relative to the file that declares them
+- linked resource id collisions are invalid
 - runtime inputs overlay existing `type: text` resources for one run
 - graph source changes only when authoring or refactoring a graph
 - request-specific values belong in runtime inputs, not source mutation

@@ -138,30 +138,40 @@ fn isCircuitryPath(path: []const u8) bool {
 }
 
 fn validateGraphFile(allocator: Allocator, path: []const u8) !void {
-    const text = try files.readLimited(allocator, path, 1024 * 1024);
+    const text = try graph.readLinkedText(allocator, path);
     defer allocator.free(text);
     try graph.validateText(text);
 }
 
 fn compileGraphFile(allocator: Allocator, graph_path: []const u8, out_path: []const u8, home: []const u8) !void {
-    const text = try files.readLimited(allocator, graph_path, 1024 * 1024);
+    const text = try graph.readLinkedText(allocator, graph_path);
     defer allocator.free(text);
     try graph.validateText(text);
 
-    const instructions = try graph.extractIndentedBlock(allocator, text, "    instructions: |\n", 6);
+    const context_instructions = try graph.extractResourceInstructions(allocator, text, "recovered_context");
+    defer allocator.free(context_instructions);
+    const instructions = try graph.extractResourceInstructions(allocator, text, "assistant");
     defer allocator.free(instructions);
-    const session_source = try graph.readScalar(allocator, text, "      source_dir:");
-    defer allocator.free(session_source);
-    const session_max = try graph.readUsize(text, "      max_bytes:");
     const model_id = try config.resolveGraphModelId(allocator, text, home);
     defer allocator.free(model_id);
     const model_alias = try config.readModelValue(allocator, home, model_id, "alias");
     defer allocator.free(model_alias);
     const model_repo = try config.readModelValue(allocator, home, model_id, "hf_repo");
     defer allocator.free(model_repo);
-    const tools = try graph.readTools(allocator, text);
+    const tools = try graph.readTools(allocator, text, "assistant");
     defer graph.freeStringList(allocator, tools);
     for (tools) |tool| if (!tool_registry.contains(tool)) return error.UnknownTool;
+
+    var context_prompt: std.ArrayList(u8) = .empty;
+    defer context_prompt.deinit(allocator);
+    try context_prompt.print(allocator,
+        \\Identity: Context recovery
+        \\Instructions:
+        \\{s}
+        \\
+        \\Expected output:
+        \\Return ONLY valid JSON matching: {{"summary": str, "relevant_facts": [str], "uncertainty": [str]}}
+    , .{context_instructions});
 
     var prompt: std.ArrayList(u8) = .empty;
     defer prompt.deinit(allocator);
@@ -190,11 +200,10 @@ fn compileGraphFile(allocator: Allocator, graph_path: []const u8, out_path: []co
         if (i != 0) try compiled.append(allocator, ',');
         try files.appendJsonString(allocator, &compiled, tool);
     }
-    try compiled.appendSlice(allocator, "],\"prompt\":");
+    try compiled.appendSlice(allocator, "],\"context_prompt\":");
+    try files.appendJsonString(allocator, &compiled, context_prompt.items);
+    try compiled.appendSlice(allocator, ",\"prompt\":");
     try files.appendJsonString(allocator, &compiled, prompt.items);
-    try compiled.appendSlice(allocator, ",\"expect\":{\"response\":\"str\",\"done\":\"bool\"},\"session_projection\":{\"source_dir\":");
-    try files.appendJsonString(allocator, &compiled, session_source);
-    try compiled.print(allocator, ",\"strategy\":\"recent_and_keyword\",\"max_bytes\":{d}", .{session_max});
-    try compiled.appendSlice(allocator, "}}\n");
+    try compiled.appendSlice(allocator, ",\"expect\":{\"response\":\"str\",\"done\":\"bool\"},\"session_log\":{\"source_dir\":\".zinc/sessions\",\"max_bytes\":65536}}\n");
     try files.write(out_path, compiled.items);
 }

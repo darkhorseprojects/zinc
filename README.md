@@ -142,16 +142,18 @@ src/plan.zig           compiled runtime plan loading
 src/server.zig         zn up/down
 src/clean.zig          cleanup command
 src/config.zig         config and model lookup
-src/session.zig        JSONL sessions and projection
+src/session.zig        JSONL sessions and context log input
 src/files.zig          file/syscall helpers
 src/graph.zig          Zinc-supported Circuitry graph subset
 ```
 
 ## Default loop
 
-The default graph is `graphs/zinc-loop.circuitry.yaml`. It is a Circuitry v0.2 resources graph: `user_turn` and `session_projection` are text resources, and `assistant` is an agent resource with `tools` and `expect`. `zn compile` validates Zinc's supported agent-loop shape and writes a compact runtime plan. `zn run` and bare `zn "prompt"` consume that compiled Circuitry artifact directly: user turn plus bounded `session_projection` from the active per-directory session, so the hot path stays lean without bypassing the graph.
+The default graph is `graphs/zinc-loop.circuitry.yaml`. It is a Circuitry v0.2.99 resources graph that links `graphs/zinc-context-recovery.circuitry.yaml`. The linked fragment owns `session_log -> recovered_context`; the main loop owns `user_turn -> assistant`.
 
-Zinc can help author arbitrary Circuitry v0.2 graphs through tools and prompt packs. Zinc's own hot runtime currently compiles the Zinc loop shape, not every possible Circuitry program shape.
+`zn compile` resolves linked graph files, validates Zinc's supported loop shape, and writes a compact runtime plan. `zn run` and bare `zn "prompt"` consume that compiled Circuitry artifact directly: the active session log is sent through the context recovery node first, then the assistant receives `user_turn` plus `recovered_context`. The context is graph-visible instead of hidden metadata sideband.
+
+Zinc can help author arbitrary Circuitry v0.2.99 graphs through tools and prompt packs. Zinc's own hot runtime currently compiles the Zinc loop shape, not every possible Circuitry program shape.
 
 A root/user-facing invocation can replace the default runtime graph for one run:
 
@@ -204,7 +206,7 @@ request_circuitry_run
 
 `request_circuitry_run` does not execute recursively. It returns a pending approval message telling the root/user-facing invocation to run `zn file.circuitry.yaml` or `zn run file.circuitry.yaml` if approved.
 
-Prompt packs live in `prompts/` from source and are installed to `~/.local/share/zinc/prompts/`. `prompts/circuitry-author.md` is injected when the graph asks for Circuitry tools or mentions `circuitry-author`, teaching the agent v0.2 resource graph authoring rules.
+Prompt packs live in `prompts/` from source and are installed to `~/.local/share/zinc/prompts/`. `prompts/circuitry-author.md` is injected when the graph asks for Circuitry tools or mentions `circuitry-author`, teaching the agent v0.2.99 resource/link graph authoring rules.
 
 Tool trust model: tools execute on the local machine from the current working directory, and path-taking tools can mutate files. Grant `write`, `edit`, and `bash` only to graphs that should be allowed to change local state.
 
@@ -251,7 +253,7 @@ Each session is JSONL:
 {"type":"message","timestamp":0,"message":{"role":"assistant","content":"..."}}
 ```
 
-Tool calls are recorded as `message.role = "tool"` entries containing the tool name, arguments, and result. The compiled graph controls how much of the active session can be projected back into the prompt; the default `session_projection` is `recent_and_keyword` with `max_bytes: 4096`.
+Tool calls are recorded as `message.role = "tool"` entries containing the tool name, arguments, and result. The compiled graph controls how much of the active session log is exposed to context recovery; the default linked recovery node receives up to 65536 bytes of raw session JSONL and returns compact `recovered_context` for the assistant.
 
 ## Status
 
