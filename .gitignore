@@ -1,0 +1,6 @@
+zig-out/
+.zig-cache/
+.zinc/sessions/*.lock
+.DS_Store
+.zinc/sessions/
+.zinc/compiled/
