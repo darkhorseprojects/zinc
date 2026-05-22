@@ -28,6 +28,7 @@ install -m 0755 "$root/zig-out/bin/zn" "$bin_dir/zn"
 install -m 0755 "$root/scripts/setup-turboquant-linux.sh" "$scripts_dir/setup-turboquant-linux.sh"
 install -m 0755 "$root/scripts/serve-model.sh" "$scripts_dir/serve-model.sh"
 install -m 0644 "$root/graphs/zinc-loop.circuitry.yaml" "$share_dir/graphs/zinc-loop.circuitry.yaml"
+install -m 0644 "$root/graphs/zinc-context-recovery.circuitry.yaml" "$share_dir/graphs/zinc-context-recovery.circuitry.yaml"
 install -m 0644 "$root/prompts/circuitry-author.md" "$share_dir/prompts/circuitry-author.md"
 
 mkdir -p "$HOME/.config/zinc"
