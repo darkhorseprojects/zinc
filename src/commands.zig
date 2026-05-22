@@ -78,9 +78,13 @@ pub fn runFromArgs(allocator: Allocator, io: std.Io, home: []const u8, args: []c
         return;
     }
 
+    const runtime_paths = try config.loadRuntimePaths(allocator, home);
+    defer runtime_paths.deinit(allocator);
+    try compileGraphFile(allocator, runtime_paths.graph, runtime_paths.compiled_plan, home);
+
     const prompt = try std.mem.join(allocator, " ", prompt_parts.items);
     defer allocator.free(prompt);
-    try engine.run(allocator, io, home, prompt, resume_id, continue_last, null);
+    try engine.run(allocator, io, home, prompt, resume_id, continue_last, runtime_paths.compiled_plan);
 }
 
 pub fn printSessionDir(allocator: Allocator) !void {
