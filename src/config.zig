@@ -2,8 +2,31 @@ const std = @import("std");
 const files = @import("files.zig");
 const graph = @import("graph.zig");
 const layout = @import("layout.zig");
+const provider = @import("provider.zig");
 
 const Allocator = std.mem.Allocator;
+
+const default_provider_base_url = "http://127.0.0.1:30000/v1";
+const default_provider_authorization = "Bearer zinc";
+const default_chat_max_tokens = 8192;
+const default_chat_temperature = 0.2;
+const default_max_tool_turns = 16;
+const default_contract_retry_limit = 1;
+const default_contract_error_preview_bytes = 2000;
+const default_session_log_bytes = 65536;
+
+pub const RuntimeConfig = struct {
+    chat: provider.ChatConfig,
+    max_tool_turns: usize,
+    contract_retry_limit: usize,
+    contract_error_preview_bytes: usize,
+    session_log_bytes: usize,
+
+    pub fn deinit(self: RuntimeConfig, allocator: Allocator) void {
+        allocator.free(self.chat.base_url);
+        allocator.free(self.chat.authorization);
+    }
+};
 
 pub const RuntimePaths = struct {
     graph: []u8,
@@ -14,6 +37,31 @@ pub const RuntimePaths = struct {
         allocator.free(self.compiled_plan);
     }
 };
+
+pub fn loadRuntimeConfig(allocator: Allocator, home: []const u8) !RuntimeConfig {
+    var runtime = RuntimeConfig{
+        .chat = .{
+            .base_url = try readStringDefault(allocator, home, "provider_base_url", default_provider_base_url),
+            .max_tokens = default_chat_max_tokens,
+            .temperature = default_chat_temperature,
+            .authorization = undefined,
+        },
+        .max_tool_turns = default_max_tool_turns,
+        .contract_retry_limit = default_contract_retry_limit,
+        .contract_error_preview_bytes = default_contract_error_preview_bytes,
+        .session_log_bytes = default_session_log_bytes,
+    };
+    errdefer allocator.free(runtime.chat.base_url);
+    runtime.chat.authorization = try readStringDefault(allocator, home, "provider_authorization", default_provider_authorization);
+    errdefer allocator.free(runtime.chat.authorization);
+    runtime.chat.max_tokens = try readUsizeDefault(allocator, home, "chat_max_tokens", default_chat_max_tokens);
+    runtime.chat.temperature = try readFloatDefault(allocator, home, "chat_temperature", default_chat_temperature);
+    runtime.max_tool_turns = try readUsizeDefault(allocator, home, "max_tool_turns", default_max_tool_turns);
+    runtime.contract_retry_limit = try readUsizeDefault(allocator, home, "contract_retry_limit", default_contract_retry_limit);
+    runtime.contract_error_preview_bytes = try readUsizeDefault(allocator, home, "contract_error_preview_bytes", default_contract_error_preview_bytes);
+    runtime.session_log_bytes = try readUsizeDefault(allocator, home, "session_log_bytes", default_session_log_bytes);
+    return runtime;
+}
 
 pub fn loadRuntimePaths(allocator: Allocator, home: []const u8) !RuntimePaths {
     var paths = RuntimePaths{
@@ -91,6 +139,31 @@ pub fn readModelValue(allocator: Allocator, home: []const u8, model_id: []const 
     defer allocator.free(global_config);
     if (try readModelPath(allocator, global_config, model_id, key)) |value| return value;
     return error.ModelConfigKeyNotFound;
+}
+
+pub fn readStringDefault(allocator: Allocator, home: []const u8, key: []const u8, default_value: []const u8) ![]u8 {
+    return readConfigScalar(allocator, home, key) catch |err| switch (err) {
+        error.ConfigKeyNotFound => try allocator.dupe(u8, default_value),
+        else => err,
+    };
+}
+
+pub fn readUsizeDefault(allocator: Allocator, home: []const u8, key: []const u8, default_value: usize) !usize {
+    const raw = readConfigScalar(allocator, home, key) catch |err| switch (err) {
+        error.ConfigKeyNotFound => return default_value,
+        else => return err,
+    };
+    defer allocator.free(raw);
+    return std.fmt.parseInt(usize, raw, 10) catch error.InvalidConfigValue;
+}
+
+pub fn readFloatDefault(allocator: Allocator, home: []const u8, key: []const u8, default_value: f64) !f64 {
+    const raw = readConfigScalar(allocator, home, key) catch |err| switch (err) {
+        error.ConfigKeyNotFound => return default_value,
+        else => return err,
+    };
+    defer allocator.free(raw);
+    return std.fmt.parseFloat(f64, raw) catch error.InvalidConfigValue;
 }
 
 fn readConfigScalar(allocator: Allocator, home: []const u8, key: []const u8) ![]u8 {

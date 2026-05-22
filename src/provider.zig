@@ -2,11 +2,12 @@ const std = @import("std");
 const files = @import("files.zig");
 
 const Allocator = std.mem.Allocator;
-const chat_max_tokens = 8192;
-const chat_temperature = 0.2;
 
-pub const Config = struct {
-    base_url: []const u8 = "http://127.0.0.1:30000/v1",
+pub const ChatConfig = struct {
+    base_url: []const u8,
+    max_tokens: usize,
+    temperature: f64,
+    authorization: []const u8,
 };
 
 pub const Message = struct {
@@ -28,10 +29,10 @@ pub const AssistantTurn = struct {
     tool_calls: []ToolCall,
 };
 
-pub fn call(allocator: Allocator, io: std.Io, cfg: Config, model: []const u8, tools_json: []const u8, messages: []const Message, require_tool: bool) !AssistantTurn {
+pub fn call(allocator: Allocator, io: std.Io, cfg: ChatConfig, model: []const u8, tools_json: []const u8, messages: []const Message) !AssistantTurn {
     var body: std.ArrayList(u8) = .empty;
     defer body.deinit(allocator);
-    try writeChatRequest(allocator, &body, model, tools_json, messages, require_tool);
+    try writeChatRequest(allocator, &body, cfg, model, tools_json, messages);
 
     const url = try std.fmt.allocPrint(allocator, "{s}/chat/completions", .{cfg.base_url});
     defer allocator.free(url);
@@ -43,7 +44,7 @@ pub fn call(allocator: Allocator, io: std.Io, cfg: Config, model: []const u8, to
 
     const headers = [_]std.http.Header{
         .{ .name = "content-type", .value = "application/json" },
-        .{ .name = "authorization", .value = "Bearer zinc" },
+        .{ .name = "authorization", .value = cfg.authorization },
     };
     const result = try client.fetch(.{
         .location = .{ .url = url },
@@ -94,14 +95,28 @@ pub fn cleanText(allocator: Allocator, raw: []const u8) ![]u8 {
 fn cloneToolCalls(allocator: Allocator, calls: []const ToolCall) ![]ToolCall {
     if (calls.len == 0) return &.{};
     const out = try allocator.alloc(ToolCall, calls.len);
-    errdefer allocator.free(out);
-    for (calls, 0..) |tool_call, i| {
-        out[i] = .{
-            .id = try allocator.dupe(u8, tool_call.id),
-            .name = try allocator.dupe(u8, tool_call.name),
-            .arguments = try allocator.dupe(u8, tool_call.arguments),
-        };
+    var initialized: usize = 0;
+    errdefer {
+        for (out[0..initialized]) |tool_call| freeCall(allocator, tool_call);
+        allocator.free(out);
     }
+    for (calls, 0..) |tool_call, i| {
+        out[i] = try cloneToolCall(allocator, tool_call);
+        initialized += 1;
+    }
+    return out;
+}
+
+fn cloneToolCall(allocator: Allocator, tool_call: ToolCall) !ToolCall {
+    var out = ToolCall{
+        .id = try allocator.dupe(u8, tool_call.id),
+        .name = undefined,
+        .arguments = undefined,
+    };
+    errdefer allocator.free(out.id);
+    out.name = try allocator.dupe(u8, tool_call.name);
+    errdefer allocator.free(out.name);
+    out.arguments = try allocator.dupe(u8, tool_call.arguments);
     return out;
 }
 
@@ -119,10 +134,10 @@ fn freeCall(allocator: Allocator, tool_call: ToolCall) void {
     allocator.free(tool_call.arguments);
 }
 
-fn writeChatRequest(allocator: Allocator, out: *std.ArrayList(u8), model: []const u8, tools_json: []const u8, messages: []const Message, require_tool: bool) !void {
+fn writeChatRequest(allocator: Allocator, out: *std.ArrayList(u8), cfg: ChatConfig, model: []const u8, tools_json: []const u8, messages: []const Message) !void {
     try out.appendSlice(allocator, "{\"model\":");
     try files.appendJsonString(allocator, out, model);
-    try out.print(allocator, ",\"stream\":false,\"temperature\":{d:.2},\"max_tokens\":{d},\"messages\":[", .{ chat_temperature, chat_max_tokens });
+    try out.print(allocator, ",\"stream\":false,\"temperature\":{d:.2},\"max_tokens\":{d},\"messages\":[", .{ cfg.temperature, cfg.max_tokens });
     for (messages, 0..) |msg, i| {
         if (i != 0) try out.append(allocator, ',');
         try out.appendSlice(allocator, "{\"role\":");
@@ -155,44 +170,79 @@ fn writeChatRequest(allocator: Allocator, out: *std.ArrayList(u8), model: []cons
     }
     try out.appendSlice(allocator, "],\"tools\":");
     try out.appendSlice(allocator, tools_json);
-    if (require_tool) try out.appendSlice(allocator, ",\"tool_choice\":\"required\"");
     try out.append(allocator, '}');
 }
 
 fn parseAssistantTurn(allocator: Allocator, text: []const u8) !AssistantTurn {
     var parsed = try std.json.parseFromSlice(std.json.Value, allocator, text, .{});
     defer parsed.deinit();
-    const root = parsed.value;
-    const choices = root.object.get("choices") orelse return error.BadProviderResponse;
-    const first = choices.array.items[0];
-    const message = first.object.get("message") orelse return error.BadProviderResponse;
-    const content_value = message.object.get("content");
-    const content = if (content_value) |v| if (v == .null) "" else v.string else "";
 
-    var calls: std.ArrayList(ToolCall) = .empty;
+    if (parsed.value != .object) return error.BadProviderResponse;
+    const choices = parsed.value.object.get("choices") orelse return error.BadProviderResponse;
+    if (choices != .array or choices.array.items.len == 0) return error.BadProviderResponse;
+    const first = choices.array.items[0];
+    if (first != .object) return error.BadProviderResponse;
+    const message = first.object.get("message") orelse return error.BadProviderResponse;
+    if (message != .object) return error.BadProviderResponse;
+
+    const content = try readMessageContent(message);
+    var calls = try readToolCalls(allocator, message);
     errdefer {
         for (calls.items) |c| freeCall(allocator, c);
         calls.deinit(allocator);
-    }
-
-    if (message.object.get("tool_calls")) |tool_calls| {
-        if (tool_calls != .null) {
-            for (tool_calls.array.items) |tc| {
-                const id = tc.object.get("id").?.string;
-                const fun = tc.object.get("function").?;
-                const name = fun.object.get("name").?.string;
-                const args = fun.object.get("arguments").?.string;
-                try calls.append(allocator, .{
-                    .id = try allocator.dupe(u8, id),
-                    .name = try allocator.dupe(u8, name),
-                    .arguments = try allocator.dupe(u8, args),
-                });
-            }
-        }
     }
 
     return .{
         .text = try cleanText(allocator, content),
         .tool_calls = try calls.toOwnedSlice(allocator),
     };
+}
+
+fn readMessageContent(message: std.json.Value) ![]const u8 {
+    const content = message.object.get("content") orelse return "";
+    return switch (content) {
+        .null => "",
+        .string => content.string,
+        else => error.BadProviderResponse,
+    };
+}
+
+fn readToolCalls(allocator: Allocator, message: std.json.Value) !std.ArrayList(ToolCall) {
+    var calls: std.ArrayList(ToolCall) = .empty;
+    errdefer {
+        for (calls.items) |c| freeCall(allocator, c);
+        calls.deinit(allocator);
+    }
+
+    const value = message.object.get("tool_calls") orelse return calls;
+    if (value == .null) return calls;
+    if (value != .array) return error.BadProviderResponse;
+
+    for (value.array.items) |tool_call| try calls.append(allocator, try readToolCall(allocator, tool_call));
+    return calls;
+}
+
+fn readToolCall(allocator: Allocator, value: std.json.Value) !ToolCall {
+    if (value != .object) return error.BadProviderResponse;
+    const id = readStringField(value, "id") catch return error.BadProviderResponse;
+    const function = value.object.get("function") orelse return error.BadProviderResponse;
+    if (function != .object) return error.BadProviderResponse;
+    const name = readStringField(function, "name") catch return error.BadProviderResponse;
+    const arguments = readStringField(function, "arguments") catch return error.BadProviderResponse;
+    var out = ToolCall{
+        .id = try allocator.dupe(u8, id),
+        .name = undefined,
+        .arguments = undefined,
+    };
+    errdefer allocator.free(out.id);
+    out.name = try allocator.dupe(u8, name);
+    errdefer allocator.free(out.name);
+    out.arguments = try allocator.dupe(u8, arguments);
+    return out;
+}
+
+fn readStringField(object: std.json.Value, field: []const u8) ![]const u8 {
+    const value = object.object.get(field) orelse return error.BadProviderResponse;
+    if (value != .string) return error.BadProviderResponse;
+    return value.string;
 }

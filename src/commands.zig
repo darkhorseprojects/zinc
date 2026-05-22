@@ -162,6 +162,8 @@ fn compileGraphFile(allocator: Allocator, graph_path: []const u8, out_path: []co
     defer allocator.free(model_alias);
     const model_repo = try config.readModelValue(allocator, home, model_id, "hf_repo");
     defer allocator.free(model_repo);
+    const runtime = try config.loadRuntimeConfig(allocator, home);
+    defer runtime.deinit(allocator);
     const tools = try graph.readTools(allocator, text, "assistant");
     defer graph.freeStringList(allocator, tools);
     for (tools) |tool| if (!tool_registry.contains(tool)) return error.UnknownTool;
@@ -208,6 +210,6 @@ fn compileGraphFile(allocator: Allocator, graph_path: []const u8, out_path: []co
     try files.appendJsonString(allocator, &compiled, context_prompt.items);
     try compiled.appendSlice(allocator, ",\"prompt\":");
     try files.appendJsonString(allocator, &compiled, prompt.items);
-    try compiled.appendSlice(allocator, ",\"expect\":{\"response\":\"str\"},\"session_log\":{\"source_dir\":\".zinc/sessions\",\"max_bytes\":65536}}\n");
+    try compiled.print(allocator, ",\"expect\":{{\"response\":\"str\"}},\"session_log\":{{\"source_dir\":\".zinc/sessions\",\"max_bytes\":{d}}}}}\n", .{runtime.session_log_bytes});
     try files.write(out_path, compiled.items);
 }

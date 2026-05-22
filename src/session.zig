@@ -78,10 +78,7 @@ pub fn appendEvent(allocator: Allocator, path: []const u8, role: []const u8, con
     try line.appendSlice(allocator, ",\"content\":");
     try files.appendJsonString(allocator, &line, content);
     try line.appendSlice(allocator, "}}}\n");
-    const fd = try std.posix.openat(std.posix.AT.FDCWD, path, .{ .ACCMODE = .WRONLY, .APPEND = true }, 0);
-    defer _ = std.os.linux.close(fd);
-    var written: usize = 0;
-    while (written < line.items.len) written += try files.linuxWrite(fd, line.items[written..]);
+    try appendLine(path, line.items);
 }
 
 pub fn appendRuntimeEvent(allocator: Allocator, path: []const u8, phase: []const u8, event: []const u8, content: []const u8) !void {
@@ -114,10 +111,14 @@ fn appendRuntimeEventFull(allocator: Allocator, path: []const u8, phase: []const
     try line.appendSlice(allocator, ",\"content\":");
     try files.appendJsonString(allocator, &line, content);
     try line.appendSlice(allocator, "}\n");
+    try appendLine(path, line.items);
+}
+
+fn appendLine(path: []const u8, line: []const u8) !void {
     const fd = try std.posix.openat(std.posix.AT.FDCWD, path, .{ .ACCMODE = .WRONLY, .APPEND = true }, 0);
     defer _ = std.os.linux.close(fd);
     var written: usize = 0;
-    while (written < line.items.len) written += try files.linuxWrite(fd, line.items[written..]);
+    while (written < line.len) written += try files.linuxWrite(fd, line[written..]);
 }
 
 pub fn ensureDir(allocator: Allocator) ![]u8 {
