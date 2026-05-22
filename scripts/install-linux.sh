@@ -54,6 +54,7 @@ cache_type_k = "q8_0"
 cache_type_v = "turbo3"
 fit_ctx = 8192
 vram_allocation_percent = $vram_allocation_percent
+temperature = 0.5
 EOF_CONFIG
 
 cat > "$bin_dir/zn-setup-turboquant" <<EOF

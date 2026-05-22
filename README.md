@@ -87,6 +87,7 @@ cache_type_k = "q8_0"
 cache_type_v = "turbo3"
 fit_ctx = 8192
 vram_allocation_percent = 87.5
+temperature = 0.5
 ```
 
 `max_retries` is Zinc's cap for clean turn-correction retries, such as invalid final JSON or unavailable tool calls. Transient provider failures are retried immediately before they surface. Neither case creates graph branches.
