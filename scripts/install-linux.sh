@@ -55,7 +55,7 @@ cache_type_v = "turbo3"
 fit_ctx = 8192
 vram_allocation_percent = $vram_allocation_percent
 temperature = 0.5
-reasoning_effort = "low"
+reasoning_effort = "off"
 reasoning_format = "deepseek"
 EOF_CONFIG
 
