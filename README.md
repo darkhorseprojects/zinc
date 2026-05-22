@@ -89,7 +89,7 @@ fit_ctx = 8192
 vram_allocation_percent = 87.5
 ```
 
-`max_retries` is Zinc's cap for retryable one-off turn failures, such as invalid final JSON or transient provider errors. It does not create graph branches.
+`max_retries` is Zinc's cap for clean turn-correction retries, such as invalid final JSON or unavailable tool calls. Transient provider failures are retried immediately before they surface. Neither case creates graph branches.
 
 ## model server
 

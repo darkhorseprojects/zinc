@@ -51,28 +51,23 @@ pub fn run(allocator: Allocator, io: std.Io, home: []const u8, user_prompt: []co
     try provider.appendMessage(allocator, &messages, .{ .role = "system", .content = plan.prompt });
     try provider.appendMessage(allocator, &messages, .{ .role = "user", .content = user_content });
 
-    var retries: usize = 0;
+    var correction_retries: usize = 0;
     while (true) {
-        const turn = provider.call(allocator, io, .{
+        const turn = try callProviderWithTransientRetries(allocator, io, session.path, Phase.assistant_turn, runtime.max_retries, .{
             .base_url = runtime.provider_base_url,
             .authorization = local_auth_header,
             .model = plan.model_alias,
             .tools_json = plan.tools_json,
             .messages = messages.items,
-        }) catch |err| {
-            if (!isRetryableTurnError(err) or retries >= runtime.max_retries) return err;
-            retries += 1;
-            try sessions.appendRuntimeError(allocator, session.path, Phase.assistant_turn, RuntimeEvent.retryable_failure, @errorName(err), "provider call failed; retrying assistant turn");
-            continue;
-        };
+        });
         defer provider.freeTurn(allocator, turn);
 
         if (turn.tool_calls.len == 0) {
             try sessions.appendRuntimeEvent(allocator, session.path, Phase.assistant_turn, RuntimeEvent.model_output, turn.text);
             const response = parseExpectedResponse(allocator, turn.text) catch |err| {
                 try recordContractFailure(allocator, session.path, err, turn.text);
-                if (retries >= runtime.max_retries) return err;
-                retries += 1;
+                if (correction_retries >= runtime.max_retries) return err;
+                correction_retries += 1;
                 const retry = try buildContractRetryPrompt(allocator, err, turn.text);
                 defer allocator.free(retry);
                 try provider.appendMessage(allocator, &messages, .{ .role = "user", .content = retry });
@@ -85,9 +80,23 @@ pub fn run(allocator: Allocator, io: std.Io, home: []const u8, user_prompt: []co
             return;
         }
 
+        var unavailable_tool: ?[]const u8 = null;
+        for (turn.tool_calls) |call| if (!plan.allowsTool(call.name)) {
+            unavailable_tool = call.name;
+            break;
+        };
+        if (unavailable_tool) |name| {
+            try sessions.appendRuntimeError(allocator, session.path, Phase.assistant_turn, RuntimeEvent.contract_failure, "ToolNotAvailable", name);
+            if (correction_retries >= runtime.max_retries) return error.ToolNotAllowedByGraph;
+            correction_retries += 1;
+            const retry = try buildUnavailableToolRetryPrompt(allocator, name, plan.tools);
+            defer allocator.free(retry);
+            try provider.appendMessage(allocator, &messages, .{ .role = "user", .content = retry });
+            continue;
+        }
+        correction_retries = 0;
         try provider.appendMessage(allocator, &messages, .{ .role = "assistant", .content = turn.text, .tool_calls = turn.tool_calls });
         for (turn.tool_calls) |call| {
-            if (!plan.allowsTool(call.name)) return error.ToolNotAllowedByGraph;
             try sessions.appendToolEvent(allocator, session.path, RuntimeEvent.tool_call, call.name, call.arguments);
             const result = try tools.execute(allocator, io, call.name, call.arguments);
             defer allocator.free(result);
@@ -128,6 +137,35 @@ fn buildContractRetryPrompt(allocator: Allocator, err: anyerror, raw: []const u8
     , .{ @errorName(err), raw });
 }
 
+fn buildUnavailableToolRetryPrompt(allocator: Allocator, unavailable: []const u8, available: []const []const u8) ![]u8 {
+    var out: std.ArrayList(u8) = .empty;
+    errdefer out.deinit(allocator);
+    try out.print(allocator,
+        \\Runtime contract failure.
+        \\
+        \\The tool "{s}" is not available in this graph.
+        \\Retry this assistant turn cleanly using only available tools.
+        \\Available tools:
+    , .{unavailable});
+    for (available) |tool| try out.print(allocator, "\n- {s}", .{tool});
+    try out.appendSlice(allocator,
+        \\
+        \\
+        \\If no available tool can satisfy the request, return final JSON explaining the blocker.
+    );
+    return out.toOwnedSlice(allocator);
+}
+
+fn buildContextToolRetryPrompt(allocator: Allocator) ![]u8 {
+    return allocator.dupe(u8,
+        \\Runtime contract failure.
+        \\
+        \\Context recovery cannot use tools.
+        \\Retry context recovery cleanly from the provided session log and user request.
+        \\Return only JSON matching your expected output.
+    );
+}
+
 fn recoverContext(allocator: Allocator, io: std.Io, provider_base_url: []const u8, max_retries: usize, session_path: []const u8, model_alias: []const u8, context_prompt: []const u8, user_prompt: []const u8, session_log: []const u8) ![]u8 {
     var messages: std.ArrayList(provider.Message) = .empty;
     defer messages.deinit(allocator);
@@ -144,28 +182,43 @@ fn recoverContext(allocator: Allocator, io: std.Io, provider_base_url: []const u
 
     try provider.appendMessage(allocator, &messages, .{ .role = "system", .content = context_prompt });
     try provider.appendMessage(allocator, &messages, .{ .role = "user", .content = user_content });
-    var retries: usize = 0;
-    const turn = while (true) {
-        break provider.call(allocator, io, .{
+    var correction_retries: usize = 0;
+    while (true) {
+        const turn = try callProviderWithTransientRetries(allocator, io, session_path, Phase.context_recovery, max_retries, .{
             .base_url = provider_base_url,
             .authorization = local_auth_header,
             .model = model_alias,
             .tools_json = "[]",
             .messages = messages.items,
-        }) catch |err| {
-            if (!isRetryableTurnError(err) or retries >= max_retries) return err;
-            retries += 1;
-            try sessions.appendRuntimeError(allocator, session_path, Phase.context_recovery, RuntimeEvent.retryable_failure, @errorName(err), "provider call failed; retrying context recovery");
+        });
+        defer provider.freeTurn(allocator, turn);
+        if (turn.tool_calls.len != 0) {
+            try sessions.appendRuntimeError(allocator, session_path, Phase.context_recovery, RuntimeEvent.contract_failure, "ContextRecoveryCannotUseTools", turn.text);
+            if (correction_retries >= max_retries) return error.ContextRecoveryCannotUseTools;
+            correction_retries += 1;
+            const retry = try buildContextToolRetryPrompt(allocator);
+            defer allocator.free(retry);
+            try provider.appendMessage(allocator, &messages, .{ .role = "user", .content = retry });
             continue;
-        };
-    };
-    defer provider.freeTurn(allocator, turn);
-    if (turn.tool_calls.len != 0) return error.ContextRecoveryCannotUseTools;
-    try sessions.appendRuntimeEvent(allocator, session_path, Phase.context_recovery, RuntimeEvent.model_output, turn.text);
-    return provider.cleanText(allocator, turn.text);
+        }
+        try sessions.appendRuntimeEvent(allocator, session_path, Phase.context_recovery, RuntimeEvent.model_output, turn.text);
+        return provider.cleanText(allocator, turn.text);
+    }
 }
 
-fn isRetryableTurnError(err: anyerror) bool {
+fn callProviderWithTransientRetries(allocator: Allocator, io: std.Io, session_path: []const u8, phase: []const u8, max_retries: usize, request: provider.Request) !provider.AssistantTurn {
+    var attempts: usize = 0;
+    while (true) {
+        return provider.call(allocator, io, request) catch |err| {
+            if (!isTransientProviderError(err) or attempts >= max_retries) return err;
+            attempts += 1;
+            try sessions.appendRuntimeError(allocator, session_path, phase, RuntimeEvent.retryable_failure, @errorName(err), "provider call failed; retrying immediately");
+            continue;
+        };
+    }
+}
+
+fn isTransientProviderError(err: anyerror) bool {
     return switch (err) {
         error.ProviderRequestFailed,
         error.ConnectionRefused,
