@@ -147,6 +147,19 @@ fn validateGraphFile(allocator: Allocator, path: []const u8) !void {
     try graph.validateText(text);
 }
 
+fn reasoningBudget(effort: []const u8) !usize {
+    if (std.mem.eql(u8, effort, "off")) return 0;
+    if (std.mem.eql(u8, effort, "low")) return 1024;
+    if (std.mem.eql(u8, effort, "medium")) return 4096;
+    if (std.mem.eql(u8, effort, "high")) return 8192;
+    if (std.mem.eql(u8, effort, "extra-high")) return 16384;
+    return error.InvalidConfigValue;
+}
+
+fn requestMaxTokens(output_tokens: usize, effort: []const u8) !usize {
+    return output_tokens + try reasoningBudget(effort);
+}
+
 fn compileGraphFile(allocator: Allocator, graph_path: []const u8, out_path: []const u8, home: []const u8) !void {
     const text = try graph.readLinkedText(allocator, graph_path);
     defer allocator.free(text);
@@ -163,6 +176,11 @@ fn compileGraphFile(allocator: Allocator, graph_path: []const u8, out_path: []co
     const model_repo = try config.readModelValue(allocator, home, model_id, "hf_repo");
     defer allocator.free(model_repo);
     const model_temperature = try config.readModelF64Default(allocator, home, model_id, "temperature", 0.5);
+    const model_max_tokens = try config.readModelUsizeDefault(allocator, home, model_id, "max_tokens", 1024);
+    const reasoning_effort = try config.readModelStringDefault(allocator, home, model_id, "reasoning_effort", "low");
+    defer allocator.free(reasoning_effort);
+    const request_max_tokens = try requestMaxTokens(model_max_tokens, reasoning_effort);
+    const tool_reasoning = try config.readModelBoolDefault(allocator, home, model_id, "tool_reasoning", false);
     const tools = try graph.readTools(allocator, text, "assistant");
     defer graph.freeStringList(allocator, tools);
     for (tools) |tool| if (!tool_registry.contains(tool)) return error.UnknownTool;
@@ -185,8 +203,8 @@ fn compileGraphFile(allocator: Allocator, graph_path: []const u8, out_path: []co
         \\Instructions:
         \\{s}
         \\
-        \\Expected output:
-        \\Return ONLY valid JSON matching: {{"response": str}}
+        \\Output:
+        \\Answer naturally in plain text. Use tool calls instead of guessing when current state matters.
     , .{instructions});
     if (graph.wantsCircuitryPrompt(text, tools)) {
         const pack = try config.readPromptPack(allocator, home, "circuitry-author.md");
@@ -200,7 +218,7 @@ fn compileGraphFile(allocator: Allocator, graph_path: []const u8, out_path: []co
     try files.appendJsonString(allocator, &compiled, model_id);
     try compiled.appendSlice(allocator, ",\"alias\":");
     try files.appendJsonString(allocator, &compiled, model_alias);
-    try compiled.print(allocator, ",\"temperature\":{d}", .{model_temperature});
+    try compiled.print(allocator, ",\"temperature\":{d},\"max_tokens\":{d},\"tool_reasoning\":{}", .{ model_temperature, request_max_tokens, tool_reasoning });
     try compiled.appendSlice(allocator, "},\"tools\":[");
     for (tools, 0..) |tool, i| {
         if (i != 0) try compiled.append(allocator, ',');

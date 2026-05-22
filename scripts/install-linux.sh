@@ -55,8 +55,10 @@ cache_type_v = "turbo3"
 fit_ctx = 8192
 vram_allocation_percent = $vram_allocation_percent
 temperature = 0.5
-reasoning_effort = "off"
-reasoning_format = "deepseek"
+max_tokens = 1024
+tool_reasoning = false
+reasoning_effort = "low"
+reasoning_format = "auto"
 EOF_CONFIG
 
 cat > "$bin_dir/zn-setup-turboquant" <<EOF

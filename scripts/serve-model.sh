@@ -91,27 +91,28 @@ reasoning_budget="$(model_value "$model_name" reasoning_budget)"
 : "${fit_ctx:=8192}"
 : "${vram_allocation_percent:=87.5}"
 : "${reasoning_effort:=low}"
-: "${reasoning_format:=deepseek}"
+: "${reasoning_format:=auto}"
 
 case "$reasoning_effort" in
   off)
     reasoning="off"
+    reasoning_format="none"
     : "${reasoning_budget:=0}"
     ;;
   low)
-    reasoning="auto"
+    reasoning="on"
     : "${reasoning_budget:=1024}"
     ;;
   medium)
-    reasoning="auto"
+    reasoning="on"
     : "${reasoning_budget:=4096}"
     ;;
   high)
-    reasoning="auto"
+    reasoning="on"
     : "${reasoning_budget:=8192}"
     ;;
   extra-high)
-    reasoning="auto"
+    reasoning="on"
     : "${reasoning_budget:=-1}"
     ;;
   *)

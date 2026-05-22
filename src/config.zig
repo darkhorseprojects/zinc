@@ -110,6 +110,13 @@ pub fn readModelValue(allocator: Allocator, home: []const u8, model_id: []const 
     return error.ModelConfigKeyNotFound;
 }
 
+pub fn readModelStringDefault(allocator: Allocator, home: []const u8, model_id: []const u8, key: []const u8, default_value: []const u8) ![]u8 {
+    return readModelValue(allocator, home, model_id, key) catch |err| switch (err) {
+        error.ModelConfigKeyNotFound => try allocator.dupe(u8, default_value),
+        else => err,
+    };
+}
+
 pub fn readModelF64Default(allocator: Allocator, home: []const u8, model_id: []const u8, key: []const u8, default_value: f64) !f64 {
     const raw = readModelValue(allocator, home, model_id, key) catch |err| switch (err) {
         error.ModelConfigKeyNotFound => return default_value,
@@ -117,6 +124,26 @@ pub fn readModelF64Default(allocator: Allocator, home: []const u8, model_id: []c
     };
     defer allocator.free(raw);
     return std.fmt.parseFloat(f64, raw) catch error.InvalidConfigValue;
+}
+
+pub fn readModelUsizeDefault(allocator: Allocator, home: []const u8, model_id: []const u8, key: []const u8, default_value: usize) !usize {
+    const raw = readModelValue(allocator, home, model_id, key) catch |err| switch (err) {
+        error.ModelConfigKeyNotFound => return default_value,
+        else => return err,
+    };
+    defer allocator.free(raw);
+    return std.fmt.parseInt(usize, raw, 10) catch error.InvalidConfigValue;
+}
+
+pub fn readModelBoolDefault(allocator: Allocator, home: []const u8, model_id: []const u8, key: []const u8, default_value: bool) !bool {
+    const raw = readModelValue(allocator, home, model_id, key) catch |err| switch (err) {
+        error.ModelConfigKeyNotFound => return default_value,
+        else => return err,
+    };
+    defer allocator.free(raw);
+    if (std.mem.eql(u8, raw, "true")) return true;
+    if (std.mem.eql(u8, raw, "false")) return false;
+    return error.InvalidConfigValue;
 }
 
 pub fn readStringDefault(allocator: Allocator, home: []const u8, key: []const u8, default_value: []const u8) ![]u8 {

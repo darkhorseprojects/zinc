@@ -83,12 +83,8 @@ pub fn freeStringList(allocator: Allocator, list: []const []u8) void {
 }
 
 pub fn wantsCircuitryPrompt(graph_text: []const u8, tools: []const []u8) bool {
-    if (std.mem.indexOf(u8, graph_text, "circuitry-author") != null) return true;
-    for (tools) |tool| {
-        if (std.mem.startsWith(u8, tool, "circuitry_")) return true;
-        if (std.mem.eql(u8, tool, "request_circuitry_run")) return true;
-    }
-    return false;
+    _ = tools;
+    return std.mem.indexOf(u8, graph_text, "circuitry-author") != null;
 }
 
 pub fn readScalar(allocator: Allocator, text: []const u8, key: []const u8) ![]u8 {

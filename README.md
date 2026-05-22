@@ -88,13 +88,15 @@ cache_type_v = "turbo3"
 fit_ctx = 8192
 vram_allocation_percent = 87.5
 temperature = 0.5
-reasoning_effort = "off"
-reasoning_format = "deepseek"
+max_tokens = 1024
+tool_reasoning = false
+reasoning_effort = "low"
+reasoning_format = "auto"
 ```
 
-`reasoning_effort` maps to llama.cpp thinking budgets: `off = 0`, `low = 1024`, `medium = 4096`, `high = 8192`, and `extra-high = -1`. Zinc defaults to `off` for fast interactive turns; raise it per model when deeper thinking is worth the latency.
+`reasoning_effort` maps to llama.cpp thinking budgets: `off = 0`, `low = 1024`, `medium = 4096`, `high = 8192`, and `extra-high = -1`. `off` launches llama.cpp with `--reasoning off --reasoning-format none`; every other level launches with explicit `--reasoning on`. `max_tokens` is the visible-response budget; Zinc adds the configured reasoning budget when compiling the provider request cap. `tool_reasoning = false` keeps Gemma's tool-calling turns on the non-thinking template path while the server remains reasoning-enabled for compatible requests.
 
-`max_retries` is Zinc's cap for clean turn-correction retries, such as invalid final JSON or unavailable tool calls. Transient provider failures are retried immediately before they surface. Neither case creates graph branches.
+`max_retries` is Zinc's cap for clean turn-correction retries, such as empty assistant output or unavailable tool calls. Transient provider failures are retried immediately before they surface. Neither case creates graph branches.
 
 ## model server
 
@@ -113,7 +115,7 @@ uses alias gemma-4-96e-a4b-heretic-tq
 fits at least 8192 tokens of context
 caps VRAM by vram_allocation_percent
 uses q8_0 K cache and turbo3 V cache
-lets llama.cpp auto-enable Gemma thinking and returns thoughts as reasoning_content
+enables Gemma thinking explicitly and lets llama.cpp choose the reasoning parser
 runs one server slot
 ```
 
@@ -161,7 +163,7 @@ The runtime path is:
 session log + current user turn
   -> recovered_context
   -> assistant
-  -> final {"response":"..."}
+  -> final text
 ```
 
 `zn run` and bare `zn "prompt"` refresh the compiled plan before running. The context recovery node sees the session JSONL and returns compact context for the assistant. The assistant receives that context as untrusted data.
@@ -179,16 +181,14 @@ For now, graph-path execution uses Zinc's runtime subset.
 
 ## final output contract
 
-The assistant's final output must match graph `expect`:
+The assistant's final output is plain text. Graph `expect` still records the intended shape:
 
 ```yaml
 expect:
   response: str
 ```
 
-Zinc parses the model output as JSON and prints only `response`. If final output is invalid, Zinc records a runtime contract failure and retries the turn cleanly until `max_retries` is spent. It does not accept markdown wrapped around the final answer.
-
-Tool calls keep a turn going. Final JSON ends the turn.
+Tool calls keep a turn going. A non-empty assistant message with no tool calls ends the turn.
 
 ## tools
 
