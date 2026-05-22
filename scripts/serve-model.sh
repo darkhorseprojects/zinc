@@ -81,7 +81,7 @@ cache_type_k="$(model_value "$model_name" cache_type_k)"
 cache_type_v="$(model_value "$model_name" cache_type_v)"
 fit_ctx="$(model_value "$model_name" fit_ctx)"
 vram_allocation_percent="$(model_value "$model_name" vram_allocation_percent)"
-reasoning="$(model_value "$model_name" reasoning)"
+reasoning_effort="$(model_value "$model_name" reasoning_effort)"
 reasoning_format="$(model_value "$model_name" reasoning_format)"
 reasoning_budget="$(model_value "$model_name" reasoning_budget)"
 
@@ -90,9 +90,36 @@ reasoning_budget="$(model_value "$model_name" reasoning_budget)"
 : "${cache_type_v:=q8_0}"
 : "${fit_ctx:=8192}"
 : "${vram_allocation_percent:=87.5}"
-: "${reasoning:=auto}"
+: "${reasoning_effort:=low}"
 : "${reasoning_format:=deepseek}"
-: "${reasoning_budget:=-1}"
+
+case "$reasoning_effort" in
+  off)
+    reasoning="off"
+    : "${reasoning_budget:=0}"
+    ;;
+  low)
+    reasoning="auto"
+    : "${reasoning_budget:=1024}"
+    ;;
+  medium)
+    reasoning="auto"
+    : "${reasoning_budget:=4096}"
+    ;;
+  high)
+    reasoning="auto"
+    : "${reasoning_budget:=8192}"
+    ;;
+  extra-high)
+    reasoning="auto"
+    : "${reasoning_budget:=-1}"
+    ;;
+  *)
+    echo "unsupported reasoning_effort for '$model_name': $reasoning_effort" >&2
+    echo "expected one of: off, low, medium, high, extra-high" >&2
+    exit 1
+    ;;
+esac
 
 if [[ -z "$alias" || -z "$hf_repo" || -z "$hf_file" ]]; then
   echo "model '$model_name' is missing alias, hf_repo, or hf_file in Zinc config" >&2

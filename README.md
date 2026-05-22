@@ -88,10 +88,11 @@ cache_type_v = "turbo3"
 fit_ctx = 8192
 vram_allocation_percent = 87.5
 temperature = 0.5
-reasoning = "auto"
+reasoning_effort = "low"
 reasoning_format = "deepseek"
-reasoning_budget = -1
 ```
+
+`reasoning_effort` maps to llama.cpp thinking budgets: `off = 0`, `low = 1024`, `medium = 4096`, `high = 8192`, and `extra-high = -1`.
 
 `max_retries` is Zinc's cap for clean turn-correction retries, such as invalid final JSON or unavailable tool calls. Transient provider failures are retried immediately before they surface. Neither case creates graph branches.
 
