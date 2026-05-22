@@ -39,8 +39,11 @@ pub fn open(allocator: Allocator, resume_id: ?[]const u8, continue_last: bool) !
         try files.write(path, line.items);
     }
 
-    try files.write(".zinc/sessions/last", id);
     return .{ .id = id, .path = path };
+}
+
+pub fn rememberLast(session: Session) !void {
+    try files.write(".zinc/sessions/last", session.id);
 }
 
 pub fn readLog(allocator: Allocator, session_path: []const u8) ![]u8 {

@@ -45,6 +45,7 @@ pub fn run(allocator: Allocator, io: std.Io, home: []const u8, user_prompt: []co
     const recovered_context = try recoverContext(allocator, io, runtime.provider_base_url, runtime.max_retries, session.path, plan.model_alias, plan.context_prompt, user_prompt, session_log);
     defer allocator.free(recovered_context);
     try sessions.appendEvent(allocator, session.path, "user", user_prompt);
+    try sessions.rememberLast(session);
     const user_content = try buildAssistantInput(allocator, recovered_context, user_prompt);
     defer allocator.free(user_content);
 
