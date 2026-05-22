@@ -41,10 +41,16 @@ config_value() {
 model_value() {
   local model="$1"
   local key="$2"
+  local section_suffix=""
+  local scalar_key="$key"
+  if [[ "$key" == *.* ]]; then
+    section_suffix=".${key%.*}"
+    scalar_key="${key##*.}"
+  fi
   local path
   for path in "$global_config" "$manifest_config" "$project_config"; do
     [[ -f "$path" ]] || continue
-    awk -F= -v section="models.$model" -v key="$key" '
+    awk -F= -v section="models.$model$section_suffix" -v key="$scalar_key" '
       /^[[:space:]]*\[/ {
         current=$0
         gsub(/^[[:space:]]*\[|\][[:space:]]*$/, "", current)
@@ -81,9 +87,8 @@ cache_type_k="$(model_value "$model_name" cache_type_k)"
 cache_type_v="$(model_value "$model_name" cache_type_v)"
 fit_ctx="$(model_value "$model_name" fit_ctx)"
 vram_allocation_percent="$(model_value "$model_name" vram_allocation_percent)"
-reasoning_effort="$(model_value "$model_name" reasoning_effort)"
-reasoning_format="$(model_value "$model_name" reasoning_format)"
-reasoning_budget="$(model_value "$model_name" reasoning_budget)"
+reasoning_effort="$(model_value "$model_name" runtime.default_effort)"
+reasoning_format="$(model_value "$model_name" runtime.reasoning_format)"
 
 : "${engine:=llama-cpp-turboquant}"
 : "${cache_type_k:=q8_0}"
@@ -92,6 +97,8 @@ reasoning_budget="$(model_value "$model_name" reasoning_budget)"
 : "${vram_allocation_percent:=87.5}"
 : "${reasoning_effort:=low}"
 : "${reasoning_format:=auto}"
+
+reasoning_budget="$(model_value "$model_name" "runtime.budgets.$reasoning_effort")"
 
 case "$reasoning_effort" in
   off)

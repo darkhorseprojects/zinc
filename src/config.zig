@@ -135,6 +135,15 @@ pub fn readModelUsizeDefault(allocator: Allocator, home: []const u8, model_id: [
     return std.fmt.parseInt(usize, raw, 10) catch error.InvalidConfigValue;
 }
 
+pub fn readModelIsizeDefault(allocator: Allocator, home: []const u8, model_id: []const u8, key: []const u8, default_value: isize) !isize {
+    const raw = readModelValue(allocator, home, model_id, key) catch |err| switch (err) {
+        error.ModelConfigKeyNotFound => return default_value,
+        else => return err,
+    };
+    defer allocator.free(raw);
+    return std.fmt.parseInt(isize, raw, 10) catch error.InvalidConfigValue;
+}
+
 pub fn readModelBoolDefault(allocator: Allocator, home: []const u8, model_id: []const u8, key: []const u8, default_value: bool) !bool {
     const raw = readModelValue(allocator, home, model_id, key) catch |err| switch (err) {
         error.ModelConfigKeyNotFound => return default_value,
@@ -191,8 +200,16 @@ fn readScalarPath(allocator: Allocator, path: []const u8, key: []const u8) !?[]u
 fn readModelPath(allocator: Allocator, path: []const u8, model_id: []const u8, key: []const u8) !?[]u8 {
     const text = files.readLimited(allocator, path, 128 * 1024) catch return null;
     defer allocator.free(text);
-    const section_name = try std.fmt.allocPrint(allocator, "models.{s}", .{model_id});
+
+    const split = std.mem.lastIndexOfScalar(u8, key, '.');
+    const section_suffix = if (split) |i| key[0..i] else "";
+    const scalar_key = if (split) |i| key[i + 1 ..] else key;
+    const section_name = if (section_suffix.len == 0)
+        try std.fmt.allocPrint(allocator, "models.{s}", .{model_id})
+    else
+        try std.fmt.allocPrint(allocator, "models.{s}.{s}", .{ model_id, section_suffix });
     defer allocator.free(section_name);
+
     var active = false;
     var lines = std.mem.splitScalar(u8, text, '\n');
     while (lines.next()) |raw| {
@@ -205,7 +222,7 @@ fn readModelPath(allocator: Allocator, path: []const u8, model_id: []const u8, k
         if (!active) continue;
         const eq = std.mem.indexOfScalar(u8, line, '=') orelse continue;
         const lhs = std.mem.trim(u8, line[0..eq], " \t");
-        if (!std.mem.eql(u8, lhs, key)) continue;
+        if (!std.mem.eql(u8, lhs, scalar_key)) continue;
         var rhs = std.mem.trim(u8, line[eq + 1 ..], " \t");
         if (rhs.len >= 2 and rhs[0] == '"' and rhs[rhs.len - 1] == '"') rhs = rhs[1 .. rhs.len - 1];
         return try allocator.dupe(u8, rhs);
@@ -217,4 +234,12 @@ test "model config reads repo model table" {
     const alias = try readModelValue(std.testing.allocator, "/tmp/home", "gemma-heretic", "alias");
     defer std.testing.allocator.free(alias);
     try std.testing.expectEqualStrings("gemma-4-96e-a4b-heretic-tq", alias);
+}
+
+test "model config reads nested runtime tables" {
+    const effort = try readModelValue(std.testing.allocator, "/tmp/home", "gemma-heretic", "runtime.default_effort");
+    defer std.testing.allocator.free(effort);
+    try std.testing.expectEqualStrings("low", effort);
+    const budget = try readModelIsizeDefault(std.testing.allocator, "/tmp/home", "gemma-heretic", "runtime.budgets.extra-high", 0);
+    try std.testing.expectEqual(@as(isize, -1), budget);
 }

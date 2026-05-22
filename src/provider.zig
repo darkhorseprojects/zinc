@@ -8,9 +8,11 @@ pub const Request = struct {
     authorization: []const u8,
     model: []const u8,
     temperature: f64,
-    max_tokens: usize,
+    max_tokens: ?usize,
     thinking_enabled: ?bool = null,
+    preserve_thinking: bool = false,
     json_response: bool = false,
+    parse_native_tools: bool = false,
     tools_json: []const u8,
     messages: []const Message,
 };
@@ -65,7 +67,7 @@ pub fn call(allocator: Allocator, io: std.Io, request: Request) !AssistantTurn {
         std.debug.print("provider request failed: status={d}\n{s}\n", .{ @intFromEnum(result.status), preview });
         return error.ProviderRequestFailed;
     }
-    return parseAssistantTurn(allocator, response.written());
+    return parseAssistantTurn(allocator, response.written(), request.parse_native_tools);
 }
 
 pub fn appendMessage(allocator: Allocator, messages: *std.ArrayList(Message), message: Message) !void {
@@ -148,9 +150,12 @@ fn freeCall(allocator: Allocator, tool_call: ToolCall) void {
 fn writeChatRequest(allocator: Allocator, out: *std.ArrayList(u8), request: Request) !void {
     try out.appendSlice(allocator, "{\"model\":");
     try files.appendJsonString(allocator, out, request.model);
-    try out.print(allocator, ",\"temperature\":{d},\"max_tokens\":{d},\"stream\":false", .{ request.temperature, request.max_tokens });
+    try out.print(allocator, ",\"temperature\":{d},\"stream\":false", .{request.temperature});
+    if (request.max_tokens) |max_tokens| try out.print(allocator, ",\"max_tokens\":{d}", .{max_tokens});
     if (request.thinking_enabled) |enabled| {
-        try out.print(allocator, ",\"chat_template_kwargs\":{{\"enable_thinking\":{}}}", .{enabled});
+        try out.print(allocator, ",\"chat_template_kwargs\":{{\"enable_thinking\":{}", .{enabled});
+        if (enabled and request.preserve_thinking) try out.appendSlice(allocator, ",\"preserve_thinking\":true");
+        try out.append(allocator, '}');
     }
     if (request.json_response) try out.appendSlice(allocator, ",\"response_format\":{\"type\":\"json_object\"}");
     try out.appendSlice(allocator, ",\"messages\":[");
@@ -190,7 +195,7 @@ fn writeChatRequest(allocator: Allocator, out: *std.ArrayList(u8), request: Requ
     try out.append(allocator, '}');
 }
 
-fn parseAssistantTurn(allocator: Allocator, text: []const u8) !AssistantTurn {
+fn parseAssistantTurn(allocator: Allocator, text: []const u8, parse_native_tools: bool) !AssistantTurn {
     var parsed = try std.json.parseFromSlice(std.json.Value, allocator, text, .{});
     defer parsed.deinit();
 
@@ -208,7 +213,7 @@ fn parseAssistantTurn(allocator: Allocator, text: []const u8) !AssistantTurn {
         for (calls.items) |c| freeCall(allocator, c);
         calls.deinit(allocator);
     }
-    if (calls.items.len == 0) try readNativeToolCalls(allocator, content, &calls);
+    if (parse_native_tools and calls.items.len == 0) try readNativeToolCalls(allocator, content, &calls);
 
     return .{
         .text = if (calls.items.len == 0) try cleanText(allocator, content) else try allocator.dupe(u8, ""),

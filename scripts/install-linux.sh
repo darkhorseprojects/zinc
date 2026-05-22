@@ -54,11 +54,22 @@ cache_type_k = "q8_0"
 cache_type_v = "turbo3"
 fit_ctx = 8192
 vram_allocation_percent = $vram_allocation_percent
+[models.gemma-heretic.runtime]
+reasoning_profile = "gemma4-interleaved"
+tool_profile = "gemma4-native"
+default_effort = "low"
+reasoning_format = "auto"
 temperature = 0.5
 max_tokens = 1024
+preserve_reasoning = true
 tool_reasoning = false
-reasoning_effort = "low"
-reasoning_format = "auto"
+
+[models.gemma-heretic.runtime.budgets]
+off = 0
+low = 1024
+medium = 4096
+high = 8192
+extra-high = -1
 EOF_CONFIG
 
 cat > "$bin_dir/zn-setup-turboquant" <<EOF

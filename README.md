@@ -87,14 +87,25 @@ cache_type_k = "q8_0"
 cache_type_v = "turbo3"
 fit_ctx = 8192
 vram_allocation_percent = 87.5
+[models.gemma-heretic.runtime]
+reasoning_profile = "gemma4-interleaved"
+tool_profile = "gemma4-native"
+default_effort = "low"
+reasoning_format = "auto"
 temperature = 0.5
 max_tokens = 1024
+preserve_reasoning = true
 tool_reasoning = false
-reasoning_effort = "low"
-reasoning_format = "auto"
+
+[models.gemma-heretic.runtime.budgets]
+off = 0
+low = 1024
+medium = 4096
+high = 8192
+extra-high = -1
 ```
 
-`reasoning_effort` maps to llama.cpp thinking budgets: `off = 0`, `low = 1024`, `medium = 4096`, `high = 8192`, and `extra-high = -1`. `off` launches llama.cpp with `--reasoning off --reasoning-format none`; every other level launches with explicit `--reasoning on`. `max_tokens` is the visible-response budget; Zinc adds the configured reasoning budget when compiling the provider request cap. `tool_reasoning = false` keeps Gemma's tool-calling turns on the non-thinking template path while the server remains reasoning-enabled for compatible requests.
+The runtime table owns provider/model behavior. `default_effort` selects a budget from `runtime.budgets`; `off` launches llama.cpp with `--reasoning off --reasoning-format none`, while every other level launches with explicit `--reasoning on`. `max_tokens` is the visible-response budget; Zinc adds the configured reasoning budget when compiling the provider request cap. A negative budget, such as `extra-high = -1`, omits the request cap and lets the backend/model limit apply. `tool_reasoning = false` keeps Gemma's tool-calling turns on the non-thinking template path until Zinc's backend fully preserves interleaved reasoning through tool loops.
 
 `max_retries` is Zinc's cap for clean turn-correction retries, such as empty assistant output or unavailable tool calls. Transient provider failures are retried immediately before they surface. Neither case creates graph branches.
 

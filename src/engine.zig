@@ -60,7 +60,9 @@ pub fn run(allocator: Allocator, io: std.Io, home: []const u8, user_prompt: []co
             .model = plan.model_alias,
             .temperature = plan.temperature,
             .max_tokens = plan.max_tokens,
-            .thinking_enabled = if (plan.tool_reasoning) null else false,
+            .thinking_enabled = plan.tool_reasoning,
+            .preserve_thinking = plan.preserve_reasoning,
+            .parse_native_tools = std.mem.eql(u8, plan.tool_profile, "gemma4-native"),
             .tools_json = plan.tools_json,
             .messages = messages.items,
         });
