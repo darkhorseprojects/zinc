@@ -84,10 +84,40 @@ pub fn appendEvent(allocator: Allocator, path: []const u8, role: []const u8, con
     while (written < line.items.len) written += try files.linuxWrite(fd, line.items[written..]);
 }
 
-pub fn appendToolEvent(allocator: Allocator, path: []const u8, name: []const u8, args: []const u8, result: []const u8) !void {
-    const text = try std.fmt.allocPrint(allocator, "tool {s}\nargs: {s}\nresult:\n{s}", .{ name, args, result });
-    defer allocator.free(text);
-    try appendEvent(allocator, path, "tool", text);
+pub fn appendRuntimeEvent(allocator: Allocator, path: []const u8, phase: []const u8, event: []const u8, content: []const u8) !void {
+    try appendRuntimeEventFull(allocator, path, phase, event, null, null, content);
+}
+
+pub fn appendRuntimeError(allocator: Allocator, path: []const u8, phase: []const u8, event: []const u8, error_name: []const u8, content: []const u8) !void {
+    try appendRuntimeEventFull(allocator, path, phase, event, error_name, null, content);
+}
+
+pub fn appendToolEvent(allocator: Allocator, path: []const u8, event: []const u8, name: []const u8, content: []const u8) !void {
+    try appendRuntimeEventFull(allocator, path, "tool", event, null, name, content);
+}
+
+fn appendRuntimeEventFull(allocator: Allocator, path: []const u8, phase: []const u8, event: []const u8, error_name: ?[]const u8, tool: ?[]const u8, content: []const u8) !void {
+    var line: std.ArrayList(u8) = .empty;
+    defer line.deinit(allocator);
+    try line.print(allocator, "{{\"type\":\"runtime\",\"timestamp\":{d},\"phase\":", .{0});
+    try files.appendJsonString(allocator, &line, phase);
+    try line.appendSlice(allocator, ",\"event\":");
+    try files.appendJsonString(allocator, &line, event);
+    if (error_name) |name| {
+        try line.appendSlice(allocator, ",\"error\":");
+        try files.appendJsonString(allocator, &line, name);
+    }
+    if (tool) |name| {
+        try line.appendSlice(allocator, ",\"tool\":");
+        try files.appendJsonString(allocator, &line, name);
+    }
+    try line.appendSlice(allocator, ",\"content\":");
+    try files.appendJsonString(allocator, &line, content);
+    try line.appendSlice(allocator, "}\n");
+    const fd = try std.posix.openat(std.posix.AT.FDCWD, path, .{ .ACCMODE = .WRONLY, .APPEND = true }, 0);
+    defer _ = std.os.linux.close(fd);
+    var written: usize = 0;
+    while (written < line.items.len) written += try files.linuxWrite(fd, line.items[written..]);
 }
 
 pub fn ensureDir(allocator: Allocator) ![]u8 {

@@ -2,7 +2,7 @@ const std = @import("std");
 const files = @import("files.zig");
 
 const Allocator = std.mem.Allocator;
-const chat_max_tokens = 256;
+const chat_max_tokens = 8192;
 const chat_temperature = 0.2;
 
 pub const Config = struct {

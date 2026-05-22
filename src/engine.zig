@@ -9,7 +9,7 @@ const tools = @import("tools.zig");
 const Allocator = std.mem.Allocator;
 
 const max_tool_turns = 16;
-const final_json_repair_attempts = 1;
+const max_contract_retries = 1;
 
 pub fn run(allocator: Allocator, io: std.Io, home: []const u8, user_prompt: []const u8, resume_id: ?[]const u8, continue_last: bool, plan_path_override: ?[]const u8) !void {
     const cfg = provider.Config{};
@@ -28,7 +28,7 @@ pub fn run(allocator: Allocator, io: std.Io, home: []const u8, user_prompt: []co
 
     const session_log = try sessions.readLog(allocator, session.path, plan.session_max_bytes);
     defer allocator.free(session_log);
-    const recovered_context = try recoverContext(allocator, io, cfg, plan.model_alias, plan.context_prompt, user_prompt, session_log);
+    const recovered_context = try recoverContext(allocator, io, cfg, session.path, plan.model_alias, plan.context_prompt, user_prompt, session_log);
     defer allocator.free(recovered_context);
     try sessions.appendEvent(allocator, session.path, "user", user_prompt);
     const user_content = try std.fmt.allocPrint(allocator,
@@ -45,27 +45,20 @@ pub fn run(allocator: Allocator, io: std.Io, home: []const u8, user_prompt: []co
 
     const force_first_tool = asksForTool(user_prompt);
     var turns: usize = 0;
-    var expect_corrections: usize = 0;
+    var contract_retries: usize = 0;
     while (turns < max_tool_turns) : (turns += 1) {
         const turn = try provider.call(allocator, io, cfg, plan.model_alias, plan.tools_json, messages.items, force_first_tool and turns == 0);
         defer provider.freeTurn(allocator, turn);
 
         if (turn.tool_calls.len == 0) {
+            try sessions.appendRuntimeEvent(allocator, session.path, "assistant_turn", "model_output", turn.text);
             const response = parseExpectedResponse(allocator, turn.text) catch |err| {
-                if (expect_corrections >= final_json_repair_attempts) {
-                    try reportFinalOutputError(allocator, session.path, err, turn.text);
-                    return err;
-                }
-                expect_corrections += 1;
-                const correction = try std.fmt.allocPrint(allocator,
-                    \\Your previous output did not match the Circuitry expect schema.
-                    \\Output ONLY valid JSON: {{"response": string}}
-                    \\Do not add markdown or commentary.
-                    \\Previous output:
-                    \\{s}
-                , .{turn.text});
-                defer allocator.free(correction);
-                try provider.appendMessage(allocator, &messages, .{ .role = "user", .content = correction });
+                try recordContractFailure(allocator, session.path, err, turn.text);
+                if (contract_retries >= max_contract_retries) return err;
+                contract_retries += 1;
+                const retry = try buildContractRetryPrompt(allocator, err, turn.text);
+                defer allocator.free(retry);
+                try provider.appendMessage(allocator, &messages, .{ .role = "user", .content = retry });
                 continue;
             };
             defer allocator.free(response);
@@ -78,24 +71,40 @@ pub fn run(allocator: Allocator, io: std.Io, home: []const u8, user_prompt: []co
         try provider.appendMessage(allocator, &messages, .{ .role = "assistant", .content = turn.text, .tool_calls = turn.tool_calls });
         for (turn.tool_calls) |call| {
             if (!plan.allowsTool(call.name)) return error.ToolNotAllowedByGraph;
+            try sessions.appendToolEvent(allocator, session.path, "tool_call", call.name, call.arguments);
             const result = try tools.execute(allocator, io, call.name, call.arguments);
             defer allocator.free(result);
-            try sessions.appendToolEvent(allocator, session.path, call.name, call.arguments, result);
+            try sessions.appendToolEvent(allocator, session.path, "tool_result", call.name, result);
             try provider.appendMessage(allocator, &messages, .{ .role = "tool", .content = result, .name = call.name, .tool_call_id = call.id });
         }
     }
     return error.TooManyToolTurns;
 }
 
-fn reportFinalOutputError(allocator: Allocator, session_path: []const u8, err: anyerror, raw: []const u8) !void {
+fn recordContractFailure(allocator: Allocator, session_path: []const u8, err: anyerror, raw: []const u8) !void {
     const preview = raw[0..@min(raw.len, 2000)];
-    std.debug.print("final output parse failed: {s}\nraw assistant output:\n{s}\n", .{ @errorName(err), preview });
-    const event = try std.fmt.allocPrint(allocator, "{s}\nraw assistant output:\n{s}", .{ @errorName(err), preview });
-    defer allocator.free(event);
-    try sessions.appendEvent(allocator, session_path, "assistant_error", event);
+    std.debug.print("runtime contract failure: {s}\nraw assistant output:\n{s}\n", .{ @errorName(err), preview });
+    try sessions.appendRuntimeError(allocator, session_path, "assistant_turn", "contract_failure", @errorName(err), preview);
 }
 
-fn recoverContext(allocator: Allocator, io: std.Io, cfg: provider.Config, model_alias: []const u8, context_prompt: []const u8, user_prompt: []const u8, session_log: []const u8) ![]u8 {
+fn buildContractRetryPrompt(allocator: Allocator, err: anyerror, raw: []const u8) ![]u8 {
+    const preview = raw[0..@min(raw.len, 2000)];
+    return std.fmt.allocPrint(allocator,
+        \\Runtime contract failure.
+        \\
+        \\Zinc rejected your previous assistant output.
+        \\Reason: {s}
+        \\
+        \\Raw rejected output:
+        \\{s}
+        \\
+        \\Retry this assistant turn cleanly. Do not patch or continue the rejected text.
+        \\Return one complete JSON object matching: {{"response": string}}
+        \\Do not add markdown or commentary outside the JSON object.
+    , .{ @errorName(err), preview });
+}
+
+fn recoverContext(allocator: Allocator, io: std.Io, cfg: provider.Config, session_path: []const u8, model_alias: []const u8, context_prompt: []const u8, user_prompt: []const u8, session_log: []const u8) ![]u8 {
     var messages: std.ArrayList(provider.Message) = .empty;
     defer messages.deinit(allocator);
     defer provider.freeMessages(allocator, messages.items);
@@ -114,6 +123,7 @@ fn recoverContext(allocator: Allocator, io: std.Io, cfg: provider.Config, model_
     const turn = try provider.call(allocator, io, cfg, model_alias, "[]", messages.items, false);
     defer provider.freeTurn(allocator, turn);
     if (turn.tool_calls.len != 0) return error.ContextRecoveryCannotUseTools;
+    try sessions.appendRuntimeEvent(allocator, session_path, "context_recovery", "model_output", turn.text);
     return provider.cleanText(allocator, turn.text);
 }
 
