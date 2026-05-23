@@ -231,15 +231,15 @@ fn readModelPath(allocator: Allocator, path: []const u8, model_id: []const u8, k
 }
 
 test "model config reads repo model table" {
-    const alias = try readModelValue(std.testing.allocator, "/tmp/home", "gemma-heretic", "alias");
+    const alias = try readModelValue(std.testing.allocator, ".zinc", "gemma-heretic", "alias");
     defer std.testing.allocator.free(alias);
     try std.testing.expectEqualStrings("gemma-4-96e-a4b-heretic-tq", alias);
 }
 
 test "model config reads nested runtime tables" {
-    const effort = try readModelValue(std.testing.allocator, "/tmp/home", "gemma-heretic", "runtime.default_effort");
+    const effort = try readModelValue(std.testing.allocator, ".zinc", "gemma-heretic", "runtime.reasoning_effort");
     defer std.testing.allocator.free(effort);
     try std.testing.expectEqualStrings("low", effort);
-    const budget = try readModelIsizeDefault(std.testing.allocator, "/tmp/home", "gemma-heretic", "runtime.budgets.extra-high", 0);
+    const budget = try readModelIsizeDefault(std.testing.allocator, ".zinc", "gemma-heretic", "runtime.budgets.extra-high", 0);
     try std.testing.expectEqual(@as(isize, -1), budget);
 }

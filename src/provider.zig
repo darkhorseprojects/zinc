@@ -9,8 +9,6 @@ pub const Request = struct {
     model: []const u8,
     temperature: f64,
     max_tokens: ?usize,
-    thinking_enabled: ?bool = null,
-    preserve_thinking: bool = false,
     json_response: bool = false,
     parse_native_tools: bool = false,
     tools_json: []const u8,
@@ -152,11 +150,6 @@ fn writeChatRequest(allocator: Allocator, out: *std.ArrayList(u8), request: Requ
     try files.appendJsonString(allocator, out, request.model);
     try out.print(allocator, ",\"temperature\":{d},\"stream\":false", .{request.temperature});
     if (request.max_tokens) |max_tokens| try out.print(allocator, ",\"max_tokens\":{d}", .{max_tokens});
-    if (request.thinking_enabled) |enabled| {
-        try out.print(allocator, ",\"chat_template_kwargs\":{{\"enable_thinking\":{}", .{enabled});
-        if (enabled and request.preserve_thinking) try out.appendSlice(allocator, ",\"preserve_thinking\":true");
-        try out.append(allocator, '}');
-    }
     if (request.json_response) try out.appendSlice(allocator, ",\"response_format\":{\"type\":\"json_object\"}");
     try out.appendSlice(allocator, ",\"messages\":[");
     for (request.messages, 0..) |msg, i| {

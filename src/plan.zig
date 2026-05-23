@@ -11,10 +11,9 @@ pub const Plan = struct {
     model_alias: []u8,
     temperature: f64,
     max_tokens: ?usize,
-    reasoning_profile: []u8,
-    tool_profile: []u8,
-    default_effort: []u8,
-    preserve_reasoning: bool,
+    tool_format: []u8,
+    reasoning_effort: []u8,
+    reasoning_format: []u8,
     tool_reasoning: bool,
     tools: [][]u8,
     tools_json: []u8,
@@ -24,9 +23,9 @@ pub const Plan = struct {
         allocator.free(self.context_prompt);
         allocator.free(self.model_id);
         allocator.free(self.model_alias);
-        allocator.free(self.reasoning_profile);
-        allocator.free(self.tool_profile);
-        allocator.free(self.default_effort);
+        allocator.free(self.tool_format);
+        allocator.free(self.reasoning_effort);
+        allocator.free(self.reasoning_format);
         for (self.tools) |tool| allocator.free(tool);
         allocator.free(self.tools);
         allocator.free(self.tools_json);
@@ -58,10 +57,9 @@ pub fn load(allocator: Allocator, path: []const u8) !Plan {
         .model_alias = try allocator.dupe(u8, (model_object.get("alias") orelse return error.BadRuntimePlan).string),
         .temperature = try readF64(model_object.get("temperature") orelse return error.BadRuntimePlan),
         .max_tokens = try readOptionalUsize(model_object.get("max_tokens") orelse return error.BadRuntimePlan),
-        .reasoning_profile = try allocator.dupe(u8, (model_object.get("reasoning_profile") orelse return error.BadRuntimePlan).string),
-        .tool_profile = try allocator.dupe(u8, (model_object.get("tool_profile") orelse return error.BadRuntimePlan).string),
-        .default_effort = try allocator.dupe(u8, (model_object.get("default_effort") orelse return error.BadRuntimePlan).string),
-        .preserve_reasoning = try readBool(model_object.get("preserve_reasoning") orelse return error.BadRuntimePlan),
+        .tool_format = try allocator.dupe(u8, (model_object.get("tool_format") orelse return error.BadRuntimePlan).string),
+        .reasoning_effort = try allocator.dupe(u8, (model_object.get("reasoning_effort") orelse return error.BadRuntimePlan).string),
+        .reasoning_format = try allocator.dupe(u8, (model_object.get("reasoning_format") orelse return error.BadRuntimePlan).string),
         .tool_reasoning = try readBool(model_object.get("tool_reasoning") orelse return error.BadRuntimePlan),
         .tools = tool_names,
         .tools_json = tools_json,

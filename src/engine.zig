@@ -60,9 +60,7 @@ pub fn run(allocator: Allocator, io: std.Io, home: []const u8, user_prompt: []co
             .model = plan.model_alias,
             .temperature = plan.temperature,
             .max_tokens = plan.max_tokens,
-            .thinking_enabled = plan.tool_reasoning,
-            .preserve_thinking = plan.preserve_reasoning,
-            .parse_native_tools = std.mem.eql(u8, plan.tool_profile, "gemma4-native"),
+            .parse_native_tools = std.mem.eql(u8, plan.tool_format, "gemma-native"),
             .tools_json = plan.tools_json,
             .messages = messages.items,
         });
@@ -195,7 +193,6 @@ fn recoverContext(allocator: Allocator, io: std.Io, provider_base_url: []const u
             .model = model_alias,
             .temperature = temperature,
             .max_tokens = 512,
-            .thinking_enabled = false,
             .json_response = true,
             .tools_json = "[]",
             .messages = messages.items,

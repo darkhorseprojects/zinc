@@ -147,6 +147,21 @@ fn validateGraphFile(allocator: Allocator, path: []const u8) !void {
     try graph.validateText(text);
 }
 
+fn validateToolFormat(format: []const u8) !void {
+    if (std.mem.eql(u8, format, "openai")) return;
+    if (std.mem.eql(u8, format, "gemma-native")) return;
+    return error.InvalidConfigValue;
+}
+
+fn validateReasoningEffort(effort: []const u8) !void {
+    if (std.mem.eql(u8, effort, "off")) return;
+    if (std.mem.eql(u8, effort, "low")) return;
+    if (std.mem.eql(u8, effort, "medium")) return;
+    if (std.mem.eql(u8, effort, "high")) return;
+    if (std.mem.eql(u8, effort, "extra-high")) return;
+    return error.InvalidConfigValue;
+}
+
 fn defaultReasoningBudget(effort: []const u8) !isize {
     if (std.mem.eql(u8, effort, "off")) return 0;
     if (std.mem.eql(u8, effort, "low")) return 1024;
@@ -159,18 +174,6 @@ fn defaultReasoningBudget(effort: []const u8) !isize {
 fn requestMaxTokens(output_tokens: usize, reasoning_budget: isize) !?usize {
     if (reasoning_budget < 0) return null;
     return output_tokens + @as(usize, @intCast(reasoning_budget));
-}
-
-fn validateReasoningProfile(profile: []const u8) !void {
-    if (std.mem.eql(u8, profile, "none")) return;
-    if (std.mem.eql(u8, profile, "gemma4-interleaved")) return;
-    return error.InvalidConfigValue;
-}
-
-fn validateToolProfile(profile: []const u8) !void {
-    if (std.mem.eql(u8, profile, "openai")) return;
-    if (std.mem.eql(u8, profile, "gemma4-native")) return;
-    return error.InvalidConfigValue;
 }
 
 fn compileGraphFile(allocator: Allocator, graph_path: []const u8, out_path: []const u8, home: []const u8) !void {
@@ -190,19 +193,18 @@ fn compileGraphFile(allocator: Allocator, graph_path: []const u8, out_path: []co
     defer allocator.free(model_repo);
     const model_temperature = try config.readModelF64Default(allocator, home, model_id, "runtime.temperature", 0.5);
     const model_max_tokens = try config.readModelUsizeDefault(allocator, home, model_id, "runtime.max_tokens", 1024);
-    const reasoning_profile = try config.readModelStringDefault(allocator, home, model_id, "runtime.reasoning_profile", "none");
-    defer allocator.free(reasoning_profile);
-    try validateReasoningProfile(reasoning_profile);
-    const tool_profile = try config.readModelStringDefault(allocator, home, model_id, "runtime.tool_profile", "openai");
-    defer allocator.free(tool_profile);
-    try validateToolProfile(tool_profile);
-    const default_effort = try config.readModelStringDefault(allocator, home, model_id, "runtime.default_effort", "off");
-    defer allocator.free(default_effort);
-    const budget_key = try std.fmt.allocPrint(allocator, "runtime.budgets.{s}", .{default_effort});
+    const tool_format = try config.readModelStringDefault(allocator, home, model_id, "runtime.tool_format", "openai");
+    defer allocator.free(tool_format);
+    try validateToolFormat(tool_format);
+    const reasoning_effort = try config.readModelStringDefault(allocator, home, model_id, "runtime.reasoning_effort", "off");
+    defer allocator.free(reasoning_effort);
+    try validateReasoningEffort(reasoning_effort);
+    const reasoning_format = try config.readModelStringDefault(allocator, home, model_id, "runtime.reasoning_format", "none");
+    defer allocator.free(reasoning_format);
+    const budget_key = try std.fmt.allocPrint(allocator, "runtime.budgets.{s}", .{reasoning_effort});
     defer allocator.free(budget_key);
-    const reasoning_budget = try config.readModelIsizeDefault(allocator, home, model_id, budget_key, try defaultReasoningBudget(default_effort));
+    const reasoning_budget = try config.readModelIsizeDefault(allocator, home, model_id, budget_key, try defaultReasoningBudget(reasoning_effort));
     const request_max_tokens = try requestMaxTokens(model_max_tokens, reasoning_budget);
-    const preserve_reasoning = try config.readModelBoolDefault(allocator, home, model_id, "runtime.preserve_reasoning", false);
     const tool_reasoning = try config.readModelBoolDefault(allocator, home, model_id, "runtime.tool_reasoning", false);
     const tools = try graph.readTools(allocator, text, "assistant");
     defer graph.freeStringList(allocator, tools);
@@ -243,13 +245,13 @@ fn compileGraphFile(allocator: Allocator, graph_path: []const u8, out_path: []co
     try files.appendJsonString(allocator, &compiled, model_alias);
     try compiled.print(allocator, ",\"temperature\":{d},\"max_tokens\":", .{model_temperature});
     if (request_max_tokens) |max_tokens| try compiled.print(allocator, "{d}", .{max_tokens}) else try compiled.appendSlice(allocator, "null");
-    try compiled.appendSlice(allocator, ",\"reasoning_profile\":");
-    try files.appendJsonString(allocator, &compiled, reasoning_profile);
-    try compiled.appendSlice(allocator, ",\"tool_profile\":");
-    try files.appendJsonString(allocator, &compiled, tool_profile);
-    try compiled.appendSlice(allocator, ",\"default_effort\":");
-    try files.appendJsonString(allocator, &compiled, default_effort);
-    try compiled.print(allocator, ",\"preserve_reasoning\":{},\"tool_reasoning\":{}", .{ preserve_reasoning, tool_reasoning });
+    try compiled.appendSlice(allocator, ",\"tool_format\":");
+    try files.appendJsonString(allocator, &compiled, tool_format);
+    try compiled.appendSlice(allocator, ",\"reasoning_effort\":");
+    try files.appendJsonString(allocator, &compiled, reasoning_effort);
+    try compiled.appendSlice(allocator, ",\"reasoning_format\":");
+    try files.appendJsonString(allocator, &compiled, reasoning_format);
+    try compiled.print(allocator, ",\"tool_reasoning\":{}", .{tool_reasoning });
     try compiled.appendSlice(allocator, "},\"tools\":[");
     for (tools, 0..) |tool, i| {
         if (i != 0) try compiled.append(allocator, ',');
@@ -259,6 +261,6 @@ fn compileGraphFile(allocator: Allocator, graph_path: []const u8, out_path: []co
     try files.appendJsonString(allocator, &compiled, context_prompt.items);
     try compiled.appendSlice(allocator, ",\"prompt\":");
     try files.appendJsonString(allocator, &compiled, prompt.items);
-    try compiled.appendSlice(allocator, ",\"expect\":{\"response\":\"str\"}}\n");
+    try compiled.appendSlice(allocator, ",\"expect\":{\"response\":\"str\"}}");
     try files.write(out_path, compiled.items);
 }
