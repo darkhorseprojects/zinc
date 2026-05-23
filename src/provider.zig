@@ -100,6 +100,11 @@ pub fn cleanText(allocator: Allocator, raw: []const u8) ![]u8 {
     if (std.mem.lastIndexOf(u8, text, channel_end)) |last_marker| {
         const after_marker = text[last_marker + channel_end.len ..];
         text = std.mem.trim(u8, after_marker, " \t\r\n");
+    } else if (std.mem.startsWith(u8, text, "<|channel>thought\n")) {
+        // No closing marker found - model truncated during reasoning.
+        // Strip the reasoning prefix and return what follows (may be partial reasoning or empty).
+        text = text["<|channel>thought\n".len ..];
+        text = std.mem.trim(u8, text, " \t\r\n");
     }
     // Strip code fence markers if present
     if (std.mem.startsWith(u8, text, "```")) {
@@ -246,9 +251,12 @@ fn extractReasoningFromString(allocator: Allocator, content: []const u8) ![]u8 {
     const channel_end = "<channel|>";
     if (std.mem.startsWith(u8, content, thought_prefix)) {
         const after_prefix = content[thought_prefix.len..];
+        // If no closing marker, the output was truncated - treat all as reasoning
         if (std.mem.indexOf(u8, after_prefix, channel_end)) |end_pos| {
             return allocator.dupe(u8, after_prefix[0..end_pos]);
         }
+        // Truncated - return all content as reasoning
+        return allocator.dupe(u8, after_prefix);
     }
     return allocator.dupe(u8, "");
 }
