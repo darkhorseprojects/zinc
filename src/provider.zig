@@ -31,6 +31,7 @@ pub const ToolCall = struct {
 
 pub const AssistantTurn = struct {
     text: []const u8,
+    reasoning: []const u8,
     tool_calls: []ToolCall,
 };
 
@@ -86,15 +87,17 @@ pub fn freeMessages(allocator: Allocator, messages: []Message) void {
 
 pub fn freeTurn(allocator: Allocator, turn: AssistantTurn) void {
     allocator.free(turn.text);
+    allocator.free(turn.reasoning);
     for (turn.tool_calls) |tool_call| freeCall(allocator, tool_call);
     allocator.free(turn.tool_calls);
 }
 
 pub fn cleanText(allocator: Allocator, raw: []const u8) ![]u8 {
     var text = std.mem.trim(u8, raw, " \t\r\n");
-    const thought_prefix = "<|channel>thought\n<channel|>";
+    const thought_prefix = "<|channel>thought\n";
     if (std.mem.startsWith(u8, text, thought_prefix)) text = std.mem.trim(u8, text[thought_prefix.len..], " \t\r\n");
     while (std.mem.endsWith(u8, text, "</thought>")) text = std.mem.trim(u8, text[0 .. text.len - "</thought>".len], " \t\r\n");
+    if (std.mem.endsWith(u8, text, "<channel|>")) text = std.mem.trim(u8, text[0 .. text.len - "<channel|>".len], " \t\r\n");
     if (std.mem.startsWith(u8, text, "```")) {
         const after_open = std.mem.indexOfScalar(u8, text, '\n') orelse return allocator.dupe(u8, text);
         text = std.mem.trim(u8, text[after_open + 1 ..], " \t\r\n");
@@ -201,6 +204,7 @@ fn parseAssistantTurn(allocator: Allocator, text: []const u8, parse_native_tools
     if (message != .object) return error.BadProviderResponse;
 
     const content = try readMessageContent(message);
+    const reasoning_field = try readMessageReasoning(message);
     var calls = try readToolCalls(allocator, message);
     errdefer {
         for (calls.items) |c| freeCall(allocator, c);
@@ -208,14 +212,41 @@ fn parseAssistantTurn(allocator: Allocator, text: []const u8, parse_native_tools
     }
     if (parse_native_tools and calls.items.len == 0) try readNativeToolCalls(allocator, content, &calls);
 
+    // Use reasoning field if available; otherwise extract from content markers
+    const reasoning = if (reasoning_field.len > 0)
+        try allocator.dupe(u8, reasoning_field)
+    else
+        try extractReasoningFromString(allocator, content);
+
     return .{
         .text = if (calls.items.len == 0) try cleanText(allocator, content) else try allocator.dupe(u8, ""),
+        .reasoning = reasoning,
         .tool_calls = try calls.toOwnedSlice(allocator),
     };
 }
 
 fn readMessageContent(message: std.json.Value) ![]const u8 {
     return readOptionalStringField(message, "content");
+}
+
+fn readMessageReasoning(message: std.json.Value) ![]const u8 {
+    const reasoning_content = try readOptionalStringField(message, "reasoning_content");
+    if (reasoning_content.len != 0) return reasoning_content;
+    const reasoning = try readOptionalStringField(message, "reasoning");
+    if (reasoning.len != 0) return reasoning;
+    return readOptionalStringField(message, "reasoning_text");
+}
+
+fn extractReasoningFromString(allocator: Allocator, content: []const u8) ![]u8 {
+    const thought_prefix = "<|channel>thought\n";
+    const channel_end = "<channel|>";
+    if (std.mem.startsWith(u8, content, thought_prefix)) {
+        const after_prefix = content[thought_prefix.len..];
+        if (std.mem.indexOf(u8, after_prefix, channel_end)) |end_pos| {
+            return allocator.dupe(u8, after_prefix[0..end_pos]);
+        }
+    }
+    return allocator.dupe(u8, "");
 }
 
 fn readOptionalStringField(object: std.json.Value, field: []const u8) ![]const u8 {

@@ -100,6 +100,9 @@ pub fn run(allocator: Allocator, io: std.Io, home: []const u8, user_prompt: []co
         }
         correction_retries = 0;
         try provider.appendMessage(allocator, &messages, .{ .role = "assistant", .content = turn.text, .tool_calls = turn.tool_calls });
+        if (turn.reasoning.len > 0) {
+            try sessions.appendRuntimeEvent(allocator, session.path, Phase.assistant_turn, RuntimeEvent.model_output, turn.reasoning);
+        }
         for (turn.tool_calls) |call| {
             try sessions.appendToolEvent(allocator, session.path, RuntimeEvent.tool_call, call.name, call.arguments);
             const result = try tools.execute(allocator, io, call.name, call.arguments);

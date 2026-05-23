@@ -108,18 +108,22 @@ case "$reasoning_effort" in
     ;;
   low)
     reasoning="on"
+    reasoning_format="none"
     : "${reasoning_budget:=1024}"
     ;;
   medium)
     reasoning="on"
+    reasoning_format="none"
     : "${reasoning_budget:=4096}"
     ;;
   high)
     reasoning="on"
+    reasoning_format="none"
     : "${reasoning_budget:=8192}"
     ;;
   extra-high)
     reasoning="on"
+    reasoning_format="none"
     : "${reasoning_budget:=-1}"
     ;;
   *)
