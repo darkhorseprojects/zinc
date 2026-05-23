@@ -1,16 +1,8 @@
 # Zinc
 
-Zinc (`zn`) is a small Zig runtime for local Circuitry agent loops.
+`zn` is a small Zig runtime for local Circuitry agent loops.
 
-It does a narrow job:
-
-- compile the Zinc-shaped Circuitry graph into a runtime plan
-- keep project sessions as JSONL
-- call an OpenAI-compatible local model server
-- expose the graph-approved tools
-- print the assistant's final `response`
-
-Tools run inside the agent turn. They are session runtime events, not Circuitry graph nodes.
+It compiles a Zinc-shaped Circuitry graph, keeps JSONL sessions, calls a local OpenAI-compatible model server, exposes graph-approved tools, and prints the assistant's final text.
 
 ## install
 
@@ -18,40 +10,27 @@ Tools run inside the agent turn. They are session runtime events, not Circuitry 
 git clone https://github.com/darkhorseprojects/zinc.git
 cd zinc
 ./scripts/install-linux.sh
-```
-
-The install script writes:
-
-```text
-~/.local/bin/zn
-~/.local/bin/zn-setup-turboquant
-~/.local/share/zinc/graphs/
-~/.local/share/zinc/prompts/
-~/.local/share/zinc/compiled/plan.json
-~/.config/zinc/config.toml
-```
-
-Build the supported TurboQuant llama-server:
-
-```bash
 zn-setup-turboquant
+zn up
 ```
 
-Start and stop the local server:
+## use
 
 ```bash
-zn up
+zn "summarize this repo"
+zn --continue "follow up"
+zn --session <id> "resume this session"
+zn validate
+zn compile
 zn down
 ```
 
-Basic use:
+From source:
 
 ```bash
-zn validate
-zn compile
-zn "summarize this repo"
-zn --continue "follow up in the last session for this directory"
-zn --session <id> "resume this session id"
+zig build
+zig build test
+./zig-out/bin/zn "hello"
 ```
 
 ## config
@@ -65,19 +44,14 @@ zinc.toml
 installed defaults
 ```
 
-The current scalar runtime keys are:
+Small default shape:
 
 ```toml
 graph = "graphs/zinc-loop.circuitry.yaml"
 compiled_plan = ".zinc/compiled/plan.json"
 provider_base_url = "http://127.0.0.1:30000/v1"
-max_retries = 5
 default_model = "gemma-heretic"
-```
 
-Model config uses TOML tables:
-
-```toml
 [models.gemma-heretic]
 engine = "llama-cpp-turboquant"
 alias = "gemma-4-96e-a4b-heretic-tq"
@@ -87,139 +61,72 @@ cache_type_k = "q8_0"
 cache_type_v = "turbo3"
 fit_ctx = 8192
 vram_allocation_percent = 87.5
+
 [models.gemma-heretic.runtime]
-reasoning_profile = "gemma4-interleaved"
-tool_profile = "gemma4-native"
-default_effort = "low"
+tool_format = "gemma-native"
+reasoning_effort = "low"
 reasoning_format = "auto"
 temperature = 0.5
 max_tokens = 1024
-preserve_reasoning = true
 tool_reasoning = false
 
 [models.gemma-heretic.runtime.budgets]
 off = 0
-low = 1024
-medium = 4096
-high = 8192
+low = 256
+medium = 1024
+high = 4096
 extra-high = -1
 ```
 
-The runtime table owns provider/model behavior. `default_effort` selects a budget from `runtime.budgets`; `off` launches llama.cpp with `--reasoning off --reasoning-format none`, while every other level launches with explicit `--reasoning on`. `max_tokens` is the visible-response budget; Zinc adds the configured reasoning budget when compiling the provider request cap. A negative budget, such as `extra-high = -1`, omits the request cap and lets the backend/model limit apply. `tool_reasoning = false` keeps Gemma's tool-calling turns on the non-thinking template path until Zinc's backend fully preserves interleaved reasoning through tool loops.
-
-`max_retries` is Zinc's cap for clean turn-correction retries, such as empty assistant output or unavailable tool calls. Transient provider failures are retried immediately before they surface. Neither case creates graph branches.
-
-## model server
-
-Zinc talks to a local OpenAI-compatible endpoint. The default is:
+Reasoning is one compiled value: `reasoning_tokens`.
 
 ```text
-http://127.0.0.1:30000/v1
+0   thinking off
+>0  thinking on, bounded to that many tokens
+-1  thinking on, no request budget cap
 ```
 
-The default install is tuned for the Gemma Heretic TurboQuant GGUF on a 16GB NVIDIA card. The launcher:
+`reasoning_format` is only extraction. Use `auto` unless you intentionally want raw thought markers in visible output.
+
+## graphs
+
+Default graph:
 
 ```text
-uses WaveCut's TurboQuant llama.cpp branch
-serves Gemma-4-96E-A4B-Heretic-TQ3_1S.gguf
-uses alias gemma-4-96e-a4b-heretic-tq
-fits at least 8192 tokens of context
-caps VRAM by vram_allocation_percent
-uses q8_0 K cache and turbo3 V cache
-enables Gemma thinking explicitly and lets llama.cpp choose the reasoning parser
-runs one server slot
+graphs/zinc-loop.circuitry.yaml
+  links graphs/zinc-context-recovery.circuitry.yaml
 ```
 
-`zn compile` fails when a graph asks for a model id Zinc cannot find in config. `zn up [model-id]` starts the configured model server and records its pid. Without an argument, `zn up` serves the graph-resolved model, or `default_model` when the graph says `inherit`.
+Runtime path:
 
-## commands from source
+```text
+session log + user turn -> recovered_context -> assistant -> final text
+```
+
+Run another graph once:
 
 ```bash
-zig build
-zig build test
-./zig-out/bin/zn validate
-./zig-out/bin/zn compile
-./zig-out/bin/zn up
-./zig-out/bin/zn down
-./zig-out/bin/zn clean
-./zig-out/bin/zn session-dir
-./zig-out/bin/zn "summarize this repo"
-./zig-out/bin/zn run --continue "follow up"
-```
-
-## source map
-
-```text
-src/main.zig           CLI dispatch
-src/commands.zig       validate, compile, run, session-dir
-src/engine.zig         compiled agent loop
-src/provider.zig       OpenAI-compatible HTTP calls
-src/tools.zig          builtin tools
-src/plan.zig           compiled runtime plan loading
-src/server.zig         zn up/down
-src/clean.zig          cleanup command
-src/config.zig         config and model lookup
-src/session.zig        JSONL sessions
-src/files.zig          file/syscall helpers
-src/graph.zig          Zinc's Circuitry subset
-```
-
-## default loop
-
-The default graph is `graphs/zinc-loop.circuitry.yaml`. It links `graphs/zinc-context-recovery.circuitry.yaml`.
-
-The runtime path is:
-
-```text
-session log + current user turn
-  -> recovered_context
-  -> assistant
-  -> final text
-```
-
-`zn run` and bare `zn "prompt"` refresh the compiled plan before running. The context recovery node sees the session JSONL and returns compact context for the assistant. The assistant receives that context as untrusted data.
-
-Zinc can also run a graph path for one root turn:
-
-```bash
-zn graphs/custom.circuitry.yaml
-zn run graphs/custom.circuitry.yaml "do the thing"
-zn graphs/custom.circuitry.yaml --input brief=hello --input mode=fast
+zn graphs/custom.circuitry.yaml "do the thing"
+zn graphs/custom.circuitry.yaml --input brief=hello
 zn graphs/custom.circuitry.yaml --inputs-json '{"brief":"hello"}'
 ```
 
-For now, graph-path execution uses Zinc's runtime subset.
+## sessions
 
-## final output contract
+Project sessions live in:
 
-The assistant's final output is plain text. Graph `expect` still records the intended shape:
-
-```yaml
-expect:
-  response: str
+```text
+.zinc/sessions/last
+.zinc/sessions/<session-id>.jsonl
 ```
 
-Tool calls keep a turn going. A non-empty assistant message with no tool calls ends the turn.
+Conversation messages and runtime events are both JSONL entries.
 
 ## tools
 
-Graphs choose the tools an agent may use:
+Graphs choose tool names. Zinc validates them at compile time and exposes only that list at runtime.
 
-```yaml
-resources:
-  assistant:
-    type: agent
-    tools:
-      - read
-      - write
-      - edit
-      - bash
-      - request_circuitry_run
-```
-
-Zinc resolves those names at compile time and refuses unknown tools. At runtime it exposes only the compiled list and rejects tool calls outside that list.
-
-Current builtin tools:
+Builtins:
 
 ```text
 read
@@ -229,51 +136,17 @@ bash
 request_circuitry_run
 ```
 
-`bash` is the general adapter to the local machine and network. `write`, `edit`, and `bash` can change local state.
-
-`request_circuitry_run` does not call Zinc recursively. It returns a pending approval message telling the user-facing turn what graph command to run if approved.
-
-## sessions
-
-Each project keeps sessions in `.zinc/sessions/`:
+## source map
 
 ```text
-.zinc/sessions/last
-.zinc/sessions/<session-id>.jsonl
+src/main.zig       CLI dispatch
+src/commands.zig   validate, compile, run
+src/engine.zig     agent loop
+src/provider.zig   OpenAI-compatible HTTP
+src/plan.zig       compiled plan loading
+src/server.zig     zn up/down
+src/config.zig     config lookup
+src/session.zig    JSONL sessions
+src/tools.zig      builtin tools
+src/graph.zig      Circuitry subset
 ```
-
-The file is JSONL. Conversation and runtime are separate:
-
-```jsonl
-{"type":"session","version":1,"runtime":"zinc","id":"s...","createdAt":0}
-{"type":"message","timestamp":0,"message":{"role":"user","content":"..."}}
-{"type":"runtime","timestamp":0,"phase":"context_recovery","event":"model_output","content":"..."}
-{"type":"runtime","timestamp":0,"phase":"tool","event":"tool_call","tool":"bash","content":"..."}
-{"type":"runtime","timestamp":0,"phase":"tool","event":"tool_result","tool":"bash","content":"..."}
-{"type":"message","timestamp":0,"message":{"role":"assistant","content":"..."}}
-```
-
-`--continue` uses the last session id in this directory. `--session <id>` resumes a specific session.
-
-## cleanup
-
-Cleanup is dry-run unless you pass `--yes`.
-
-```bash
-zn clean                 # local compiled artifacts
-zn clean --yes
-zn clean sessions        # local session history
-zn clean sessions --yes
-zn clean all             # local compiled artifacts and sessions
-zn clean global          # global Zinc state/log files
-zn clean global --yes
-zn clean build           # global TurboQuant build checkout
-zn clean build --yes
-zn clean global all      # global state/logs and build checkout
-```
-
-Global cleanup refuses to remove state while the recorded Zinc server is running. Run `zn down` first.
-
-## status
-
-Zinc is early. The public seed is useful, but small on purpose. Expect the config keys and graph subset to move as the runtime gets sharper.

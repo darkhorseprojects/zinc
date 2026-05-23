@@ -55,20 +55,18 @@ cache_type_v = "turbo3"
 fit_ctx = 8192
 vram_allocation_percent = $vram_allocation_percent
 [models.gemma-heretic.runtime]
-reasoning_profile = "gemma4-interleaved"
-tool_profile = "gemma4-native"
-default_effort = "low"
+tool_format = "gemma-native"
+reasoning_effort = "low"
 reasoning_format = "auto"
 temperature = 0.5
 max_tokens = 1024
-preserve_reasoning = true
 tool_reasoning = false
 
 [models.gemma-heretic.runtime.budgets]
 off = 0
-low = 1024
-medium = 4096
-high = 8192
+low = 256
+medium = 1024
+high = 4096
 extra-high = -1
 EOF_CONFIG
 

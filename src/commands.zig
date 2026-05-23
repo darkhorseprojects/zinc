@@ -162,18 +162,26 @@ fn validateReasoningEffort(effort: []const u8) !void {
     return error.InvalidConfigValue;
 }
 
+fn validateReasoningFormat(format: []const u8) !void {
+    if (std.mem.eql(u8, format, "auto")) return;
+    if (std.mem.eql(u8, format, "deepseek")) return;
+    if (std.mem.eql(u8, format, "deepseek-legacy")) return;
+    if (std.mem.eql(u8, format, "none")) return;
+    return error.InvalidConfigValue;
+}
+
 fn defaultReasoningBudget(effort: []const u8) !isize {
     if (std.mem.eql(u8, effort, "off")) return 0;
-    if (std.mem.eql(u8, effort, "low")) return 1024;
-    if (std.mem.eql(u8, effort, "medium")) return 4096;
-    if (std.mem.eql(u8, effort, "high")) return 8192;
+    if (std.mem.eql(u8, effort, "low")) return 256;
+    if (std.mem.eql(u8, effort, "medium")) return 1024;
+    if (std.mem.eql(u8, effort, "high")) return 4096;
     if (std.mem.eql(u8, effort, "extra-high")) return -1;
     return error.InvalidConfigValue;
 }
 
-fn requestMaxTokens(output_tokens: usize, reasoning_budget: isize) !?usize {
-    if (reasoning_budget < 0) return null;
-    return output_tokens + @as(usize, @intCast(reasoning_budget));
+fn requestTokenLimit(visible_tokens: usize, thought_tokens: isize) !?usize {
+    if (thought_tokens < 0) return null;
+    return visible_tokens + @as(usize, @intCast(thought_tokens));
 }
 
 fn compileGraphFile(allocator: Allocator, graph_path: []const u8, out_path: []const u8, home: []const u8) !void {
@@ -189,26 +197,26 @@ fn compileGraphFile(allocator: Allocator, graph_path: []const u8, out_path: []co
     defer allocator.free(model_id);
     const model_alias = try config.readModelValue(allocator, home, model_id, "alias");
     defer allocator.free(model_alias);
-    const model_repo = try config.readModelValue(allocator, home, model_id, "hf_repo");
-    defer allocator.free(model_repo);
     const model_temperature = try config.readModelF64Default(allocator, home, model_id, "runtime.temperature", 0.5);
-    const model_max_tokens = try config.readModelUsizeDefault(allocator, home, model_id, "runtime.max_tokens", 1024);
+    const visible_tokens = try config.readModelUsizeDefault(allocator, home, model_id, "runtime.max_tokens", 1024);
     const tool_format = try config.readModelStringDefault(allocator, home, model_id, "runtime.tool_format", "openai");
     defer allocator.free(tool_format);
     try validateToolFormat(tool_format);
     const reasoning_effort = try config.readModelStringDefault(allocator, home, model_id, "runtime.reasoning_effort", "off");
     defer allocator.free(reasoning_effort);
     try validateReasoningEffort(reasoning_effort);
-    const reasoning_format = try config.readModelStringDefault(allocator, home, model_id, "runtime.reasoning_format", "none");
+    const reasoning_format = try config.readModelStringDefault(allocator, home, model_id, "runtime.reasoning_format", "auto");
     defer allocator.free(reasoning_format);
+    try validateReasoningFormat(reasoning_format);
     const budget_key = try std.fmt.allocPrint(allocator, "runtime.budgets.{s}", .{reasoning_effort});
     defer allocator.free(budget_key);
-    const reasoning_budget = try config.readModelIsizeDefault(allocator, home, model_id, budget_key, try defaultReasoningBudget(reasoning_effort));
-    const request_max_tokens = try requestMaxTokens(model_max_tokens, reasoning_budget);
+    const thought_tokens = try config.readModelIsizeDefault(allocator, home, model_id, budget_key, try defaultReasoningBudget(reasoning_effort));
+    const request_token_limit = try requestTokenLimit(visible_tokens, thought_tokens);
     const tool_reasoning = try config.readModelBoolDefault(allocator, home, model_id, "runtime.tool_reasoning", false);
     const tools = try graph.readTools(allocator, text, "assistant");
     defer graph.freeStringList(allocator, tools);
     for (tools) |tool| if (!tool_registry.contains(tool)) return error.UnknownTool;
+    const reasoning_tokens = if (!std.mem.eql(u8, reasoning_effort, "off") and (tools.len == 0 or tool_reasoning)) thought_tokens else 0;
 
     var context_prompt: std.ArrayList(u8) = .empty;
     defer context_prompt.deinit(allocator);
@@ -244,14 +252,12 @@ fn compileGraphFile(allocator: Allocator, graph_path: []const u8, out_path: []co
     try compiled.appendSlice(allocator, ",\"alias\":");
     try files.appendJsonString(allocator, &compiled, model_alias);
     try compiled.print(allocator, ",\"temperature\":{d},\"max_tokens\":", .{model_temperature});
-    if (request_max_tokens) |max_tokens| try compiled.print(allocator, "{d}", .{max_tokens}) else try compiled.appendSlice(allocator, "null");
+    if (request_token_limit) |max_tokens| try compiled.print(allocator, "{d}", .{max_tokens}) else try compiled.appendSlice(allocator, "null");
     try compiled.appendSlice(allocator, ",\"tool_format\":");
     try files.appendJsonString(allocator, &compiled, tool_format);
-    try compiled.appendSlice(allocator, ",\"reasoning_effort\":");
-    try files.appendJsonString(allocator, &compiled, reasoning_effort);
     try compiled.appendSlice(allocator, ",\"reasoning_format\":");
     try files.appendJsonString(allocator, &compiled, reasoning_format);
-    try compiled.print(allocator, ",\"tool_reasoning\":{}", .{tool_reasoning });
+    try compiled.print(allocator, ",\"reasoning_tokens\":{d}", .{reasoning_tokens});
     try compiled.appendSlice(allocator, "},\"tools\":[");
     for (tools, 0..) |tool, i| {
         if (i != 0) try compiled.append(allocator, ',');

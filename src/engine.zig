@@ -60,6 +60,9 @@ pub fn run(allocator: Allocator, io: std.Io, home: []const u8, user_prompt: []co
             .model = plan.model_alias,
             .temperature = plan.temperature,
             .max_tokens = plan.max_tokens,
+            .reasoning_format = plan.reasoning_format,
+            .reasoning_budget_tokens = reasoningBudgetTokens(plan.reasoning_tokens),
+            .thinking_enabled = reasoningEnabled(plan.reasoning_tokens),
             .parse_native_tools = std.mem.eql(u8, plan.tool_format, "gemma-native"),
             .tools_json = plan.tools_json,
             .messages = messages.items,
@@ -196,6 +199,9 @@ fn recoverContext(allocator: Allocator, io: std.Io, provider_base_url: []const u
             .model = model_alias,
             .temperature = temperature,
             .max_tokens = 512,
+            .reasoning_format = "auto",
+            .reasoning_budget_tokens = null,
+            .thinking_enabled = false,
             .json_response = true,
             .tools_json = "[]",
             .messages = messages.items,
@@ -213,6 +219,15 @@ fn recoverContext(allocator: Allocator, io: std.Io, provider_base_url: []const u
         try sessions.appendRuntimeEvent(allocator, session_path, Phase.context_recovery, RuntimeEvent.model_output, turn.text);
         return provider.cleanText(allocator, turn.text);
     }
+}
+
+fn reasoningEnabled(reasoning_tokens: isize) bool {
+    return reasoning_tokens != 0;
+}
+
+fn reasoningBudgetTokens(reasoning_tokens: isize) ?usize {
+    if (reasoning_tokens <= 0) return null;
+    return @intCast(reasoning_tokens);
 }
 
 fn callProviderWithTransientRetries(allocator: Allocator, io: std.Io, session_path: []const u8, phase: []const u8, max_retries: usize, request: provider.Request) !provider.AssistantTurn {

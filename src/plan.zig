@@ -12,9 +12,8 @@ pub const Plan = struct {
     temperature: f64,
     max_tokens: ?usize,
     tool_format: []u8,
-    reasoning_effort: []u8,
     reasoning_format: []u8,
-    tool_reasoning: bool,
+    reasoning_tokens: isize,
     tools: [][]u8,
     tools_json: []u8,
 
@@ -24,7 +23,6 @@ pub const Plan = struct {
         allocator.free(self.model_id);
         allocator.free(self.model_alias);
         allocator.free(self.tool_format);
-        allocator.free(self.reasoning_effort);
         allocator.free(self.reasoning_format);
         for (self.tools) |tool| allocator.free(tool);
         allocator.free(self.tools);
@@ -58,9 +56,8 @@ pub fn load(allocator: Allocator, path: []const u8) !Plan {
         .temperature = try readF64(model_object.get("temperature") orelse return error.BadRuntimePlan),
         .max_tokens = try readOptionalUsize(model_object.get("max_tokens") orelse return error.BadRuntimePlan),
         .tool_format = try allocator.dupe(u8, (model_object.get("tool_format") orelse return error.BadRuntimePlan).string),
-        .reasoning_effort = try allocator.dupe(u8, (model_object.get("reasoning_effort") orelse return error.BadRuntimePlan).string),
         .reasoning_format = try allocator.dupe(u8, (model_object.get("reasoning_format") orelse return error.BadRuntimePlan).string),
-        .tool_reasoning = try readBool(model_object.get("tool_reasoning") orelse return error.BadRuntimePlan),
+        .reasoning_tokens = try readIsize(model_object.get("reasoning_tokens") orelse return error.BadRuntimePlan),
         .tools = tool_names,
         .tools_json = tools_json,
     };
@@ -82,12 +79,13 @@ fn readOptionalUsize(value: std.json.Value) !?usize {
     };
 }
 
-fn readBool(value: std.json.Value) !bool {
+fn readIsize(value: std.json.Value) !isize {
     return switch (value) {
-        .bool => value.bool,
+        .integer => |v| @intCast(v),
         else => error.BadRuntimePlan,
     };
 }
+
 
 pub fn buildToolsJson(allocator: Allocator, tools: []const []const u8) ![]u8 {
     var out: std.ArrayList(u8) = .empty;

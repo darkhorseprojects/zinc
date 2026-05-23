@@ -19,14 +19,14 @@ vram_allocation_percent = 87.5
 [models.gemma-heretic.runtime]
 tool_format = "gemma-native"
 reasoning_effort = "low"
-reasoning_format = "none"
+reasoning_format = "auto"
 temperature = 0.5
 max_tokens = 1024
 tool_reasoning = false
 
 [models.gemma-heretic.runtime.budgets]
 off = 0
-low = 1024
-medium = 4096
-high = 8192
+low = 256
+medium = 1024
+high = 4096
 extra-high = -1

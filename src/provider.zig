@@ -9,6 +9,9 @@ pub const Request = struct {
     model: []const u8,
     temperature: f64,
     max_tokens: ?usize,
+    reasoning_format: []const u8,
+    reasoning_budget_tokens: ?usize,
+    thinking_enabled: bool,
     json_response: bool = false,
     parse_native_tools: bool = false,
     tools_json: []const u8,
@@ -94,17 +97,11 @@ pub fn freeTurn(allocator: Allocator, turn: AssistantTurn) void {
 
 pub fn cleanText(allocator: Allocator, raw: []const u8) ![]u8 {
     var text = std.mem.trim(u8, raw, " \t\r\n");
-    // Gemma 4 with reasoning enabled outputs: <|channel>thought\n...\n<channel|>final_text
-    // The chat template forces this format. We need to find the LAST <channel|> and extract what follows.
     const channel_end = "<channel|>";
     if (std.mem.lastIndexOf(u8, text, channel_end)) |last_marker| {
-        const after_marker = text[last_marker + channel_end.len ..];
-        text = std.mem.trim(u8, after_marker, " \t\r\n");
-    } else if (std.mem.startsWith(u8, text, "<|channel>thought\n")) {
-        // No closing marker found - model truncated during reasoning.
-        // Strip the reasoning prefix and return what follows (may be partial reasoning or empty).
-        text = text["<|channel>thought\n".len ..];
-        text = std.mem.trim(u8, text, " \t\r\n");
+        text = std.mem.trim(u8, text[last_marker + channel_end.len ..], " \t\r\n");
+    } else if (startsGemmaThought(text)) {
+        text = "";
     }
     // Strip code fence markers if present
     if (std.mem.startsWith(u8, text, "```")) {
@@ -162,6 +159,11 @@ fn writeChatRequest(allocator: Allocator, out: *std.ArrayList(u8), request: Requ
     try files.appendJsonString(allocator, out, request.model);
     try out.print(allocator, ",\"temperature\":{d},\"stream\":false", .{request.temperature});
     if (request.max_tokens) |max_tokens| try out.print(allocator, ",\"max_tokens\":{d}", .{max_tokens});
+    try out.appendSlice(allocator, ",\"reasoning_format\":");
+    try files.appendJsonString(allocator, out, request.reasoning_format);
+    if (request.reasoning_budget_tokens) |budget| try out.print(allocator, ",\"thinking_budget_tokens\":{d}", .{budget});
+    try out.appendSlice(allocator, ",\"chat_template_kwargs\":{\"enable_thinking\":");
+    try out.appendSlice(allocator, if (request.thinking_enabled) "true}" else "false}");
     if (request.json_response) try out.appendSlice(allocator, ",\"response_format\":{\"type\":\"json_object\"}");
     try out.appendSlice(allocator, ",\"messages\":[");
     for (request.messages, 0..) |msg, i| {
@@ -247,21 +249,21 @@ fn readMessageReasoning(message: std.json.Value) ![]const u8 {
 }
 
 fn extractReasoningFromString(allocator: Allocator, content: []const u8) ![]u8 {
-    const thought_prefix = "<|channel>thought\n";
-    const channel_end = "<channel|>";
-    if (std.mem.startsWith(u8, content, thought_prefix)) {
-        const after_prefix = content[thought_prefix.len..];
-        // If no closing marker, the output was truncated - treat all as reasoning
-        if (std.mem.indexOf(u8, after_prefix, channel_end)) |end_pos| {
-            return allocator.dupe(u8, after_prefix[0..end_pos]);
-        }
-        // Truncated - return all content as reasoning
-        return allocator.dupe(u8, after_prefix);
-    }
-    return allocator.dupe(u8, "");
+    const prefix = gemmaThoughtPrefix(content) orelse return allocator.dupe(u8, "");
+    const thought = content[prefix.len..];
+    const end = std.mem.indexOf(u8, thought, "<channel|>") orelse thought.len;
+    return allocator.dupe(u8, std.mem.trim(u8, thought[0..end], " \t\r\n"));
 }
 
-// Fallback for when reasoning_format is "none" and reasoning is embedded in content
+fn startsGemmaThought(text: []const u8) bool {
+    return gemmaThoughtPrefix(text) != null;
+}
+
+fn gemmaThoughtPrefix(text: []const u8) ?[]const u8 {
+    const prefixes = [_][]const u8{ "<|channel>thought\n", "thought\n" };
+    for (prefixes) |prefix| if (std.mem.startsWith(u8, text, prefix)) return prefix;
+    return null;
+}
 
 fn readOptionalStringField(object: std.json.Value, field: []const u8) ![]const u8 {
     const value = object.object.get(field) orelse return "";
@@ -379,4 +381,20 @@ fn readStringField(object: std.json.Value, field: []const u8) ![]const u8 {
     const value = object.object.get(field) orelse return error.BadProviderResponse;
     if (value != .string) return error.BadProviderResponse;
     return value.string;
+}
+
+test "Gemma channel content is separated from final text" {
+    const text = try cleanText(std.testing.allocator, "thought\nprivate scratch<channel|>visible answer");
+    defer std.testing.allocator.free(text);
+    try std.testing.expectEqualStrings("visible answer", text);
+
+    const reasoning = try extractReasoningFromString(std.testing.allocator, "thought\nprivate scratch<channel|>visible answer");
+    defer std.testing.allocator.free(reasoning);
+    try std.testing.expectEqualStrings("private scratch", reasoning);
+}
+
+test "truncated Gemma channel does not become final text" {
+    const text = try cleanText(std.testing.allocator, "<|channel>thought\nprivate scratch only");
+    defer std.testing.allocator.free(text);
+    try std.testing.expectEqualStrings("", text);
 }

@@ -96,35 +96,14 @@ reasoning_format="$(model_value "$model_name" runtime.reasoning_format)"
 : "${fit_ctx:=8192}"
 : "${vram_allocation_percent:=87.5}"
 : "${reasoning_effort:=off}"
-: "${reasoning_format:=none}"
-
-reasoning_budget="$(model_value "$model_name" "runtime.budgets.$reasoning_effort")"
+: "${reasoning_format:=auto}"
 
 case "$reasoning_effort" in
   off)
     reasoning="off"
-    reasoning_format="none"
-    : "${reasoning_budget:=0}"
     ;;
-  low)
+  low|medium|high|extra-high)
     reasoning="on"
-    reasoning_format="none"
-    : "${reasoning_budget:=1024}"
-    ;;
-  medium)
-    reasoning="on"
-    reasoning_format="none"
-    : "${reasoning_budget:=4096}"
-    ;;
-  high)
-    reasoning="on"
-    reasoning_format="none"
-    : "${reasoning_budget:=8192}"
-    ;;
-  extra-high)
-    reasoning="on"
-    reasoning_format="none"
-    : "${reasoning_budget:=-1}"
     ;;
   *)
     echo "unsupported reasoning_effort for '$model_name': $reasoning_effort" >&2
@@ -188,4 +167,4 @@ exec "$server" \
   --log-colors off \
   --reasoning "$reasoning" \
   --reasoning-format "$reasoning_format" \
-  --reasoning-budget "$reasoning_budget"
+  --reasoning-budget -1
