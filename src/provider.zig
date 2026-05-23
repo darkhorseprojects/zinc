@@ -94,14 +94,14 @@ pub fn freeTurn(allocator: Allocator, turn: AssistantTurn) void {
 
 pub fn cleanText(allocator: Allocator, raw: []const u8) ![]u8 {
     var text = std.mem.trim(u8, raw, " \t\r\n");
-    // Gemma with reasoning-format none outputs: <|channel>thought\n...\n<channel|>final_text
-    // We need to find the LAST <channel|> and return what comes after
+    // Gemma 4 with reasoning enabled outputs: <|channel>thought\n...\n<channel|>final_text
+    // The chat template forces this format. We need to find the LAST <channel|> and extract what follows.
     const channel_end = "<channel|>";
     if (std.mem.lastIndexOf(u8, text, channel_end)) |last_marker| {
         const after_marker = text[last_marker + channel_end.len ..];
         text = std.mem.trim(u8, after_marker, " \t\r\n");
     }
-    while (std.mem.endsWith(u8, text, "</thought>")) text = std.mem.trim(u8, text[0 .. text.len - "</thought>".len], " \t\r\n");
+    // Strip code fence markers if present
     if (std.mem.startsWith(u8, text, "```")) {
         const after_open = std.mem.indexOfScalar(u8, text, '\n') orelse return allocator.dupe(u8, text);
         text = std.mem.trim(u8, text[after_open + 1 ..], " \t\r\n");
@@ -252,6 +252,8 @@ fn extractReasoningFromString(allocator: Allocator, content: []const u8) ![]u8 {
     }
     return allocator.dupe(u8, "");
 }
+
+// Fallback for when reasoning_format is "none" and reasoning is embedded in content
 
 fn readOptionalStringField(object: std.json.Value, field: []const u8) ![]const u8 {
     const value = object.object.get(field) orelse return "";
