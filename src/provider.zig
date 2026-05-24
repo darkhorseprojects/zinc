@@ -73,15 +73,26 @@ pub fn call(allocator: Allocator, io: std.Io, request: Request) !AssistantTurn {
 }
 
 pub fn appendMessage(allocator: Allocator, messages: *std.ArrayList(Message), message: Message) !void {
-    const owned = Message{
-        .role = message.role,
-        .content = try allocator.dupe(u8, message.content),
-        .name = if (message.name) |v| try allocator.dupe(u8, v) else null,
-        .tool_call_id = if (message.tool_call_id) |v| try allocator.dupe(u8, v) else null,
-        .tool_calls = try cloneToolCalls(allocator, message.tool_calls),
-    };
-    errdefer freeMessage(allocator, owned);
-    try messages.append(allocator, owned);
+    const role = try allocator.dupe(u8, message.role);
+    errdefer allocator.free(role);
+    const content = try allocator.dupe(u8, message.content);
+    errdefer allocator.free(content);
+    const name = if (message.name) |v| try allocator.dupe(u8, v) else null;
+    errdefer if (name) |v| allocator.free(v);
+    const tool_call_id = if (message.tool_call_id) |v| try allocator.dupe(u8, v) else null;
+    errdefer if (tool_call_id) |v| allocator.free(v);
+    const tool_calls = try cloneToolCalls(allocator, message.tool_calls);
+    errdefer {
+        for (tool_calls) |tool_call| freeCall(allocator, tool_call);
+        if (tool_calls.len != 0) allocator.free(tool_calls);
+    }
+    try messages.append(allocator, .{
+        .role = role,
+        .content = content,
+        .name = name,
+        .tool_call_id = tool_call_id,
+        .tool_calls = tool_calls,
+    });
 }
 
 pub fn freeMessages(allocator: Allocator, messages: []Message) void {
@@ -141,6 +152,7 @@ fn cloneToolCall(allocator: Allocator, tool_call: ToolCall) !ToolCall {
 }
 
 fn freeMessage(allocator: Allocator, message: Message) void {
+    allocator.free(message.role);
     allocator.free(message.content);
     if (message.name) |v| allocator.free(v);
     if (message.tool_call_id) |v| allocator.free(v);
@@ -397,4 +409,17 @@ test "truncated Gemma channel does not become final text" {
     const text = try cleanText(std.testing.allocator, "<|channel>thought\nprivate scratch only");
     defer std.testing.allocator.free(text);
     try std.testing.expectEqualStrings("", text);
+}
+
+test "appendMessage owns role bytes" {
+    var messages: std.ArrayList(Message) = .empty;
+    defer messages.deinit(std.testing.allocator);
+    defer freeMessages(std.testing.allocator, messages.items);
+    const role = try std.testing.allocator.dupe(u8, "user");
+    const content = try std.testing.allocator.dupe(u8, "hello");
+    try appendMessage(std.testing.allocator, &messages, .{ .role = role, .content = content });
+    std.testing.allocator.free(role);
+    std.testing.allocator.free(content);
+    try std.testing.expectEqualStrings("user", messages.items[0].role);
+    try std.testing.expectEqualStrings("hello", messages.items[0].content);
 }
