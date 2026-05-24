@@ -116,6 +116,7 @@ pub fn run(allocator: Allocator, io: std.Io, home: []const u8, user_prompt: []co
             return;
         }
 
+        if (try logAndReportUnreplayableToolCall(allocator, session.path, plan.tools, turn.tool_calls, &messages, runtime.max_retries, &correction_retries)) continue;
         try provider.appendMessage(allocator, &messages, .{ .role = "assistant", .content = turn.text, .tool_calls = turn.tool_calls });
         if (turn.reasoning.len > 0) {
             try sessions.appendRuntimeEvent(allocator, session.path, Phase.assistant_turn, RuntimeEvent.model_output, turn.reasoning);
@@ -134,6 +135,31 @@ pub fn run(allocator: Allocator, io: std.Io, home: []const u8, user_prompt: []co
             try provider.appendMessage(allocator, &messages, .{ .role = "tool", .content = result, .name = call.name, .tool_call_id = call.id });
         }
     }
+}
+
+fn logAndReportUnreplayableToolCall(allocator: Allocator, session_path: []const u8, available_tools: []const []const u8, calls: []const provider.ToolCall, messages: *std.ArrayList(provider.Message), max_retries: usize, correction_retries: *usize) !bool {
+    for (calls) |call| {
+        const result = try unreplayableToolFailure(allocator, available_tools, call) orelse continue;
+        defer allocator.free(result);
+        try sessions.appendToolEvent(allocator, session_path, RuntimeEvent.tool_call, call.name, call.arguments);
+        try sessions.appendToolEvent(allocator, session_path, RuntimeEvent.tool_result, call.name, result);
+        if (correction_retries.* >= max_retries) return error.ToolCallFailed;
+        correction_retries.* += 1;
+        const retry = try buildToolFailureRetryPrompt(allocator, result);
+        defer allocator.free(retry);
+        try provider.appendMessage(allocator, messages, .{ .role = "user", .content = retry });
+        return true;
+    }
+    return false;
+}
+
+fn unreplayableToolFailure(allocator: Allocator, available_tools: []const []const u8, call: provider.ToolCall) !?[]u8 {
+    if (!allowsTool(available_tools, call.name)) return try toolFailureResult(allocator, call.name, "ToolNotAvailable", "tool is not available in this graph", call.arguments);
+    tools.validateArguments(allocator, call.name, call.arguments) catch |err| return switch (err) {
+        error.OutOfMemory => err,
+        else => try toolFailureResult(allocator, call.name, @errorName(err), "tool arguments did not match the required JSON schema", call.arguments),
+    };
+    return null;
 }
 
 fn executeToolCall(allocator: Allocator, io: std.Io, ctx: RuntimeReadContext, available_tools: []const []const u8, call: provider.ToolCall) ![]u8 {
@@ -294,6 +320,17 @@ fn isToolFailure(result: []const u8) bool {
     return std.mem.startsWith(u8, std.mem.trim(u8, result, " \t\r\n"), "{\"ok\":false");
 }
 
+fn buildToolFailureRetryPrompt(allocator: Allocator, result: []const u8) ![]u8 {
+    return std.fmt.allocPrint(allocator,
+        \\wrong. your actual tool call failed.
+        \\
+        \\tool output:
+        \\{s}
+        \\
+        \\try again with a valid actual tool call, or answer if no tool is needed.
+    , .{result});
+}
+
 fn buildUnavailableToolRetryPrompt(allocator: Allocator, unavailable: []const u8, available: []const []const u8) ![]u8 {
     var out: std.ArrayList(u8) = .empty;
     errdefer out.deinit(allocator);
@@ -364,6 +401,7 @@ fn recoverFocusedContext(allocator: Allocator, io: std.Io, provider_base_url: []
 
         if (turn.tool_calls.len == 0) return provider.cleanText(allocator, turn.text);
 
+        if (try logAndReportUnreplayableToolCall(allocator, session_path, available_tools, turn.tool_calls, &messages, max_retries, &correction_retries)) continue;
         try provider.appendMessage(allocator, &messages, .{ .role = "assistant", .content = turn.text, .tool_calls = turn.tool_calls });
         if (turn.reasoning.len > 0) try sessions.appendRuntimeEvent(allocator, session_path, "focused_recovery", RuntimeEvent.model_output, turn.reasoning);
         for (turn.tool_calls) |call| {
