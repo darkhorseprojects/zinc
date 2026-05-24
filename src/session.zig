@@ -61,7 +61,7 @@ pub fn appendEvent(allocator: Allocator, path: []const u8, role: []const u8, con
     try files.appendJsonString(allocator, &line, role);
     try line.appendSlice(allocator, ",\"content\":");
     try files.appendJsonString(allocator, &line, content);
-    try line.appendSlice(allocator, "}}}\n");
+    try line.appendSlice(allocator, "}}\n");
     try appendLine(path, line.items);
 }
 
@@ -175,4 +175,23 @@ test "missing session log reads empty" {
     const log = try readLog(std.testing.allocator, "missing-session.jsonl");
     defer std.testing.allocator.free(log);
     try std.testing.expectEqualStrings("", log);
+}
+
+test "message events are valid json lines" {
+    var dir = std.testing.tmpDir(.{});
+    defer dir.cleanup();
+    var file = try dir.dir.createFile("session.jsonl", .{});
+    file.close();
+
+    const tmp_path = try dir.dir.realpathAlloc(std.testing.allocator, ".");
+    defer std.testing.allocator.free(tmp_path);
+    const path = try std.fs.path.join(std.testing.allocator, &.{ tmp_path, "session.jsonl" });
+    defer std.testing.allocator.free(path);
+
+    try appendEvent(std.testing.allocator, path, "user", "hello");
+    const log = try files.readLimited(std.testing.allocator, path, 1024);
+    defer std.testing.allocator.free(log);
+    var parsed = try std.json.parseFromSlice(std.json.Value, std.testing.allocator, std.mem.trim(u8, log, "\n"), .{});
+    defer parsed.deinit();
+    try std.testing.expectEqualStrings("message", parsed.value.object.get("type").?.string);
 }

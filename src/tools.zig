@@ -4,7 +4,10 @@ const files = @import("files.zig");
 const Allocator = std.mem.Allocator;
 
 pub fn execute(allocator: Allocator, io: std.Io, name: []const u8, arg_text: []const u8) ![]u8 {
-    var parsed = try std.json.parseFromSlice(std.json.Value, allocator, arg_text, .{});
+    var parsed = std.json.parseFromSlice(std.json.Value, allocator, arg_text, .{}) catch |err| return switch (err) {
+        error.OutOfMemory => err,
+        else => error.InvalidToolArguments,
+    };
     defer parsed.deinit();
     if (parsed.value != .object) return error.InvalidToolArguments;
     const args = parsed.value.object;
@@ -27,6 +30,43 @@ pub fn execute(allocator: Allocator, io: std.Io, name: []const u8, arg_text: []c
     }
     if (std.mem.eql(u8, name, "bash")) return runBash(allocator, io, try requireStringArg(args, "command"));
     if (std.mem.eql(u8, name, "request_circuitry_run")) return requestCircuitryRun(allocator, args);
+    return error.UnknownTool;
+}
+
+pub fn validateArguments(allocator: Allocator, name: []const u8, arg_text: []const u8) !void {
+    var parsed = std.json.parseFromSlice(std.json.Value, allocator, arg_text, .{}) catch |err| return switch (err) {
+        error.OutOfMemory => err,
+        else => error.InvalidToolArguments,
+    };
+    defer parsed.deinit();
+    if (parsed.value != .object) return error.InvalidToolArguments;
+    const args = parsed.value.object;
+    if (std.mem.eql(u8, name, "read")) {
+        _ = try requireStringArg(args, "path");
+        return;
+    }
+    if (std.mem.eql(u8, name, "write")) {
+        _ = try requireStringArg(args, "path");
+        _ = try requireStringArg(args, "content");
+        return;
+    }
+    if (std.mem.eql(u8, name, "edit")) {
+        _ = try requireStringArg(args, "path");
+        _ = try requireStringArg(args, "oldText");
+        _ = try requireStringArg(args, "newText");
+        return;
+    }
+    if (std.mem.eql(u8, name, "bash")) {
+        _ = try requireStringArg(args, "command");
+        return;
+    }
+    if (std.mem.eql(u8, name, "request_circuitry_run")) {
+        _ = try requireStringArg(args, "graph");
+        _ = try requireStringArg(args, "reason");
+        _ = try requireStringArg(args, "expected_result");
+        _ = try requireStringArg(args, "risk");
+        return;
+    }
     return error.UnknownTool;
 }
 
@@ -75,4 +115,8 @@ test "tool arguments require declared string fields" {
     defer parsed.deinit();
     try std.testing.expectEqualStrings("src/main.zig", try requireStringArg(parsed.value.object, "path"));
     try std.testing.expectError(error.InvalidToolArguments, requireStringArg(parsed.value.object, "missing"));
+}
+
+test "invalid tool json maps to tool argument error" {
+    try std.testing.expectError(error.InvalidToolArguments, validateArguments(std.testing.allocator, "bash", "{\"command\":\"unterminated"));
 }
