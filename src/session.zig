@@ -69,6 +69,43 @@ pub fn appendRuntimeEvent(allocator: Allocator, path: []const u8, phase: []const
     try appendRuntimeEventFull(allocator, path, phase, event, null, null, content);
 }
 
+pub fn appendCompaction(allocator: Allocator, path: []const u8, message_count: usize, summary: []const u8) !void {
+    var line: std.ArrayList(u8) = .empty;
+    defer line.deinit(allocator);
+    try line.print(allocator, "{{\"type\":\"compaction\",\"timestamp\":{d},\"message_count\":{d},\"summary\":", .{ 0, message_count });
+    try files.appendJsonString(allocator, &line, summary);
+    try line.appendSlice(allocator, "}\n");
+    try appendLine(path, line.items);
+}
+
+pub fn countMessages(allocator: Allocator, session_log: []const u8) !usize {
+    var count: usize = 0;
+    var lines = std.mem.splitScalar(u8, session_log, '\n');
+    while (lines.next()) |line| {
+        var parsed = std.json.parseFromSlice(std.json.Value, allocator, line, .{}) catch continue;
+        defer parsed.deinit();
+        if (parsed.value != .object) continue;
+        const typ = parsed.value.object.get("type") orelse continue;
+        if (typ == .string and std.mem.eql(u8, typ.string, "message")) count += 1;
+    }
+    return count;
+}
+
+pub fn latestCompactionMessageCount(allocator: Allocator, session_log: []const u8) !?usize {
+    var latest: ?usize = null;
+    var lines = std.mem.splitScalar(u8, session_log, '\n');
+    while (lines.next()) |line| {
+        var parsed = std.json.parseFromSlice(std.json.Value, allocator, line, .{}) catch continue;
+        defer parsed.deinit();
+        if (parsed.value != .object) continue;
+        const typ = parsed.value.object.get("type") orelse continue;
+        if (typ != .string or !std.mem.eql(u8, typ.string, "compaction")) continue;
+        const value = parsed.value.object.get("message_count") orelse continue;
+        if (value == .integer and value.integer >= 0) latest = @intCast(value.integer);
+    }
+    return latest;
+}
+
 pub fn appendRuntimeError(allocator: Allocator, path: []const u8, phase: []const u8, event: []const u8, error_name: []const u8, content: []const u8) !void {
     try appendRuntimeEventFull(allocator, path, phase, event, error_name, null, content);
 }

@@ -1,4 +1,5 @@
 const std = @import("std");
+const compaction = @import("compaction.zig");
 const config = @import("config.zig");
 const engine = @import("engine.zig");
 const files = @import("files.zig");
@@ -19,6 +20,7 @@ pub fn usage() void {
         \\  zn up [model-id]
         \\  zn down
         \\  zn clean [compiled|sessions|all|build|global [state|build|all]] [--yes]
+        \\  zn compact [--session id|--continue] [graph]
         \\  zn [--session id|--continue] <prompt>
         \\  zn run [--session id|--continue] <prompt>
         \\  zn session-dir
@@ -85,6 +87,39 @@ pub fn runFromArgs(allocator: Allocator, io: std.Io, home: []const u8, args: []c
     const prompt = try std.mem.join(allocator, " ", prompt_parts.items);
     defer allocator.free(prompt);
     try engine.run(allocator, io, home, prompt, resume_id, continue_last, runtime_paths.compiled_plan);
+}
+
+pub fn compactFromArgs(allocator: Allocator, io: std.Io, home: []const u8, args: []const []const u8) !void {
+    var resume_id: ?[]const u8 = null;
+    var continue_last = true;
+    const default_graph_path = try config.readStringDefault(allocator, home, "compaction_graph", "graphs/zinc-compaction.circuitry.yaml");
+    defer allocator.free(default_graph_path);
+    var graph_path: []const u8 = default_graph_path;
+
+    var i: usize = 0;
+    while (i < args.len) : (i += 1) {
+        const arg = args[i];
+        if (std.mem.eql(u8, arg, "--continue")) {
+            if (resume_id != null) return error.ConflictingSessionFlags;
+            continue_last = true;
+            continue;
+        }
+        if (std.mem.eql(u8, arg, "--session")) {
+            if (resume_id != null) return error.ConflictingSessionFlags;
+            i += 1;
+            if (i >= args.len) return error.MissingSessionId;
+            resume_id = args[i];
+            continue_last = false;
+            continue;
+        }
+        graph_path = arg;
+    }
+
+    const session = try sessions.open(allocator, resume_id, continue_last);
+    defer session.deinit(allocator);
+    const message_count = try compaction.runGraph(allocator, io, home, session, graph_path);
+    try sessions.rememberLast(session);
+    std.debug.print("compacted {d} messages in session {s}\n", .{ message_count, session.id });
 }
 
 pub fn printSessionDir(allocator: Allocator) !void {
@@ -189,11 +224,20 @@ fn compileGraphFile(allocator: Allocator, graph_path: []const u8, out_path: []co
     defer allocator.free(text);
     try graph.validateText(text);
 
-    const context_resource = graph.findResourceByIdentity(text, "Context recovery") orelse return error.InvalidCircuitryGraph;
-    const context_instructions = try graph.extractResourceInstructions(allocator, text, context_resource);
-    defer allocator.free(context_instructions);
-    const instructions = try graph.extractResourceInstructions(allocator, text, "assistant");
+    const assistant_resource = graph.findAgentWithTools(text) orelse return error.InvalidCircuitryGraph;
+    const assistant_identity = try graph.resourceIdentity(allocator, text, assistant_resource);
+    defer allocator.free(assistant_identity);
+    const instructions = try graph.extractResourceInstructions(allocator, text, assistant_resource);
     defer allocator.free(instructions);
+    const focused_recovery_resource = try graph.findFirstAgentInput(allocator, text, assistant_resource) orelse return error.InvalidCircuitryGraph;
+    defer allocator.free(focused_recovery_resource);
+    const focused_recovery_identity = try graph.resourceIdentity(allocator, text, focused_recovery_resource);
+    defer allocator.free(focused_recovery_identity);
+    const focused_recovery_instructions = try graph.extractResourceInstructions(allocator, text, focused_recovery_resource);
+    defer allocator.free(focused_recovery_instructions);
+    const focused_recovery_tools = try graph.readTools(allocator, text, focused_recovery_resource);
+    defer graph.freeStringList(allocator, focused_recovery_tools);
+    for (focused_recovery_tools) |tool| if (!tool_registry.contains(tool)) return error.UnknownTool;
     const model_id = try config.resolveGraphModelId(allocator, text, home);
     defer allocator.free(model_id);
     const model_alias = try config.readModelValue(allocator, home, model_id, "alias");
@@ -214,37 +258,41 @@ fn compileGraphFile(allocator: Allocator, graph_path: []const u8, out_path: []co
     const thought_tokens = try config.readModelIsizeDefault(allocator, home, model_id, budget_key, try defaultReasoningBudget(reasoning_effort));
     const request_token_limit = try requestTokenLimit(visible_tokens, thought_tokens);
     const tool_reasoning = try config.readModelBoolDefault(allocator, home, model_id, "runtime.tool_reasoning", false);
-    const tools = try graph.readTools(allocator, text, "assistant");
+    const tools = try graph.readTools(allocator, text, assistant_resource);
     defer graph.freeStringList(allocator, tools);
     for (tools) |tool| if (!tool_registry.contains(tool)) return error.UnknownTool;
     const reasoning_tokens = if (!std.mem.eql(u8, reasoning_effort, "off") and (tools.len == 0 or tool_reasoning)) thought_tokens else 0;
 
-    var context_prompt: std.ArrayList(u8) = .empty;
-    defer context_prompt.deinit(allocator);
-    try context_prompt.print(allocator,
-        \\Identity: Context recovery
-        \\Instructions:
-        \\{s}
-        \\
-        \\Expected output:
-        \\Return ONLY valid JSON matching: {{"summary": str, "relevant_facts": [str], "uncertainty": [str]}}
-    , .{context_instructions});
-
     var prompt: std.ArrayList(u8) = .empty;
     defer prompt.deinit(allocator);
     try prompt.print(allocator,
-        \\Identity: Zinc
+        \\Identity: {s}
         \\Instructions:
         \\{s}
         \\
         \\Output:
         \\Answer naturally in plain text. Use tool calls instead of guessing when current state matters.
-    , .{instructions});
+    , .{ assistant_identity, instructions });
     if (graph.wantsCircuitryPrompt(text, tools)) {
         const pack = try config.readPromptPack(allocator, home, "circuitry-author.md");
         defer allocator.free(pack);
         try prompt.print(allocator, "\n\nCircuitry authoring knowledge:\n{s}", .{pack});
     }
+
+    const prompt_packs = try graph.readPromptPacks(allocator, text);
+    defer graph.freePromptPacks(allocator, prompt_packs);
+    if (prompt_packs.len != 0) {
+        try prompt.appendSlice(allocator, "\n\nAvailable prompt packs. These are optional runtime guides; load one only when useful by calling read with path `prompt:<id>`.");
+        for (prompt_packs) |pack| try prompt.print(allocator, "\n- {s}: {s} — {s} (load: read {{\"path\":\"prompt:{s}\"}})", .{ pack.id, pack.title, pack.description, pack.id });
+    }
+
+    var focused_recovery_prompt: std.ArrayList(u8) = .empty;
+    defer focused_recovery_prompt.deinit(allocator);
+    try focused_recovery_prompt.print(allocator,
+        \\Identity: {s}
+        \\Instructions:
+        \\{s}
+    , .{ focused_recovery_identity, focused_recovery_instructions });
 
     var compiled: std.ArrayList(u8) = .empty;
     defer compiled.deinit(allocator);
@@ -252,8 +300,10 @@ fn compileGraphFile(allocator: Allocator, graph_path: []const u8, out_path: []co
     try files.appendJsonString(allocator, &compiled, model_id);
     try compiled.appendSlice(allocator, ",\"alias\":");
     try files.appendJsonString(allocator, &compiled, model_alias);
+    const context_tokens = try config.readModelUsizeDefault(allocator, home, model_id, "fit_ctx", visible_tokens);
     try compiled.print(allocator, ",\"temperature\":{d},\"max_tokens\":", .{model_temperature});
     if (request_token_limit) |max_tokens| try compiled.print(allocator, "{d}", .{max_tokens}) else try compiled.appendSlice(allocator, "null");
+    try compiled.print(allocator, ",\"context_tokens\":{d}", .{context_tokens});
     try compiled.appendSlice(allocator, ",\"tool_format\":");
     try files.appendJsonString(allocator, &compiled, tool_format);
     try compiled.appendSlice(allocator, ",\"reasoning_format\":");
@@ -264,10 +314,28 @@ fn compileGraphFile(allocator: Allocator, graph_path: []const u8, out_path: []co
         if (i != 0) try compiled.append(allocator, ',');
         try files.appendJsonString(allocator, &compiled, tool);
     }
-    try compiled.appendSlice(allocator, "],\"context_prompt\":");
-    try files.appendJsonString(allocator, &compiled, context_prompt.items);
-    try compiled.appendSlice(allocator, ",\"prompt\":");
+    try compiled.appendSlice(allocator, "],\"focused_recovery_tools\":[");
+    for (focused_recovery_tools, 0..) |tool, i| {
+        if (i != 0) try compiled.append(allocator, ',');
+        try files.appendJsonString(allocator, &compiled, tool);
+    }
+    try compiled.appendSlice(allocator, "],\"prompt\":");
     try files.appendJsonString(allocator, &compiled, prompt.items);
-    try compiled.appendSlice(allocator, ",\"expect\":{\"response\":\"str\"}}");
+    try compiled.appendSlice(allocator, ",\"focused_recovery_prompt\":");
+    try files.appendJsonString(allocator, &compiled, focused_recovery_prompt.items);
+    try compiled.appendSlice(allocator, ",\"prompts\":[");
+    for (prompt_packs, 0..) |pack, i| {
+        if (i != 0) try compiled.append(allocator, ',');
+        try compiled.appendSlice(allocator, "{\"id\":");
+        try files.appendJsonString(allocator, &compiled, pack.id);
+        try compiled.appendSlice(allocator, ",\"title\":");
+        try files.appendJsonString(allocator, &compiled, pack.title);
+        try compiled.appendSlice(allocator, ",\"description\":");
+        try files.appendJsonString(allocator, &compiled, pack.description);
+        try compiled.appendSlice(allocator, ",\"content\":");
+        try files.appendJsonString(allocator, &compiled, pack.content);
+        try compiled.append(allocator, '}');
+    }
+    try compiled.appendSlice(allocator, "],\"expect\":{\"response\":\"str\"}}");
     try files.write(out_path, compiled.items);
 }

@@ -5,6 +5,8 @@ graph = "graphs/zinc-loop.circuitry.yaml"
 compiled_plan = ".zinc/compiled/plan.json"
 provider_base_url = "http://127.0.0.1:30000/v1"
 max_retries = 5
+compaction_threshold_percent = 70
+compaction_graph = "graphs/zinc-compaction.circuitry.yaml"
 default_model = "gemma-heretic"
 
 [models.gemma-heretic]

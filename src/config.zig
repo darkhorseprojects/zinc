@@ -7,13 +7,17 @@ const Allocator = std.mem.Allocator;
 
 const default_provider_base_url = "http://127.0.0.1:30000/v1";
 const default_max_retries = 5;
+const default_compaction_threshold_percent = 70;
 
 pub const RuntimeConfig = struct {
     provider_base_url: []u8,
     max_retries: usize,
+    compaction_threshold_percent: usize,
+    compaction_graph: []u8,
 
     pub fn deinit(self: RuntimeConfig, allocator: Allocator) void {
         allocator.free(self.provider_base_url);
+        allocator.free(self.compaction_graph);
     }
 };
 
@@ -31,6 +35,8 @@ pub fn loadRuntimeConfig(allocator: Allocator, home: []const u8) !RuntimeConfig 
     return .{
         .provider_base_url = try readStringDefault(allocator, home, "provider_base_url", default_provider_base_url),
         .max_retries = try readUsizeDefault(allocator, home, "max_retries", default_max_retries),
+        .compaction_threshold_percent = try readUsizeDefault(allocator, home, "compaction_threshold_percent", default_compaction_threshold_percent),
+        .compaction_graph = try readStringDefault(allocator, home, "compaction_graph", "graphs/zinc-compaction.circuitry.yaml"),
     };
 }
 

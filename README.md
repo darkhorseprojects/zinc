@@ -20,6 +20,7 @@ zn up
 zn "summarize this repo"
 zn --continue "follow up"
 zn --session <id> "resume this session"
+zn compact --continue
 zn validate
 zn compile
 zn down
@@ -50,6 +51,8 @@ Small default shape:
 graph = "graphs/zinc-loop.circuitry.yaml"
 compiled_plan = ".zinc/compiled/plan.json"
 provider_base_url = "http://127.0.0.1:30000/v1"
+compaction_threshold_percent = 70
+compaction_graph = "graphs/zinc-compaction.circuitry.yaml"
 default_model = "gemma-heretic"
 
 [models.gemma-heretic]
@@ -100,7 +103,19 @@ graphs/zinc-loop.circuitry.yaml
 Runtime path:
 
 ```text
-session log + user turn -> recovered_context -> assistant -> final text
+session JSONL -> deterministic context assembly
+assembled context + user turn + session_dir -> focused_recovery graph agent with tools
+assembled context + focused_recovery output + user turn -> assistant -> final text
+```
+
+The raw JSONL session log is parsed by Zinc runtime code. It is not passed to the assistant or focused recovery agent. The focused recovery agent receives only assembled context, current user turn, and the session directory, then uses graph-declared tools such as `bash`/`read` if it wants archive context. Text resources with prompt-pack frontmatter are listed to the assistant by stable id and can be lazy-loaded through `read {"path":"prompt:<id>"}`; no local prompt file paths are exposed. The compaction command is the intentional exception: `zn compact` gives a session log to the compaction graph agent so it can produce a durable summary. Zinc also runs that graph automatically when the estimated session log token count reaches `compaction_threshold_percent` of the configured model `fit_ctx`; set the percentage to `0` to disable automatic compaction.
+
+Compaction path:
+
+```text
+zn compact --continue
+  uses graphs/zinc-compaction.circuitry.yaml
+  appends a compaction summary to the session log
 ```
 
 Run another graph once:
@@ -120,7 +135,7 @@ Project sessions live in:
 .zinc/sessions/<session-id>.jsonl
 ```
 
-Conversation messages and runtime events are both JSONL entries.
+Conversation messages, runtime events, and compaction summaries are JSONL entries. Continuation replays exact first messages, the latest compaction summary when available, the exact transcript tail after that compaction, and focused matches from other session files.
 
 ## tools
 

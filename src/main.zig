@@ -19,6 +19,7 @@ pub fn main(init: std.process.Init) !void {
     if (std.mem.eql(u8, cmd, "up")) return server.start(allocator, init.io, home, args.next());
     if (std.mem.eql(u8, cmd, "down")) return server.stop(allocator, home);
     if (std.mem.eql(u8, cmd, "clean")) return cleanCommandArgs(allocator, init.io, home, &args);
+    if (std.mem.eql(u8, cmd, "compact")) return compactCommandArgs(allocator, init.io, home, &args);
     if (std.mem.eql(u8, cmd, "session-dir")) return commands.printSessionDir(allocator);
 
     var parts: std.ArrayList([]const u8) = .empty;
@@ -38,6 +39,12 @@ fn cleanCommandArgs(allocator: std.mem.Allocator, io: std.Io, home: []const u8, 
     const parts = try collectArgs(allocator, args);
     defer allocator.free(parts);
     return clean.run(allocator, io, home, parts);
+}
+
+fn compactCommandArgs(allocator: std.mem.Allocator, io: std.Io, home: []const u8, args: *std.process.Args.Iterator) !void {
+    const parts = try collectArgs(allocator, args);
+    defer allocator.free(parts);
+    return commands.compactFromArgs(allocator, io, home, parts);
 }
 
 fn collectArgs(allocator: std.mem.Allocator, args: *std.process.Args.Iterator) ![][]const u8 {
