@@ -29,7 +29,9 @@ install -m 0755 "$root/scripts/setup-turboquant-linux.sh" "$scripts_dir/setup-tu
 install -m 0755 "$root/scripts/serve-model.sh" "$scripts_dir/serve-model.sh"
 install -m 0644 "$root/graphs/zinc-loop.circuitry.yaml" "$share_dir/graphs/zinc-loop.circuitry.yaml"
 install -m 0644 "$root/graphs/zinc-context-recovery.circuitry.yaml" "$share_dir/graphs/zinc-context-recovery.circuitry.yaml"
+install -m 0644 "$root/graphs/zinc-compaction.circuitry.yaml" "$share_dir/graphs/zinc-compaction.circuitry.yaml"
 install -m 0644 "$root/prompts/circuitry-author.md" "$share_dir/prompts/circuitry-author.md"
+install -m 0644 "$root/prompts/bash-guide.md" "$share_dir/prompts/bash-guide.md"
 
 mkdir -p "$HOME/.config/zinc"
 vram_allocation_percent="87.5"
@@ -43,6 +45,8 @@ graph = "$share_dir/graphs/zinc-loop.circuitry.yaml"
 compiled_plan = "$share_dir/compiled/plan.json"
 provider_base_url = "http://127.0.0.1:30000/v1"
 max_retries = 5
+compaction_threshold_percent = 70
+compaction_graph = "$share_dir/graphs/zinc-compaction.circuitry.yaml"
 default_model = "gemma-heretic"
 
 [models.gemma-heretic]

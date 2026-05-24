@@ -128,6 +128,20 @@ pub fn printSessionDir(allocator: Allocator) !void {
     std.debug.print("{s}\n", .{dir});
 }
 
+fn resolvePromptPackContent(allocator: Allocator, home: []const u8, pack: graph.PromptPack) ![]u8 {
+    const trimmed = std.mem.trim(u8, pack.content, " \t\r\n");
+    if (!std.mem.startsWith(u8, trimmed, "---\n")) return allocator.dupe(u8, pack.content);
+    const rest = trimmed[4..];
+    const end = std.mem.indexOf(u8, rest, "\n---") orelse return allocator.dupe(u8, pack.content);
+    const body = std.mem.trim(u8, rest[end + "\n---".len ..], " \t\r\n");
+    if (!std.mem.startsWith(u8, body, "prompt:")) return allocator.dupe(u8, pack.content);
+    const id = std.mem.trim(u8, body["prompt:".len..], " \t\r\n");
+    if (id.len == 0) return allocator.dupe(u8, pack.content);
+    const filename = try std.fmt.allocPrint(allocator, "{s}.md", .{id});
+    defer allocator.free(filename);
+    return config.readPromptPack(allocator, home, filename);
+}
+
 fn graphInvocationPrompt(allocator: Allocator, graph_path: []const u8, args: []const []const u8) ![]u8 {
     var inputs: std.ArrayList([]const u8) = .empty;
     defer inputs.deinit(allocator);
@@ -332,8 +346,10 @@ fn compileGraphFile(allocator: Allocator, graph_path: []const u8, out_path: []co
         try files.appendJsonString(allocator, &compiled, pack.title);
         try compiled.appendSlice(allocator, ",\"description\":");
         try files.appendJsonString(allocator, &compiled, pack.description);
+        const content = try resolvePromptPackContent(allocator, home, pack);
+        defer allocator.free(content);
         try compiled.appendSlice(allocator, ",\"content\":");
-        try files.appendJsonString(allocator, &compiled, pack.content);
+        try files.appendJsonString(allocator, &compiled, content);
         try compiled.append(allocator, '}');
     }
     try compiled.appendSlice(allocator, "],\"expect\":{\"response\":\"str\"}}");
