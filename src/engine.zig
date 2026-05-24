@@ -116,42 +116,36 @@ pub fn run(allocator: Allocator, io: std.Io, home: []const u8, user_prompt: []co
             return;
         }
 
-        var unavailable_tool: ?[]const u8 = null;
-        for (turn.tool_calls) |call| if (!plan.allowsTool(call.name)) {
-            unavailable_tool = call.name;
-            break;
-        };
-        if (unavailable_tool) |name| {
-            try sessions.appendRuntimeError(allocator, session.path, Phase.assistant_turn, RuntimeEvent.contract_failure, "ToolNotAvailable", name);
-            if (correction_retries >= runtime.max_retries) return error.ToolNotAllowedByGraph;
-            correction_retries += 1;
-            const retry = try buildUnavailableToolRetryPrompt(allocator, name, plan.tools);
-            defer allocator.free(retry);
-            try provider.appendMessage(allocator, &messages, .{ .role = "user", .content = retry });
-            continue;
-        }
-        if (try firstInvalidToolArguments(allocator, turn.tool_calls)) |bad| {
-            try sessions.appendRuntimeError(allocator, session.path, Phase.assistant_turn, RuntimeEvent.contract_failure, "InvalidToolArguments", bad.name);
-            if (correction_retries >= runtime.max_retries) return error.InvalidToolArguments;
-            correction_retries += 1;
-            const retry = try buildInvalidToolArgumentsRetryPrompt(allocator, bad.name, bad.arguments);
-            defer allocator.free(retry);
-            try provider.appendMessage(allocator, &messages, .{ .role = "user", .content = retry });
-            continue;
-        }
-        correction_retries = 0;
         try provider.appendMessage(allocator, &messages, .{ .role = "assistant", .content = turn.text, .tool_calls = turn.tool_calls });
         if (turn.reasoning.len > 0) {
             try sessions.appendRuntimeEvent(allocator, session.path, Phase.assistant_turn, RuntimeEvent.model_output, turn.reasoning);
         }
         for (turn.tool_calls) |call| {
             try sessions.appendToolEvent(allocator, session.path, RuntimeEvent.tool_call, call.name, call.arguments);
-            const result = try executeToolWithRuntimeReads(allocator, io, read_context, call.name, call.arguments);
+            const result = try executeToolCall(allocator, io, read_context, plan.tools, call);
             defer allocator.free(result);
+            if (isToolFailure(result)) {
+                if (correction_retries >= runtime.max_retries) return error.ToolCallFailed;
+                correction_retries += 1;
+            } else {
+                correction_retries = 0;
+            }
             try sessions.appendToolEvent(allocator, session.path, RuntimeEvent.tool_result, call.name, result);
             try provider.appendMessage(allocator, &messages, .{ .role = "tool", .content = result, .name = call.name, .tool_call_id = call.id });
         }
     }
+}
+
+fn executeToolCall(allocator: Allocator, io: std.Io, ctx: RuntimeReadContext, available_tools: []const []const u8, call: provider.ToolCall) ![]u8 {
+    if (!allowsTool(available_tools, call.name)) return toolFailureResult(allocator, call.name, "ToolNotAvailable", "tool is not available in this graph", call.arguments);
+    tools.validateArguments(allocator, call.name, call.arguments) catch |err| return switch (err) {
+        error.OutOfMemory => err,
+        else => toolFailureResult(allocator, call.name, @errorName(err), "tool arguments did not match the required JSON schema", call.arguments),
+    };
+    return executeToolWithRuntimeReads(allocator, io, ctx, call.name, call.arguments) catch |err| switch (err) {
+        error.OutOfMemory => err,
+        else => toolFailureResult(allocator, call.name, @errorName(err), "tool execution failed", call.arguments),
+    };
 }
 
 fn executeToolWithRuntimeReads(allocator: Allocator, io: std.Io, ctx: RuntimeReadContext, name: []const u8, arg_text: []const u8) ![]u8 {
@@ -281,27 +275,23 @@ fn buildContractRetryPrompt(allocator: Allocator, err: anyerror, raw: []const u8
     , .{ @errorName(err), raw });
 }
 
-fn firstInvalidToolArguments(allocator: Allocator, calls: []const provider.ToolCall) !?provider.ToolCall {
-    for (calls) |call| tools.validateArguments(allocator, call.name, call.arguments) catch |err| switch (err) {
-        error.OutOfMemory => return err,
-        else => return call,
-    };
-    return null;
+fn toolFailureResult(allocator: Allocator, tool_name: []const u8, error_name: []const u8, message: []const u8, arguments: []const u8) ![]u8 {
+    var out: std.ArrayList(u8) = .empty;
+    errdefer out.deinit(allocator);
+    try out.appendSlice(allocator, "{\"ok\":false,\"tool\":");
+    try files.appendJsonString(allocator, &out, tool_name);
+    try out.appendSlice(allocator, ",\"error\":");
+    try files.appendJsonString(allocator, &out, error_name);
+    try out.appendSlice(allocator, ",\"message\":");
+    try files.appendJsonString(allocator, &out, message);
+    try out.appendSlice(allocator, ",\"arguments\":");
+    try files.appendJsonString(allocator, &out, arguments);
+    try out.append(allocator, '}');
+    return out.toOwnedSlice(allocator);
 }
 
-fn buildInvalidToolArgumentsRetryPrompt(allocator: Allocator, name: []const u8, arguments: []const u8) ![]u8 {
-    return std.fmt.allocPrint(allocator,
-        \\Runtime contract failure.
-        \\
-        \\Zinc rejected your previous tool call before executing it.
-        \\Tool: {s}
-        \\Reason: arguments were not a valid JSON object matching the tool schema.
-        \\
-        \\Rejected arguments:
-        \\{s}
-        \\
-        \\Retry this assistant turn cleanly. If you need a tool, emit exactly one valid tool call with complete JSON arguments.
-    , .{ name, arguments });
+fn isToolFailure(result: []const u8) bool {
+    return std.mem.startsWith(u8, std.mem.trim(u8, result, " \t\r\n"), "{\"ok\":false");
 }
 
 fn buildUnavailableToolRetryPrompt(allocator: Allocator, unavailable: []const u8, available: []const []const u8) ![]u8 {
@@ -374,40 +364,34 @@ fn recoverFocusedContext(allocator: Allocator, io: std.Io, provider_base_url: []
 
         if (turn.tool_calls.len == 0) return provider.cleanText(allocator, turn.text);
 
-        var unavailable_tool: ?[]const u8 = null;
-        for (turn.tool_calls) |call| if (!allowsTool(available_tools, call.name)) {
-            unavailable_tool = call.name;
-            break;
-        };
-        if (unavailable_tool) |name| {
-            try sessions.appendRuntimeError(allocator, session_path, "focused_recovery", RuntimeEvent.contract_failure, "ToolNotAvailable", name);
-            if (correction_retries >= max_retries) return error.ToolNotAllowedByGraph;
-            correction_retries += 1;
-            const retry = try buildUnavailableToolRetryPrompt(allocator, name, available_tools);
-            defer allocator.free(retry);
-            try provider.appendMessage(allocator, &messages, .{ .role = "user", .content = retry });
-            continue;
-        }
-        if (try firstInvalidToolArguments(allocator, turn.tool_calls)) |bad| {
-            try sessions.appendRuntimeError(allocator, session_path, "focused_recovery", RuntimeEvent.contract_failure, "InvalidToolArguments", bad.name);
-            if (correction_retries >= max_retries) return error.InvalidToolArguments;
-            correction_retries += 1;
-            const retry = try buildInvalidToolArgumentsRetryPrompt(allocator, bad.name, bad.arguments);
-            defer allocator.free(retry);
-            try provider.appendMessage(allocator, &messages, .{ .role = "user", .content = retry });
-            continue;
-        }
-        correction_retries = 0;
         try provider.appendMessage(allocator, &messages, .{ .role = "assistant", .content = turn.text, .tool_calls = turn.tool_calls });
         if (turn.reasoning.len > 0) try sessions.appendRuntimeEvent(allocator, session_path, "focused_recovery", RuntimeEvent.model_output, turn.reasoning);
         for (turn.tool_calls) |call| {
             try sessions.appendToolEvent(allocator, session_path, RuntimeEvent.tool_call, call.name, call.arguments);
-            const result = try tools.execute(allocator, io, call.name, call.arguments);
+            const result = try executeFocusedToolCall(allocator, io, available_tools, call);
             defer allocator.free(result);
+            if (isToolFailure(result)) {
+                if (correction_retries >= max_retries) return error.ToolCallFailed;
+                correction_retries += 1;
+            } else {
+                correction_retries = 0;
+            }
             try sessions.appendToolEvent(allocator, session_path, RuntimeEvent.tool_result, call.name, result);
             try provider.appendMessage(allocator, &messages, .{ .role = "tool", .content = result, .name = call.name, .tool_call_id = call.id });
         }
     }
+}
+
+fn executeFocusedToolCall(allocator: Allocator, io: std.Io, available_tools: []const []const u8, call: provider.ToolCall) ![]u8 {
+    if (!allowsTool(available_tools, call.name)) return toolFailureResult(allocator, call.name, "ToolNotAvailable", "tool is not available in this graph", call.arguments);
+    tools.validateArguments(allocator, call.name, call.arguments) catch |err| return switch (err) {
+        error.OutOfMemory => err,
+        else => toolFailureResult(allocator, call.name, @errorName(err), "tool arguments did not match the required JSON schema", call.arguments),
+    };
+    return tools.execute(allocator, io, call.name, call.arguments) catch |err| switch (err) {
+        error.OutOfMemory => err,
+        else => toolFailureResult(allocator, call.name, @errorName(err), "tool execution failed", call.arguments),
+    };
 }
 
 fn allowsTool(available: []const []const u8, name: []const u8) bool {
