@@ -1,14 +1,13 @@
-circuitry: "0.2.99"
+circuitry: "0.3"
 resources:
   session_log:
     type: text
     label: "Raw session log"
     value: ""
-
   recovered_context:
     type: agent
     identity: "Context recovery"
-    inputs: [user_turn, session_log]
+    inputs: [session_log]
     expect:
       summary: str
       relevant_facts:

@@ -189,7 +189,8 @@ fn compileGraphFile(allocator: Allocator, graph_path: []const u8, out_path: []co
     defer allocator.free(text);
     try graph.validateText(text);
 
-    const context_instructions = try graph.extractResourceInstructions(allocator, text, "recovered_context");
+    const context_resource = graph.findResourceByIdentity(text, "Context recovery") orelse return error.InvalidCircuitryGraph;
+    const context_instructions = try graph.extractResourceInstructions(allocator, text, context_resource);
     defer allocator.free(context_instructions);
     const instructions = try graph.extractResourceInstructions(allocator, text, "assistant");
     defer allocator.free(instructions);
