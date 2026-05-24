@@ -110,15 +110,6 @@ pub fn run(allocator: Allocator, io: std.Io, home: []const u8, user_prompt: []co
                 try provider.appendMessage(allocator, &messages, .{ .role = "user", .content = retry });
                 continue;
             }
-            if (looksLikeTextToolCall(response, plan.tools)) {
-                try recordContractFailure(allocator, session.path, error.TextToolCall, response);
-                if (correction_retries >= runtime.max_retries) return error.TextToolCall;
-                correction_retries += 1;
-                const retry = try buildTextToolCallRetryPrompt(allocator, response);
-                defer allocator.free(retry);
-                try provider.appendMessage(allocator, &messages, .{ .role = "user", .content = retry });
-                continue;
-            }
             try sessions.appendEvent(allocator, session.path, "assistant", response);
             _ = try files.linuxWrite(1, response);
             _ = try files.linuxWrite(1, "\n");
@@ -293,31 +284,6 @@ fn latestUserMessage(allocator: Allocator, session_log: []const u8) ![]u8 {
 fn recordContractFailure(allocator: Allocator, session_path: []const u8, err: anyerror, raw: []const u8) !void {
     std.debug.print("runtime contract failure: {s}\nraw assistant output:\n{s}\n", .{ @errorName(err), raw });
     try sessions.appendRuntimeError(allocator, session_path, Phase.assistant_turn, RuntimeEvent.contract_failure, @errorName(err), raw);
-}
-
-fn looksLikeTextToolCall(text: []const u8, available_tools: []const []const u8) bool {
-    var lines = std.mem.splitScalar(u8, text, '\n');
-    while (lines.next()) |line_raw| {
-        var line = std.mem.trim(u8, line_raw, " \t\r`*_>");
-        if (std.mem.startsWith(u8, line, "tool:")) line = std.mem.trim(u8, line["tool:".len..], " \t");
-        for (available_tools) |tool| {
-            if (!std.mem.startsWith(u8, line, tool)) continue;
-            const rest = std.mem.trim(u8, line[tool.len..], " \t");
-            if (rest.len != 0 and (rest[0] == ':' or rest[0] == '{' or rest[0] == '(')) return true;
-        }
-    }
-    return false;
-}
-
-fn buildTextToolCallRetryPrompt(allocator: Allocator, output: []const u8) ![]u8 {
-    return std.fmt.allocPrint(allocator,
-        \\wrong. you printed a tool call as text instead of using the actual tool channel.
-        \\
-        \\printed output:
-        \\{s}
-        \\
-        \\try again. if you need bash/read/etc, make an actual tool call. do not write markdown or textual tool calls.
-    , .{output});
 }
 
 fn buildContractRetryPrompt(allocator: Allocator, err: anyerror, raw: []const u8) ![]u8 {
