@@ -116,7 +116,7 @@ pub fn run(allocator: Allocator, io: std.Io, home: []const u8, user_prompt: []co
             return;
         }
 
-        if (try logAndReportUnreplayableToolCall(allocator, session.path, plan.tools, turn.tool_calls, &messages, runtime.max_retries, &correction_retries)) continue;
+        if (try logAndReportUnreplayableToolCall(allocator, session.path, plan.tools, turn.tool_calls, &messages, runtime.max_retries, &correction_retries, user_prompt)) continue;
         try provider.appendMessage(allocator, &messages, .{ .role = "assistant", .content = turn.text, .tool_calls = turn.tool_calls });
         if (turn.reasoning.len > 0) {
             try sessions.appendRuntimeEvent(allocator, session.path, Phase.assistant_turn, RuntimeEvent.model_output, turn.reasoning);
@@ -137,7 +137,7 @@ pub fn run(allocator: Allocator, io: std.Io, home: []const u8, user_prompt: []co
     }
 }
 
-fn logAndReportUnreplayableToolCall(allocator: Allocator, session_path: []const u8, available_tools: []const []const u8, calls: []const provider.ToolCall, messages: *std.ArrayList(provider.Message), max_retries: usize, correction_retries: *usize) !bool {
+fn logAndReportUnreplayableToolCall(allocator: Allocator, session_path: []const u8, available_tools: []const []const u8, calls: []const provider.ToolCall, messages: *std.ArrayList(provider.Message), max_retries: usize, correction_retries: *usize, user_prompt: []const u8) !bool {
     for (calls) |call| {
         const result = try unreplayableToolFailure(allocator, available_tools, call) orelse continue;
         defer allocator.free(result);
@@ -145,7 +145,7 @@ fn logAndReportUnreplayableToolCall(allocator: Allocator, session_path: []const 
         try sessions.appendToolEvent(allocator, session_path, RuntimeEvent.tool_result, call.name, result);
         if (correction_retries.* >= max_retries) return error.ToolCallFailed;
         correction_retries.* += 1;
-        const retry = try buildToolFailureRetryPrompt(allocator, result);
+        const retry = try buildToolFailureRetryPrompt(allocator, call.name, result, user_prompt);
         defer allocator.free(retry);
         try provider.appendMessage(allocator, messages, .{ .role = "user", .content = retry });
         return true;
@@ -320,15 +320,24 @@ fn isToolFailure(result: []const u8) bool {
     return std.mem.startsWith(u8, std.mem.trim(u8, result, " \t\r\n"), "{\"ok\":false");
 }
 
-fn buildToolFailureRetryPrompt(allocator: Allocator, result: []const u8) ![]u8 {
-    return std.fmt.allocPrint(allocator,
-        \\wrong. your actual tool call failed.
-        \\
-        \\tool output:
-        \\{s}
-        \\
-        \\try again with a valid actual tool call, or answer if no tool is needed.
-    , .{result});
+fn buildToolFailureRetryPrompt(allocator: Allocator, tool_name: []const u8, result: []const u8, original_request: []const u8) ![]u8 {
+    const err = jsonStringField(result, "error") orelse "ToolCallFailed";
+    const message = jsonStringField(result, "message") orelse "tool call failed";
+    _ = message;
+    return std.fmt.allocPrint(allocator, "The previous {s} tool call failed before execution: {s}. Use {s} now. Original request: {s}", .{ tool_name, err, tool_name, original_request });
+}
+
+fn jsonStringField(json: []const u8, field: []const u8) ?[]const u8 {
+    var needle_buf: [64]u8 = undefined;
+    if (field.len + 4 > needle_buf.len) return null;
+    needle_buf[0] = '"';
+    @memcpy(needle_buf[1 .. 1 + field.len], field);
+    @memcpy(needle_buf[1 + field.len .. 4 + field.len], "\":\"");
+    const needle = needle_buf[0 .. field.len + 4];
+    const start = std.mem.indexOf(u8, json, needle) orelse return null;
+    const value_start = start + needle.len;
+    const value_end = std.mem.indexOfScalarPos(u8, json, value_start, '"') orelse return null;
+    return json[value_start..value_end];
 }
 
 fn buildUnavailableToolRetryPrompt(allocator: Allocator, unavailable: []const u8, available: []const []const u8) ![]u8 {
@@ -401,7 +410,7 @@ fn recoverFocusedContext(allocator: Allocator, io: std.Io, provider_base_url: []
 
         if (turn.tool_calls.len == 0) return provider.cleanText(allocator, turn.text);
 
-        if (try logAndReportUnreplayableToolCall(allocator, session_path, available_tools, turn.tool_calls, &messages, max_retries, &correction_retries)) continue;
+        if (try logAndReportUnreplayableToolCall(allocator, session_path, available_tools, turn.tool_calls, &messages, max_retries, &correction_retries, user_prompt)) continue;
         try provider.appendMessage(allocator, &messages, .{ .role = "assistant", .content = turn.text, .tool_calls = turn.tool_calls });
         if (turn.reasoning.len > 0) try sessions.appendRuntimeEvent(allocator, session_path, "focused_recovery", RuntimeEvent.model_output, turn.reasoning);
         for (turn.tool_calls) |call| {
