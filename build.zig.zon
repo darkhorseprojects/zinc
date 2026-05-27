@@ -13,5 +13,6 @@
         ".zinc/prompts",
         "scripts",
         "README.md",
+        "LICENSE",
     },
 }

@@ -1,14 +1,24 @@
 # Zinc
 
-Zinc is a small local runtime for Circuitry agent graphs.
+[![release](https://img.shields.io/github/v/release/darkhorseprojects/zinc?include_prereleases&label=release)](https://github.com/darkhorseprojects/zinc/releases)
+[![license](https://img.shields.io/badge/license-Apache--2.0-blue)](#license)
+[![zig](https://img.shields.io/badge/zig-0.16-orange)](https://ziglang.org/)
 
-It keeps the boundary sharp:
+Zinc is a tiny Circuitry-native runtime for local coding agents.
 
 ```text
-Circuitry YAML -> resolved graph bundle -> Zinc loop plan -> local OpenAI-compatible agent loop
+Circuitry graph -> Zinc loop plan -> semantic session log -> OpenAI/tool loop -> local llama.cpp server
 ```
 
-Circuitry owns YAML, imports, schema checks, and normalization. Zinc owns local config, packages, session context, tools, compaction, and the llama.cpp server lifecycle.
+Circuitry owns YAML, imports, validation, and graph normalization. Zinc consumes resolved Circuitry JSON bundles and handles the local runtime: config, packages, context, tools, compaction, and model serving.
+
+## Primary contracts
+
+- Circuitry graphs are source programs: `resources:`, `args:`, `imports:`.
+- `circuitry parse graph.circuitry.yaml` is Zinc's graph loader boundary.
+- `zn compile` compiles loop entrypoint graphs.
+- `zn compact` owns compaction graphs.
+- Packages install graphs, prompts, and assets without becoming part of Zinc itself.
 
 ## Install
 
@@ -17,24 +27,22 @@ npm install -g @darkhorseprojects/circuitry@0.3.9
 ./scripts/install-linux.sh
 ```
 
-The installer builds `zn`, installs stock graphs/prompts under `~/.local/share/zinc`, and creates `~/.config/zinc/config.yaml` if one does not already exist.
+Installs:
 
-## Daily use
-
-```bash
-zn "explain this repo"
-zn run --graph repair --text notes=@notes.md "fix the failing test"
-zn compact
-zn update
+```text
+~/.local/bin/zn
+~/.local/share/zinc/graphs/*.circuitry.yaml
+~/.local/share/zinc/prompts/*.md
+~/.config/zinc/config.yaml
 ```
 
-`zn update` updates installed Zinc packages, then updates Zinc from `https://github.com/darkhorseprojects/zinc.git` and reruns the installer. Use `--skip-packages` or `--skip-zinc` to update only one side.
+The installer preserves an existing config file.
 
 ## Commands
 
 ```bash
-zn [--session id|--continue] <prompt>
-zn run [--graph id|path] [--input name=value] [--text name=value|@file] [--file name=path] [--image name=path] [--session id|--continue] <prompt>
+zn "prompt"
+zn run [--graph id|path] [--input name=value] [--text name=value|@file] [--file name=path] [--image name=path] [--session id|--continue] "prompt"
 
 zn check [graph]
 zn compile [graph] [plan.json]
@@ -58,10 +66,11 @@ zn stop
 
 ## Graphs
 
-A Zinc loop graph is a Circuitry source graph with runtime args and at least one tool-using agent.
+A Zinc loop graph is a Circuitry graph with runtime args and a tool-using agent.
 
 ```yaml
 circuitry: "0.3.2"
+title: Repair loop
 args:
   user_turn:
     type: text
@@ -73,6 +82,7 @@ resources:
   user_turn:
     type: text
     value: ""
+
   assistant:
     type: agent
     identity: Zinc
@@ -84,26 +94,27 @@ resources:
       Be direct. Use tools when useful.
 ```
 
-Runtime bindings:
+Runtime inputs overlay declared resources for one run:
 
-```text
---input name=value   text literal
---text name=value    text literal
---text name=@file    text loaded from file
---file name=path     file input, readable as input:<name>
---image name=path    image input sent as model image content
+```bash
+zn run --graph repair \
+  --text notes=@notes.md \
+  --file spec=./SPEC.md \
+  --image screenshot=./shot.png \
+  "fix this"
 ```
 
 If the graph declares a text arg named `user_turn`, the positional prompt binds to it.
 
 ## Packages
 
-A package is a directory with `zinc.pkg.yaml` plus exported files.
+A package is a directory with `zinc.pkg.yaml` and exported assets.
 
 ```yaml
 name: browser-repair
 version: 0.1.0
 description: Browser repair graphs and prompts.
+
 exports:
   graphs:
     repair: graphs/repair.circuitry.yaml
@@ -121,9 +132,29 @@ zn pkg add github:user/repo
 zn pkg add github:user/repo/path/to/package
 zn pkg add github:user/repo#v1.0.0
 zn pkg add https://github.com/user/repo.git#<commit>
+zn pkg add git+https://github.com/user/repo.git#<commit>
 ```
 
-Local packages install to `.zinc/packages`. Global packages install to `~/.local/share/zinc/packages`. Local packages win when names overlap.
+Local packages live in `.zinc/packages`. Global packages live in `~/.local/share/zinc/packages`. Local packages override global packages.
+
+`zn pkg update <name>` reinstalls from the recorded source. If the source is pinned with `#tag` or `#commit`, the update remains pinned.
+
+`zn update` updates every installed package, then updates Zinc itself and reruns the installer.
+
+## Runtime model
+
+```text
+load config
+resolve graph
+compile loop plan
+assemble session context
+call provider
+execute graph-declared tools
+append semantic JSONL rows
+compact when context pressure crosses threshold
+```
+
+Sessions are stored as semantic JSONL in `.zinc/sessions`. Tool calls and results replay as provider messages when a session continues.
 
 ## Config
 
@@ -135,38 +166,32 @@ Config precedence:
 built-in defaults
 ```
 
-Useful keys:
+Common keys:
 
 ```yaml
 paths:
   graph: ~/.local/share/zinc/graphs/zinc-loop.circuitry.yaml
   compiled_plan: ~/.local/share/zinc/compiled/plan.json
   compaction_graph: ~/.local/share/zinc/graphs/zinc-compaction.circuitry.yaml
+
 provider:
   base_url: http://127.0.0.1:30000/v1
   authorization: Bearer zinc
+
 runtime:
   max_retries: 5
   compaction_threshold_percent: 70
 ```
 
-## Runtime model
+Inspect a value:
 
-```text
-load config and graph
-compile graph to a loop plan
-assemble semantic session context
-call provider
-execute graph-declared tools
-append semantic JSONL rows
-compact when context pressure is high
+```bash
+zn config get provider.base_url
 ```
 
-Sessions live in `.zinc/sessions`. Tool calls and results replay as conversation messages.
+## llama.cpp server
 
-## Local model server
-
-`zn serve` clones/builds llama.cpp under `~/.local/share/zinc/llama.cpp`, downloads model files under `~/.local/share/zinc/models`, and starts `llama-server` for the configured model.
+`zn serve` owns the local model server lifecycle. It clones/builds llama.cpp under `~/.local/share/zinc/llama.cpp`, downloads model artifacts under `~/.local/share/zinc/models`, and starts `llama-server` for the configured model.
 
 ```bash
 zn serve
@@ -185,4 +210,4 @@ zig-out/bin/zn compile
 
 ## License
 
-TBD.
+Apache-2.0. See [`LICENSE`](LICENSE).
