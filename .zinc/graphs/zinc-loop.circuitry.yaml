@@ -1,4 +1,4 @@
-circuitry: "0.3.2"
+circuitry: "0.3.10"
 title: "Zinc default loop"
 description: |
   A minimal Circuitry agent loop. Runtime overlays provide the current

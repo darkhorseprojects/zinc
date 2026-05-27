@@ -23,7 +23,7 @@ Circuitry owns YAML, imports, validation, and graph normalization. Zinc consumes
 ## Install
 
 ```bash
-npm install -g @darkhorseprojects/circuitry@0.3.9
+npm install -g @darkhorseprojects/circuitry@0.3.10
 ./scripts/install-linux.sh
 ```
 
@@ -69,7 +69,7 @@ zn stop
 A Zinc loop graph is a Circuitry graph with runtime args and a tool-using agent.
 
 ```yaml
-circuitry: "0.3.2"
+circuitry: "0.3.10"
 title: Repair loop
 args:
   user_turn:

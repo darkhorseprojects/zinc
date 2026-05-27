@@ -25,7 +25,7 @@ fi
 circuitry_bin="$(command -v circuitry)"
 circuitry_version="$(node -e 'const fs=require("fs"),path=require("path"); const bin=fs.realpathSync(process.argv[1]); console.log(require(path.join(path.dirname(bin), "..", "package.json")).version)' "$circuitry_bin" 2>/dev/null || true)"
 case "$circuitry_version" in
-  0.3.9|0.3.1[0-9]*|0.[4-9].*|[1-9].*) ;;
+  0.3.10|0.3.1[0-9]*|0.[4-9].*|[1-9].*) ;;
   *) echo "Zinc requires circuitry >= 0.3.9; found ${circuitry_version:-unknown}" >&2; exit 1 ;;
 esac
 

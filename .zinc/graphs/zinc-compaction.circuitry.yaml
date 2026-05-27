@@ -1,4 +1,4 @@
-circuitry: "0.3.2"
+circuitry: "0.3.10"
 title: "Zinc context compaction"
 description: |
   Converts the middle of a Zinc session transcript into a durable summary that
