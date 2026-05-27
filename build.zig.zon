@@ -12,7 +12,6 @@
         ".zinc/graphs",
         ".zinc/prompts",
         "scripts",
-        "wiki",
         "README.md",
     },
 }
