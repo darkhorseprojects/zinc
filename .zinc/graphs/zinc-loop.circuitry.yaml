@@ -50,4 +50,3 @@ resources:
       Answer in plain text after you have enough context.
       Use tools when they are fit for the task.
       Read prompts to lazily load packets of context.
-      For bash commands, read the Bash Guide before executing.

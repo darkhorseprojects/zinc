@@ -1,7 +1,7 @@
 const std = @import("std");
-const files = @import("../files.zig");
-const graph = @import("../graph.zig");
-const layout = @import("../layout.zig");
+const files = @import("../sys/fs.zig");
+const graph = @import("../core/graph.zig");
+const layout = @import("../sys/layout.zig");
 
 const Allocator = std.mem.Allocator;
 
@@ -361,11 +361,18 @@ fn loadConfigValue(allocator: Allocator, io: std.Io, path: []const u8, json_text
 }
 
 fn parseYamlFileToJSON(allocator: Allocator, io: std.Io, path: []const u8) ![]u8 {
-    const result = try std.process.run(allocator, io, .{
+    const result = std.process.run(allocator, io, .{
         .argv = &.{ "circuitry", "parse", path },
         .stderr_limit = .limited(64 * 1024),
         .stdout_limit = .limited(16 * 1024 * 1024),
-    });
+    }) catch |err| switch (err) {
+        error.FileNotFound => {
+            std.debug.print("error: 'circuitry' command not found. Please ensure circuitry is installed and in your PATH.\n", .{});
+            std.debug.print("To install circuitry, run:\n  npm install -g @darkhorseprojects/circuitry\n\n", .{});
+            return error.CircuitryNotFound;
+        },
+        else => return err,
+    };
     defer {
         allocator.free(result.stdout);
         allocator.free(result.stderr);

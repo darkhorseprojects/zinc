@@ -1,7 +1,7 @@
 const std = @import("std");
 const config = @import("runtime/config.zig");
-const files = @import("files.zig");
-const layout = @import("layout.zig");
+const files = @import("sys/fs.zig");
+const layout = @import("sys/layout.zig");
 
 const Allocator = std.mem.Allocator;
 const root = ".local/share/zinc";

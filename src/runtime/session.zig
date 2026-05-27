@@ -1,7 +1,7 @@
 const std = @import("std");
-const files = @import("../files.zig");
+const files = @import("../sys/fs.zig");
 const provider = @import("provider.zig");
-const tools = @import("../tools.zig");
+const tools = @import("../sys/process.zig");
 
 const Allocator = std.mem.Allocator;
 const first_message_count: usize = 6;

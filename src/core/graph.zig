@@ -1,5 +1,5 @@
 const std = @import("std");
-const files = @import("files.zig");
+const files = @import("../sys/fs.zig");
 
 const Allocator = std.mem.Allocator;
 
@@ -102,7 +102,18 @@ pub fn load(allocator: Allocator, io: std.Io, graph_path: []const u8) !Graph {
 }
 
 fn parseWithCircuitry(allocator: Allocator, io: std.Io, graph_path: []const u8) ![]u8 {
-    const result = try std.process.run(allocator, io, .{ .argv = &.{ "circuitry", "parse", graph_path }, .stderr_limit = .limited(64 * 1024), .stdout_limit = .limited(16 * 1024 * 1024) });
+    const result = std.process.run(allocator, io, .{
+        .argv = &.{ "circuitry", "parse", graph_path },
+        .stderr_limit = .limited(64 * 1024),
+        .stdout_limit = .limited(16 * 1024 * 1024)
+    }) catch |err| switch (err) {
+        error.FileNotFound => {
+            std.debug.print("error: 'circuitry' command not found. Please ensure circuitry is installed and in your PATH.\n", .{});
+            std.debug.print("To install circuitry, run:\n  npm install -g @darkhorseprojects/circuitry\n\n", .{});
+            return error.CircuitryNotFound;
+        },
+        else => return err,
+    };
     defer allocator.free(result.stderr);
     if (result.term != .exited or result.term.exited != 0) {
         std.debug.print("circuitry parse failed:\n{s}\n", .{result.stderr});

@@ -1,13 +1,13 @@
 const std = @import("std");
 const compaction = @import("compaction.zig");
-const config = @import("runtime/config.zig");
-const files = @import("files.zig");
+const config = @import("../runtime/config.zig");
+const files = @import("../sys/fs.zig");
 const plan_mod = @import("plan.zig");
-const provider = @import("runtime/provider.zig");
+const provider = @import("../runtime/provider.zig");
 const resource = @import("resource.zig");
-const sessions = @import("runtime/session.zig");
-const tools = @import("tools.zig");
-const trace = @import("trace.zig");
+const sessions = @import("../runtime/session.zig");
+const tools = @import("../sys/process.zig");
+const trace = @import("../sys/trace.zig");
 
 const Allocator = std.mem.Allocator;
 

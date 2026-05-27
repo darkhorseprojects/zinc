@@ -1,5 +1,5 @@
 const std = @import("std");
-const files = @import("files.zig");
+const files = @import("fs.zig");
 
 pub const Span = struct {
     name: []const u8,

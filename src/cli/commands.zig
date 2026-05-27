@@ -1,16 +1,21 @@
 const std = @import("std");
-const compaction = @import("compaction.zig");
-const config = @import("runtime/config.zig");
-const engine = @import("engine.zig");
-const files = @import("files.zig");
-const graph = @import("graph.zig");
-const layout = @import("layout.zig");
-const packages = @import("packages.zig");
-const plan = @import("plan.zig");
-const resource = @import("resource.zig");
-const sessions = @import("runtime/session.zig");
-const tools = @import("tools.zig");
-const trace = @import("trace.zig");
+const root = @import("../root.zig");
+const sys = root.sys;
+const core = root.core;
+const runtime = root.runtime;
+
+const compaction = core.compaction;
+const config = runtime.config;
+const engine = core.engine;
+const files = sys.fs;
+const graph = core.graph;
+const layout = sys.layout;
+const packages = core.packages;
+const plan = core.plan;
+const resource = core.resource;
+const sessions = runtime.session;
+const tools = sys.process;
+const trace = sys.trace;
 
 const Allocator = std.mem.Allocator;
 
@@ -21,6 +26,7 @@ pub fn usage() void {
         \\usage:
         \\  zn check [graph]
         \\  zn compile [graph] [compiled-plan]
+        \\  zn clean [--local|--global] [compiled | plan | sessions | logs | packages | state | all]
         \\  zn serve [model-id]
         \\  zn stop
         \\  zn status
@@ -557,4 +563,60 @@ fn compileLoopGraphFile(allocator: Allocator, io: std.Io, graph_path: []const u8
     }
     try compiled.appendSlice(allocator, "],\"expect\":{\"response\":\"str\"}}");
     try files.write(out_path, compiled.items);
+}
+
+pub fn clean(allocator: Allocator, io: std.Io, home: []const u8, scope: packages.Scope, target_str: []const u8) !void {
+    const Target = enum { compiled, plan, sessions, logs, packages, state, all };
+    const target = std.meta.stringToEnum(Target, target_str) orelse return error.InvalidCleanTarget;
+
+    var dir = std.Io.Dir.cwd();
+
+    switch (scope) {
+        .local => {
+            // Clean local compiled / plan
+            if (target == .compiled or target == .plan or target == .all) {
+                const runtime_paths = config.loadRuntimePaths(allocator, io, home) catch null;
+                defer if (runtime_paths) |rp| rp.deinit(allocator);
+                if (runtime_paths) |rp| {
+                    if (std.fs.path.dirname(rp.compiled_plan)) |compiled_dir| {
+                        dir.deleteTree(io, compiled_dir) catch |err| if (err != error.FileNotFound) return err;
+                    }
+                } else {
+                    dir.deleteTree(io, ".zinc/compiled") catch |err| if (err != error.FileNotFound) return err;
+                }
+            }
+
+            // Clean local sessions
+            if (target == .sessions or target == .all) {
+                dir.deleteTree(io, ".zinc/sessions") catch |err| if (err != error.FileNotFound) return err;
+            }
+
+            // Clean local logs
+            if (target == .logs or target == .all) {
+                dir.deleteTree(io, ".zinc/logs") catch |err| if (err != error.FileNotFound) return err;
+            }
+
+            // Clean local packages
+            if (target == .packages or target == .all) {
+                dir.deleteTree(io, ".zinc/packages") catch |err| if (err != error.FileNotFound) return err;
+            }
+        },
+        .global => {
+            // Clean global packages
+            if (target == .packages or target == .all) {
+                const global_pkgs = try layout.sharePath(allocator, home, "packages");
+                defer allocator.free(global_pkgs);
+                dir.deleteTree(io, global_pkgs) catch |err| if (err != error.FileNotFound) return err;
+            }
+
+            // Clean global state (PID, daemon logs, info)
+            if (target == .state or target == .all) {
+                const global_state = try layout.statePath(allocator, home, "");
+                defer allocator.free(global_state);
+                dir.deleteTree(io, global_state) catch |err| if (err != error.FileNotFound) return err;
+            }
+        },
+    }
+
+    std.debug.print("cleaned {s} {s} artifacts\n", .{ @tagName(scope), @tagName(target) });
 }

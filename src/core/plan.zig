@@ -1,6 +1,6 @@
 const std = @import("std");
-const files = @import("files.zig");
-const tools = @import("tools.zig");
+const files = @import("../sys/fs.zig");
+const tools = @import("../sys/process.zig");
 
 const Allocator = std.mem.Allocator;
 
