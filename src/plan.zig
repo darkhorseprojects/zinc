@@ -1,6 +1,6 @@
 const std = @import("std");
 const files = @import("files.zig");
-const tool_registry = @import("tool_registry.zig");
+const tools = @import("tools.zig");
 
 const Allocator = std.mem.Allocator;
 
@@ -18,6 +18,43 @@ pub const PromptPack = struct {
     }
 };
 
+pub const InputKind = enum { text, file, image };
+
+pub const InputSpec = struct {
+    id: []u8,
+    kind: InputKind,
+    required: bool,
+
+    pub fn deinit(self: InputSpec, allocator: Allocator) void {
+        allocator.free(self.id);
+    }
+};
+
+pub const RuntimeInput = struct {
+    id: []u8,
+    kind: InputKind,
+    value: []u8,
+    mime: []u8,
+
+    pub fn deinit(self: RuntimeInput, allocator: Allocator) void {
+        allocator.free(self.id);
+        allocator.free(self.value);
+        allocator.free(self.mime);
+    }
+};
+
+pub const ImageInput = struct {
+    id: []u8,
+    path: []u8,
+    mime: []u8,
+
+    pub fn deinit(self: ImageInput, allocator: Allocator) void {
+        allocator.free(self.id);
+        allocator.free(self.path);
+        allocator.free(self.mime);
+    }
+};
+
 pub const Plan = struct {
     prompt: []u8,
     focused_recovery_prompt: []u8,
@@ -28,12 +65,12 @@ pub const Plan = struct {
     temperature: f64,
     max_tokens: ?usize,
     context_tokens: usize,
-    tool_format: []u8,
-    reasoning_format: []u8,
     reasoning_tokens: isize,
     tools: [][]u8,
     tools_json: []u8,
     prompts: []PromptPack,
+    inputs: []InputSpec,
+    image_inputs: []ImageInput,
 
     pub fn deinit(self: Plan, allocator: Allocator) void {
         allocator.free(self.prompt);
@@ -43,13 +80,16 @@ pub const Plan = struct {
         allocator.free(self.focused_recovery_tools_json);
         allocator.free(self.model_id);
         allocator.free(self.model_alias);
-        allocator.free(self.tool_format);
-        allocator.free(self.reasoning_format);
+
         for (self.tools) |tool| allocator.free(tool);
         allocator.free(self.tools);
         allocator.free(self.tools_json);
         for (self.prompts) |prompt| prompt.deinit(allocator);
         allocator.free(self.prompts);
+        for (self.inputs) |input| input.deinit(allocator);
+        allocator.free(self.inputs);
+        for (self.image_inputs) |image| image.deinit(allocator);
+        allocator.free(self.image_inputs);
     }
 
     pub fn allowsTool(self: Plan, name: []const u8) bool {
@@ -85,6 +125,16 @@ pub fn load(allocator: Allocator, path: []const u8) !Plan {
         for (prompts) |prompt| prompt.deinit(allocator);
         allocator.free(prompts);
     }
+    const inputs = if (root.get("inputs")) |value| try readInputSpecs(allocator, value) else try allocator.alloc(InputSpec, 0);
+    errdefer {
+        for (inputs) |input| input.deinit(allocator);
+        allocator.free(inputs);
+    }
+    const image_inputs = if (root.get("image_inputs")) |value| try readImageInputs(allocator, value) else try allocator.alloc(ImageInput, 0);
+    errdefer {
+        for (image_inputs) |image| image.deinit(allocator);
+        allocator.free(image_inputs);
+    }
     return .{
         .prompt = try allocator.dupe(u8, (root.get("prompt") orelse return error.BadRuntimePlan).string),
         .focused_recovery_prompt = try allocator.dupe(u8, (root.get("focused_recovery_prompt") orelse return error.BadRuntimePlan).string),
@@ -95,12 +145,12 @@ pub fn load(allocator: Allocator, path: []const u8) !Plan {
         .temperature = try readF64(model_object.get("temperature") orelse return error.BadRuntimePlan),
         .max_tokens = try readOptionalUsize(model_object.get("max_tokens") orelse return error.BadRuntimePlan),
         .context_tokens = try readUsize(model_object.get("context_tokens") orelse return error.BadRuntimePlan),
-        .tool_format = try allocator.dupe(u8, (model_object.get("tool_format") orelse return error.BadRuntimePlan).string),
-        .reasoning_format = try allocator.dupe(u8, (model_object.get("reasoning_format") orelse return error.BadRuntimePlan).string),
         .reasoning_tokens = try readIsize(model_object.get("reasoning_tokens") orelse return error.BadRuntimePlan),
         .tools = tool_names,
         .tools_json = tools_json,
         .prompts = prompts,
+        .inputs = inputs,
+        .image_inputs = image_inputs,
     };
 }
 
@@ -150,9 +200,64 @@ fn readToolNames(allocator: Allocator, value: std.json.Value) ![][]u8 {
     return out;
 }
 
-fn freeToolNames(allocator: Allocator, tools: [][]u8) void {
-    for (tools) |tool| allocator.free(tool);
-    allocator.free(tools);
+fn freeToolNames(allocator: Allocator, tool_names: [][]u8) void {
+    for (tool_names) |tool| allocator.free(tool);
+    allocator.free(tool_names);
+}
+
+pub fn inputKindName(kind: InputKind) []const u8 {
+    return switch (kind) {
+        .text => "text",
+        .file => "file",
+        .image => "image",
+    };
+}
+
+pub fn parseInputKind(raw: []const u8) !InputKind {
+    if (std.mem.eql(u8, raw, "text")) return .text;
+    if (std.mem.eql(u8, raw, "file")) return .file;
+    if (std.mem.eql(u8, raw, "image")) return .image;
+    return error.BadRuntimePlan;
+}
+
+fn readInputSpecs(allocator: Allocator, value: std.json.Value) ![]InputSpec {
+    if (value != .array) return error.BadRuntimePlan;
+    var out = try allocator.alloc(InputSpec, value.array.items.len);
+    var initialized: usize = 0;
+    errdefer {
+        for (out[0..initialized]) |input| input.deinit(allocator);
+        allocator.free(out);
+    }
+    for (value.array.items, 0..) |item, i| {
+        if (item != .object) return error.BadRuntimePlan;
+        out[i] = .{
+            .id = try allocator.dupe(u8, readString(item.object, "id")),
+            .kind = try parseInputKind(readString(item.object, "type")),
+            .required = readBool(item.object, "required"),
+        };
+        initialized += 1;
+    }
+    return out;
+}
+
+fn readImageInputs(allocator: Allocator, value: std.json.Value) ![]ImageInput {
+    if (value != .array) return error.BadRuntimePlan;
+    var out = try allocator.alloc(ImageInput, value.array.items.len);
+    var initialized: usize = 0;
+    errdefer {
+        for (out[0..initialized]) |image| image.deinit(allocator);
+        allocator.free(out);
+    }
+    for (value.array.items, 0..) |item, i| {
+        if (item != .object) return error.BadRuntimePlan;
+        out[i] = .{
+            .id = try allocator.dupe(u8, readString(item.object, "id")),
+            .path = try allocator.dupe(u8, readString(item.object, "path")),
+            .mime = try allocator.dupe(u8, readString(item.object, "mime")),
+        };
+        initialized += 1;
+    }
+    return out;
 }
 
 fn readPrompts(allocator: Allocator, value: std.json.Value) ![]PromptPack {
@@ -182,15 +287,11 @@ fn readString(object: std.json.ObjectMap, field: []const u8) []const u8 {
     return value.string;
 }
 
-pub fn buildToolsJson(allocator: Allocator, tools: []const []const u8) ![]u8 {
-    var out: std.ArrayList(u8) = .empty;
-    errdefer out.deinit(allocator);
-    try out.append(allocator, '[');
-    for (tools, 0..) |tool_name, i| {
-        const tool = tool_registry.find(tool_name) orelse return error.UnknownTool;
-        if (i != 0) try out.append(allocator, ',');
-        try out.appendSlice(allocator, tool.schema);
-    }
-    try out.append(allocator, ']');
-    return out.toOwnedSlice(allocator);
+fn readBool(object: std.json.ObjectMap, field: []const u8) bool {
+    const value = object.get(field) orelse return false;
+    return if (value == .bool) value.bool else false;
+}
+
+pub fn buildToolsJson(allocator: Allocator, tool_names: []const []const u8) ![]u8 {
+    return tools.schemaJson(allocator, tool_names);
 }

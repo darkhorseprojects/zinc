@@ -6,11 +6,15 @@ Contract:
 graph source + runtime inputs -> node outputs/errors
 ```
 
-Use Circuitry v0.2.99 authored graph shape:
+Use Circuitry v0.3.2 authored graph shape:
 
 ```yaml
-circuitry: "0.2.99"
+circuitry: "0.3.2"
 title: Example workflow
+args:
+  brief:
+    type: text
+    required: true
 runtime:
   provider: zinc
   model: inherit
@@ -32,12 +36,17 @@ resources:
       Read the brief and output JSON matching expect.
 ```
 
-Split reusable graph pieces with `links:`:
+Split reusable graph pieces with `imports:`:
 
 ```yaml
-circuitry: "0.2.99"
-links:
-  - ./context-recovery.circuitry.yaml
+circuitry: "0.3.2"
+imports:
+  - path: ./context-recovery.circuitry.yaml
+    resources: "*"
+args:
+  user_turn:
+    type: text
+    required: true
 resources:
   user_turn:
     type: text
@@ -49,12 +58,12 @@ resources:
 
 Rules:
 
-- authored files use top-level `resources:` only
+- authored files use `imports:`, `args:`, and `resources:`
 - edges are derived from executable resource `inputs:` lists
-- `links:` paths are relative to the file that declares them
-- linked files merge resources before validation/execution
-- linked fragments may reference resources supplied by the parent graph
-- runtime inputs overlay existing `type: text` resources for one run
+- import paths are relative to the file that declares them
+- imported files merge selected resources before validation/execution
+- imported fragments may reference resources supplied by the parent graph
+- runtime inputs overlay existing text resources for one run
 - graph source changes only when authoring or refactoring a graph
 - request-specific values belong in runtime inputs, not source mutation
 - validate graph source before writing or running it
@@ -65,7 +74,7 @@ Recursive graph execution boundary:
 - runtime nodes do not directly run other graphs
 - if another graph should be run, call `request_circuitry_run`
 - include reason, graph path, inputs, expected result, and risk
-- root/user-facing Zinc approves by running `zn path/to/file.circuitry.yaml` or `zn run path/to/file.circuitry.yaml`
+- root/user-facing Zinc approves by running `zn --graph path/to/file.circuitry.yaml` or `zn run --graph path/to/file.circuitry.yaml`
 - do not recursively spawn graphs to avoid ordinary thinking
 
 Model selection precedence:

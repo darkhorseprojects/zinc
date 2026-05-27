@@ -1,0 +1,53 @@
+circuitry: "0.3.2"
+title: "Zinc default loop"
+description: |
+  A minimal Circuitry agent loop. Runtime overlays provide the current
+  user turn. Zinc assembles prior context deterministically, while the imported
+  context recovery fragment guides focused archive searches.
+imports:
+  - path: ./zinc-context-recovery.circuitry.yaml
+    resources: "*"
+runtime:
+  provider: zinc
+  model: inherit
+args:
+  user_turn:
+    type: text
+    required: true
+validation:
+  rules:
+    - no-self-loops
+    - no-unknown-edge-endpoints
+    - no-cycles
+    - rule: require-executable-inputs
+      executableKinds: [agent]
+resources:
+  prompt_bash_guide:
+    type: text
+    label: "Bash Guide"
+    value: |
+      ---
+      id: bash-guide
+      title: Bash Guide
+      description: Use when using bash for files, processes, network, HTTP, git, packages, logs, or command diagnostics.
+      ---
+      prompt:bash-guide
+
+  assistant:
+    type: agent
+    identity: "Zinc"
+    inputs: [assembled_context, focused_recovery, user_turn]
+    tools:
+      - read
+      - write
+      - edit
+      - bash
+      - request_circuitry_run
+    expect:
+      response: str
+    instructions: |
+      You are Zinc, a small local coding agent. Be direct, accurate, and natural.
+      Answer in plain text after you have enough context.
+      Use tools when they are fit for the task.
+      Read prompts to lazily load packets of context.
+      For bash commands, read the Bash Guide before executing.

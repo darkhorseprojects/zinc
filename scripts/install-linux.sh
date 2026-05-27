@@ -5,7 +5,8 @@ root="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd)"
 prefix="$HOME/.local"
 bin_dir="$prefix/bin"
 share_dir="$prefix/share/zinc"
-scripts_dir="$share_dir/scripts"
+config_dir="$HOME/.config/zinc"
+config_file="$config_dir/config.yaml"
 
 need() {
   if ! command -v "$1" >/dev/null 2>&1; then
@@ -15,74 +16,89 @@ need() {
 }
 
 need zig
-
+need git
+need node
+need circuitry
 if [[ "$(zig version)" != 0.16.* ]]; then
   echo "warning: Zinc was designed against Zig 0.16.x; found $(zig version)" >&2
 fi
+circuitry_bin="$(command -v circuitry)"
+circuitry_version="$(node -e 'const fs=require("fs"),path=require("path"); const bin=fs.realpathSync(process.argv[1]); console.log(require(path.join(path.dirname(bin), "..", "package.json")).version)' "$circuitry_bin" 2>/dev/null || true)"
+case "$circuitry_version" in
+  0.3.9|0.3.1[0-9]*|0.[4-9].*|[1-9].*) ;;
+  *) echo "Zinc requires circuitry >= 0.3.9; found ${circuitry_version:-unknown}" >&2; exit 1 ;;
+esac
 
 cd "$root"
 zig build -Doptimize=ReleaseFast
 
-mkdir -p "$bin_dir" "$scripts_dir" "$share_dir/graphs" "$share_dir/compiled" "$share_dir/prompts"
+mkdir -p "$bin_dir" "$share_dir/graphs" "$share_dir/compiled" "$share_dir/prompts" "$config_dir"
 install -m 0755 "$root/zig-out/bin/zn" "$bin_dir/zn"
-install -m 0755 "$root/scripts/setup-turboquant-linux.sh" "$scripts_dir/setup-turboquant-linux.sh"
-install -m 0755 "$root/scripts/serve-model.sh" "$scripts_dir/serve-model.sh"
-install -m 0644 "$root/graphs/zinc-loop.circuitry.yaml" "$share_dir/graphs/zinc-loop.circuitry.yaml"
-install -m 0644 "$root/graphs/zinc-context-recovery.circuitry.yaml" "$share_dir/graphs/zinc-context-recovery.circuitry.yaml"
-install -m 0644 "$root/graphs/zinc-compaction.circuitry.yaml" "$share_dir/graphs/zinc-compaction.circuitry.yaml"
-install -m 0644 "$root/prompts/circuitry-author.md" "$share_dir/prompts/circuitry-author.md"
-install -m 0644 "$root/prompts/bash-guide.md" "$share_dir/prompts/bash-guide.md"
+install -m 0644 "$root/.zinc/graphs/zinc-loop.circuitry.yaml" "$share_dir/graphs/zinc-loop.circuitry.yaml"
+install -m 0644 "$root/.zinc/graphs/zinc-context-recovery.circuitry.yaml" "$share_dir/graphs/zinc-context-recovery.circuitry.yaml"
+install -m 0644 "$root/.zinc/graphs/zinc-compaction.circuitry.yaml" "$share_dir/graphs/zinc-compaction.circuitry.yaml"
+install -m 0644 "$root/.zinc/prompts/circuitry-author.md" "$share_dir/prompts/circuitry-author.md"
+install -m 0644 "$root/.zinc/prompts/bash-guide.md" "$share_dir/prompts/bash-guide.md"
 
-mkdir -p "$HOME/.config/zinc"
-vram_allocation_percent="87.5"
-if [[ -f "$HOME/.config/zinc/config.toml" ]]; then
-  existing_vram="$(awk -F= '$1 ~ /^[[:space:]]*vram_allocation_percent[[:space:]]*$/ { gsub(/^[[:space:]]+|[[:space:]]+$/, "", $2); print $2; exit }' "$HOME/.config/zinc/config.toml")"
-  [[ -z "$existing_vram" ]] || vram_allocation_percent="$existing_vram"
-fi
-cat > "$HOME/.config/zinc/config.toml" <<EOF_CONFIG
-# Zinc global config. Project config at .zinc/config.toml can override these.
-graph = "$share_dir/graphs/zinc-loop.circuitry.yaml"
-compiled_plan = "$share_dir/compiled/plan.json"
-provider_base_url = "http://127.0.0.1:30000/v1"
-max_retries = 5
-compaction_threshold_percent = 70
-compaction_graph = "$share_dir/graphs/zinc-compaction.circuitry.yaml"
-default_model = "gemma-heretic"
+if [[ ! -f "$config_file" ]]; then
+cat > "$config_file" <<EOF_CONFIG
+default_model: qwen-heretic-mtp
 
-[models.gemma-heretic]
-engine = "llama-cpp-turboquant"
-alias = "gemma-4-96e-a4b-heretic-tq"
-hf_repo = "WaveCut/Gemma-4-96E-A4B-Heretic-TQ"
-hf_file = "Gemma-4-96E-A4B-Heretic-TQ3_1S.gguf"
-cache_type_k = "q8_0"
-cache_type_v = "turbo3"
-fit_ctx = 8192
-vram_allocation_percent = $vram_allocation_percent
-[models.gemma-heretic.runtime]
-tool_format = "gemma-native"
-reasoning_effort = "low"
-reasoning_format = "auto"
-temperature = 0.5
-max_tokens = 1024
-tool_reasoning = false
+paths:
+  graph: $share_dir/graphs/zinc-loop.circuitry.yaml
+  compiled_plan: $share_dir/compiled/plan.json
+  compaction_graph: $share_dir/graphs/zinc-compaction.circuitry.yaml
 
-[models.gemma-heretic.runtime.budgets]
-off = 0
-low = 256
-medium = 1024
-high = 4096
-extra-high = -1
+runtime:
+  max_retries: 5
+  compaction_threshold_percent: 70
+
+provider:
+  base_url: http://127.0.0.1:30000/v1
+  authorization: Bearer zinc
+
+models:
+  qwen-heretic-mtp:
+    model: qwen3.6-27b-heretic-mtp-q3_k_s
+    loader:
+      engine: llama.cpp
+      repo: https://github.com/ggml-org/llama.cpp.git
+      ref: master
+      hf_repo: mradermacher/Qwen3.6-27B-uncensored-heretic-v2-Native-MTP-Preserved-GGUF
+      hf_file: Qwen3.6-27B-uncensored-heretic-v2-Native-MTP-Preserved.Q3_K_S.gguf
+      mmproj_file: Qwen3.6-27B-uncensored-heretic-v2-Native-MTP-Preserved.mmproj-Q8_0.gguf
+      cache_type_k: q4_0
+      cache_type_v: q4_0
+      fit_ctx: 8192
+      gpu_layers: fit
+      draft_tokens: 2
+      reasoning_format: deepseek
+      mtp: true
+    generation:
+      temperature: 0.6
+      max_tokens: 1024
+    reasoning:
+      enabled: true
+      effort: low
+      budgets:
+        off: 0
+        low: 256
+        medium: 1024
+        high: 4096
+        extra_high: -1
+    protocol:
+      reasoning:
+        content_markers:
+          starts:
+            - "<think>\n"
+            - "<think>"
+          end: "</think>"
+
 EOF_CONFIG
+fi
 
-cat > "$bin_dir/zn-setup-turboquant" <<EOF
-#!/usr/bin/env bash
-exec "$scripts_dir/setup-turboquant-linux.sh" "\$@"
-EOF
-chmod 0755 "$bin_dir/zn-setup-turboquant"
-rm -f "$bin_dir/zn-setup-beellama" "$scripts_dir/setup-beellama-linux.sh" "$bin_dir/zn-serve-qwen36-27b-bee" "$scripts_dir/serve-qwen36-27b-bee.sh" "$bin_dir/zn-serve-gemma-heretic-bee" "$scripts_dir/serve-gemma-heretic-bee.sh" "$bin_dir/zn-serve-gemma-heretic" "$scripts_dir/serve-gemma-heretic-turboquant.sh" "$bin_dir/zn-serve"
+rm -f "$bin_dir/zn-setup-turboquant" "$bin_dir/zn-setup-beellama" "$bin_dir/zn-serve" "$share_dir/scripts/serve-model.sh" "$share_dir/scripts/setup-beellama-linux.sh" "$share_dir/scripts/setup-turboquant-linux.sh"
 "$bin_dir/zn" compile "$share_dir/graphs/zinc-loop.circuitry.yaml" "$share_dir/compiled/plan.json" >/dev/null
 
-
 echo "installed Zinc: $bin_dir/zn"
-echo "installed TurboQuant setup helper: $bin_dir/zn-setup-turboquant"
-echo "model server lifecycle: zn up / zn down"
+echo "model server lifecycle: zn serve / zn stop / zn status"

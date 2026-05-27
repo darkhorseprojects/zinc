@@ -3,4 +3,5 @@ zig-out/
 .zinc/sessions/*.lock
 .DS_Store
 .zinc/sessions/
+.zinc/logs/
 .zinc/compiled/

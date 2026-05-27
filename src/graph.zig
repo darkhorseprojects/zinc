@@ -8,7 +8,6 @@ pub const PromptPack = struct {
     title: []u8,
     description: []u8,
     content: []u8,
-
     pub fn deinit(self: PromptPack, allocator: Allocator) void {
         allocator.free(self.id);
         allocator.free(self.title);
@@ -17,181 +16,168 @@ pub const PromptPack = struct {
     }
 };
 
-pub fn validateText(text: []const u8) !void {
-    try requireContains(text, "circuitry: \"0.2.99\"");
-    try requireContains(text, "resources:");
-}
-
-pub fn readLinkedText(allocator: Allocator, graph_path: []const u8) ![]u8 {
-    var stack: std.ArrayList([]u8) = .empty;
-    defer {
-        for (stack.items) |item| allocator.free(item);
-        stack.deinit(allocator);
+pub const InputSpec = struct {
+    id: []u8,
+    kind: []u8,
+    required: bool,
+    pub fn deinit(self: InputSpec, allocator: Allocator) void {
+        allocator.free(self.id);
+        allocator.free(self.kind);
     }
-    return readLinkedTextStack(allocator, graph_path, &stack);
-}
+};
 
-fn readLinkedTextStack(allocator: Allocator, graph_path: []const u8, stack: *std.ArrayList([]u8)) anyerror![]u8 {
-    const canonical = try absolutePath(allocator, graph_path);
-    errdefer allocator.free(canonical);
-    for (stack.items) |ancestor| if (std.mem.eql(u8, ancestor, canonical)) return error.CircuitryGraphImportCycle;
-    try stack.append(allocator, canonical);
-    defer allocator.free(stack.pop().?);
-
-    const text = try files.readLimited(allocator, canonical, 1024 * 1024);
-    defer allocator.free(text);
-
-    const links = try readLinks(allocator, canonical, text);
-    defer freeStringList(allocator, links);
-    if (links.len == 0) return allocator.dupe(u8, text);
-
-    var out: std.ArrayList(u8) = .empty;
-    errdefer out.deinit(allocator);
-    try out.appendSlice(allocator, textBeforeResources(text));
-    try out.appendSlice(allocator, "resources:\n");
-    for (links) |link| {
-        const linked = try readLinkedTextStack(allocator, link, stack);
-        defer allocator.free(linked);
-        try out.appendSlice(allocator, resourcesBody(linked) orelse return error.InvalidCircuitryGraph);
-        try out.append(allocator, '\n');
+pub const ImageInput = struct {
+    id: []u8,
+    path: []u8,
+    mime: []u8,
+    pub fn deinit(self: ImageInput, allocator: Allocator) void {
+        allocator.free(self.id);
+        allocator.free(self.path);
+        allocator.free(self.mime);
     }
-    try out.appendSlice(allocator, resourcesBody(text) orelse return error.InvalidCircuitryGraph);
-    return out.toOwnedSlice(allocator);
-}
+};
 
-fn readLinks(allocator: Allocator, graph_path: []const u8, text: []const u8) ![][]u8 {
-    const links_line = findLineStarting(text, "links:") orelse return allocator.alloc([]u8, 0);
-    const start = @intFromPtr(links_line.ptr) - @intFromPtr(text.ptr) + links_line.len;
-    var links: std.ArrayList([]u8) = .empty;
-    errdefer freeStringList(allocator, links.items);
-    var lines = std.mem.splitScalar(u8, text[start..], '\n');
-    while (lines.next()) |raw| {
-        const trimmed = std.mem.trim(u8, raw, " \t\r");
-        if (trimmed.len == 0) continue;
-        if (!std.mem.startsWith(u8, trimmed, "- ")) break;
-        const rel = parseLinkPath(trimmed[2..]) orelse return error.InvalidCircuitryGraph;
-        try links.append(allocator, try joinRelative(allocator, graph_path, rel));
+pub const Resource = struct {
+    id: []const u8,
+    source_file: []const u8,
+    value: std.json.Value,
+};
+
+pub const Graph = struct {
+    json_text: []u8,
+    parsed: std.json.Parsed(std.json.Value),
+    resources: []Resource,
+    args: []InputSpec,
+    runtime_model: ?[]u8,
+    agent_model: ?[]u8,
+
+    pub fn deinit(self: Graph, allocator: Allocator) void {
+        for (self.args) |arg| arg.deinit(allocator);
+        allocator.free(self.args);
+        if (self.runtime_model) |model| allocator.free(model);
+        if (self.agent_model) |model| allocator.free(model);
+        allocator.free(self.resources);
+        var parsed = self.parsed;
+        parsed.deinit();
+        allocator.free(self.json_text);
     }
-    return links.toOwnedSlice(allocator);
-}
+};
 
-fn parseLinkPath(text: []const u8) ?[]const u8 {
-    var rest = std.mem.trim(u8, text, " \t\r");
-    if (std.mem.startsWith(u8, rest, "path:")) rest = std.mem.trim(u8, rest["path:".len..], " \t\r");
-    if (rest.len == 0) return null;
-    if (rest[0] == '"' or rest[0] == '\'') {
-        const quote = rest[0];
-        rest = rest[1..];
-        const end = std.mem.indexOfScalar(u8, rest, quote) orelse return null;
-        return rest[0..end];
+pub fn load(allocator: Allocator, io: std.Io, graph_path: []const u8) !Graph {
+    const text = try parseWithCircuitry(allocator, io, graph_path);
+    errdefer allocator.free(text);
+
+    var parsed = try std.json.parseFromSlice(std.json.Value, allocator, text, .{});
+    errdefer parsed.deinit();
+    const root = parsed.value;
+
+    if (root != .object) return error.InvalidCircuitryGraph;
+    const graph_value = objectGet(root, "graph") orelse root;
+    const resources_value = objectGet(graph_value, "resources") orelse return error.InvalidCircuitryGraph;
+    if (resources_value != .object) return error.InvalidCircuitryGraph;
+    const resources_obj = resources_value.object;
+
+    var resources = try allocator.alloc(Resource, resources_obj.count());
+    errdefer allocator.free(resources);
+    var i: usize = 0;
+    var iter = resources_obj.iterator();
+    while (iter.next()) |entry| : (i += 1) {
+        const origins = objectGet(root, "origins");
+        const origin_value = if (origins) |value| if (value == .object) value.object.get(entry.key_ptr.*) else null else null;
+        resources[i] = .{
+            .id = entry.key_ptr.*,
+            .source_file = if (origin_value) |value| scalarText(value) orelse graph_path else graph_path,
+            .value = entry.value_ptr.*,
+        };
     }
-    const end = std.mem.indexOfAny(u8, rest, " \t\r\n") orelse rest.len;
-    return rest[0..end];
+
+    const args = try readArgs(allocator, graph_value);
+    errdefer freeInputSpecs(allocator, args);
+    const runtime_model = if (scalarAt(graph_value, &.{ "runtime", "model" })) |model| try allocator.dupe(u8, model) else null;
+    errdefer if (runtime_model) |model| allocator.free(model);
+    const agent_model = try firstAgentModel(allocator, resources);
+    errdefer if (agent_model) |model| allocator.free(model);
+
+    return .{ .json_text = text, .parsed = parsed, .resources = resources, .args = args, .runtime_model = runtime_model, .agent_model = agent_model };
 }
 
-fn textBeforeResources(text: []const u8) []const u8 {
-    const resources = findLineStarting(text, "resources:") orelse return text;
-    return text[0 .. @intFromPtr(resources.ptr) - @intFromPtr(text.ptr)];
+fn parseWithCircuitry(allocator: Allocator, io: std.Io, graph_path: []const u8) ![]u8 {
+    const result = try std.process.run(allocator, io, .{ .argv = &.{ "circuitry", "parse", graph_path }, .stderr_limit = .limited(64 * 1024), .stdout_limit = .limited(16 * 1024 * 1024) });
+    defer allocator.free(result.stderr);
+    if (result.term != .exited or result.term.exited != 0) {
+        std.debug.print("circuitry parse failed:\n{s}\n", .{result.stderr});
+        allocator.free(result.stdout);
+        return error.CircuitryParseFailed;
+    }
+    return result.stdout;
 }
 
-fn resourcesBody(text: []const u8) ?[]const u8 {
-    const resources = findLineStarting(text, "resources:") orelse return null;
-    const start = @intFromPtr(resources.ptr) - @intFromPtr(text.ptr) + resources.len;
-    return text[start..];
+fn readArgs(allocator: Allocator, graph_value: std.json.Value) ![]InputSpec {
+    const args = objectGet(graph_value, "args") orelse return allocator.alloc(InputSpec, 0);
+    if (args != .object) return error.InvalidCircuitryGraph;
+    const args_obj = args.object;
+    var out = try allocator.alloc(InputSpec, args_obj.count());
+    var initialized: usize = 0;
+    errdefer {
+        for (out[0..initialized]) |arg| arg.deinit(allocator);
+        allocator.free(out);
+    }
+    var iter = args_obj.iterator();
+    while (iter.next()) |entry| : (initialized += 1) {
+        const value = entry.value_ptr.*;
+        out[initialized] = .{
+            .id = try allocator.dupe(u8, entry.key_ptr.*),
+            .kind = try allocator.dupe(u8, mapScalar(value, "type") orelse "text"),
+            .required = mapBool(value, "required") orelse false,
+        };
+    }
+    return out;
 }
 
-pub fn readPromptPacks(allocator: Allocator, text: []const u8) ![]PromptPack {
+fn firstAgentModel(allocator: Allocator, resources: []const Resource) !?[]u8 {
+    for (resources) |res| {
+        if (!std.mem.eql(u8, resourceType(res) orelse "", "agent")) continue;
+        if (resourceField(res, "model")) |model| return try allocator.dupe(u8, model);
+    }
+    return null;
+}
+
+pub fn validate(graph: Graph) !void {
+    if (graph.resources.len == 0) return error.InvalidCircuitryGraph;
+}
+
+pub fn readPromptPacks(allocator: Allocator, graph: Graph) ![]PromptPack {
     var packs: std.ArrayList(PromptPack) = .empty;
     errdefer {
         for (packs.items) |pack| pack.deinit(allocator);
         packs.deinit(allocator);
     }
-
-    var cursor: usize = 0;
-    while (cursor < text.len) {
-        const line_end = std.mem.indexOfScalarPos(u8, text, cursor, '\n') orelse text.len;
-        const line = text[cursor..line_end];
-        if (resourceNameFromLine(line)) |name| {
-            if (resourceBlock(text[cursor..], name)) |relative_block| {
-                const block = relative_block;
-                if (blockResourceType(block)) |typ| {
-                    if (std.mem.eql(u8, typ, "text")) {
-                        if (extractTextValue(allocator, block)) |content| {
-                            errdefer allocator.free(content);
-                            if (parsePromptPack(allocator, block, content)) |pack| {
-                                try packs.append(allocator, pack);
-                            } else |_| {}
-                        } else |_| {}
-                    }
-                }
-            }
+    for (graph.resources) |res| {
+        if (!std.mem.eql(u8, resourceType(res) orelse "", "text")) continue;
+        const content = resourceTextValue(allocator, res) catch continue;
+        errdefer allocator.free(content);
+        const trimmed = std.mem.trim(u8, content, " \t\r\n");
+        if (!std.mem.startsWith(u8, trimmed, "---\n")) {
+            allocator.free(content);
+            continue;
         }
-        cursor = if (line_end == text.len) text.len else line_end + 1;
+        const fm_end = std.mem.indexOf(u8, trimmed[4..], "\n---") orelse {
+            allocator.free(content);
+            continue;
+        };
+        const fm = trimmed[4 .. 4 + fm_end];
+        const id = frontmatter(fm, "id") orelse {
+            allocator.free(content);
+            continue;
+        };
+        try packs.append(allocator, .{
+            .id = try allocator.dupe(u8, id),
+            .title = try allocator.dupe(u8, frontmatter(fm, "title") orelse resourceField(res, "label") orelse id),
+            .description = try allocator.dupe(u8, frontmatter(fm, "description") orelse ""),
+            .content = content,
+        });
     }
     return packs.toOwnedSlice(allocator);
-}
-
-fn parsePromptPack(allocator: Allocator, block: []const u8, content: []u8) !PromptPack {
-    if (!std.mem.startsWith(u8, std.mem.trim(u8, content, " \t\r\n"), "---\n")) return error.NotPromptPack;
-    const trimmed_left = std.mem.trim(u8, content, " \t\r\n");
-    const rest = trimmed_left[4..];
-    const end = std.mem.indexOf(u8, rest, "\n---") orelse return error.NotPromptPack;
-    const frontmatter = rest[0..end];
-    const id_raw = frontmatterValue(frontmatter, "id") orelse return error.NotPromptPack;
-    const desc_raw = frontmatterValue(frontmatter, "description") orelse "";
-    const title_raw = frontmatterValue(frontmatter, "title") orelse labelValue(block) orelse id_raw;
-    return .{
-        .id = try allocator.dupe(u8, id_raw),
-        .title = try allocator.dupe(u8, title_raw),
-        .description = try allocator.dupe(u8, desc_raw),
-        .content = content,
-    };
-}
-
-fn frontmatterValue(frontmatter: []const u8, key: []const u8) ?[]const u8 {
-    var lines = std.mem.splitScalar(u8, frontmatter, '\n');
-    while (lines.next()) |line_raw| {
-        const line = std.mem.trim(u8, line_raw, " \t\r");
-        const colon = std.mem.indexOfScalar(u8, line, ':') orelse continue;
-        const lhs = std.mem.trim(u8, line[0..colon], " \t");
-        if (!std.mem.eql(u8, lhs, key)) continue;
-        var rhs = std.mem.trim(u8, line[colon + 1 ..], " \t");
-        if (rhs.len >= 2 and ((rhs[0] == '"' and rhs[rhs.len - 1] == '"') or (rhs[0] == '\'' and rhs[rhs.len - 1] == '\''))) rhs = rhs[1 .. rhs.len - 1];
-        return rhs;
-    }
-    return null;
-}
-
-fn labelValue(block: []const u8) ?[]const u8 {
-    var lines = std.mem.splitScalar(u8, block, '\n');
-    while (lines.next()) |line| {
-        const trimmed = std.mem.trim(u8, line, " \t\r");
-        if (!std.mem.startsWith(u8, trimmed, "label:")) continue;
-        var value = std.mem.trim(u8, trimmed["label:".len..], " \t\r");
-        if (value.len >= 2 and value[0] == '"' and value[value.len - 1] == '"') value = value[1 .. value.len - 1];
-        return value;
-    }
-    return null;
-}
-
-fn extractTextValue(allocator: Allocator, block: []const u8) ![]u8 {
-    if (std.mem.indexOf(u8, block, "    value: |\n") != null) return extractIndentedBlock(allocator, block, "    value: |\n", 6);
-    const line = findLineStarting(block, "    value:") orelse return error.InvalidCircuitryGraph;
-    var value = std.mem.trim(u8, line["    value:".len..], " \t\r");
-    if (value.len >= 2 and value[0] == '"' and value[value.len - 1] == '"') value = value[1 .. value.len - 1];
-    return allocator.dupe(u8, value);
-}
-
-fn blockResourceType(block: []const u8) ?[]const u8 {
-    var lines = std.mem.splitScalar(u8, block, '\n');
-    while (lines.next()) |line| {
-        const trimmed = std.mem.trim(u8, line, " \t\r");
-        if (!std.mem.startsWith(u8, trimmed, "type:")) continue;
-        var value = std.mem.trim(u8, trimmed["type:".len..], " \t\r");
-        if (value.len >= 2 and value[0] == '"' and value[value.len - 1] == '"') value = value[1 .. value.len - 1];
-        return value;
-    }
-    return null;
 }
 
 pub fn freePromptPacks(allocator: Allocator, packs: []const PromptPack) void {
@@ -199,151 +185,85 @@ pub fn freePromptPacks(allocator: Allocator, packs: []const PromptPack) void {
     allocator.free(packs);
 }
 
-pub fn findResourceByIdentity(text: []const u8, identity: []const u8) ?[]const u8 {
-    var current: ?[]const u8 = null;
-    var lines = std.mem.splitScalar(u8, text, '\n');
-    while (lines.next()) |line| {
-        if (resourceNameFromLine(line)) |name| {
-            current = name;
-            continue;
-        }
-        if (current) |name| {
-            if (identityFromLine(line)) |found| {
-                if (std.mem.eql(u8, found, identity)) return name;
-            }
-        }
-    }
-    return null;
-}
-
-fn resourceNameFromLine(line: []const u8) ?[]const u8 {
-    if (line.len < 4 or !std.mem.startsWith(u8, line, "  ") or line[2] == ' ') return null;
-    if (line[line.len - 1] != ':') return null;
-    return line[2 .. line.len - 1];
-}
-
-fn identityFromLine(line: []const u8) ?[]const u8 {
-    const prefix = "    identity:";
-    if (!std.mem.startsWith(u8, line, prefix)) return null;
-    var value = std.mem.trim(u8, line[prefix.len..], " \t\r");
-    if (value.len >= 2 and value[0] == '"' and value[value.len - 1] == '"') value = value[1 .. value.len - 1];
-    return value;
-}
-
-pub fn findAgentWithTools(text: []const u8) ?[]const u8 {
-    var current: ?[]const u8 = null;
-    var in_agent = false;
+pub fn findAgentWithTools(graph: Graph) ?[]const u8 {
     var found: ?[]const u8 = null;
-    var lines = std.mem.splitScalar(u8, text, '\n');
-    while (lines.next()) |line| {
-        if (resourceNameFromLine(line)) |name| {
-            current = name;
-            in_agent = false;
-            continue;
-        }
-        if (current == null) continue;
-        const trimmed = std.mem.trim(u8, line, " \t\r");
-        if (std.mem.eql(u8, trimmed, "type: agent")) in_agent = true;
-        if (in_agent and std.mem.startsWith(u8, trimmed, "tools:")) found = current.?;
+    for (graph.resources) |res| {
+        if (std.mem.eql(u8, resourceType(res) orelse "", "agent") and resourceValue(res, "tools") != null) found = res.id;
     }
     return found;
 }
 
-pub fn findFirstAgentInput(allocator: Allocator, graph_text: []const u8, resource_id: []const u8) !?[]u8 {
-    const inputs = try readInputs(allocator, graph_text, resource_id);
+pub fn findFirstAgentInput(allocator: Allocator, graph: Graph, id: []const u8) !?[]u8 {
+    const res = resource(graph, id) orelse return error.InvalidCircuitryGraph;
+    const inputs = try readList(allocator, res, "inputs");
     defer freeStringList(allocator, inputs);
-    for (inputs) |input| {
-        if (resourceType(graph_text, input)) |typ| {
-            if (std.mem.eql(u8, typ, "agent")) return try allocator.dupe(u8, input);
-        }
-    }
+    for (inputs) |input| if (resource(graph, input)) |candidate| if (std.mem.eql(u8, resourceType(candidate) orelse "", "agent")) return try allocator.dupe(u8, input);
     return null;
 }
 
-pub fn findSingleAgent(text: []const u8) ?[]const u8 {
+pub fn findSingleAgent(graph: Graph) ?[]const u8 {
     var found: ?[]const u8 = null;
-    var current: ?[]const u8 = null;
-    var lines = std.mem.splitScalar(u8, text, '\n');
-    while (lines.next()) |line| {
-        if (resourceNameFromLine(line)) |name| {
-            current = name;
-            continue;
-        }
-        if (current) |name| {
-            const trimmed = std.mem.trim(u8, line, " \t\r");
-            if (std.mem.eql(u8, trimmed, "type: agent")) {
-                if (found != null) return null;
-                found = name;
-            }
-        }
-    }
+    for (graph.resources) |res| if (std.mem.eql(u8, resourceType(res) orelse "", "agent")) {
+        if (found != null) return null;
+        found = res.id;
+    };
     return found;
 }
 
-pub fn resourceIdentity(allocator: Allocator, text: []const u8, resource_id: []const u8) ![]u8 {
-    const block = resourceBlock(text, resource_id) orelse return error.InvalidCircuitryGraph;
-    var lines = std.mem.splitScalar(u8, block, '\n');
-    while (lines.next()) |line| {
-        if (identityFromLine(line)) |identity| return allocator.dupe(u8, identity);
-    }
-    return allocator.dupe(u8, resource_id);
+pub fn resourceIdentity(allocator: Allocator, graph: Graph, id: []const u8) ![]u8 {
+    const res = resource(graph, id) orelse return error.InvalidCircuitryGraph;
+    return allocator.dupe(u8, resourceField(res, "identity") orelse resourceField(res, "label") orelse id);
 }
 
-fn resourceType(text: []const u8, resource_id: []const u8) ?[]const u8 {
-    const block = resourceBlock(text, resource_id) orelse return null;
-    var lines = std.mem.splitScalar(u8, block, '\n');
-    while (lines.next()) |line| {
-        const trimmed = std.mem.trim(u8, line, " \t\r");
-        if (!std.mem.startsWith(u8, trimmed, "type:")) continue;
-        var value = std.mem.trim(u8, trimmed["type:".len..], " \t\r");
-        if (value.len >= 2 and value[0] == '"' and value[value.len - 1] == '"') value = value[1 .. value.len - 1];
-        return value;
-    }
-    return null;
+pub fn readTools(allocator: Allocator, graph: Graph, id: []const u8) ![][]u8 {
+    const res = resource(graph, id) orelse return error.InvalidCircuitryGraph;
+    const items = try readList(allocator, res, "tools");
+    if (items.len == 0) return error.InvalidCircuitryGraph;
+    return items;
 }
 
-pub fn readInputs(allocator: Allocator, graph_text: []const u8, resource_id: []const u8) ![][]u8 {
-    const block = resourceBlock(graph_text, resource_id) orelse return error.InvalidCircuitryGraph;
-    const line = findLineStarting(block, "    inputs:") orelse return allocator.alloc([]u8, 0);
-    var out: std.ArrayList([]u8) = .empty;
-    errdefer freeStringList(allocator, out.items);
-    const tail = std.mem.trim(u8, line["    inputs:".len..], " \t\r");
-    if (!std.mem.startsWith(u8, tail, "[")) return error.InvalidCircuitryGraph;
-    const end = std.mem.lastIndexOfScalar(u8, tail, ']') orelse return error.InvalidCircuitryGraph;
-    var parts = std.mem.splitScalar(u8, tail[1..end], ',');
-    while (parts.next()) |part| {
-        const input = std.mem.trim(u8, part, " \t\r\"'");
-        if (input.len != 0) try out.append(allocator, try allocator.dupe(u8, input));
+pub fn readInputSpecs(allocator: Allocator, graph: Graph) ![]InputSpec {
+    var out = try allocator.alloc(InputSpec, graph.args.len);
+    var initialized: usize = 0;
+    errdefer {
+        for (out[0..initialized]) |input| input.deinit(allocator);
+        allocator.free(out);
+    }
+    for (graph.args, 0..) |input, i| {
+        out[i] = .{ .id = try allocator.dupe(u8, input.id), .kind = try allocator.dupe(u8, input.kind), .required = input.required };
+        initialized += 1;
+    }
+    return out;
+}
+
+pub fn freeInputSpecs(allocator: Allocator, inputs: []const InputSpec) void {
+    for (inputs) |input| input.deinit(allocator);
+    allocator.free(inputs);
+}
+
+pub fn readImageInputs(allocator: Allocator, graph: Graph, id: []const u8) ![]ImageInput {
+    const res = resource(graph, id) orelse return error.InvalidCircuitryGraph;
+    const inputs = try readList(allocator, res, "inputs");
+    defer freeStringList(allocator, inputs);
+    var out: std.ArrayList(ImageInput) = .empty;
+    errdefer {
+        for (out.items) |item| item.deinit(allocator);
+        out.deinit(allocator);
+    }
+    for (inputs) |input| {
+        const input_res = resource(graph, input) orelse continue;
+        if (!std.mem.eql(u8, resourceType(input_res) orelse "", "image")) continue;
+        const raw_path = resourceField(input_res, "path") orelse resourceField(input_res, "uri") orelse resourceField(input_res, "value") orelse return error.InvalidCircuitryGraph;
+        const resolved = try resolveResourceRef(allocator, std.fs.path.dirname(input_res.source_file) orelse ".", raw_path);
+        errdefer allocator.free(resolved);
+        try out.append(allocator, .{ .id = try allocator.dupe(u8, input), .path = resolved, .mime = try allocator.dupe(u8, resourceField(input_res, "mimeType") orelse mimeFromPath(raw_path)) });
     }
     return out.toOwnedSlice(allocator);
 }
 
-pub fn readTools(allocator: Allocator, graph_text: []const u8, resource_id: []const u8) ![][]u8 {
-    const block = resourceBlock(graph_text, resource_id) orelse return error.InvalidCircuitryGraph;
-    const line = findLineStarting(block, "    tools:") orelse return error.InvalidCircuitryGraph;
-    var out: std.ArrayList([]u8) = .empty;
-    errdefer freeStringList(allocator, out.items);
-
-    const tail = std.mem.trim(u8, line["    tools:".len..], " \t\r");
-    if (std.mem.startsWith(u8, tail, "[")) {
-        const end = std.mem.lastIndexOfScalar(u8, tail, ']') orelse return error.InvalidCircuitryGraph;
-        var parts = std.mem.splitScalar(u8, tail[1..end], ',');
-        while (parts.next()) |part| {
-            const tool = std.mem.trim(u8, part, " \t\r\"'");
-            if (tool.len != 0) try out.append(allocator, try allocator.dupe(u8, tool));
-        }
-    } else {
-        const line_start = @intFromPtr(line.ptr) - @intFromPtr(block.ptr);
-        var lines = std.mem.splitScalar(u8, block[line_start + line.len ..], '\n');
-        while (lines.next()) |raw| {
-            if (raw.len == 0) continue;
-            if (!std.mem.startsWith(u8, raw, "      - ")) break;
-            const tool = std.mem.trim(u8, raw[8..], " \t\r\"'");
-            try out.append(allocator, try allocator.dupe(u8, tool));
-        }
-    }
-    if (out.items.len == 0) return error.InvalidCircuitryGraph;
-    return out.toOwnedSlice(allocator);
+pub fn freeImageInputs(allocator: Allocator, inputs: []const ImageInput) void {
+    for (inputs) |input| input.deinit(allocator);
+    allocator.free(inputs);
 }
 
 pub fn freeStringList(allocator: Allocator, list: []const []u8) void {
@@ -351,120 +271,116 @@ pub fn freeStringList(allocator: Allocator, list: []const []u8) void {
     allocator.free(list);
 }
 
-pub fn wantsCircuitryPrompt(graph_text: []const u8, tools: []const []u8) bool {
-    _ = tools;
-    return std.mem.indexOf(u8, graph_text, "circuitry-author") != null;
+pub fn wantsCircuitryPrompt(graph: Graph, _: []const []u8) bool {
+    for (graph.resources) |res| if (std.mem.eql(u8, res.id, "prompt_circuitry_author")) return true;
+    for (graph.resources) |res| if (resourceTextValueContains(res, "circuitry-author")) return true;
+    return false;
 }
 
-pub fn readScalar(allocator: Allocator, text: []const u8, key: []const u8) ![]u8 {
-    const line = findLineStarting(text, key) orelse return error.InvalidCircuitryGraph;
-    var value = std.mem.trim(u8, line[key.len..], " \t\r");
-    if (value.len >= 2 and value[0] == '"' and value[value.len - 1] == '"') value = value[1 .. value.len - 1];
-    return allocator.dupe(u8, value);
+pub fn graphModel(allocator: Allocator, graph: Graph) !?[]u8 {
+    if (graph.agent_model) |model| if (!std.mem.eql(u8, model, "inherit")) return try allocator.dupe(u8, model);
+    if (graph.runtime_model) |model| if (!std.mem.eql(u8, model, "inherit")) return try allocator.dupe(u8, model);
+    return null;
 }
 
-pub fn readUsize(text: []const u8, key: []const u8) !usize {
-    const line = findLineStarting(text, key) orelse return error.InvalidCircuitryGraph;
-    const value = std.mem.trim(u8, line[key.len..], " \t\r");
-    return std.fmt.parseInt(usize, value, 10);
+pub fn extractResourceInstructions(allocator: Allocator, graph: Graph, id: []const u8) ![]u8 {
+    const res = resource(graph, id) orelse return error.InvalidCircuitryGraph;
+    return allocator.dupe(u8, resourceField(res, "instructions") orelse return error.InvalidCircuitryGraph);
 }
 
-pub fn extractResourceInstructions(allocator: Allocator, text: []const u8, resource_id: []const u8) ![]u8 {
-    const block = resourceBlock(text, resource_id) orelse return error.InvalidCircuitryGraph;
-    return extractIndentedBlock(allocator, block, "    instructions: |\n", 6);
+fn resource(graph: Graph, id: []const u8) ?Resource {
+    for (graph.resources) |res| if (std.mem.eql(u8, res.id, id)) return res;
+    return null;
 }
 
-pub fn extractIndentedBlock(allocator: Allocator, text: []const u8, marker: []const u8, indent: usize) ![]u8 {
-    const start = (std.mem.indexOf(u8, text, marker) orelse return error.InvalidCircuitryGraph) + marker.len;
-    var out: std.ArrayList(u8) = .empty;
-    errdefer out.deinit(allocator);
+fn resourceType(res: Resource) ?[]const u8 {
+    return resourceField(res, "type");
+}
 
-    var lines = std.mem.splitScalar(u8, text[start..], '\n');
-    while (lines.next()) |line| {
-        if (line.len == 0) {
-            try out.append(allocator, '\n');
-            continue;
-        }
-        const spaces = countLeadingSpaces(line);
-        if (spaces < indent) break;
-        try out.appendSlice(allocator, line[indent..]);
-        try out.append(allocator, '\n');
+fn resourceField(res: Resource, field: []const u8) ?[]const u8 {
+    return mapScalar(res.value, field);
+}
+
+fn resourceValue(res: Resource, field: []const u8) ?std.json.Value {
+    return objectGet(res.value, field);
+}
+
+fn resourceTextValue(allocator: Allocator, res: Resource) ![]u8 {
+    return allocator.dupe(u8, resourceField(res, "value") orelse return error.InvalidCircuitryGraph);
+}
+
+fn resourceTextValueContains(res: Resource, needle: []const u8) bool {
+    const value = resourceField(res, "value") orelse return false;
+    return std.mem.indexOf(u8, value, needle) != null;
+}
+
+fn readList(allocator: Allocator, res: Resource, field: []const u8) ![][]u8 {
+    const found = resourceValue(res, field) orelse return allocator.alloc([]u8, 0);
+    if (found != .array) return error.InvalidCircuitryGraph;
+    var out = try allocator.alloc([]u8, found.array.items.len);
+    var initialized: usize = 0;
+    errdefer {
+        for (out[0..initialized]) |item| allocator.free(item);
+        allocator.free(out);
     }
-    return out.toOwnedSlice(allocator);
-}
-
-fn absolutePath(allocator: Allocator, path: []const u8) ![]u8 {
-    if (std.fs.path.isAbsolute(path)) return allocator.dupe(u8, path);
-    var buf: [4096]u8 = undefined;
-    const rc = std.os.linux.getcwd(&buf, buf.len);
-    const errno = std.os.linux.errno(rc);
-    if (errno != .SUCCESS) return error.CurrentDirectoryUnavailable;
-    var cwd = buf[0..rc];
-    if (std.mem.indexOfScalar(u8, cwd, 0)) |zero| cwd = cwd[0..zero];
-    return std.fs.path.join(allocator, &.{ cwd, path });
-}
-
-fn joinRelative(allocator: Allocator, from_file: []const u8, rel: []const u8) ![]u8 {
-    if (std.fs.path.isAbsolute(rel)) return allocator.dupe(u8, rel);
-    const dir = std.fs.path.dirname(from_file) orelse ".";
-    return std.fs.path.join(allocator, &.{ dir, rel });
-}
-
-fn resourceBlock(text: []const u8, resource_id: []const u8) ?[]const u8 {
-    var marker_buf: [128]u8 = undefined;
-    const marker = std.fmt.bufPrint(&marker_buf, "  {s}:\n", .{resource_id}) catch return null;
-    const start = std.mem.indexOf(u8, text, marker) orelse return null;
-    const body_start = start + marker.len;
-    var cursor = body_start;
-    while (cursor < text.len) {
-        const line_start = cursor;
-        const next = std.mem.indexOfScalarPos(u8, text, cursor, '\n') orelse text.len;
-        const line = text[line_start..next];
-        if (line.len >= 3 and std.mem.startsWith(u8, line, "  ") and line[2] != ' ') return text[start..line_start];
-        cursor = if (next == text.len) text.len else next + 1;
+    for (found.array.items, 0..) |item, i| {
+        out[i] = try allocator.dupe(u8, scalarText(item) orelse return error.InvalidCircuitryGraph);
+        initialized += 1;
     }
-    return text[start..];
+    return out;
 }
 
-fn findLineStarting(text: []const u8, key: []const u8) ?[]const u8 {
-    var lines = std.mem.splitScalar(u8, text, '\n');
+fn objectGet(value: std.json.Value, key: []const u8) ?std.json.Value {
+    if (value != .object) return null;
+    return value.object.get(key);
+}
+
+fn scalarAt(value: std.json.Value, path: []const []const u8) ?[]const u8 {
+    return scalarText(valueAt(value, path) orelse return null);
+}
+
+fn valueAt(value: std.json.Value, path: []const []const u8) ?std.json.Value {
+    var v = value;
+    for (path) |part| v = objectGet(v, part) orelse return null;
+    return v;
+}
+
+fn mapScalar(value: std.json.Value, field: []const u8) ?[]const u8 {
+    return scalarText(objectGet(value, field) orelse return null);
+}
+
+fn scalarText(value: std.json.Value) ?[]const u8 {
+    return if (value == .string) value.string else null;
+}
+
+fn mapBool(value: std.json.Value, field: []const u8) ?bool {
+    const found = objectGet(value, field) orelse return null;
+    return if (found == .bool) found.bool else null;
+}
+
+fn frontmatter(fm: []const u8, key: []const u8) ?[]const u8 {
+    var lines = std.mem.splitScalar(u8, fm, '\n');
     while (lines.next()) |line| {
-        if (std.mem.startsWith(u8, line, key)) return line;
+        const colon = std.mem.indexOfScalar(u8, line, ':') orelse continue;
+        if (std.mem.eql(u8, std.mem.trim(u8, line[0..colon], " \t\r"), key)) return unquote(std.mem.trim(u8, line[colon + 1 ..], " \t\r"));
     }
     return null;
 }
 
-fn countLeadingSpaces(line: []const u8) usize {
-    var n: usize = 0;
-    while (n < line.len and line[n] == ' ') n += 1;
-    return n;
+fn unquote(raw: []const u8) []const u8 {
+    if (raw.len >= 2 and ((raw[0] == '"' and raw[raw.len - 1] == '"') or (raw[0] == '\'' and raw[raw.len - 1] == '\''))) return raw[1 .. raw.len - 1];
+    return raw;
 }
 
-fn requireContains(haystack: []const u8, needle: []const u8) !void {
-    if (std.mem.indexOf(u8, haystack, needle) == null) return error.InvalidCircuitryGraph;
+fn mimeFromPath(path: []const u8) []const u8 {
+    if (std.mem.endsWith(u8, path, ".png")) return "image/png";
+    if (std.mem.endsWith(u8, path, ".jpg") or std.mem.endsWith(u8, path, ".jpeg")) return "image/jpeg";
+    if (std.mem.endsWith(u8, path, ".webp")) return "image/webp";
+    if (std.mem.endsWith(u8, path, ".gif")) return "image/gif";
+    return "application/octet-stream";
 }
 
-test "graph tool reader accepts block tools and rejects empty tools" {
-    const source =
-        \\  assistant:
-        \\    type: agent
-        \\    tools:
-        \\      - read
-        \\      - bash
-    ;
-    const tools = try readTools(std.testing.allocator, source, "assistant");
-    defer freeStringList(std.testing.allocator, tools);
-    try std.testing.expectEqual(@as(usize, 2), tools.len);
-    try std.testing.expectEqualStrings("read", tools[0]);
-    try std.testing.expectEqualStrings("bash", tools[1]);
-
-    try std.testing.expectError(error.InvalidCircuitryGraph, readTools(std.testing.allocator, "    tools: []", "assistant"));
-}
-
-test "graph links merge resources" {
-    const text = try readLinkedText(std.testing.allocator, "graphs/zinc-loop.circuitry.yaml");
-    defer std.testing.allocator.free(text);
-    try std.testing.expect(std.mem.indexOf(u8, text, "  assembled_context:\n") != null);
-    try std.testing.expect(std.mem.indexOf(u8, text, "  focused_recovery:\n") != null);
-    try std.testing.expect(std.mem.indexOf(u8, text, "    inputs: [assembled_context, user_turn]\n") != null);
+fn resolveResourceRef(allocator: Allocator, source_dir: []const u8, path: []const u8) ![]u8 {
+    if (std.fs.path.isAbsolute(path)) return allocator.dupe(u8, path);
+    return std.fs.path.join(allocator, &.{ source_dir, path });
 }

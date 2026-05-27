@@ -1,7 +1,7 @@
 ---
 id: bash-guide
 title: Bash Guide
-description: General computer-use guide for bash: inspect files, processes, network, HTTP, git, packages, logs, and surprising command results.
+description: Use when using bash for files, processes, network, HTTP, git, packages, logs, or command diagnostics.
 ---
 
 # Bash Guide

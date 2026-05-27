@@ -1,5 +1,6 @@
 const std = @import("std");
-const clean = @import("clean.zig");
+
+pub const std_options = std.Options{ .log_level = .err };
 const commands = @import("commands.zig");
 const server = @import("server.zig");
 
@@ -13,13 +14,17 @@ pub fn main(init: std.process.Init) !void {
 
     const cmd = args.next() orelse return commands.usage();
     if (std.mem.eql(u8, cmd, "help") or std.mem.eql(u8, cmd, "--help") or std.mem.eql(u8, cmd, "-h")) return commands.usage();
-    if (std.mem.eql(u8, cmd, "validate")) return commands.validate(allocator, home, args.next());
-    if (std.mem.eql(u8, cmd, "compile")) return commands.compile(allocator, home, args.next(), args.next());
+    if (std.mem.eql(u8, cmd, "check")) return commands.validate(allocator, init.io, home, args.next());
+    if (std.mem.eql(u8, cmd, "compile")) return commands.compile(allocator, init.io, home, args.next(), args.next());
     if (std.mem.eql(u8, cmd, "run")) return runCommandArgs(allocator, init.io, home, &args);
-    if (std.mem.eql(u8, cmd, "up")) return server.start(allocator, init.io, home, args.next());
-    if (std.mem.eql(u8, cmd, "down")) return server.stop(allocator, home);
-    if (std.mem.eql(u8, cmd, "clean")) return cleanCommandArgs(allocator, init.io, home, &args);
+    if (std.mem.eql(u8, cmd, "serve")) return server.start(allocator, init.io, home, args.next());
+    if (std.mem.eql(u8, cmd, "stop")) return server.stop(allocator, home);
+    if (std.mem.eql(u8, cmd, "status")) return server.status(allocator, home);
+    if (std.mem.eql(u8, cmd, "config")) return configCommandArgs(allocator, init.io, home, &args);
+    if (std.mem.eql(u8, cmd, "graph")) return graphCommandArgs(allocator, init.io, home, &args);
+    if (std.mem.eql(u8, cmd, "pkg")) return packageCommandArgs(allocator, init.io, home, &args);
     if (std.mem.eql(u8, cmd, "compact")) return compactCommandArgs(allocator, init.io, home, &args);
+    if (std.mem.eql(u8, cmd, "update")) return updateCommandArgs(allocator, init.io, home, &args);
     if (std.mem.eql(u8, cmd, "session-dir")) return commands.printSessionDir(allocator);
 
     var parts: std.ArrayList([]const u8) = .empty;
@@ -35,16 +40,41 @@ fn runCommandArgs(allocator: std.mem.Allocator, io: std.Io, home: []const u8, ar
     return commands.runFromArgs(allocator, io, home, parts);
 }
 
-fn cleanCommandArgs(allocator: std.mem.Allocator, io: std.Io, home: []const u8, args: *std.process.Args.Iterator) !void {
+fn configCommandArgs(allocator: std.mem.Allocator, io: std.Io, home: []const u8, args: *std.process.Args.Iterator) !void {
+    const sub = args.next() orelse return commands.usage();
+    if (!std.mem.eql(u8, sub, "get")) return commands.usage();
+    const path = args.next() orelse return error.MissingConfigPath;
+    return commands.configGet(allocator, io, home, path);
+}
+
+fn graphCommandArgs(allocator: std.mem.Allocator, io: std.Io, home: []const u8, args: *std.process.Args.Iterator) !void {
+    const sub = args.next() orelse return commands.usage();
+    if (std.mem.eql(u8, sub, "list")) return commands.graphList(allocator, io, home);
+    return commands.usage();
+}
+
+fn packageCommandArgs(allocator: std.mem.Allocator, io: std.Io, home: []const u8, args: *std.process.Args.Iterator) !void {
+    const sub = args.next() orelse return commands.usage();
+    if (std.mem.eql(u8, sub, "list")) return commands.packageList(allocator, io, home);
     const parts = try collectArgs(allocator, args);
     defer allocator.free(parts);
-    return clean.run(allocator, io, home, parts);
+    if (std.mem.eql(u8, sub, "add")) return commands.packageAdd(allocator, io, home, parts);
+    if (std.mem.eql(u8, sub, "remove")) return commands.packageRemove(allocator, io, home, parts);
+    if (std.mem.eql(u8, sub, "update")) return commands.packageUpdate(allocator, io, home, parts);
+    if (std.mem.eql(u8, sub, "show")) return commands.packageShow(allocator, io, home, parts);
+    return commands.usage();
 }
 
 fn compactCommandArgs(allocator: std.mem.Allocator, io: std.Io, home: []const u8, args: *std.process.Args.Iterator) !void {
     const parts = try collectArgs(allocator, args);
     defer allocator.free(parts);
     return commands.compactFromArgs(allocator, io, home, parts);
+}
+
+fn updateCommandArgs(allocator: std.mem.Allocator, io: std.Io, home: []const u8, args: *std.process.Args.Iterator) !void {
+    const parts = try collectArgs(allocator, args);
+    defer allocator.free(parts);
+    return commands.updateFromArgs(allocator, io, home, parts);
 }
 
 fn collectArgs(allocator: std.mem.Allocator, args: *std.process.Args.Iterator) ![][]const u8 {

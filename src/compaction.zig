@@ -1,43 +1,48 @@
 const std = @import("std");
-const config = @import("config.zig");
+const config = @import("runtime/config.zig");
 const graph = @import("graph.zig");
-const provider = @import("provider.zig");
-const sessions = @import("session.zig");
+const provider = @import("runtime/provider.zig");
+const sessions = @import("runtime/session.zig");
 
 const Allocator = std.mem.Allocator;
-const local_auth_header = "Bearer zinc";
+
+pub fn validateGraph(allocator: Allocator, io: std.Io, graph_path: []const u8) !void {
+    const loaded_graph = try graph.load(allocator, io, graph_path);
+    defer loaded_graph.deinit(allocator);
+    try graph.validate(loaded_graph);
+    const resource = graph.findSingleAgent(loaded_graph) orelse return error.InvalidCircuitryGraph;
+    const identity = try graph.resourceIdentity(allocator, loaded_graph, resource);
+    defer allocator.free(identity);
+    const instructions = try graph.extractResourceInstructions(allocator, loaded_graph, resource);
+    defer allocator.free(instructions);
+}
 
 pub fn runGraph(allocator: Allocator, io: std.Io, home: []const u8, session: sessions.Session, graph_path: []const u8) !usize {
-    const session_log = try sessions.readLog(allocator, session.path);
-    defer allocator.free(session_log);
-    const message_count = try sessions.countMessages(allocator, session_log);
+    const profile = try config.loadRuntimeProfile(allocator, io, home, null);
+    defer profile.deinit(allocator);
+    const session_log = try sessions.readParsed(allocator, session.path);
+    defer session_log.deinit(allocator);
+    const message_count = session_log.messageCount();
     if (message_count == 0) return error.EmptySession;
 
-    const text = try graph.readLinkedText(allocator, graph_path);
-    defer allocator.free(text);
-    try graph.validateText(text);
-    const resource = graph.findSingleAgent(text) orelse return error.InvalidCircuitryGraph;
-    const identity = try graph.resourceIdentity(allocator, text, resource);
+    const transcript = try session_log.transcript(allocator);
+    defer allocator.free(transcript);
+    const loaded_graph = try graph.load(allocator, io, graph_path);
+    defer loaded_graph.deinit(allocator);
+    try graph.validate(loaded_graph);
+    const resource = graph.findSingleAgent(loaded_graph) orelse return error.InvalidCircuitryGraph;
+    const identity = try graph.resourceIdentity(allocator, loaded_graph, resource);
     defer allocator.free(identity);
-    const instructions = try graph.extractResourceInstructions(allocator, text, resource);
+    const instructions = try graph.extractResourceInstructions(allocator, loaded_graph, resource);
     defer allocator.free(instructions);
-    const model_id = try config.resolveGraphModelId(allocator, text, home);
-    defer allocator.free(model_id);
-    const model_alias = try config.readModelValue(allocator, home, model_id, "alias");
-    defer allocator.free(model_alias);
-    const temperature = try config.readModelF64Default(allocator, home, model_id, "runtime.temperature", 0.5);
-    const visible_tokens = try config.readModelUsizeDefault(allocator, home, model_id, "runtime.max_tokens", 1024);
-
-    const runtime = try config.loadRuntimeConfig(allocator, home);
-    defer runtime.deinit(allocator);
 
     const system_prompt = try std.fmt.allocPrint(allocator, "Identity: {s}\nInstructions:\n{s}", .{ identity, instructions });
     defer allocator.free(system_prompt);
     const user_prompt = try std.fmt.allocPrint(allocator,
-        \\Compact this Zinc session log. The summary will cover {d} persisted user/assistant messages.
-        \\session_log:
+        \\Compact this Zinc semantic transcript. The summary will cover {d} persisted messages.
+        \\transcript:
         \\{s}
-    , .{ message_count, session_log });
+    , .{ message_count, transcript });
     defer allocator.free(user_prompt);
 
     var messages: std.ArrayList(provider.Message) = .empty;
@@ -47,20 +52,15 @@ pub fn runGraph(allocator: Allocator, io: std.Io, home: []const u8, session: ses
     try provider.appendMessage(allocator, &messages, .{ .role = "user", .content = user_prompt });
 
     const turn = try provider.call(allocator, io, .{
-        .base_url = runtime.provider_base_url,
-        .authorization = local_auth_header,
-        .model = model_alias,
-        .temperature = temperature,
-        .max_tokens = visible_tokens,
-        .reasoning_format = "auto",
+        .profile = &profile,
+        .max_tokens = profile.model.generation.max_tokens,
         .reasoning_budget_tokens = null,
-        .thinking_enabled = false,
         .json_response = true,
         .tools_json = "[]",
         .messages = messages.items,
     });
     defer provider.freeTurn(allocator, turn);
-    const clean = try provider.cleanText(allocator, turn.text);
+    const clean = try provider.cleanText(allocator, turn.text, &profile);
     defer allocator.free(clean);
     const summary = try parseSummary(allocator, clean);
     defer allocator.free(summary);

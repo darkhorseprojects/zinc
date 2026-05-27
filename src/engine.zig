@@ -1,191 +1,170 @@
 const std = @import("std");
 const compaction = @import("compaction.zig");
-const config = @import("config.zig");
-const context = @import("context.zig");
+const config = @import("runtime/config.zig");
 const files = @import("files.zig");
 const plan_mod = @import("plan.zig");
-const provider = @import("provider.zig");
-const sessions = @import("session.zig");
+const provider = @import("runtime/provider.zig");
+const resource = @import("resource.zig");
+const sessions = @import("runtime/session.zig");
 const tools = @import("tools.zig");
+const trace = @import("trace.zig");
 
 const Allocator = std.mem.Allocator;
 
-const Phase = struct {
-    const assistant_turn = "assistant_turn";
-    const tool = "tool";
-};
-
-const RuntimeEvent = struct {
-    const model_output = "model_output";
-    const contract_failure = "contract_failure";
-    const retryable_failure = "retryable_failure";
-    const tool_call = "tool_call";
-    const tool_result = "tool_result";
-};
-
-const local_auth_header = "Bearer zinc";
-
 const RuntimeReadContext = struct {
     prompts: []const plan_mod.PromptPack,
+    inputs: []const BoundInput,
     session_id: []const u8,
     session_path: []const u8,
     session_dir: []const u8,
     session_log: []const u8,
 };
 
-pub fn run(allocator: Allocator, io: std.Io, home: []const u8, user_prompt: []const u8, resume_id: ?[]const u8, continue_last: bool, plan_path_override: ?[]const u8) !void {
-    const runtime = try config.loadRuntimeConfig(allocator, home);
-    defer runtime.deinit(allocator);
-    const runtime_paths = try config.loadRuntimePaths(allocator, home);
-    defer runtime_paths.deinit(allocator);
-    const plan_path = plan_path_override orelse runtime_paths.compiled_plan;
-    const plan = try plan_mod.load(allocator, plan_path);
-    defer plan.deinit(allocator);
+const Agent = struct {
+    label: []const u8,
+    system: []const u8,
+    tools: []const []const u8,
+    tools_json: []const u8,
+    json: bool = false,
+    runtime_reads: bool = false,
+};
 
+const BoundInput = struct {
+    id: []u8,
+    kind: plan_mod.InputKind,
+    value: []u8,
+    mime: []u8,
+
+    fn deinit(self: BoundInput, allocator: Allocator) void {
+        allocator.free(self.id);
+        allocator.free(self.value);
+        allocator.free(self.mime);
+    }
+};
+
+pub fn run(allocator: Allocator, io: std.Io, home: []const u8, user_prompt: []const u8, resume_id: ?[]const u8, continue_last: bool, plan_path_override: ?[]const u8, runtime_inputs: []const plan_mod.RuntimeInput) !void {
+    const span = trace.span("engine_run");
+    defer span.end("engine", "continue={} prompt_chars={d}", .{ continue_last, user_prompt.len });
+
+    const profile = try config.loadRuntimeProfile(allocator, io, home, null);
+    defer profile.deinit(allocator);
+    const plan = try plan_mod.load(allocator, plan_path_override orelse profile.paths.compiled_plan);
+    defer plan.deinit(allocator);
     const session = try sessions.open(allocator, resume_id, continue_last);
     defer session.deinit(allocator);
+
+    var log = try sessions.readParsed(allocator, session.path);
+    defer log.deinit(allocator);
+    trace.event("session", "open", "id={s} bytes={d} messages={d}", .{ session.id, log.raw.len, log.messageCount() });
+    if (try shouldCompact(log, plan.context_tokens, profile.runtime.compaction_threshold_percent)) {
+        _ = try compaction.runGraph(allocator, io, home, session, profile.paths.compaction_graph);
+        log.deinit(allocator);
+        log = try sessions.readParsed(allocator, session.path);
+    }
+
+    const prior = try log.transcript(allocator);
+    defer allocator.free(prior);
+    const session_dir = std.fs.path.dirname(session.path) orelse ".zinc/sessions";
+    const focused = if (log.compaction != null) try runFocused(allocator, io, &profile, &plan, session.path, prior, user_prompt, session_dir) else blk: {
+        trace.event("context", "focused_recovery_skip", "session_bytes={d} messages={d}", .{ log.raw.len, log.messageCount() });
+        break :blk try allocator.dupe(u8, "");
+    };
+    defer allocator.free(focused);
+
+    const bound_inputs = try bindInputs(allocator, &plan, user_prompt, runtime_inputs);
+    defer freeBoundInputs(allocator, bound_inputs);
+    const read_ctx = RuntimeReadContext{ .prompts = plan.prompts, .inputs = bound_inputs, .session_id = session.id, .session_path = session.path, .session_dir = session_dir, .session_log = log.raw };
+    const uri_catalog = try runtimeUriCatalog(allocator);
+    defer allocator.free(uri_catalog);
+    const system = try std.fmt.allocPrint(allocator, "{s}\n\n{s}", .{ plan.prompt, uri_catalog });
+    defer allocator.free(system);
 
     var messages: std.ArrayList(provider.Message) = .empty;
     defer messages.deinit(allocator);
     defer provider.freeMessages(allocator, messages.items);
-
-    var session_log = try sessions.readLog(allocator, session.path);
-    defer allocator.free(session_log);
-    if (try shouldCompact(allocator, session_log, plan.context_tokens, runtime.compaction_threshold_percent)) {
-        _ = try compaction.runGraph(allocator, io, home, session, runtime.compaction_graph);
-        allocator.free(session_log);
-        session_log = try sessions.readLog(allocator, session.path);
-    }
-
-    const prior_context_text = try context.buildPriorContextText(allocator, session_log);
-    defer allocator.free(prior_context_text);
-    const session_dir = std.fs.path.dirname(session.path) orelse ".zinc/sessions";
-    const focused_context = try recoverFocusedContext(allocator, io, runtime.provider_base_url, runtime.max_retries, session.path, plan.model_alias, plan.temperature, plan.max_tokens, plan.tool_format, plan.focused_recovery_prompt, plan.focused_recovery_tools, plan.focused_recovery_tools_json, prior_context_text, user_prompt, session_dir);
-    defer allocator.free(focused_context);
-    const read_context = RuntimeReadContext{
-        .prompts = plan.prompts,
-        .session_id = session.id,
-        .session_path = session.path,
-        .session_dir = session_dir,
-        .session_log = session_log,
-    };
-    const runtime_uri_catalog = try buildRuntimeUriCatalog(allocator, read_context);
-    defer allocator.free(runtime_uri_catalog);
-    const system_prompt = try std.fmt.allocPrint(allocator, "{s}\n\n{s}", .{ plan.prompt, runtime_uri_catalog });
-    defer allocator.free(system_prompt);
-
-    try provider.appendMessage(allocator, &messages, .{ .role = "system", .content = system_prompt });
-    try context.appendPriorContext(allocator, &messages, session_log, focused_context);
-    try provider.appendMessage(allocator, &messages, .{ .role = "user", .content = user_prompt });
-
-    try sessions.appendEvent(allocator, session.path, "user", user_prompt);
+    const input_parts = try modelPartsForInputs(allocator, plan.image_inputs, bound_inputs);
+    defer freeModelParts(allocator, input_parts);
+    try provider.appendMessage(allocator, &messages, .{ .role = "system", .content = system });
+    try log.appendReplayMessages(allocator, &messages, focused);
+    const user_content = try userContent(allocator, user_prompt, bound_inputs);
+    defer allocator.free(user_content);
+    try provider.appendMessage(allocator, &messages, .{ .role = "user", .content = user_content, .parts = input_parts });
+    try sessions.appendUserMessage(allocator, session.path, user_content);
     try sessions.rememberLast(session);
 
-    var correction_retries: usize = 0;
+    const text = try runAgent(allocator, io, &profile, session.path, &messages, read_ctx, .{ .label = "main", .system = system, .tools = plan.tools, .tools_json = plan.tools_json, .runtime_reads = true }, plan.max_tokens, reasoningBudget(plan.reasoning_tokens));
+    defer allocator.free(text);
+    const response = std.mem.trim(u8, text, " \t\r\n");
+    if (response.len == 0) return error.EmptyAssistantResponse;
+    try sessions.appendAssistantText(allocator, session.path, response);
+    _ = try files.linuxWrite(1, response);
+    _ = try files.linuxWrite(1, "\n");
+}
+
+fn runFocused(allocator: Allocator, io: std.Io, profile: *const config.RuntimeProfile, plan: *const plan_mod.Plan, session_path: []const u8, prior: []const u8, user_prompt: []const u8, session_dir: []const u8) ![]u8 {
+    const content = try std.fmt.allocPrint(allocator, "assembled_context:\n{s}\n\nuser_turn:\n{s}\n\nsession_dir:\n{s}", .{ prior, user_prompt, session_dir });
+    defer allocator.free(content);
+    var messages: std.ArrayList(provider.Message) = .empty;
+    defer messages.deinit(allocator);
+    defer provider.freeMessages(allocator, messages.items);
+    try provider.appendMessage(allocator, &messages, .{ .role = "system", .content = plan.focused_recovery_prompt });
+    try provider.appendMessage(allocator, &messages, .{ .role = "user", .content = content });
+    const dummy = RuntimeReadContext{ .prompts = &.{}, .inputs = &.{}, .session_id = "", .session_path = session_path, .session_dir = session_dir, .session_log = "" };
+    return runAgent(allocator, io, profile, session_path, &messages, dummy, .{ .label = "focused_recovery", .system = plan.focused_recovery_prompt, .tools = plan.focused_recovery_tools, .tools_json = plan.focused_recovery_tools_json, .json = true }, profile.model.generation.max_tokens, null);
+}
+
+fn runAgent(allocator: Allocator, io: std.Io, profile: *const config.RuntimeProfile, session_path: []const u8, messages: *std.ArrayList(provider.Message), read_ctx: RuntimeReadContext, agent: Agent, max_tokens: ?usize, reasoning: ?usize) ![]u8 {
+    var retries: usize = 0;
     while (true) {
-        const turn = try callProviderWithTransientRetries(allocator, io, session.path, Phase.assistant_turn, runtime.max_retries, .{
-            .base_url = runtime.provider_base_url,
-            .authorization = local_auth_header,
-            .model = plan.model_alias,
-            .temperature = plan.temperature,
-            .max_tokens = plan.max_tokens,
-            .reasoning_format = plan.reasoning_format,
-            .reasoning_budget_tokens = reasoningBudgetTokens(plan.reasoning_tokens),
-            .thinking_enabled = reasoningEnabled(plan.reasoning_tokens),
-            .parse_native_tools = std.mem.eql(u8, plan.tool_format, "gemma-native"),
-            .tools_json = plan.tools_json,
-            .messages = messages.items,
-        });
+        const turn = try callProvider(allocator, io, session_path, profile.runtime.max_retries, agent.label, .{ .profile = profile, .max_tokens = max_tokens, .reasoning_budget_tokens = reasoning, .json_response = agent.json, .tools_json = agent.tools_json, .messages = messages.items });
         defer provider.freeTurn(allocator, turn);
-
-        if (turn.tool_calls.len == 0) {
-            const response = std.mem.trim(u8, turn.text, " \t\r\n");
-            try sessions.appendRuntimeEvent(allocator, session.path, Phase.assistant_turn, RuntimeEvent.model_output, response);
-            if (response.len == 0) {
-                try recordContractFailure(allocator, session.path, error.EmptyAssistantResponse, turn.text);
-                if (correction_retries >= runtime.max_retries) return error.EmptyAssistantResponse;
-                correction_retries += 1;
-                const retry = try buildContractRetryPrompt(allocator, error.EmptyAssistantResponse, turn.text);
-                defer allocator.free(retry);
-                try provider.appendMessage(allocator, &messages, .{ .role = "user", .content = retry });
-                continue;
-            }
-            try sessions.appendEvent(allocator, session.path, "assistant", response);
-            _ = try files.linuxWrite(1, response);
-            _ = try files.linuxWrite(1, "\n");
-            return;
-        }
-
-        if (try logAndReportUnreplayableToolCall(allocator, session.path, plan.tools, turn.tool_calls, &messages, runtime.max_retries, &correction_retries, user_prompt)) continue;
-        try provider.appendMessage(allocator, &messages, .{ .role = "assistant", .content = turn.text, .tool_calls = turn.tool_calls });
-        if (turn.reasoning.len > 0) {
-            try sessions.appendRuntimeEvent(allocator, session.path, Phase.assistant_turn, RuntimeEvent.model_output, turn.reasoning);
-        }
+        if (turn.tool_calls.len == 0) return provider.cleanText(allocator, turn.text, profile);
+        try provider.appendMessage(allocator, messages, .{ .role = "assistant", .content = turn.text, .tool_calls = turn.tool_calls });
+        if (std.mem.eql(u8, agent.label, "main")) try sessions.appendAssistantToolCalls(allocator, session_path, turn.text, turn.tool_calls);
         for (turn.tool_calls) |call| {
-            try sessions.appendToolEvent(allocator, session.path, RuntimeEvent.tool_call, call.name, call.arguments);
-            const result = try executeToolCall(allocator, io, read_context, plan.tools, call);
-            defer allocator.free(result);
-            if (isToolFailure(result)) {
-                if (correction_retries >= runtime.max_retries) return error.ToolCallFailed;
-                correction_retries += 1;
-            } else {
-                correction_retries = 0;
-            }
-            try sessions.appendToolEvent(allocator, session.path, RuntimeEvent.tool_result, call.name, result);
-            try provider.appendMessage(allocator, &messages, .{ .role = "tool", .content = result, .name = call.name, .tool_call_id = call.id });
+            const result = try executeTool(allocator, io, read_ctx, agent, call);
+            defer result.deinit(allocator);
+            if (std.mem.eql(u8, agent.label, "main")) try sessions.appendToolResult(allocator, session_path, call, result);
+            if (result.is_error) {
+                if (retries >= profile.runtime.max_retries) return error.ToolCallFailed;
+                retries += 1;
+            } else retries = 0;
+            try provider.appendMessage(allocator, messages, .{ .role = "tool", .content = result.content, .name = call.name, .tool_call_id = call.id });
         }
     }
 }
 
-fn logAndReportUnreplayableToolCall(allocator: Allocator, session_path: []const u8, available_tools: []const []const u8, calls: []const provider.ToolCall, messages: *std.ArrayList(provider.Message), max_retries: usize, correction_retries: *usize, user_prompt: []const u8) !bool {
-    for (calls) |call| {
-        const result = try unreplayableToolFailure(allocator, available_tools, call) orelse continue;
-        defer allocator.free(result);
-        try sessions.appendToolEvent(allocator, session_path, RuntimeEvent.tool_call, call.name, call.arguments);
-        try sessions.appendToolEvent(allocator, session_path, RuntimeEvent.tool_result, call.name, result);
-        if (correction_retries.* >= max_retries) return error.ToolCallFailed;
-        correction_retries.* += 1;
-        const retry = try buildToolFailureRetryPrompt(allocator, call.name, result, user_prompt);
-        defer allocator.free(retry);
-        try provider.appendMessage(allocator, messages, .{ .role = "user", .content = retry });
-        return true;
-    }
-    return false;
-}
-
-fn unreplayableToolFailure(allocator: Allocator, available_tools: []const []const u8, call: provider.ToolCall) !?[]u8 {
-    if (!allowsTool(available_tools, call.name)) return try toolFailureResult(allocator, call.name, "ToolNotAvailable", "tool is not available in this graph", call.arguments);
+fn executeTool(allocator: Allocator, io: std.Io, ctx: RuntimeReadContext, agent: Agent, call: provider.ToolCall) !tools.ToolResult {
+    if (!hasTool(agent.tools, call.name)) return toolError(allocator, call, "ToolNotAvailable", "tool is not available in this graph");
     tools.validateArguments(allocator, call.name, call.arguments) catch |err| return switch (err) {
         error.OutOfMemory => err,
-        else => try toolFailureResult(allocator, call.name, @errorName(err), "tool arguments did not match the required JSON schema", call.arguments),
+        else => toolError(allocator, call, @errorName(err), "tool arguments did not match the required JSON schema"),
     };
-    return null;
-}
-
-fn executeToolCall(allocator: Allocator, io: std.Io, ctx: RuntimeReadContext, available_tools: []const []const u8, call: provider.ToolCall) ![]u8 {
-    if (!allowsTool(available_tools, call.name)) return toolFailureResult(allocator, call.name, "ToolNotAvailable", "tool is not available in this graph", call.arguments);
-    tools.validateArguments(allocator, call.name, call.arguments) catch |err| return switch (err) {
-        error.OutOfMemory => err,
-        else => toolFailureResult(allocator, call.name, @errorName(err), "tool arguments did not match the required JSON schema", call.arguments),
-    };
-    return executeToolWithRuntimeReads(allocator, io, ctx, call.name, call.arguments) catch |err| switch (err) {
-        error.OutOfMemory => err,
-        else => toolFailureResult(allocator, call.name, @errorName(err), "tool execution failed", call.arguments),
-    };
-}
-
-fn executeToolWithRuntimeReads(allocator: Allocator, io: std.Io, ctx: RuntimeReadContext, name: []const u8, arg_text: []const u8) ![]u8 {
-    if (std.mem.eql(u8, name, "read")) {
-        var parsed = std.json.parseFromSlice(std.json.Value, allocator, arg_text, .{}) catch |err| return switch (err) {
-            error.OutOfMemory => err,
-            else => error.InvalidToolArguments,
-        };
+    if (agent.runtime_reads and std.mem.eql(u8, call.name, "read")) {
+        var parsed = try std.json.parseFromSlice(std.json.Value, allocator, call.arguments, .{});
         defer parsed.deinit();
-        if (parsed.value != .object) return error.InvalidToolArguments;
         const path = try tools.requireStringArg(parsed.value.object, "path");
-        if (try readRuntimeUri(allocator, io, ctx, path)) |content| return content;
+        if (try readRuntimeUri(allocator, io, ctx, path)) |content| return .{ .content = content, .is_error = false };
     }
-    return tools.execute(allocator, io, name, arg_text);
+    return tools.executeResult(allocator, io, call.name, call.arguments) catch |err| switch (err) {
+        error.OutOfMemory => err,
+        else => toolError(allocator, call, @errorName(err), "tool execution failed"),
+    };
+}
+
+fn toolError(allocator: Allocator, call: provider.ToolCall, name: []const u8, message: []const u8) !tools.ToolResult {
+    var out: std.ArrayList(u8) = .empty;
+    errdefer out.deinit(allocator);
+    try out.appendSlice(allocator, "{\"ok\":false,\"tool\":");
+    try files.appendJsonString(allocator, &out, call.name);
+    try out.appendSlice(allocator, ",\"error\":");
+    try files.appendJsonString(allocator, &out, name);
+    try out.appendSlice(allocator, ",\"message\":");
+    try files.appendJsonString(allocator, &out, message);
+    try out.appendSlice(allocator, ",\"arguments\":");
+    try files.appendJsonString(allocator, &out, call.arguments);
+    try out.append(allocator, '}');
+    return .{ .content = try out.toOwnedSlice(allocator), .is_error = true };
 }
 
 fn readRuntimeUri(allocator: Allocator, io: std.Io, ctx: RuntimeReadContext, path: []const u8) !?[]u8 {
@@ -194,45 +173,128 @@ fn readRuntimeUri(allocator: Allocator, io: std.Io, ctx: RuntimeReadContext, pat
         for (ctx.prompts) |prompt| if (std.mem.eql(u8, prompt.id, id)) return try allocator.dupe(u8, prompt.content);
         return error.PromptNotFound;
     }
-    if (std.mem.eql(u8, path, "session:current")) return try sessionMessageTranscript(allocator, ctx.session_log);
+    if (std.mem.startsWith(u8, path, "input:")) {
+        const id = path["input:".len..];
+        for (ctx.inputs) |input| if (std.mem.eql(u8, input.id, id)) return try readInputValue(allocator, input);
+        return error.InputNotFound;
+    }
+    if (std.mem.eql(u8, path, "session:current")) {
+        const log = try sessions.parseRaw(allocator, ctx.session_log);
+        defer log.deinit(allocator);
+        return try log.transcript(allocator);
+    }
     if (std.mem.eql(u8, path, "session:last")) return try std.fmt.allocPrint(allocator, "id: {s}\npath: {s}\n", .{ ctx.session_id, ctx.session_path });
     if (std.mem.eql(u8, path, "sessions:index")) return try sessionsIndex(allocator, io, ctx.session_dir);
     return null;
 }
 
-fn buildRuntimeUriCatalog(allocator: Allocator, ctx: RuntimeReadContext) ![]u8 {
-    var out: std.ArrayList(u8) = .empty;
-    errdefer out.deinit(allocator);
-    try out.appendSlice(allocator, "Runtime-readable URIs. These are optional views available through the existing read tool; load only when useful.\n");
-    for (ctx.prompts) |prompt| try out.print(allocator, "- prompt:{s}: {s} — {s} (read {{\"path\":\"prompt:{s}\"}})\n", .{ prompt.id, prompt.title, prompt.description, prompt.id });
-    try out.appendSlice(allocator,
-        \\- session:current: current session transcript as message-only text
-        \\- session:last: current session id/path metadata
-        \\- sessions:index: compact index of session files and latest user turns
-    );
+fn bindInputs(allocator: Allocator, plan: *const plan_mod.Plan, user_prompt: []const u8, runtime_inputs: []const plan_mod.RuntimeInput) ![]BoundInput {
+    var out: std.ArrayList(BoundInput) = .empty;
+    errdefer {
+        for (out.items) |input| input.deinit(allocator);
+        out.deinit(allocator);
+    }
+    for (runtime_inputs) |input| {
+        const spec = inputSpec(plan, input.id) orelse return error.UnknownGraphInput;
+        if (spec.kind != input.kind) return error.GraphInputTypeMismatch;
+        try out.append(allocator, try cloneRuntimeInput(allocator, input));
+    }
+    if (user_prompt.len != 0) {
+        if (inputSpec(plan, "user_turn")) |spec| if (!hasBoundInput(out.items, "user_turn")) {
+            if (spec.kind != .text) return error.GraphInputTypeMismatch;
+            try out.append(allocator, .{ .id = try allocator.dupe(u8, "user_turn"), .kind = .text, .value = try allocator.dupe(u8, user_prompt), .mime = try allocator.dupe(u8, "text/plain") });
+        };
+    }
+    for (plan.inputs) |spec| if (spec.required and !hasBoundInput(out.items, spec.id)) return error.MissingRequiredGraphInput;
     return out.toOwnedSlice(allocator);
 }
 
-fn sessionMessageTranscript(allocator: Allocator, session_log: []const u8) ![]u8 {
+fn cloneRuntimeInput(allocator: Allocator, input: plan_mod.RuntimeInput) !BoundInput {
+    return .{ .id = try allocator.dupe(u8, input.id), .kind = input.kind, .value = try allocator.dupe(u8, input.value), .mime = try allocator.dupe(u8, input.mime) };
+}
+
+fn freeBoundInputs(allocator: Allocator, inputs: []const BoundInput) void {
+    for (inputs) |input| input.deinit(allocator);
+    allocator.free(inputs);
+}
+
+fn inputSpec(plan: *const plan_mod.Plan, id: []const u8) ?plan_mod.InputSpec {
+    for (plan.inputs) |input| if (std.mem.eql(u8, input.id, id)) return input;
+    return null;
+}
+
+fn hasBoundInput(inputs: []const BoundInput, id: []const u8) bool {
+    for (inputs) |input| if (std.mem.eql(u8, input.id, id)) return true;
+    return false;
+}
+
+fn userContent(allocator: Allocator, user_prompt: []const u8, inputs: []const BoundInput) ![]u8 {
+    if (inputs.len == 0) return allocator.dupe(u8, user_prompt);
     var out: std.ArrayList(u8) = .empty;
     errdefer out.deinit(allocator);
-    var lines = std.mem.splitScalar(u8, session_log, '\n');
-    while (lines.next()) |line| {
-        if (std.mem.trim(u8, line, " \t\r").len == 0) continue;
-        var parsed = std.json.parseFromSlice(std.json.Value, allocator, line, .{}) catch continue;
-        defer parsed.deinit();
-        if (parsed.value != .object) continue;
-        const root = parsed.value.object;
-        const typ = root.get("type") orelse continue;
-        if (typ != .string or !std.mem.eql(u8, typ.string, "message")) continue;
-        const message = root.get("message") orelse continue;
-        if (message != .object) continue;
-        const role_value = message.object.get("role") orelse continue;
-        const content_value = message.object.get("content") orelse continue;
-        if (role_value != .string or content_value != .string) continue;
-        try out.print(allocator, "{s}: {s}\n", .{ role_value.string, content_value.string });
+    if (user_prompt.len != 0 and !hasBoundInput(inputs, "user_turn")) try out.appendSlice(allocator, user_prompt);
+    for (inputs) |input| {
+        if (input.kind == .image) continue;
+        if (out.items.len != 0) try out.appendSlice(allocator, "\n\n");
+        if (input.kind == .text) {
+            const text = try readInputValue(allocator, input);
+            defer allocator.free(text);
+            try out.print(allocator, "input {s}:\n{s}", .{ input.id, text });
+        } else try out.print(allocator, "file input {s}: input:{s}", .{ input.id, input.id });
     }
     return out.toOwnedSlice(allocator);
+}
+
+fn readInputValue(allocator: Allocator, input: BoundInput) ![]u8 {
+    if (input.kind == .text and std.mem.startsWith(u8, input.value, "@")) return files.readLimited(allocator, input.value[1..], 8 * 1024 * 1024);
+    if (input.kind == .text) return allocator.dupe(u8, input.value);
+    if (input.kind == .file) return files.readLimited(allocator, input.value, 32 * 1024 * 1024);
+    return error.GraphInputNotReadable;
+}
+
+fn modelPartsForInputs(allocator: Allocator, plan_images: []const plan_mod.ImageInput, inputs: []const BoundInput) ![]resource.ModelPart {
+    var total = plan_images.len;
+    for (inputs) |input| {
+        if (input.kind == .image) total += 1;
+    }
+    if (total == 0) return &.{};
+    var out = try allocator.alloc(resource.ModelPart, total);
+    var initialized: usize = 0;
+    errdefer {
+        for (out[0..initialized]) |part| part.deinit(allocator);
+        allocator.free(out);
+    }
+    for (plan_images) |image| {
+        const ref = try resource.parseRef(allocator, image.path, null);
+        defer ref.deinit(allocator);
+        out[initialized] = try resource.refToImagePart(allocator, ref, image.mime);
+        initialized += 1;
+    }
+    for (inputs) |input| if (input.kind == .image) {
+        const ref = try resource.parseRef(allocator, input.value, null);
+        defer ref.deinit(allocator);
+        out[initialized] = try resource.refToImagePart(allocator, ref, input.mime);
+        initialized += 1;
+    };
+    return out;
+}
+
+fn freeModelParts(allocator: Allocator, parts: []const resource.ModelPart) void {
+    for (parts) |part| part.deinit(allocator);
+    if (parts.len != 0) allocator.free(parts);
+}
+
+fn runtimeUriCatalog(allocator: Allocator) ![]u8 {
+    return allocator.dupe(u8,
+        \\Runtime reads
+        \\
+        \\- session:current: current session transcript with tool calls and tool results
+        \\
+        \\- session:last: current session id and path
+        \\
+        \\- sessions:index: session file index with latest user turns
+        \\- input:<id>: content for bound file/text graph inputs
+    );
 }
 
 fn sessionsIndex(allocator: Allocator, io: std.Io, session_dir: []const u8) ![]u8 {
@@ -247,252 +309,75 @@ fn sessionsIndex(allocator: Allocator, io: std.Io, session_dir: []const u8) ![]u
         if (entry.kind != .file or !std.mem.endsWith(u8, entry.name, ".jsonl")) continue;
         const path = try std.fs.path.join(allocator, &.{ session_dir, entry.name });
         defer allocator.free(path);
-        const log = sessions.readLog(allocator, path) catch continue;
-        defer allocator.free(log);
-        const message_count = sessions.countMessages(allocator, log) catch 0;
-        const latest = try latestUserMessage(allocator, log);
-        defer allocator.free(latest);
-        try out.print(allocator, "- {s}: messages={d} latest_user={s}\n", .{ entry.name, message_count, latest });
+        const log = sessions.readParsed(allocator, path) catch continue;
+        defer log.deinit(allocator);
+        try out.print(allocator, "- {s}: messages={d}\n", .{ entry.name, log.messageCount() });
         count += 1;
     }
     return out.toOwnedSlice(allocator);
 }
 
-fn latestUserMessage(allocator: Allocator, session_log: []const u8) ![]u8 {
-    var latest = try allocator.dupe(u8, "");
-    errdefer allocator.free(latest);
-    var lines = std.mem.splitScalar(u8, session_log, '\n');
-    while (lines.next()) |line| {
-        var parsed = std.json.parseFromSlice(std.json.Value, allocator, line, .{}) catch continue;
-        defer parsed.deinit();
-        if (parsed.value != .object) continue;
-        const root = parsed.value.object;
-        const typ = root.get("type") orelse continue;
-        if (typ != .string or !std.mem.eql(u8, typ.string, "message")) continue;
-        const message = root.get("message") orelse continue;
-        if (message != .object) continue;
-        const role_value = message.object.get("role") orelse continue;
-        const content_value = message.object.get("content") orelse continue;
-        if (role_value == .string and content_value == .string and std.mem.eql(u8, role_value.string, "user")) {
-            allocator.free(latest);
-            latest = try allocator.dupe(u8, content_value.string[0..@min(content_value.string.len, 160)]);
-        }
-    }
-    return latest;
-}
-
-fn recordContractFailure(allocator: Allocator, session_path: []const u8, err: anyerror, raw: []const u8) !void {
-    std.debug.print("runtime contract failure: {s}\nraw assistant output:\n{s}\n", .{ @errorName(err), raw });
-    try sessions.appendRuntimeError(allocator, session_path, Phase.assistant_turn, RuntimeEvent.contract_failure, @errorName(err), raw);
-}
-
-fn buildContractRetryPrompt(allocator: Allocator, err: anyerror, raw: []const u8) ![]u8 {
-    return std.fmt.allocPrint(allocator,
-        \\Runtime contract failure.
-        \\
-        \\Zinc rejected your previous assistant output.
-        \\Reason: {s}
-        \\
-        \\Raw rejected output:
-        \\{s}
-        \\
-        \\Retry this assistant turn cleanly. Do not patch or continue the rejected text.
-        \\Answer the current user request in final text.
-    , .{ @errorName(err), raw });
-}
-
-fn toolFailureResult(allocator: Allocator, tool_name: []const u8, error_name: []const u8, message: []const u8, arguments: []const u8) ![]u8 {
-    var out: std.ArrayList(u8) = .empty;
-    errdefer out.deinit(allocator);
-    try out.appendSlice(allocator, "{\"ok\":false,\"tool\":");
-    try files.appendJsonString(allocator, &out, tool_name);
-    try out.appendSlice(allocator, ",\"error\":");
-    try files.appendJsonString(allocator, &out, error_name);
-    try out.appendSlice(allocator, ",\"message\":");
-    try files.appendJsonString(allocator, &out, message);
-    try out.appendSlice(allocator, ",\"arguments\":");
-    try files.appendJsonString(allocator, &out, arguments);
-    try out.append(allocator, '}');
-    return out.toOwnedSlice(allocator);
-}
-
-fn isToolFailure(result: []const u8) bool {
-    return std.mem.startsWith(u8, std.mem.trim(u8, result, " \t\r\n"), "{\"ok\":false");
-}
-
-fn buildToolFailureRetryPrompt(allocator: Allocator, tool_name: []const u8, result: []const u8, original_request: []const u8) ![]u8 {
-    const err = jsonStringField(result, "error") orelse "ToolCallFailed";
-    const message = jsonStringField(result, "message") orelse "tool call failed";
-    _ = message;
-    return std.fmt.allocPrint(allocator, "The previous {s} tool call failed before execution: {s}. Use {s} now. Original request: {s}", .{ tool_name, err, tool_name, original_request });
-}
-
-fn jsonStringField(json: []const u8, field: []const u8) ?[]const u8 {
-    var needle_buf: [64]u8 = undefined;
-    if (field.len + 4 > needle_buf.len) return null;
-    needle_buf[0] = '"';
-    @memcpy(needle_buf[1 .. 1 + field.len], field);
-    @memcpy(needle_buf[1 + field.len .. 4 + field.len], "\":\"");
-    const needle = needle_buf[0 .. field.len + 4];
-    const start = std.mem.indexOf(u8, json, needle) orelse return null;
-    const value_start = start + needle.len;
-    const value_end = std.mem.indexOfScalarPos(u8, json, value_start, '"') orelse return null;
-    return json[value_start..value_end];
-}
-
-fn buildUnavailableToolRetryPrompt(allocator: Allocator, unavailable: []const u8, available: []const []const u8) ![]u8 {
-    var out: std.ArrayList(u8) = .empty;
-    errdefer out.deinit(allocator);
-    try out.print(allocator,
-        \\Runtime contract failure.
-        \\
-        \\The tool "{s}" is not available in this graph.
-        \\Retry this assistant turn cleanly using only available tools.
-        \\Available tools:
-    , .{unavailable});
-    for (available) |tool| try out.print(allocator, "\n- {s}", .{tool});
-    try out.appendSlice(allocator,
-        \\
-        \\
-        \\If no available tool can satisfy the request, explain the blocker in final text.
-    );
-    return out.toOwnedSlice(allocator);
-}
-
-fn shouldCompact(allocator: Allocator, session_log: []const u8, context_tokens: usize, threshold_percent: usize) !bool {
-    if (threshold_percent == 0) return false;
-    if (context_tokens == 0) return false;
-    const message_count = try sessions.countMessages(allocator, session_log);
-    if (message_count == 0) return false;
-    if (try sessions.latestCompactionMessageCount(allocator, session_log)) |compacted_count| {
-        if (compacted_count >= message_count) return false;
-    }
-    const estimated_tokens = (session_log.len + 3) / 4;
-    return estimated_tokens * 100 >= context_tokens * threshold_percent;
-}
-
-fn recoverFocusedContext(allocator: Allocator, io: std.Io, provider_base_url: []const u8, max_retries: usize, session_path: []const u8, model_alias: []const u8, temperature: f64, max_tokens: ?usize, tool_format: []const u8, focused_prompt: []const u8, available_tools: []const []const u8, available_tools_json: []const u8, prior_context: []const u8, user_prompt: []const u8, session_dir: []const u8) ![]u8 {
-    const user_content = try std.fmt.allocPrint(allocator,
-        \\assembled_context:
-        \\{s}
-        \\
-        \\user_turn:
-        \\{s}
-        \\
-        \\session_dir:
-        \\{s}
-    , .{ prior_context, user_prompt, session_dir });
-    defer allocator.free(user_content);
-
-    var messages: std.ArrayList(provider.Message) = .empty;
-    defer messages.deinit(allocator);
-    defer provider.freeMessages(allocator, messages.items);
-    try provider.appendMessage(allocator, &messages, .{ .role = "system", .content = focused_prompt });
-    try provider.appendMessage(allocator, &messages, .{ .role = "user", .content = user_content });
-
-    var correction_retries: usize = 0;
-    while (true) {
-        const turn = try callProviderWithTransientRetries(allocator, io, session_path, "focused_recovery", max_retries, .{
-            .base_url = provider_base_url,
-            .authorization = local_auth_header,
-            .model = model_alias,
-            .temperature = temperature,
-            .max_tokens = max_tokens,
-            .reasoning_format = "auto",
-            .reasoning_budget_tokens = null,
-            .thinking_enabled = false,
-            .parse_native_tools = std.mem.eql(u8, tool_format, "gemma-native"),
-            .json_response = true,
-            .tools_json = available_tools_json,
-            .messages = messages.items,
-        });
-        defer provider.freeTurn(allocator, turn);
-
-        if (turn.tool_calls.len == 0) return provider.cleanText(allocator, turn.text);
-
-        if (try logAndReportUnreplayableToolCall(allocator, session_path, available_tools, turn.tool_calls, &messages, max_retries, &correction_retries, user_prompt)) continue;
-        try provider.appendMessage(allocator, &messages, .{ .role = "assistant", .content = turn.text, .tool_calls = turn.tool_calls });
-        if (turn.reasoning.len > 0) try sessions.appendRuntimeEvent(allocator, session_path, "focused_recovery", RuntimeEvent.model_output, turn.reasoning);
-        for (turn.tool_calls) |call| {
-            try sessions.appendToolEvent(allocator, session_path, RuntimeEvent.tool_call, call.name, call.arguments);
-            const result = try executeFocusedToolCall(allocator, io, available_tools, call);
-            defer allocator.free(result);
-            if (isToolFailure(result)) {
-                if (correction_retries >= max_retries) return error.ToolCallFailed;
-                correction_retries += 1;
-            } else {
-                correction_retries = 0;
-            }
-            try sessions.appendToolEvent(allocator, session_path, RuntimeEvent.tool_result, call.name, result);
-            try provider.appendMessage(allocator, &messages, .{ .role = "tool", .content = result, .name = call.name, .tool_call_id = call.id });
-        }
-    }
-}
-
-fn executeFocusedToolCall(allocator: Allocator, io: std.Io, available_tools: []const []const u8, call: provider.ToolCall) ![]u8 {
-    if (!allowsTool(available_tools, call.name)) return toolFailureResult(allocator, call.name, "ToolNotAvailable", "tool is not available in this graph", call.arguments);
-    tools.validateArguments(allocator, call.name, call.arguments) catch |err| return switch (err) {
-        error.OutOfMemory => err,
-        else => toolFailureResult(allocator, call.name, @errorName(err), "tool arguments did not match the required JSON schema", call.arguments),
-    };
-    return tools.execute(allocator, io, call.name, call.arguments) catch |err| switch (err) {
-        error.OutOfMemory => err,
-        else => toolFailureResult(allocator, call.name, @errorName(err), "tool execution failed", call.arguments),
-    };
-}
-
-fn allowsTool(available: []const []const u8, name: []const u8) bool {
-    for (available) |tool| if (std.mem.eql(u8, tool, name)) return true;
-    return false;
-}
-
-fn reasoningEnabled(reasoning_tokens: isize) bool {
-    return reasoning_tokens != 0;
-}
-
-fn reasoningBudgetTokens(reasoning_tokens: isize) ?usize {
-    if (reasoning_tokens <= 0) return null;
-    return @intCast(reasoning_tokens);
-}
-
-fn callProviderWithTransientRetries(allocator: Allocator, io: std.Io, session_path: []const u8, phase: []const u8, max_retries: usize, request: provider.Request) !provider.AssistantTurn {
+fn callProvider(allocator: Allocator, io: std.Io, session_path: []const u8, max_retries: usize, label: []const u8, request: provider.Request) !provider.AssistantTurn {
     var attempts: usize = 0;
     while (true) {
-        return provider.call(allocator, io, request) catch |err| {
+        const span = trace.span("provider_call");
+        trace.event("llm", "request", "label={s} attempt={d} messages={d} chars={d} tools={d}", .{ label, attempts + 1, request.messages.len, messageChars(request.messages), request.tools_json.len });
+        const turn = provider.call(allocator, io, request) catch |err| {
+            span.end("llm", "label={s} attempt={d} error={s}", .{ label, attempts + 1, @errorName(err) });
             if (err == error.ProviderLoadingModel) {
-                try sessions.appendRuntimeError(allocator, session_path, phase, RuntimeEvent.retryable_failure, @errorName(err), "provider is still loading the model; waiting before retry");
+                try sessions.appendProviderError(allocator, session_path, "provider loading");
                 sleepMillis(1000);
                 continue;
             }
-            if (!isTransientProviderError(err) or attempts >= max_retries) return err;
+            if (!isTransient(err) or attempts >= max_retries) return err;
             attempts += 1;
-            try sessions.appendRuntimeError(allocator, session_path, phase, RuntimeEvent.retryable_failure, @errorName(err), "provider call failed; retrying immediately");
+            try sessions.appendProviderError(allocator, session_path, "provider retry");
             continue;
         };
+        span.end("llm", "label={s} attempt={d} text_chars={d} tool_calls={d}", .{ label, attempts + 1, turn.text.len, turn.tool_calls.len });
+        return turn;
     }
 }
 
-fn isTransientProviderError(err: anyerror) bool {
+fn shouldCompact(log: sessions.Log, context_tokens: usize, threshold_percent: usize) !bool {
+    if (threshold_percent == 0 or context_tokens == 0 or log.messageCount() == 0) return false;
+    if (log.compaction) |c| if (c.message_count >= log.messageCount()) return false;
+    return ((log.raw.len + 3) / 4) * 100 >= context_tokens * threshold_percent;
+}
+
+fn messageChars(messages: []const provider.Message) usize {
+    var n: usize = 0;
+    for (messages) |m| {
+        n += m.role.len + m.content.len;
+        for (m.parts) |part| switch (part) {
+            .text => |text| n += text.len,
+            .image_url => |url| n += url.len,
+        };
+    }
+    return n;
+}
+
+fn hasTool(available: []const []const u8, name: []const u8) bool {
+    for (available) |tool| if (std.mem.eql(u8, tool, name)) return true;
+    return false;
+}
+fn reasoningBudget(tokens: isize) ?usize {
+    return if (tokens <= 0) null else @intCast(tokens);
+}
+fn isTransient(err: anyerror) bool {
     return switch (err) {
-        error.ProviderRequestFailed,
-        error.ProviderLoadingModel,
-        error.ConnectionRefused,
-        error.ConnectionResetByPeer,
-        error.BrokenPipe,
-        error.BadProviderResponse,
-        => true,
+        error.ProviderRequestFailed, error.ProviderLoadingModel, error.ConnectionRefused, error.ConnectionResetByPeer, error.BrokenPipe, error.BadProviderResponse => true,
         else => false,
     };
 }
-
 fn sleepMillis(ms: usize) void {
-    var request = std.os.linux.timespec{ .sec = @intCast(ms / 1000), .nsec = @intCast((ms % 1000) * std.time.ns_per_ms) };
+    var req = std.os.linux.timespec{ .sec = @intCast(ms / 1000), .nsec = @intCast((ms % 1000) * std.time.ns_per_ms) };
     while (true) {
-        var remaining: std.os.linux.timespec = undefined;
-        const rc = std.os.linux.nanosleep(&request, &remaining);
+        var rem: std.os.linux.timespec = undefined;
+        const rc = std.os.linux.nanosleep(&req, &rem);
         const errno = std.os.linux.errno(rc);
         if (errno == .SUCCESS) return;
         if (errno != .INTR) return;
-        request = remaining;
+        req = rem;
     }
 }

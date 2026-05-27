@@ -1,0 +1,51 @@
+default_model: qwen-heretic-mtp
+
+paths:
+  graph: .zinc/graphs/zinc-loop.circuitry.yaml
+  compiled_plan: .zinc/compiled/plan.json
+  compaction_graph: .zinc/graphs/zinc-compaction.circuitry.yaml
+
+runtime:
+  max_retries: 5
+  compaction_threshold_percent: 70
+
+provider:
+  base_url: http://127.0.0.1:30000/v1
+  authorization: Bearer zinc
+
+models:
+  qwen-heretic-mtp:
+    model: qwen3.6-27b-heretic-mtp-q3_k_s
+    loader:
+      engine: llama.cpp
+      repo: https://github.com/ggml-org/llama.cpp.git
+      ref: master
+      hf_repo: mradermacher/Qwen3.6-27B-uncensored-heretic-v2-Native-MTP-Preserved-GGUF
+      hf_file: Qwen3.6-27B-uncensored-heretic-v2-Native-MTP-Preserved.Q3_K_S.gguf
+      mmproj_file: Qwen3.6-27B-uncensored-heretic-v2-Native-MTP-Preserved.mmproj-Q8_0.gguf
+      cache_type_k: q4_0
+      cache_type_v: q4_0
+      fit_ctx: 8192
+      gpu_layers: fit
+      draft_tokens: 2
+      reasoning_format: deepseek
+      mtp: true
+    generation:
+      temperature: 0.6
+      max_tokens: 1024
+    reasoning:
+      enabled: true
+      effort: low
+      budgets:
+        off: 0
+        low: 256
+        medium: 1024
+        high: 4096
+        extra_high: -1
+    protocol:
+      reasoning:
+        content_markers:
+          starts:
+            - "<think>\n"
+            - "<think>"
+          end: "</think>"

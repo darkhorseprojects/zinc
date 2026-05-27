@@ -1,167 +1,188 @@
 # Zinc
 
-`zn` is a small Zig runtime for local Circuitry agent loops.
+Zinc is a small local runtime for Circuitry agent graphs.
 
-It compiles a Zinc-shaped Circuitry graph, keeps JSONL sessions, calls a local OpenAI-compatible model server, exposes graph-approved tools, and prints the assistant's final text.
+It keeps the boundary sharp:
 
-## install
+```text
+Circuitry YAML -> resolved graph bundle -> Zinc loop plan -> local OpenAI-compatible agent loop
+```
+
+Circuitry owns YAML, imports, schema checks, and normalization. Zinc owns local config, packages, session context, tools, compaction, and the llama.cpp server lifecycle.
+
+## Install
 
 ```bash
-git clone https://github.com/darkhorseprojects/zinc.git
-cd zinc
+npm install -g @darkhorseprojects/circuitry@0.3.9
 ./scripts/install-linux.sh
-zn-setup-turboquant
-zn up
 ```
 
-## use
+The installer builds `zn`, installs stock graphs/prompts under `~/.local/share/zinc`, and creates `~/.config/zinc/config.yaml` if one does not already exist.
+
+## Daily use
 
 ```bash
-zn "summarize this repo"
-zn --continue "follow up"
-zn --session <id> "resume this session"
-zn compact --continue
-zn validate
-zn compile
-zn down
+zn "explain this repo"
+zn run --graph repair --text notes=@notes.md "fix the failing test"
+zn compact
+zn update
 ```
 
-From source:
+`zn update` updates installed Zinc packages, then updates Zinc from `https://github.com/darkhorseprojects/zinc.git` and reruns the installer. Use `--skip-packages` or `--skip-zinc` to update only one side.
+
+## Commands
 
 ```bash
-zig build
+zn [--session id|--continue] <prompt>
+zn run [--graph id|path] [--input name=value] [--text name=value|@file] [--file name=path] [--image name=path] [--session id|--continue] <prompt>
+
+zn check [graph]
+zn compile [graph] [plan.json]
+zn compact [--dry-run] [--session id|--continue] [graph]
+zn update [--ref tag-or-commit] [--skip-packages] [--skip-zinc]
+
+zn graph list
+zn session-dir
+zn config get <path>
+
+zn pkg add [--local|--global] [--replace] <source>
+zn pkg list
+zn pkg show [--local|--global] <name>
+zn pkg update [--local|--global] <name>
+zn pkg remove [--local|--global] <name>
+
+zn serve [model]
+zn status
+zn stop
+```
+
+## Graphs
+
+A Zinc loop graph is a Circuitry source graph with runtime args and at least one tool-using agent.
+
+```yaml
+circuitry: "0.3.2"
+args:
+  user_turn:
+    type: text
+    required: true
+runtime:
+  provider: zinc
+  model: inherit
+resources:
+  user_turn:
+    type: text
+    value: ""
+  assistant:
+    type: agent
+    identity: Zinc
+    inputs: [user_turn]
+    tools: [read, write, edit, bash]
+    expect:
+      response: str
+    instructions: |
+      Be direct. Use tools when useful.
+```
+
+Runtime bindings:
+
+```text
+--input name=value   text literal
+--text name=value    text literal
+--text name=@file    text loaded from file
+--file name=path     file input, readable as input:<name>
+--image name=path    image input sent as model image content
+```
+
+If the graph declares a text arg named `user_turn`, the positional prompt binds to it.
+
+## Packages
+
+A package is a directory with `zinc.pkg.yaml` plus exported files.
+
+```yaml
+name: browser-repair
+version: 0.1.0
+description: Browser repair graphs and prompts.
+exports:
+  graphs:
+    repair: graphs/repair.circuitry.yaml
+  prompts:
+    dom-debug: prompts/dom-debug.md
+  assets:
+    screenshot: assets/example.png
+```
+
+Install sources:
+
+```bash
+zn pkg add ./local-package
+zn pkg add github:user/repo
+zn pkg add github:user/repo/path/to/package
+zn pkg add github:user/repo#v1.0.0
+zn pkg add https://github.com/user/repo.git#<commit>
+```
+
+Local packages install to `.zinc/packages`. Global packages install to `~/.local/share/zinc/packages`. Local packages win when names overlap.
+
+## Config
+
+Config precedence:
+
+```text
+.zinc/config.yaml
+~/.config/zinc/config.yaml
+built-in defaults
+```
+
+Useful keys:
+
+```yaml
+paths:
+  graph: ~/.local/share/zinc/graphs/zinc-loop.circuitry.yaml
+  compiled_plan: ~/.local/share/zinc/compiled/plan.json
+  compaction_graph: ~/.local/share/zinc/graphs/zinc-compaction.circuitry.yaml
+provider:
+  base_url: http://127.0.0.1:30000/v1
+  authorization: Bearer zinc
+runtime:
+  max_retries: 5
+  compaction_threshold_percent: 70
+```
+
+## Runtime model
+
+```text
+load config and graph
+compile graph to a loop plan
+assemble semantic session context
+call provider
+execute graph-declared tools
+append semantic JSONL rows
+compact when context pressure is high
+```
+
+Sessions live in `.zinc/sessions`. Tool calls and results replay as conversation messages.
+
+## Local model server
+
+`zn serve` clones/builds llama.cpp under `~/.local/share/zinc/llama.cpp`, downloads model files under `~/.local/share/zinc/models`, and starts `llama-server` for the configured model.
+
+```bash
+zn serve
+zn status
+zn stop
+```
+
+## Development
+
+```bash
 zig build test
-./zig-out/bin/zn "hello"
+zig build
+zig-out/bin/zn check
+zig-out/bin/zn compile
 ```
 
-## config
+## License
 
-Zinc reads config in this order:
-
-```text
-.zinc/config.toml
-zinc.toml
-~/.config/zinc/config.toml
-installed defaults
-```
-
-Small default shape:
-
-```toml
-graph = "graphs/zinc-loop.circuitry.yaml"
-compiled_plan = ".zinc/compiled/plan.json"
-provider_base_url = "http://127.0.0.1:30000/v1"
-compaction_threshold_percent = 70
-compaction_graph = "graphs/zinc-compaction.circuitry.yaml"
-default_model = "gemma-heretic"
-
-[models.gemma-heretic]
-engine = "llama-cpp-turboquant"
-alias = "gemma-4-96e-a4b-heretic-tq"
-hf_repo = "WaveCut/Gemma-4-96E-A4B-Heretic-TQ"
-hf_file = "Gemma-4-96E-A4B-Heretic-TQ3_1S.gguf"
-cache_type_k = "q8_0"
-cache_type_v = "turbo3"
-fit_ctx = 8192
-vram_allocation_percent = 87.5
-
-[models.gemma-heretic.runtime]
-tool_format = "gemma-native"
-reasoning_effort = "low"
-reasoning_format = "auto"
-temperature = 0.5
-max_tokens = 1024
-tool_reasoning = false
-
-[models.gemma-heretic.runtime.budgets]
-off = 0
-low = 256
-medium = 1024
-high = 4096
-extra-high = -1
-```
-
-Reasoning is one compiled value: `reasoning_tokens`.
-
-```text
-0   thinking off
->0  thinking on, bounded to that many tokens
--1  thinking on, no request budget cap
-```
-
-`reasoning_format` is only extraction. Use `auto` unless you intentionally want raw thought markers in visible output.
-
-## graphs
-
-Default graph:
-
-```text
-graphs/zinc-loop.circuitry.yaml
-  links graphs/zinc-context-recovery.circuitry.yaml
-```
-
-Runtime path:
-
-```text
-session JSONL -> deterministic context assembly
-assembled context + user turn + session_dir -> focused_recovery graph agent with tools
-assembled context + focused_recovery output + user turn -> assistant -> final text
-```
-
-The raw JSONL session log is parsed by Zinc runtime code. It is not passed to the assistant or focused recovery agent. The focused recovery agent receives only assembled context, current user turn, and the session directory, then uses graph-declared tools such as `bash`/`read` if it wants archive context. Text resources with prompt-pack frontmatter are listed to the assistant by stable id and can be lazy-loaded through `read {"path":"prompt:<id>"}`; no local prompt file paths are exposed. The compaction command is the intentional exception: `zn compact` gives a session log to the compaction graph agent so it can produce a durable summary. Zinc also runs that graph automatically when the estimated session log token count reaches `compaction_threshold_percent` of the configured model `fit_ctx`; set the percentage to `0` to disable automatic compaction.
-
-Compaction path:
-
-```text
-zn compact --continue
-  uses graphs/zinc-compaction.circuitry.yaml
-  appends a compaction summary to the session log
-```
-
-Run another graph once:
-
-```bash
-zn graphs/custom.circuitry.yaml "do the thing"
-zn graphs/custom.circuitry.yaml --input brief=hello
-zn graphs/custom.circuitry.yaml --inputs-json '{"brief":"hello"}'
-```
-
-## sessions
-
-Project sessions live in:
-
-```text
-.zinc/sessions/last
-.zinc/sessions/<session-id>.jsonl
-```
-
-Conversation messages, runtime events, and compaction summaries are JSONL entries. Continuation replays exact first messages, the latest compaction summary when available, the exact transcript tail after that compaction, and focused matches from other session files.
-
-## tools
-
-Graphs choose tool names. Zinc validates them at compile time and exposes only that list at runtime.
-
-Builtins:
-
-```text
-read
-write
-edit
-bash
-request_circuitry_run
-```
-
-## source map
-
-```text
-src/main.zig       CLI dispatch
-src/commands.zig   validate, compile, run
-src/engine.zig     agent loop
-src/provider.zig   OpenAI-compatible HTTP
-src/plan.zig       compiled plan loading
-src/server.zig     zn up/down
-src/config.zig     config lookup
-src/session.zig    JSONL sessions
-src/tools.zig      builtin tools
-src/graph.zig      Circuitry subset
-```
+TBD.

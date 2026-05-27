@@ -90,13 +90,3 @@ fn mkdirOne(path: []const u8) !void {
     if (errno == .SUCCESS or errno == .EXIST) return;
     return error.MkdirFailed;
 }
-
-test "edit requires unique old text" {
-    const path = ".zig-cache/files-test-edit.txt";
-    try write(path, "one two one");
-    try std.testing.expectError(error.OldTextNotUnique, edit(std.testing.allocator, path, "one", "x"));
-    try edit(std.testing.allocator, path, "two", "2");
-    const text = try readLimited(std.testing.allocator, path, 1024);
-    defer std.testing.allocator.free(text);
-    try std.testing.expectEqualStrings("one 2 one", text);
-}

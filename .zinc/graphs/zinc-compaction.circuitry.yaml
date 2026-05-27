@@ -1,11 +1,11 @@
-circuitry: "0.2.99"
+circuitry: "0.3.2"
 title: "Zinc context compaction"
 description: |
   Converts the middle of a Zinc session transcript into a durable summary that
   can be inserted between preserved first messages and the exact transcript tail.
 runtime:
   provider: zinc
-  model: gemma-heretic
+  model: inherit
 resources:
   session_log:
     type: text

@@ -1,4 +1,4 @@
-circuitry: "0.2.99"
+circuitry: "0.3.2"
 title: "Zinc context recovery"
 description: |
   Graph fragment for the model-guided part of continuation context recovery.
