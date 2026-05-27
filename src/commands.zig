@@ -312,14 +312,12 @@ fn updateZinc(allocator: Allocator, io: std.Io, home: []const u8, ref: ?[]const 
     try files.mkdirP(std.fs.path.dirname(source_dir) orelse return error.InvalidUpdatePath);
     if (!files.existsPath(source_dir)) {
         try runCommand(allocator, io, &.{ "git", "clone", "https://github.com/darkhorseprojects/zinc.git", source_dir });
-    } else {
-        try runCommand(allocator, io, &.{ "git", "-C", source_dir, "fetch", "--tags", "origin" });
     }
+    try runCommand(allocator, io, &.{ "git", "-C", source_dir, "fetch", "--all", "--force" });
     if (ref) |r| {
         try runCommand(allocator, io, &.{ "git", "-C", source_dir, "checkout", "--detach", r });
     } else {
-        try runCommand(allocator, io, &.{ "git", "-C", source_dir, "checkout", "main" });
-        try runCommand(allocator, io, &.{ "git", "-C", source_dir, "pull", "--ff-only", "origin", "main" });
+        try runCommand(allocator, io, &.{ "git", "-C", source_dir, "reset", "--hard", "origin/main" });
     }
     const installer = try std.fs.path.join(allocator, &.{ source_dir, "scripts/install-linux.sh" });
     defer allocator.free(installer);
