@@ -163,16 +163,44 @@ const Config = struct {
         return try allocator.dupe(u8, raw);
     }
     fn usizeValue(self: Config, path: []const []const u8, default: usize) !usize {
-        const raw = scalarText(self.value(path)) orelse return default;
-        return std.fmt.parseInt(usize, raw, 10) catch error.InvalidConfigValue;
+        const found = self.value(path) orelse return default;
+        switch (found) {
+            .integer => |val| {
+                if (val < 0) return error.InvalidConfigValue;
+                return @intCast(val);
+            },
+            .string => |val| {
+                return std.fmt.parseInt(usize, val, 10) catch error.InvalidConfigValue;
+            },
+            else => return error.InvalidConfigValue,
+        }
     }
     fn isizeValue(self: Config, path: []const []const u8, default: isize) !isize {
-        const raw = scalarText(self.value(path)) orelse return default;
-        return std.fmt.parseInt(isize, raw, 10) catch error.InvalidConfigValue;
+        const found = self.value(path) orelse return default;
+        switch (found) {
+            .integer => |val| {
+                return @intCast(val);
+            },
+            .string => |val| {
+                return std.fmt.parseInt(isize, val, 10) catch error.InvalidConfigValue;
+            },
+            else => return error.InvalidConfigValue,
+        }
     }
     fn f64Value(self: Config, path: []const []const u8, default: f64) !f64 {
-        const raw = scalarText(self.value(path)) orelse return default;
-        return std.fmt.parseFloat(f64, raw) catch error.InvalidConfigValue;
+        const found = self.value(path) orelse return default;
+        switch (found) {
+            .float => |val| {
+                return val;
+            },
+            .integer => |val| {
+                return @floatFromInt(val);
+            },
+            .string => |val| {
+                return std.fmt.parseFloat(f64, val) catch error.InvalidConfigValue;
+            },
+            else => return error.InvalidConfigValue,
+        }
     }
     fn boolValue(self: Config, path: []const []const u8, default: bool) !bool {
         const found = self.value(path) orelse return default;
