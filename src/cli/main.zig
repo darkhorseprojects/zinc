@@ -5,6 +5,29 @@ const root = @import("../root.zig");
 const Scope = root.core.packages.Scope;
 
 pub fn run(init: std.process.Init) !void {
+    runInner(init) catch |err| {
+        switch (err) {
+            error.ProviderRequestFailed => {
+                std.debug.print("error: provider request failed. Check server/provider log at ~/.local/state/zinc/server.log for details.\n", .{});
+            },
+            error.ProviderLoadingModel => {
+                std.debug.print("error: provider is still loading the model. Please wait and try again.\n", .{});
+            },
+            error.ConnectionRefused => {
+                std.debug.print("error: connection refused. Is the Zinc model server running? Start it with 'zn serve'.\n", .{});
+            },
+            error.SessionNotFound => {
+                std.debug.print("error: session not found. Check if the session ID is correct.\n", .{});
+            },
+            else => {
+                std.debug.print("error: {s}\n", .{@errorName(err)});
+            },
+        }
+        std.process.exit(1);
+    };
+}
+
+fn runInner(init: std.process.Init) !void {
     const allocator = init.gpa;
     const home = std.process.Environ.getPosix(init.minimal.environ, "HOME") orelse return error.HomeNotSet;
 
