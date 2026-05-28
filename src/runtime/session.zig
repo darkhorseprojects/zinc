@@ -58,13 +58,15 @@ pub const Log = struct {
         var out: std.ArrayList(u8) = .empty;
         errdefer out.deinit(allocator);
         const first_end: usize = @min(first_message_count, self.messages.len);
-        for (self.messages[0..first_end]) |message| try renderMessage(allocator, &out, message);
+        for (self.messages[0..first_end], 0..) |message, i| try renderMessageSmart(allocator, &out, message, i);
         var tail_start = first_end;
         if (self.compaction) |c| {
             tail_start = @max(first_end, @as(usize, @min(c.message_count, self.messages.len)));
             try out.print(allocator, "compaction_summary: {s}\n", .{c.summary});
         }
-        for (self.messages[tail_start..]) |message| try renderMessage(allocator, &out, message);
+        for (self.messages[tail_start..], 0..) |message, i| {
+            try renderMessageSmart(allocator, &out, message, tail_start + i);
+        }
         return out.toOwnedSlice(allocator);
     }
 
@@ -314,7 +316,7 @@ fn appendLine(path: []const u8, line: []const u8) !void {
     var n: usize = 0;
     while (n < line.len) n += try files.linuxWrite(fd, line[n..]);
 }
-fn readLastId(allocator: Allocator) ![]u8 {
+pub fn readLastId(allocator: Allocator) ![]u8 {
     const raw = try files.readLimited(allocator, ".zinc/sessions/last", 256);
     defer allocator.free(raw);
     const id = std.mem.trim(u8, raw, " \t\r\n");
@@ -349,4 +351,37 @@ fn freeCall(allocator: Allocator, call: provider.ToolCall) void {
     allocator.free(call.id);
     allocator.free(call.name);
     allocator.free(call.arguments);
+}
+
+fn renderMessageSmart(allocator: Allocator, out: *std.ArrayList(u8), message: Message, index: usize) !void {
+    if (std.mem.eql(u8, message.role, "assistant") and message.tool_calls.len != 0) {
+        for (message.tool_calls) |call| try out.print(allocator, "assistant tool call {s} {s}\n", .{ call.name, call.arguments });
+        return;
+    }
+    if (std.mem.eql(u8, message.role, "tool")) {
+        const content = try truncateMessageContent(allocator, message, index);
+        defer allocator.free(content);
+        try out.print(allocator, "tool {s} call_id={s}: {s}\n", .{ message.name orelse "", message.tool_call_id orelse "", content });
+        return;
+    }
+    const content = try truncateMessageContent(allocator, message, index);
+    defer allocator.free(content);
+    try out.print(allocator, "{s}: {s}\n", .{ message.role, content });
+}
+
+fn truncateMessageContent(allocator: Allocator, message: Message, index: usize) ![]u8 {
+    const content = message.content;
+    const max_preview = 2048;
+
+    if (content.len <= max_preview) {
+        return try allocator.dupe(u8, content);
+    }
+
+    const preview = content[0..max_preview];
+    if (std.mem.eql(u8, message.role, "tool")) {
+        const call_id = message.tool_call_id orelse "";
+        return std.fmt.allocPrint(allocator, "{s}... [truncated, {d} chars - use session:current:tools:{s} for full]", .{ preview, content.len, call_id });
+    } else {
+        return std.fmt.allocPrint(allocator, "{s}... [truncated, {d} chars - use session:current:messages:{d} for full]", .{ preview, content.len, index });
+    }
 }

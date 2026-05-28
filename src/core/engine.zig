@@ -61,6 +61,9 @@ pub fn run(allocator: Allocator, io: std.Io, home: []const u8, user_prompt: []co
         log.deinit(allocator);
         log = try sessions.readParsed(allocator, session.path);
     }
+    if (try needsPrevention(log, plan.context_tokens)) {
+        try preProcessForContext(allocator, log);
+    }
 
     const prior = try log.transcript(allocator);
     defer allocator.free(prior);
@@ -342,7 +345,33 @@ fn callProvider(allocator: Allocator, io: std.Io, session_path: []const u8, max_
 fn shouldCompact(log: sessions.Log, context_tokens: usize, threshold_percent: usize) !bool {
     if (threshold_percent == 0 or context_tokens == 0 or log.messageCount() == 0) return false;
     if (log.compaction) |c| if (c.message_count >= log.messageCount()) return false;
-    return ((log.raw.len + 3) / 4) * 100 >= context_tokens * threshold_percent;
+    const estimated_tokens = log.raw.len / 3;
+    return estimated_tokens >= context_tokens * 80 / 100;
+}
+
+fn needsPrevention(log: sessions.Log, context_tokens: usize) !bool {
+    if (context_tokens == 0) return false;
+    const estimated_tokens = log.raw.len / 3;
+    return estimated_tokens >= context_tokens * 50 / 100;
+}
+
+fn preProcessForContext(allocator: Allocator, log: sessions.Log) !void {
+    var i: usize = 0;
+    while (i < log.messages.len) : (i += 1) {
+        const message = &log.messages[i];
+        const max_preview = 2048;
+        if (message.content.len > max_preview) {
+            const preview = message.content[0..max_preview];
+            const new_content = if (std.mem.eql(u8, message.role, "tool")) blk: {
+                const call_id = message.tool_call_id orelse "";
+                break :blk try std.fmt.allocPrint(allocator, "{s}... [truncated, {d} chars - use session:current:tools:{s} for full]", .{ preview, message.content.len, call_id });
+            } else blk: {
+                break :blk try std.fmt.allocPrint(allocator, "{s}... [truncated, {d} chars - use session:current:messages:{d} for full]", .{ preview, message.content.len, i });
+            };
+            allocator.free(message.content);
+            message.content = new_content;
+        }
+    }
 }
 
 fn messageChars(messages: []const provider.Message) usize {

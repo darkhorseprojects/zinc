@@ -1,5 +1,6 @@
 const std = @import("std");
 const files = @import("fs.zig");
+const sessions = @import("../runtime/session.zig");
 
 const Allocator = std.mem.Allocator;
 
@@ -24,7 +25,7 @@ const Tool = struct {
 };
 
 const builtin = [_]Tool{
-    .{ .name = "read", .description = "Read a UTF-8 file from the current working directory, or a Zinc runtime URI such as prompt:<id>, session:current, session:last, or sessions:index.", .prompt = "read files and Zinc runtime URIs", .params = &.{.{ .name = "path" }}, .run = runRead },
+    .{ .name = "read", .description = "Read a UTF-8 file from the current working directory, or a Zinc runtime URI such as prompt:<id>, session:current, session:last, or sessions:index. Supports :bytes=<start>-<end> for chunking. Use session:current:tools:<id> or session:current:messages:<index> for specific results.", .prompt = "read files and Zinc runtime URIs", .params = &.{.{ .name = "path" }}, .run = runRead },
     .{ .name = "write", .description = "Create or overwrite a UTF-8 file.", .prompt = "create or overwrite files", .params = &.{ .{ .name = "path" }, .{ .name = "content" } }, .run = runWrite },
     .{ .name = "edit", .description = "Replace exact text in a UTF-8 file. The old text must occur exactly once.", .prompt = "replace exact text in files", .params = &.{ .{ .name = "path" }, .{ .name = "oldText" }, .{ .name = "newText" } }, .run = runEdit },
     .{ .name = "bash", .description = "Run a shell command in the current working directory.", .prompt = "run shell commands in the current working directory", .params = &.{.{ .name = "command" }}, .run = runBashTool },
@@ -113,7 +114,173 @@ fn writeSchema(allocator: Allocator, out: *std.ArrayList(u8), tool: Tool) !void 
 }
 
 fn runRead(allocator: Allocator, _: std.Io, args: std.json.ObjectMap) !ToolResult {
-    return .{ .content = try files.readLimited(allocator, try requireStringArg(args, "path"), 1024 * 1024), .is_error = false };
+    const path = try requireStringArg(args, "path");
+
+    if (std.mem.indexOf(u8, path, "tools:")) |pos| {
+        return try readToolResult(allocator, path, pos);
+    }
+
+    if (std.mem.indexOf(u8, path, "messages:")) |pos| {
+        return try readMessageResult(allocator, path, pos);
+    }
+
+    if (std.mem.indexOf(u8, path, ":bytes=")) |byte_pos| {
+        const split = splitByteRange(path, byte_pos);
+        return try readWithRange(allocator, split.base_path, split.range);
+    }
+
+    return fullRead(allocator, path);
+}
+
+const ByteRangeSplit = struct {
+    base_path: []const u8,
+    range: []const u8,
+};
+
+fn splitByteRange(path: []const u8, byte_pos: usize) ByteRangeSplit {
+    return .{
+        .base_path = path[0..byte_pos],
+        .range = path[byte_pos + ":bytes=".len..],
+    };
+}
+
+fn readWithRange(allocator: Allocator, base_path: []const u8, range_str: []const u8) !ToolResult {
+    var start: usize = 0;
+    var end: ?usize = null;
+    if (std.mem.indexOfScalar(u8, range_str, '-')) |dash_pos| {
+        if (dash_pos > 0) {
+            start = try std.fmt.parseInt(usize, range_str[0..dash_pos], 10);
+        }
+        if (dash_pos + 1 < range_str.len) {
+            end = try std.fmt.parseInt(usize, range_str[dash_pos + 1..], 10);
+        }
+    } else {
+        start = try std.fmt.parseInt(usize, range_str, 10);
+    }
+
+    const full_content = try files.readLimited(allocator, base_path, 8 * 1024 * 1024);
+    defer allocator.free(full_content);
+
+    const actual_start = @min(start, full_content.len);
+    const actual_end = if (end) |e| @min(e, full_content.len) else full_content.len;
+    if (actual_start > actual_end) return error.InvalidByteRange;
+
+    return .{
+        .content = try allocator.dupe(u8, full_content[actual_start..actual_end]),
+        .is_error = false,
+    };
+}
+
+fn fullRead(allocator: Allocator, path: []const u8) !ToolResult {
+    return .{ .content = try files.readLimited(allocator, path, 1024 * 1024), .is_error = false };
+}
+
+fn readToolResult(allocator: Allocator, path: []const u8, tools_pos: usize) !ToolResult {
+    var tool_id = path[tools_pos + "tools:".len..];
+    var start: usize = 0;
+    var end: ?usize = null;
+    var has_range = false;
+
+    if (std.mem.indexOf(u8, tool_id, ":bytes=")) |bytes_pos| {
+        const range_str = tool_id[bytes_pos + ":bytes=".len..];
+        tool_id = tool_id[0..bytes_pos];
+        has_range = true;
+        if (std.mem.indexOfScalar(u8, range_str, '-')) |dash_pos| {
+            if (dash_pos > 0) {
+                start = try std.fmt.parseInt(usize, range_str[0..dash_pos], 10);
+            }
+            if (dash_pos + 1 < range_str.len) {
+                end = try std.fmt.parseInt(usize, range_str[dash_pos + 1..], 10);
+            }
+        } else {
+            start = try std.fmt.parseInt(usize, range_str, 10);
+        }
+    }
+
+    const last_id = try sessions.readLastId(allocator);
+    defer allocator.free(last_id);
+    const session_path = try std.fmt.allocPrint(allocator, ".zinc/sessions/{s}.jsonl", .{last_id});
+    defer allocator.free(session_path);
+
+    const log = try sessions.readParsed(allocator, session_path);
+    defer log.deinit(allocator);
+
+    for (log.messages) |message| {
+        if (std.mem.eql(u8, message.role, "tool")) {
+            if (message.tool_call_id) |tc_id| {
+                if (std.mem.eql(u8, tc_id, tool_id)) {
+                    var content = message.content;
+                    if (has_range) {
+                        const actual_start = @min(start, content.len);
+                        const actual_end = if (end) |e| @min(e, content.len) else content.len;
+                        if (actual_start > actual_end) return error.InvalidByteRange;
+                        return .{
+                            .content = try allocator.dupe(u8, content[actual_start..actual_end]),
+                            .is_error = false,
+                        };
+                    } else {
+                        return .{
+                            .content = try allocator.dupe(u8, content),
+                            .is_error = false,
+                        };
+                    }
+                }
+            }
+        }
+    }
+    return error.ToolResultNotFound;
+}
+
+fn readMessageResult(allocator: Allocator, path: []const u8, msg_pos: usize) !ToolResult {
+    var msg_id_str = path[msg_pos + "messages:".len..];
+    var start: usize = 0;
+    var end: ?usize = null;
+    var has_range = false;
+
+    if (std.mem.indexOf(u8, msg_id_str, ":bytes=")) |bytes_pos| {
+        const range_str = msg_id_str[bytes_pos + ":bytes=".len..];
+        msg_id_str = msg_id_str[0..bytes_pos];
+        has_range = true;
+        if (std.mem.indexOfScalar(u8, range_str, '-')) |dash_pos| {
+            if (dash_pos > 0) {
+                start = try std.fmt.parseInt(usize, range_str[0..dash_pos], 10);
+            }
+            if (dash_pos + 1 < range_str.len) {
+                end = try std.fmt.parseInt(usize, range_str[dash_pos + 1..], 10);
+            }
+        } else {
+            start = try std.fmt.parseInt(usize, range_str, 10);
+        }
+    }
+
+    const index = try std.fmt.parseInt(usize, msg_id_str, 10);
+
+    const last_id = try sessions.readLastId(allocator);
+    defer allocator.free(last_id);
+    const session_path = try std.fmt.allocPrint(allocator, ".zinc/sessions/{s}.jsonl", .{last_id});
+    defer allocator.free(session_path);
+
+    const log = try sessions.readParsed(allocator, session_path);
+    defer log.deinit(allocator);
+
+    if (index >= log.messages.len) return error.MessageIndexOutOfBounds;
+    const message = log.messages[index];
+    const content = message.content;
+
+    if (has_range) {
+        const actual_start = @min(start, content.len);
+        const actual_end = if (end) |e| @min(e, content.len) else content.len;
+        if (actual_start > actual_end) return error.InvalidByteRange;
+        return .{
+            .content = try allocator.dupe(u8, content[actual_start..actual_end]),
+            .is_error = false,
+        };
+    } else {
+        return .{
+            .content = try allocator.dupe(u8, content),
+            .is_error = false,
+        };
+    }
 }
 
 fn runWrite(allocator: Allocator, _: std.Io, args: std.json.ObjectMap) !ToolResult {
