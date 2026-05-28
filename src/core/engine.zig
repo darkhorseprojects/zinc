@@ -68,7 +68,7 @@ pub fn run(allocator: Allocator, io: std.Io, home: []const u8, user_prompt: []co
     const prior = try log.transcript(allocator);
     defer allocator.free(prior);
     const session_dir = std.fs.path.dirname(session.path) orelse ".zinc/sessions";
-    const focused = if (log.compaction != null) try runFocused(allocator, io, &profile, &plan, session.path, prior, user_prompt, session_dir) else blk: {
+    const focused = if (log.compaction != null) try runFocused(allocator, io, &profile, &plan, home, session, prior, user_prompt, session_dir) else blk: {
         trace.event("context", "focused_recovery_skip", "session_bytes={d} messages={d}", .{ log.raw.len, log.messageCount() });
         break :blk try allocator.dupe(u8, "");
     };
@@ -95,7 +95,7 @@ pub fn run(allocator: Allocator, io: std.Io, home: []const u8, user_prompt: []co
     try sessions.appendUserMessage(allocator, session.path, user_content);
     try sessions.rememberLast(session);
 
-    const text = try runAgent(allocator, io, &profile, session.path, &messages, read_ctx, .{ .label = "main", .system = system, .tools = plan.tools, .tools_json = plan.tools_json, .runtime_reads = true }, plan.max_tokens, reasoningBudget(plan.reasoning_tokens));
+    const text = try runAgent(allocator, io, &profile, home, session, &messages, read_ctx, .{ .label = "main", .system = system, .tools = plan.tools, .tools_json = plan.tools_json, .runtime_reads = true }, plan.max_tokens, reasoningBudget(plan.reasoning_tokens), plan.context_tokens);
     defer allocator.free(text);
     const response = std.mem.trim(u8, text, " \t\r\n");
     if (response.len == 0) return error.EmptyAssistantResponse;
@@ -104,7 +104,7 @@ pub fn run(allocator: Allocator, io: std.Io, home: []const u8, user_prompt: []co
     _ = try files.linuxWrite(1, "\n");
 }
 
-fn runFocused(allocator: Allocator, io: std.Io, profile: *const config.RuntimeProfile, plan: *const plan_mod.Plan, session_path: []const u8, prior: []const u8, user_prompt: []const u8, session_dir: []const u8) ![]u8 {
+fn runFocused(allocator: Allocator, io: std.Io, profile: *const config.RuntimeProfile, plan: *const plan_mod.Plan, home: []const u8, session: sessions.Session, prior: []const u8, user_prompt: []const u8, session_dir: []const u8) ![]u8 {
     const content = try std.fmt.allocPrint(allocator, "assembled_context:\n{s}\n\nuser_turn:\n{s}\n\nsession_dir:\n{s}", .{ prior, user_prompt, session_dir });
     defer allocator.free(content);
     var messages: std.ArrayList(provider.Message) = .empty;
@@ -112,22 +112,44 @@ fn runFocused(allocator: Allocator, io: std.Io, profile: *const config.RuntimePr
     defer provider.freeMessages(allocator, messages.items);
     try provider.appendMessage(allocator, &messages, .{ .role = "system", .content = plan.focused_recovery_prompt });
     try provider.appendMessage(allocator, &messages, .{ .role = "user", .content = content });
-    const dummy = RuntimeReadContext{ .prompts = &.{}, .inputs = &.{}, .session_id = "", .session_path = session_path, .session_dir = session_dir, .session_log = "" };
-    return runAgent(allocator, io, profile, session_path, &messages, dummy, .{ .label = "focused_recovery", .system = plan.focused_recovery_prompt, .tools = plan.focused_recovery_tools, .tools_json = plan.focused_recovery_tools_json, .json = true }, profile.model.generation.max_tokens, null);
+    const dummy = RuntimeReadContext{ .prompts = &.{}, .inputs = &.{}, .session_id = "", .session_path = session.path, .session_dir = session_dir, .session_log = "" };
+    return runAgent(allocator, io, profile, home, session, &messages, dummy, .{ .label = "focused_recovery", .system = plan.focused_recovery_prompt, .tools = plan.focused_recovery_tools, .tools_json = plan.focused_recovery_tools_json, .json = true }, profile.model.generation.max_tokens, null, plan.context_tokens);
 }
 
-fn runAgent(allocator: Allocator, io: std.Io, profile: *const config.RuntimeProfile, session_path: []const u8, messages: *std.ArrayList(provider.Message), read_ctx: RuntimeReadContext, agent: Agent, max_tokens: ?usize, reasoning: ?usize) ![]u8 {
+fn runAgent(allocator: Allocator, io: std.Io, profile: *const config.RuntimeProfile, home: []const u8, session: sessions.Session, messages: *std.ArrayList(provider.Message), read_ctx: RuntimeReadContext, agent: Agent, max_tokens: ?usize, reasoning: ?usize, context_tokens: usize) ![]u8 {
     var retries: usize = 0;
     while (true) {
-        const turn = try callProvider(allocator, io, session_path, profile.runtime.max_retries, agent.label, .{ .profile = profile, .max_tokens = max_tokens, .reasoning_budget_tokens = reasoning, .json_response = agent.json, .tools_json = agent.tools_json, .messages = messages.items });
+        if (std.mem.eql(u8, agent.label, "main")) {
+            var log = try sessions.readParsed(allocator, session.path);
+            defer log.deinit(allocator);
+            if (try shouldCompact(log, context_tokens, profile.runtime.compaction_threshold_percent)) {
+                _ = try compaction.runGraph(allocator, io, home, session, profile.paths.compaction_graph);
+                var compacted_log = try sessions.readParsed(allocator, session.path);
+                defer compacted_log.deinit(allocator);
+                if (try needsPrevention(compacted_log, context_tokens)) {
+                    try preProcessForContext(allocator, compacted_log);
+                }
+                provider.freeMessages(allocator, messages.items);
+                messages.clearRetainingCapacity();
+                try provider.appendMessage(allocator, messages, .{ .role = "system", .content = agent.system });
+                try compacted_log.appendReplayMessages(allocator, messages, "");
+            } else if (try needsPrevention(log, context_tokens)) {
+                try preProcessForContext(allocator, log);
+                provider.freeMessages(allocator, messages.items);
+                messages.clearRetainingCapacity();
+                try provider.appendMessage(allocator, messages, .{ .role = "system", .content = agent.system });
+                try log.appendReplayMessages(allocator, messages, "");
+            }
+        }
+        const turn = try callProvider(allocator, io, session.path, profile.runtime.max_retries, agent.label, .{ .profile = profile, .max_tokens = max_tokens, .reasoning_budget_tokens = reasoning, .json_response = agent.json, .tools_json = agent.tools_json, .messages = messages.items });
         defer provider.freeTurn(allocator, turn);
         if (turn.tool_calls.len == 0) return provider.cleanText(allocator, turn.text, profile);
         try provider.appendMessage(allocator, messages, .{ .role = "assistant", .content = turn.text, .tool_calls = turn.tool_calls });
-        if (std.mem.eql(u8, agent.label, "main")) try sessions.appendAssistantToolCalls(allocator, session_path, turn.text, turn.tool_calls);
+        if (std.mem.eql(u8, agent.label, "main")) try sessions.appendAssistantToolCalls(allocator, session.path, turn.text, turn.tool_calls);
         for (turn.tool_calls) |call| {
             const result = try executeTool(allocator, io, read_ctx, agent, call);
             defer result.deinit(allocator);
-            if (std.mem.eql(u8, agent.label, "main")) try sessions.appendToolResult(allocator, session_path, call, result);
+            if (std.mem.eql(u8, agent.label, "main")) try sessions.appendToolResult(allocator, session.path, call, result);
             if (result.is_error) {
                 if (retries >= profile.runtime.max_retries) return error.ToolCallFailed;
                 retries += 1;
