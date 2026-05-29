@@ -1,24 +1,34 @@
-circuitry: "0.3.10"
+circuitry: "0.4"
 title: "Zinc context recovery"
 description: |
-  Graph fragment for the model-guided part of continuation context recovery.
-  The runtime assembles exact current-session transcript windows deterministically;
-  this agent may use tools to inspect the session archive and choose extra facts.
-resources:
+  Resource-native recovery graph. Zinc can run this as an entry directly or
+  use it through a `type: run` resource in another graph.
+entry: focused_recovery
+inputs:
   assembled_context:
     type: text
-    label: "Deterministically assembled current-session context"
-    value: ""
-
+    required: true
   user_turn:
     type: text
-    label: "Current user turn supplied by parent graph"
-    value: ""
-
+    required: true
   session_dir:
     type: text
+    required: true
+resources:
+  assembled_context:
+    type: input
+    label: "Deterministically assembled current-session context"
+    from: assembled_context
+
+  user_turn:
+    type: input
+    label: "Current user turn supplied by parent graph"
+    from: user_turn
+
+  session_dir:
+    type: input
     label: "Directory containing Zinc JSONL session files"
-    value: ""
+    from: session_dir
 
   focused_recovery:
     type: agent

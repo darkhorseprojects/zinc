@@ -55,13 +55,41 @@ pub fn validate(allocator: Allocator, io: std.Io, home: []const u8, path_arg: ?[
     std.debug.print("ok: {s}\n", .{path});
 }
 
-pub fn compile(allocator: Allocator, io: std.Io, home: []const u8, graph_arg: ?[]const u8, out_arg: ?[]const u8) !void {
+pub fn compileFromArgs(allocator: Allocator, io: std.Io, home: []const u8, args: []const []const u8) !void {
     const runtime_paths = try config.loadRuntimePaths(allocator, io, home);
     defer runtime_paths.deinit(allocator);
-    const graph_path = if (graph_arg) |spec| try packages.resolveGraph(allocator, io, home, spec) else try allocator.dupe(u8, runtime_paths.graph);
+
+    var graph_spec: ?[]const u8 = null;
+    var out_spec: ?[]const u8 = null;
+    var entry_override: ?[]const u8 = null;
+    var i: usize = 0;
+    while (i < args.len) : (i += 1) {
+        const arg = args[i];
+        if (std.mem.eql(u8, arg, "--entry")) {
+            i += 1;
+            if (i >= args.len) return error.MissingEntry;
+            entry_override = args[i];
+            continue;
+        }
+        if (std.mem.startsWith(u8, arg, "--entry=")) {
+            entry_override = arg["--entry=".len..];
+            continue;
+        }
+        if (graph_spec == null) {
+            graph_spec = arg;
+            continue;
+        }
+        if (out_spec == null) {
+            out_spec = arg;
+            continue;
+        }
+        return error.TooManyArguments;
+    }
+
+    const graph_path = if (graph_spec) |spec| try packages.resolveGraph(allocator, io, home, spec) else try allocator.dupe(u8, runtime_paths.graph);
     defer allocator.free(graph_path);
-    const out = out_arg orelse runtime_paths.compiled_plan;
-    try compileLoopGraphFile(allocator, io, graph_path, out, home);
+    const out = out_spec orelse runtime_paths.compiled_plan;
+    try compileGraphFile(allocator, io, graph_path, entry_override, out, home);
     std.debug.print("compiled: {s} -> {s}\n", .{ graph_path, out });
 }
 
@@ -80,17 +108,34 @@ pub fn runFromArgs(allocator: Allocator, io: std.Io, home: []const u8, args: []c
     defer runtime_paths.deinit(allocator);
     const resolved_graph = if (parsed_args.graph_path) |spec| try packages.resolveGraph(allocator, io, home, spec) else try allocator.dupe(u8, runtime_paths.graph);
     defer allocator.free(resolved_graph);
-    try compileLoopGraphFile(allocator, io, resolved_graph, runtime_paths.compiled_plan, home);
+
+    const loaded_graph = try graph.load(allocator, io, resolved_graph);
+    defer loaded_graph.deinit(allocator);
+    try graph.validate(loaded_graph);
+
+    const model_id = try config.resolveGraphModelId(allocator, io, loaded_graph, home);
+    defer allocator.free(model_id);
+    const profile = try config.loadRuntimeProfile(allocator, io, home, model_id);
+    defer profile.deinit(allocator);
+
+    const compiled = try compileGraphToJSON(allocator, io, loaded_graph, resolved_graph, parsed_args.entry, home, &profile);
+    defer allocator.free(compiled);
+
+    const run_plan = try plan.loadFromSlice(allocator, compiled);
+    defer run_plan.deinit(allocator);
+
+    files.write(runtime_paths.compiled_plan, compiled) catch {};
 
     const prompt = try std.mem.join(allocator, " ", parsed_args.prompt_parts.items);
     defer allocator.free(prompt);
-    try engine.run(allocator, io, home, prompt, parsed_args.resume_id, parsed_args.continue_last, runtime_paths.compiled_plan, parsed_args.inputs.items);
+    try engine.runPlan(allocator, io, home, &profile, &run_plan, prompt, parsed_args.resume_id, parsed_args.continue_last, parsed_args.inputs.items);
 }
 
 const RunArgs = struct {
     prompt_parts: std.ArrayList([]const u8),
     inputs: std.ArrayList(plan.RuntimeInput),
     graph_path: ?[]const u8 = null,
+    entry: ?[]const u8 = null,
     resume_id: ?[]const u8 = null,
     continue_last: bool = false,
 
@@ -125,6 +170,12 @@ fn parseRunArgs(allocator: Allocator, args: []const []const u8) !RunArgs {
             parsed.graph_path = args[i];
             continue;
         }
+        if (std.mem.eql(u8, arg, "--entry")) {
+            i += 1;
+            if (i >= args.len) return error.MissingEntry;
+            parsed.entry = args[i];
+            continue;
+        }
         if (std.mem.eql(u8, arg, "--input") or std.mem.eql(u8, arg, "--text") or std.mem.eql(u8, arg, "--file") or std.mem.eql(u8, arg, "--image")) {
             const kind = inputFlagKind(arg);
             i += 1;
@@ -134,6 +185,10 @@ fn parseRunArgs(allocator: Allocator, args: []const []const u8) !RunArgs {
         }
         if (std.mem.startsWith(u8, arg, "--graph=")) {
             parsed.graph_path = arg["--graph=".len..];
+            continue;
+        }
+        if (std.mem.startsWith(u8, arg, "--entry=")) {
+            parsed.entry = arg["--entry=".len..];
             continue;
         }
         if (std.mem.startsWith(u8, arg, "--input=") or std.mem.startsWith(u8, arg, "--text=") or std.mem.startsWith(u8, arg, "--file=") or std.mem.startsWith(u8, arg, "--image=")) {
@@ -430,32 +485,40 @@ fn appendToolPromptSections(allocator: Allocator, prompt: *std.ArrayList(u8), to
     }
 }
 
-fn compileLoopGraphFile(allocator: Allocator, io: std.Io, graph_path: []const u8, out_path: []const u8, home: []const u8) !void {
-    const compile_span = trace.span("compile_graph");
-    defer compile_span.end("compile", "graph={s} out={s}", .{ graph_path, out_path });
+fn compileGraphToJSON(allocator: Allocator, io: std.Io, loaded_graph: graph.Graph, graph_path: []const u8, entry_override: ?[]const u8, home: []const u8, profile: *const config.RuntimeProfile) ![]u8 {
+    const assistant_resource = graph.entryResourceId(loaded_graph, entry_override) orelse return error.InvalidCircuitryGraph;
+    const assistant = graph.resource(loaded_graph, assistant_resource) orelse return error.InvalidCircuitryGraph;
+    if (!std.mem.eql(u8, graph.resourceType(assistant) orelse "", "agent")) return error.InvalidCircuitryGraph;
 
-    const loaded_graph = try graph.load(allocator, io, graph_path);
-    defer loaded_graph.deinit(allocator);
-    try graph.validate(loaded_graph);
-
-    const assistant_resource = graph.findAgentWithTools(loaded_graph) orelse return error.InvalidCircuitryGraph;
     const assistant_identity = try graph.resourceIdentity(allocator, loaded_graph, assistant_resource);
     defer allocator.free(assistant_identity);
     const instructions = try graph.extractResourceInstructions(allocator, loaded_graph, assistant_resource);
     defer allocator.free(instructions);
-    const focused_recovery_resource = try graph.findFirstAgentInput(allocator, loaded_graph, assistant_resource) orelse return error.InvalidCircuitryGraph;
-    defer allocator.free(focused_recovery_resource);
-    const focused_recovery_identity = try graph.resourceIdentity(allocator, loaded_graph, focused_recovery_resource);
-    defer allocator.free(focused_recovery_identity);
-    const focused_recovery_instructions = try graph.extractResourceInstructions(allocator, loaded_graph, focused_recovery_resource);
-    defer allocator.free(focused_recovery_instructions);
-    const focused_recovery_tools = try graph.readTools(allocator, loaded_graph, focused_recovery_resource);
-    defer graph.freeStringList(allocator, focused_recovery_tools);
-    for (focused_recovery_tools) |tool| if (!tools.contains(tool)) return error.UnknownTool;
-    const model_id = try config.resolveGraphModelId(allocator, io, loaded_graph, home);
-    defer allocator.free(model_id);
-    const profile = try config.loadRuntimeProfile(allocator, io, home, model_id);
-    defer profile.deinit(allocator);
+
+    var focused_recovery_prompt: std.ArrayList(u8) = .empty;
+    defer focused_recovery_prompt.deinit(allocator);
+    var focused_tools = try allocator.alloc([]u8, 0);
+    defer graph.freeStringList(allocator, focused_tools);
+
+    if (try graph.findRunInput(allocator, loaded_graph, assistant_resource)) |run_res| {
+        defer run_res.deinit(allocator);
+        const recovery_graph = try graph.load(allocator, io, run_res.graph);
+        defer recovery_graph.deinit(allocator);
+        const recovery_id = graph.entryResourceId(recovery_graph, run_res.entry) orelse return error.InvalidCircuitryGraph;
+        const recovery_identity = try graph.resourceIdentity(allocator, recovery_graph, recovery_id);
+        defer allocator.free(recovery_identity);
+        const recovery_instructions = try graph.extractResourceInstructions(allocator, recovery_graph, recovery_id);
+        defer allocator.free(recovery_instructions);
+        focused_tools = try graph.readTools(allocator, recovery_graph, recovery_id);
+        for (focused_tools) |tool| if (!tools.contains(tool)) return error.UnknownTool;
+        try focused_recovery_prompt.print(allocator,
+            \\Identity: {s}
+            \\Instructions:
+            \\{s}
+        , .{ recovery_identity, recovery_instructions });
+    }
+
+    const model_id = profile.model.id;
     const model_alias = profile.model.model;
     const model_temperature = profile.model.generation.temperature;
     const tool_names = try graph.readTools(allocator, loaded_graph, assistant_resource);
@@ -472,11 +535,6 @@ fn compileLoopGraphFile(allocator: Allocator, io: std.Io, graph_path: []const u8
         \\{s}
     , .{ assistant_identity, instructions });
     try appendToolPromptSections(allocator, &prompt, tool_names);
-    if (graph.wantsCircuitryPrompt(loaded_graph, tool_names)) {
-        const pack = try config.readPromptPack(allocator, home, "circuitry-author.md");
-        defer allocator.free(pack);
-        try prompt.print(allocator, "\n\nCircuitry authoring knowledge:\n{s}", .{pack});
-    }
 
     const prompt_packs = try graph.readPromptPacks(allocator, loaded_graph);
     defer graph.freePromptPacks(allocator, prompt_packs);
@@ -489,17 +547,13 @@ fn compileLoopGraphFile(allocator: Allocator, io: std.Io, graph_path: []const u8
         for (prompt_packs) |pack| try prompt.print(allocator, "\n\n- prompt:{s}: {s} — {s}", .{ pack.id, pack.title, pack.description });
     }
 
-    var focused_recovery_prompt: std.ArrayList(u8) = .empty;
-    defer focused_recovery_prompt.deinit(allocator);
-    try focused_recovery_prompt.print(allocator,
-        \\Identity: {s}
-        \\Instructions:
-        \\{s}
-    , .{ focused_recovery_identity, focused_recovery_instructions });
-
     var compiled: std.ArrayList(u8) = .empty;
-    defer compiled.deinit(allocator);
-    try compiled.appendSlice(allocator, "{\"version\":1,\"model\":{\"id\":");
+    errdefer compiled.deinit(allocator);
+    try compiled.appendSlice(allocator, "{\"version\":1,\"graph_path\":");
+    try files.appendJsonString(allocator, &compiled, graph_path);
+    try compiled.appendSlice(allocator, ",\"entry\":");
+    try files.appendJsonString(allocator, &compiled, assistant_resource);
+    try compiled.appendSlice(allocator, ",\"model\":{\"id\":");
     try files.appendJsonString(allocator, &compiled, model_id);
     try compiled.appendSlice(allocator, ",\"alias\":");
     try files.appendJsonString(allocator, &compiled, model_alias);
@@ -514,7 +568,7 @@ fn compileLoopGraphFile(allocator: Allocator, io: std.Io, graph_path: []const u8
         try files.appendJsonString(allocator, &compiled, tool);
     }
     try compiled.appendSlice(allocator, "],\"focused_recovery_tools\":[");
-    for (focused_recovery_tools, 0..) |tool, i| {
+    for (focused_tools, 0..) |tool, i| {
         if (i != 0) try compiled.append(allocator, ',');
         try files.appendJsonString(allocator, &compiled, tool);
     }
@@ -561,8 +615,35 @@ fn compileLoopGraphFile(allocator: Allocator, io: std.Io, graph_path: []const u8
         try files.appendJsonString(allocator, &compiled, image.mime);
         try compiled.append(allocator, '}');
     }
-    try compiled.appendSlice(allocator, "],\"expect\":{\"response\":\"str\"}}");
-    try files.write(out_path, compiled.items);
+    try compiled.appendSlice(allocator, "],\"expect\":");
+    if (graph.resourceExpectValue(assistant)) |expect| {
+        var aw = std.Io.Writer.Allocating.fromArrayList(allocator, &compiled);
+        defer compiled = aw.toArrayList();
+        try std.json.Stringify.value(expect, .{}, &aw.writer);
+    } else {
+        try compiled.appendSlice(allocator, "{\"response\":\"str\"}");
+    }
+    try compiled.append(allocator, '}');
+    return compiled.toOwnedSlice(allocator);
+}
+
+fn compileGraphFile(allocator: Allocator, io: std.Io, graph_path: []const u8, entry_override: ?[]const u8, out_path: []const u8, home: []const u8) !void {
+    const compile_span = trace.span("compile_graph");
+    defer compile_span.end("compile", "graph={s} out={s}", .{ graph_path, out_path });
+
+    const loaded_graph = try graph.load(allocator, io, graph_path);
+    defer loaded_graph.deinit(allocator);
+    try graph.validate(loaded_graph);
+
+    const model_id = try config.resolveGraphModelId(allocator, io, loaded_graph, home);
+    defer allocator.free(model_id);
+    const profile = try config.loadRuntimeProfile(allocator, io, home, model_id);
+    defer profile.deinit(allocator);
+
+    const compiled = try compileGraphToJSON(allocator, io, loaded_graph, graph_path, entry_override, home, &profile);
+    defer allocator.free(compiled);
+
+    try files.write(out_path, compiled);
 }
 
 pub fn clean(allocator: Allocator, io: std.Io, home: []const u8, scope: packages.Scope, target_str: []const u8) !void {

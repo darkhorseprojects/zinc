@@ -8,6 +8,7 @@ paths:
 runtime:
   max_retries: 5
   compaction_threshold_percent: 70
+  graph_run_policy: ask
 
 provider:
   base_url: http://127.0.0.1:30000/v1

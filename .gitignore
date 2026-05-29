@@ -5,3 +5,6 @@ zig-out/
 .zinc/sessions/
 .zinc/logs/
 .zinc/compiled/
+.zinc/config.json
+*.pkg.json
+*.circuitry.json

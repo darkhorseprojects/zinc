@@ -10,7 +10,7 @@ pub fn validateGraph(allocator: Allocator, io: std.Io, graph_path: []const u8) !
     const loaded_graph = try graph.load(allocator, io, graph_path);
     defer loaded_graph.deinit(allocator);
     try graph.validate(loaded_graph);
-    const resource = graph.findSingleAgent(loaded_graph) orelse return error.InvalidCircuitryGraph;
+    const resource = graph.entryResourceId(loaded_graph, null) orelse return error.InvalidCircuitryGraph;
     const identity = try graph.resourceIdentity(allocator, loaded_graph, resource);
     defer allocator.free(identity);
     const instructions = try graph.extractResourceInstructions(allocator, loaded_graph, resource);
@@ -30,7 +30,7 @@ pub fn runGraph(allocator: Allocator, io: std.Io, home: []const u8, session: ses
     const loaded_graph = try graph.load(allocator, io, graph_path);
     defer loaded_graph.deinit(allocator);
     try graph.validate(loaded_graph);
-    const resource = graph.findSingleAgent(loaded_graph) orelse return error.InvalidCircuitryGraph;
+    const resource = graph.entryResourceId(loaded_graph, null) orelse return error.InvalidCircuitryGraph;
     const identity = try graph.resourceIdentity(allocator, loaded_graph, resource);
     defer allocator.free(identity);
     const instructions = try graph.extractResourceInstructions(allocator, loaded_graph, resource);
@@ -51,11 +51,12 @@ pub fn runGraph(allocator: Allocator, io: std.Io, home: []const u8, session: ses
     try provider.appendMessage(allocator, &messages, .{ .role = "system", .content = system_prompt });
     try provider.appendMessage(allocator, &messages, .{ .role = "user", .content = user_prompt });
 
+    const compaction_reasoning = profile.runtime.compaction_reasoning_tokens;
     const turn = try provider.call(allocator, io, .{
         .profile = &profile,
-        .max_tokens = profile.model.generation.max_tokens,
-        .reasoning_budget_tokens = null,
-        .json_response = true,
+        .max_tokens = profile.runtime.compaction_max_tokens,
+        .reasoning_budget_tokens = if (!profile.model.reasoning.enabled or compaction_reasoning < 0) null else @intCast(compaction_reasoning),
+        .json_response = false,
         .tools_json = "[]",
         .messages = messages.items,
     });
@@ -69,7 +70,10 @@ pub fn runGraph(allocator: Allocator, io: std.Io, home: []const u8, session: ses
 }
 
 fn parseSummary(allocator: Allocator, text: []const u8) ![]u8 {
-    var parsed = try std.json.parseFromSlice(std.json.Value, allocator, text, .{});
+    const start = std.mem.indexOfScalar(u8, text, '{') orelse return error.BadProviderResponse;
+    const end = std.mem.lastIndexOfScalar(u8, text, '}') orelse return error.BadProviderResponse;
+    if (end <= start) return error.BadProviderResponse;
+    var parsed = try std.json.parseFromSlice(std.json.Value, allocator, text[start .. end + 1], .{});
     defer parsed.deinit();
     if (parsed.value != .object) return error.BadProviderResponse;
     const summary = parsed.value.object.get("summary") orelse return error.BadProviderResponse;

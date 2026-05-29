@@ -25,8 +25,8 @@ fi
 circuitry_bin="$(command -v circuitry)"
 circuitry_version="$(node -e 'const fs=require("fs"),path=require("path"); const bin=fs.realpathSync(process.argv[1]); console.log(require(path.join(path.dirname(bin), "..", "package.json")).version)' "$circuitry_bin" 2>/dev/null || true)"
 case "$circuitry_version" in
-  0.3.10|0.3.1[0-9]*|0.[4-9].*|[1-9].*) ;;
-  *) echo "Zinc requires circuitry >= 0.3.10; found ${circuitry_version:-unknown}" >&2; exit 1 ;;
+  0.4.*|0.[5-9].*|[1-9].*) ;;
+  *) echo "Zinc requires circuitry >= 0.4.0; found ${circuitry_version:-unknown}" >&2; exit 1 ;;
 esac
 
 cd "$root"
@@ -52,6 +52,7 @@ paths:
 runtime:
   max_retries: 5
   compaction_threshold_percent: 70
+  graph_run_policy: ask
 
 provider:
   base_url: http://127.0.0.1:30000/v1

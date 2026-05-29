@@ -43,13 +43,17 @@ const BoundInput = struct {
 };
 
 pub fn run(allocator: Allocator, io: std.Io, home: []const u8, user_prompt: []const u8, resume_id: ?[]const u8, continue_last: bool, plan_path_override: ?[]const u8, runtime_inputs: []const plan_mod.RuntimeInput) !void {
-    const span = trace.span("engine_run");
-    defer span.end("engine", "continue={} prompt_chars={d}", .{ continue_last, user_prompt.len });
-
     const profile = try config.loadRuntimeProfile(allocator, io, home, null);
     defer profile.deinit(allocator);
     const plan = try plan_mod.load(allocator, plan_path_override orelse profile.paths.compiled_plan);
     defer plan.deinit(allocator);
+    return runPlan(allocator, io, home, &profile, &plan, user_prompt, resume_id, continue_last, runtime_inputs);
+}
+
+pub fn runPlan(allocator: Allocator, io: std.Io, home: []const u8, profile: *const config.RuntimeProfile, plan: *const plan_mod.Plan, user_prompt: []const u8, resume_id: ?[]const u8, continue_last: bool, runtime_inputs: []const plan_mod.RuntimeInput) !void {
+    const span = trace.span("engine_run");
+    defer span.end("engine", "continue={} prompt_chars={d}", .{ continue_last, user_prompt.len });
+
     const session = try sessions.open(allocator, resume_id, continue_last);
     defer session.deinit(allocator);
 
@@ -68,13 +72,13 @@ pub fn run(allocator: Allocator, io: std.Io, home: []const u8, user_prompt: []co
     const prior = try log.transcript(allocator);
     defer allocator.free(prior);
     const session_dir = std.fs.path.dirname(session.path) orelse ".zinc/sessions";
-    const focused = if (log.compaction != null) try runFocused(allocator, io, &profile, &plan, home, session, prior, user_prompt, session_dir) else blk: {
+    const focused = if (log.compaction != null and plan.focused_recovery_prompt.len != 0) try runFocused(allocator, io, profile, plan, home, session, prior, user_prompt, session_dir) else blk: {
         trace.event("context", "focused_recovery_skip", "session_bytes={d} messages={d}", .{ log.raw.len, log.messageCount() });
         break :blk try allocator.dupe(u8, "");
     };
     defer allocator.free(focused);
 
-    const bound_inputs = try bindInputs(allocator, &plan, user_prompt, runtime_inputs);
+    const bound_inputs = try bindInputs(allocator, plan, user_prompt, runtime_inputs);
     defer freeBoundInputs(allocator, bound_inputs);
     const read_ctx = RuntimeReadContext{ .prompts = plan.prompts, .inputs = bound_inputs, .session_id = session.id, .session_path = session.path, .session_dir = session_dir, .session_log = log.raw };
     const uri_catalog = try runtimeUriCatalog(allocator);
@@ -95,7 +99,7 @@ pub fn run(allocator: Allocator, io: std.Io, home: []const u8, user_prompt: []co
     try sessions.appendUserMessage(allocator, session.path, user_content);
     try sessions.rememberLast(session);
 
-    const text = try runAgent(allocator, io, &profile, home, session, &messages, read_ctx, .{ .label = "main", .system = system, .tools = plan.tools, .tools_json = plan.tools_json, .runtime_reads = true }, plan.max_tokens, reasoningBudget(plan.reasoning_tokens), plan.context_tokens);
+    const text = try runAgent(allocator, io, profile, home, session, &messages, read_ctx, .{ .label = "main", .system = system, .tools = plan.tools, .tools_json = plan.tools_json, .runtime_reads = true }, plan.max_tokens, reasoningBudget(plan.reasoning_tokens), plan.context_tokens, &log);
     defer allocator.free(text);
     const response = std.mem.trim(u8, text, " \t\r\n");
     if (response.len == 0) return error.EmptyAssistantResponse;
@@ -113,28 +117,39 @@ fn runFocused(allocator: Allocator, io: std.Io, profile: *const config.RuntimePr
     try provider.appendMessage(allocator, &messages, .{ .role = "system", .content = plan.focused_recovery_prompt });
     try provider.appendMessage(allocator, &messages, .{ .role = "user", .content = content });
     const dummy = RuntimeReadContext{ .prompts = &.{}, .inputs = &.{}, .session_id = "", .session_path = session.path, .session_dir = session_dir, .session_log = "" };
-    return runAgent(allocator, io, profile, home, session, &messages, dummy, .{ .label = "focused_recovery", .system = plan.focused_recovery_prompt, .tools = plan.focused_recovery_tools, .tools_json = plan.focused_recovery_tools_json, .json = true }, profile.model.generation.max_tokens, null, plan.context_tokens);
+    const compaction_reasoning = profile.runtime.compaction_reasoning_tokens;
+    return runAgent(allocator, io, profile, home, session, &messages, dummy, .{ .label = "focused_recovery", .system = plan.focused_recovery_prompt, .tools = plan.focused_recovery_tools, .tools_json = plan.focused_recovery_tools_json, .json = true }, profile.runtime.compaction_max_tokens, if (!profile.model.reasoning.enabled or compaction_reasoning < 0) null else @intCast(compaction_reasoning), plan.context_tokens, null);
 }
 
-fn runAgent(allocator: Allocator, io: std.Io, profile: *const config.RuntimeProfile, home: []const u8, session: sessions.Session, messages: *std.ArrayList(provider.Message), read_ctx: RuntimeReadContext, agent: Agent, max_tokens: ?usize, reasoning: ?usize, context_tokens: usize) ![]u8 {
+fn runAgent(allocator: Allocator, io: std.Io, profile: *const config.RuntimeProfile, home: []const u8, session: sessions.Session, messages: *std.ArrayList(provider.Message), read_ctx: RuntimeReadContext, agent: Agent, max_tokens: ?usize, reasoning: ?usize, context_tokens: usize, log_ptr: ?*sessions.Log) ![]u8 {
     var retries: usize = 0;
+    var last_parsed_size: usize = if (log_ptr) |l| l.raw.len else 0;
     while (true) {
         if (std.mem.eql(u8, agent.label, "main")) {
-            var log = try sessions.readParsed(allocator, session.path);
-            defer log.deinit(allocator);
-            if (try shouldCompact(log, context_tokens, profile.runtime.compaction_threshold_percent)) {
+            const log = log_ptr orelse return error.MissingLogPointer;
+            var dir = std.Io.Dir.cwd();
+            if (dir.statFile(io, session.path, .{})) |stat| {
+                if (stat.size != last_parsed_size) {
+                    log.deinit(allocator);
+                    log.* = try sessions.readParsed(allocator, session.path);
+                    last_parsed_size = log.raw.len;
+                }
+            } else |_| {}
+
+            if (try shouldCompact(log.*, context_tokens, profile.runtime.compaction_threshold_percent)) {
                 _ = try compaction.runGraph(allocator, io, home, session, profile.paths.compaction_graph);
-                var compacted_log = try sessions.readParsed(allocator, session.path);
-                defer compacted_log.deinit(allocator);
-                if (try needsPrevention(compacted_log, context_tokens)) {
-                    try preProcessForContext(allocator, compacted_log);
+                log.deinit(allocator);
+                log.* = try sessions.readParsed(allocator, session.path);
+                last_parsed_size = log.raw.len;
+                if (try needsPrevention(log.*, context_tokens)) {
+                    try preProcessForContext(allocator, log.*);
                 }
                 provider.freeMessages(allocator, messages.items);
                 messages.clearRetainingCapacity();
                 try provider.appendMessage(allocator, messages, .{ .role = "system", .content = agent.system });
-                try compacted_log.appendReplayMessages(allocator, messages, "");
-            } else if (try needsPrevention(log, context_tokens)) {
-                try preProcessForContext(allocator, log);
+                try log.appendReplayMessages(allocator, messages, "");
+            } else if (try needsPrevention(log.*, context_tokens)) {
+                try preProcessForContext(allocator, log.*);
                 provider.freeMessages(allocator, messages.items);
                 messages.clearRetainingCapacity();
                 try provider.appendMessage(allocator, messages, .{ .role = "system", .content = agent.system });
@@ -154,7 +169,15 @@ fn runAgent(allocator: Allocator, io: std.Io, profile: *const config.RuntimeProf
                 if (retries >= profile.runtime.max_retries) return error.ToolCallFailed;
                 retries += 1;
             } else retries = 0;
-            try provider.appendMessage(allocator, messages, .{ .role = "tool", .content = result.content, .name = call.name, .tool_call_id = call.id });
+            const max_preview = 2048;
+            if (result.content.len > max_preview) {
+                const preview = result.content[0..max_preview];
+                const content = try std.fmt.allocPrint(allocator, "{s}... [truncated, {d} chars - use session:current:tools:{s} for full]", .{ preview, result.content.len, call.id });
+                defer allocator.free(content);
+                try provider.appendMessage(allocator, messages, .{ .role = "tool", .content = content, .name = call.name, .tool_call_id = call.id });
+            } else {
+                try provider.appendMessage(allocator, messages, .{ .role = "tool", .content = result.content, .name = call.name, .tool_call_id = call.id });
+            }
         }
     }
 }
@@ -413,7 +436,7 @@ fn hasTool(available: []const []const u8, name: []const u8) bool {
     return false;
 }
 fn reasoningBudget(tokens: isize) ?usize {
-    return if (tokens <= 0) null else @intCast(tokens);
+    return if (tokens < 0) null else @intCast(tokens);
 }
 fn isTransient(err: anyerror) bool {
     return switch (err) {

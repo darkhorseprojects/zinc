@@ -260,7 +260,38 @@ fn parseGitUrl(allocator: Allocator, body: []const u8, raw: []const u8, ref: []c
 fn loadManifest(allocator: Allocator, io: std.Io, package_dir: []const u8) !Manifest {
     const path = try std.fs.path.join(allocator, &.{ package_dir, "zinc.pkg.yaml" });
     defer allocator.free(path);
-    const json = try parseYamlFileToJSON(allocator, io, path);
+
+    const cache_path = blk: {
+        if (std.mem.endsWith(u8, path, ".yaml")) {
+            break :blk try std.fmt.allocPrint(allocator, "{s}.json", .{path[0 .. path.len - ".yaml".len]});
+        } else if (std.mem.endsWith(u8, path, ".yml")) {
+            break :blk try std.fmt.allocPrint(allocator, "{s}.json", .{path[0 .. path.len - ".yml".len]});
+        } else {
+            break :blk try std.fmt.allocPrint(allocator, "{s}.json", .{path});
+        }
+    };
+    defer allocator.free(cache_path);
+
+    var cache_valid = false;
+    if (files.existsPath(cache_path)) {
+        var dir = std.Io.Dir.cwd();
+        const yaml_stat = dir.statFile(io, path, .{}) catch null;
+        const cache_stat = dir.statFile(io, cache_path, .{}) catch null;
+        if (yaml_stat != null and cache_stat != null) {
+            if (cache_stat.?.mtime.nanoseconds >= yaml_stat.?.mtime.nanoseconds) {
+                cache_valid = true;
+            }
+        }
+    }
+
+    const json = if (cache_valid)
+        try files.readLimited(allocator, cache_path, 16 * 1024 * 1024)
+    else blk: {
+        const fresh_json = try parseYamlFileToJSON(allocator, io, path);
+        errdefer allocator.free(fresh_json);
+        files.write(cache_path, fresh_json) catch {};
+        break :blk fresh_json;
+    };
     defer allocator.free(json);
 
     var parsed = try std.json.parseFromSlice(std.json.Value, allocator, json, .{});

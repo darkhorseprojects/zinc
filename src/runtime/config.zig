@@ -21,7 +21,7 @@ pub const RuntimePaths = struct {
     }
 };
 
-pub const RuntimeSettings = struct { max_retries: usize, compaction_threshold_percent: usize };
+pub const RuntimeSettings = struct { max_retries: usize, compaction_threshold_percent: usize, compaction_max_tokens: usize, compaction_reasoning_tokens: isize };
 pub const ProviderConfig = struct {
     base_url: []u8,
     authorization: []u8,
@@ -234,7 +234,7 @@ pub fn loadRuntimeProfile(allocator: Allocator, io: std.Io, home: []const u8, mo
     errdefer allocator.free(default_model);
     const paths = try runtimePaths(allocator, home, cfg);
     errdefer paths.deinit(allocator);
-    const runtime = RuntimeSettings{ .max_retries = try cfg.usizeValue(&.{ "runtime", "max_retries" }, 5), .compaction_threshold_percent = try cfg.usizeValue(&.{ "runtime", "compaction_threshold_percent" }, 70) };
+    const runtime = RuntimeSettings{ .max_retries = try cfg.usizeValue(&.{ "runtime", "max_retries" }, 5), .compaction_threshold_percent = try cfg.usizeValue(&.{ "runtime", "compaction_threshold_percent" }, 70), .compaction_max_tokens = try cfg.usizeValue(&.{ "runtime", "compaction_max_tokens" }, 4096), .compaction_reasoning_tokens = try cfg.isizeValue(&.{ "runtime", "compaction_reasoning_tokens" }, 1024) };
     const provider = try loadProvider(allocator, cfg);
     errdefer provider.deinit(allocator);
     const model = try loadModel(allocator, cfg, default_model);
@@ -379,7 +379,38 @@ fn loadConfig(allocator: Allocator, io: std.Io, home: []const u8) !Config {
 
 fn loadConfigValue(allocator: Allocator, io: std.Io, path: []const u8, json_texts: *std.ArrayList([]u8), parsed: *std.ArrayList(std.json.Parsed(std.json.Value))) !void {
     if (!files.existsPath(path)) return;
-    const json = try parseYamlFileToJSON(allocator, io, path);
+
+    const cache_path = blk: {
+        if (std.mem.endsWith(u8, path, ".yaml")) {
+            break :blk try std.fmt.allocPrint(allocator, "{s}.json", .{path[0 .. path.len - ".yaml".len]});
+        } else if (std.mem.endsWith(u8, path, ".yml")) {
+            break :blk try std.fmt.allocPrint(allocator, "{s}.json", .{path[0 .. path.len - ".yml".len]});
+        } else {
+            break :blk try std.fmt.allocPrint(allocator, "{s}.json", .{path});
+        }
+    };
+    defer allocator.free(cache_path);
+
+    var cache_valid = false;
+    if (files.existsPath(cache_path)) {
+        var dir = std.Io.Dir.cwd();
+        const yaml_stat = dir.statFile(io, path, .{}) catch null;
+        const cache_stat = dir.statFile(io, cache_path, .{}) catch null;
+        if (yaml_stat != null and cache_stat != null) {
+            if (cache_stat.?.mtime.nanoseconds >= yaml_stat.?.mtime.nanoseconds) {
+                cache_valid = true;
+            }
+        }
+    }
+
+    const json = if (cache_valid)
+        try files.readLimited(allocator, cache_path, 16 * 1024 * 1024)
+    else blk: {
+        const fresh_json = try parseYamlFileToJSON(allocator, io, path);
+        errdefer allocator.free(fresh_json);
+        files.write(cache_path, fresh_json) catch {};
+        break :blk fresh_json;
+    };
     defer allocator.free(json);
 
     var p = try std.json.parseFromSlice(std.json.Value, allocator, json, .{});
@@ -406,7 +437,7 @@ fn parseYamlFileToJSON(allocator: Allocator, io: std.Io, path: []const u8) ![]u8
         allocator.free(result.stderr);
     }
     if (result.term != .exited or result.term.exited != 0) {
-        std.debug.print("circuitry parse failed for config:\n{s}\n", .{result.stderr});
+        std.debug.print("circuitry YAML parse failed for config:\n{s}\n", .{result.stderr});
         return error.CircuitryParseFailed;
     }
     return allocator.dupe(u8, result.stdout);

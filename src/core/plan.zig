@@ -56,6 +56,8 @@ pub const ImageInput = struct {
 };
 
 pub const Plan = struct {
+    graph_path: []u8,
+    entry: []u8,
     prompt: []u8,
     focused_recovery_prompt: []u8,
     focused_recovery_tools: [][]u8,
@@ -73,6 +75,8 @@ pub const Plan = struct {
     image_inputs: []ImageInput,
 
     pub fn deinit(self: Plan, allocator: Allocator) void {
+        allocator.free(self.graph_path);
+        allocator.free(self.entry);
         allocator.free(self.prompt);
         allocator.free(self.focused_recovery_prompt);
         for (self.focused_recovery_tools) |tool| allocator.free(tool);
@@ -106,6 +110,10 @@ pub const Plan = struct {
 pub fn load(allocator: Allocator, path: []const u8) !Plan {
     const text = try files.readLimited(allocator, path, 128 * 1024);
     defer allocator.free(text);
+    return loadFromSlice(allocator, text);
+}
+
+pub fn loadFromSlice(allocator: Allocator, text: []const u8) !Plan {
     var parsed = try std.json.parseFromSlice(std.json.Value, allocator, text, .{});
     defer parsed.deinit();
     const root = parsed.value.object;
@@ -115,8 +123,7 @@ pub fn load(allocator: Allocator, path: []const u8) !Plan {
     const tool_names = try readToolNames(allocator, tools_value);
     errdefer freeToolNames(allocator, tool_names);
     const tools_json = try buildToolsJson(allocator, tool_names);
-    const focused_tools_value = root.get("focused_recovery_tools") orelse return error.BadRuntimePlan;
-    const focused_tool_names = try readToolNames(allocator, focused_tools_value);
+    const focused_tool_names = if (root.get("focused_recovery_tools")) |value| try readToolNames(allocator, value) else try allocator.alloc([]u8, 0);
     errdefer freeToolNames(allocator, focused_tool_names);
     const focused_tools_json = try buildToolsJson(allocator, focused_tool_names);
     const prompts_value = root.get("prompts") orelse return error.BadRuntimePlan;
@@ -136,8 +143,10 @@ pub fn load(allocator: Allocator, path: []const u8) !Plan {
         allocator.free(image_inputs);
     }
     return .{
+        .graph_path = try allocator.dupe(u8, if (root.get("graph_path")) |value| value.string else ""),
+        .entry = try allocator.dupe(u8, if (root.get("entry")) |value| value.string else ""),
         .prompt = try allocator.dupe(u8, (root.get("prompt") orelse return error.BadRuntimePlan).string),
-        .focused_recovery_prompt = try allocator.dupe(u8, (root.get("focused_recovery_prompt") orelse return error.BadRuntimePlan).string),
+        .focused_recovery_prompt = try allocator.dupe(u8, if (root.get("focused_recovery_prompt")) |value| value.string else ""),
         .focused_recovery_tools = focused_tool_names,
         .focused_recovery_tools_json = focused_tools_json,
         .model_id = try allocator.dupe(u8, (model_object.get("id") orelse return error.BadRuntimePlan).string),

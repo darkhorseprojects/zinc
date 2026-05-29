@@ -43,19 +43,29 @@ pub const Resource = struct {
     value: std.json.Value,
 };
 
+pub const RunResource = struct {
+    id: []u8,
+    graph: []u8,
+    entry: ?[]u8,
+
+    pub fn deinit(self: RunResource, allocator: Allocator) void {
+        allocator.free(self.id);
+        allocator.free(self.graph);
+        if (self.entry) |entry| allocator.free(entry);
+    }
+};
+
 pub const Graph = struct {
     json_text: []u8,
     parsed: std.json.Parsed(std.json.Value),
     resources: []Resource,
-    args: []InputSpec,
-    runtime_model: ?[]u8,
-    agent_model: ?[]u8,
+    inputs: []InputSpec,
+    entry: ?[]u8,
 
     pub fn deinit(self: Graph, allocator: Allocator) void {
-        for (self.args) |arg| arg.deinit(allocator);
-        allocator.free(self.args);
-        if (self.runtime_model) |model| allocator.free(model);
-        if (self.agent_model) |model| allocator.free(model);
+        for (self.inputs) |input| input.deinit(allocator);
+        allocator.free(self.inputs);
+        if (self.entry) |entry| allocator.free(entry);
         allocator.free(self.resources);
         var parsed = self.parsed;
         parsed.deinit();
@@ -72,7 +82,7 @@ pub fn load(allocator: Allocator, io: std.Io, graph_path: []const u8) !Graph {
     const root = parsed.value;
 
     if (root != .object) return error.InvalidCircuitryGraph;
-    const graph_value = objectGet(root, "graph") orelse root;
+    const graph_value = root;
     const resources_value = objectGet(graph_value, "resources") orelse return error.InvalidCircuitryGraph;
     if (resources_value != .object) return error.InvalidCircuitryGraph;
     const resources_obj = resources_value.object;
@@ -82,30 +92,29 @@ pub fn load(allocator: Allocator, io: std.Io, graph_path: []const u8) !Graph {
     var i: usize = 0;
     var iter = resources_obj.iterator();
     while (iter.next()) |entry| : (i += 1) {
-        const origins = objectGet(root, "origins");
-        const origin_value = if (origins) |value| if (value == .object) value.object.get(entry.key_ptr.*) else null else null;
         resources[i] = .{
             .id = entry.key_ptr.*,
-            .source_file = if (origin_value) |value| scalarText(value) orelse graph_path else graph_path,
+            .source_file = graph_path,
             .value = entry.value_ptr.*,
         };
     }
 
-    const args = try readArgs(allocator, graph_value);
-    errdefer freeInputSpecs(allocator, args);
-    const runtime_model = if (scalarAt(graph_value, &.{ "runtime", "model" })) |model| try allocator.dupe(u8, model) else null;
-    errdefer if (runtime_model) |model| allocator.free(model);
-    const agent_model = try firstAgentModel(allocator, resources);
-    errdefer if (agent_model) |model| allocator.free(model);
-
-    return .{ .json_text = text, .parsed = parsed, .resources = resources, .args = args, .runtime_model = runtime_model, .agent_model = agent_model };
+    const inputs = try readInputs(allocator, graph_value);
+    errdefer freeInputSpecs(allocator, inputs);
+    const entry_id = if (scalarAt(graph_value, &.{"entry"})) |entry| try allocator.dupe(u8, entry) else null;
+    errdefer if (entry_id) |entry| allocator.free(entry);
+    return .{ .json_text = text, .parsed = parsed, .resources = resources, .inputs = inputs, .entry = entry_id };
 }
 
 fn parseWithCircuitry(allocator: Allocator, io: std.Io, graph_path: []const u8) ![]u8 {
+    return runCircuitryCommand(allocator, io, &.{ "circuitry", "resolve", graph_path });
+}
+
+fn runCircuitryCommand(allocator: Allocator, io: std.Io, argv: []const []const u8) ![]u8 {
     const result = std.process.run(allocator, io, .{
-        .argv = &.{ "circuitry", "parse", graph_path },
+        .argv = argv,
         .stderr_limit = .limited(64 * 1024),
-        .stdout_limit = .limited(16 * 1024 * 1024)
+        .stdout_limit = .limited(16 * 1024 * 1024),
     }) catch |err| switch (err) {
         error.FileNotFound => {
             std.debug.print("error: 'circuitry' command not found. Please ensure circuitry is installed and in your PATH.\n", .{});
@@ -116,17 +125,16 @@ fn parseWithCircuitry(allocator: Allocator, io: std.Io, graph_path: []const u8) 
     };
     defer allocator.free(result.stderr);
     if (result.term != .exited or result.term.exited != 0) {
-        std.debug.print("circuitry parse failed:\n{s}\n", .{result.stderr});
         allocator.free(result.stdout);
-        return error.CircuitryParseFailed;
+        return error.CircuitryCommandFailed;
     }
     return result.stdout;
 }
 
-fn readArgs(allocator: Allocator, graph_value: std.json.Value) ![]InputSpec {
-    const args = objectGet(graph_value, "args") orelse return allocator.alloc(InputSpec, 0);
-    if (args != .object) return error.InvalidCircuitryGraph;
-    const args_obj = args.object;
+fn readInputs(allocator: Allocator, graph_value: std.json.Value) ![]InputSpec {
+    const inputs = objectGet(graph_value, "inputs") orelse return allocator.alloc(InputSpec, 0);
+    if (inputs != .object) return error.InvalidCircuitryGraph;
+    const args_obj = inputs.object;
     var out = try allocator.alloc(InputSpec, args_obj.count());
     var initialized: usize = 0;
     errdefer {
@@ -145,14 +153,6 @@ fn readArgs(allocator: Allocator, graph_value: std.json.Value) ![]InputSpec {
     return out;
 }
 
-fn firstAgentModel(allocator: Allocator, resources: []const Resource) !?[]u8 {
-    for (resources) |res| {
-        if (!std.mem.eql(u8, resourceType(res) orelse "", "agent")) continue;
-        if (resourceField(res, "model")) |model| return try allocator.dupe(u8, model);
-    }
-    return null;
-}
-
 pub fn validate(graph: Graph) !void {
     if (graph.resources.len == 0) return error.InvalidCircuitryGraph;
 }
@@ -165,9 +165,38 @@ pub fn readPromptPacks(allocator: Allocator, graph: Graph) ![]PromptPack {
     }
     for (graph.resources) |res| {
         if (!std.mem.eql(u8, resourceType(res) orelse "", "text")) continue;
+
+        if (resourceField(res, "uri")) |uri| {
+            if (std.mem.startsWith(u8, uri, "prompt:")) {
+                const id = std.mem.trim(u8, uri["prompt:".len..], " \t\r\n");
+                if (id.len == 0) continue;
+                try packs.append(allocator, .{
+                    .id = try allocator.dupe(u8, id),
+                    .title = try allocator.dupe(u8, resourceField(res, "label") orelse id),
+                    .description = try allocator.dupe(u8, resourceField(res, "description") orelse ""),
+                    .content = try std.fmt.allocPrint(allocator, "prompt:{s}", .{id}),
+                });
+                continue;
+            }
+        }
+
         const content = resourceTextValue(allocator, res) catch continue;
         errdefer allocator.free(content);
         const trimmed = std.mem.trim(u8, content, " \t\r\n");
+        if (std.mem.startsWith(u8, trimmed, "prompt:")) {
+            const id = std.mem.trim(u8, trimmed["prompt:".len..], " \t\r\n");
+            if (id.len == 0) {
+                allocator.free(content);
+                continue;
+            }
+            try packs.append(allocator, .{
+                .id = try allocator.dupe(u8, id),
+                .title = try allocator.dupe(u8, resourceField(res, "label") orelse id),
+                .description = try allocator.dupe(u8, resourceField(res, "description") orelse ""),
+                .content = content,
+            });
+            continue;
+        }
         if (!std.mem.startsWith(u8, trimmed, "---\n")) {
             allocator.free(content);
             continue;
@@ -184,7 +213,7 @@ pub fn readPromptPacks(allocator: Allocator, graph: Graph) ![]PromptPack {
         try packs.append(allocator, .{
             .id = try allocator.dupe(u8, id),
             .title = try allocator.dupe(u8, frontmatter(fm, "title") orelse resourceField(res, "label") orelse id),
-            .description = try allocator.dupe(u8, frontmatter(fm, "description") orelse ""),
+            .description = try allocator.dupe(u8, frontmatter(fm, "description") orelse resourceField(res, "description") orelse ""),
             .content = content,
         });
     }
@@ -196,29 +225,9 @@ pub fn freePromptPacks(allocator: Allocator, packs: []const PromptPack) void {
     allocator.free(packs);
 }
 
-pub fn findAgentWithTools(graph: Graph) ?[]const u8 {
-    var found: ?[]const u8 = null;
-    for (graph.resources) |res| {
-        if (std.mem.eql(u8, resourceType(res) orelse "", "agent") and resourceValue(res, "tools") != null) found = res.id;
-    }
-    return found;
-}
-
-pub fn findFirstAgentInput(allocator: Allocator, graph: Graph, id: []const u8) !?[]u8 {
-    const res = resource(graph, id) orelse return error.InvalidCircuitryGraph;
-    const inputs = try readList(allocator, res, "inputs");
-    defer freeStringList(allocator, inputs);
-    for (inputs) |input| if (resource(graph, input)) |candidate| if (std.mem.eql(u8, resourceType(candidate) orelse "", "agent")) return try allocator.dupe(u8, input);
-    return null;
-}
-
-pub fn findSingleAgent(graph: Graph) ?[]const u8 {
-    var found: ?[]const u8 = null;
-    for (graph.resources) |res| if (std.mem.eql(u8, resourceType(res) orelse "", "agent")) {
-        if (found != null) return null;
-        found = res.id;
-    };
-    return found;
+pub fn entryResourceId(graph: Graph, override: ?[]const u8) ?[]const u8 {
+    if (override) |id| return id;
+    return graph.entry;
 }
 
 pub fn resourceIdentity(allocator: Allocator, graph: Graph, id: []const u8) ![]u8 {
@@ -234,13 +243,13 @@ pub fn readTools(allocator: Allocator, graph: Graph, id: []const u8) ![][]u8 {
 }
 
 pub fn readInputSpecs(allocator: Allocator, graph: Graph) ![]InputSpec {
-    var out = try allocator.alloc(InputSpec, graph.args.len);
+    var out = try allocator.alloc(InputSpec, graph.inputs.len);
     var initialized: usize = 0;
     errdefer {
         for (out[0..initialized]) |input| input.deinit(allocator);
         allocator.free(out);
     }
-    for (graph.args, 0..) |input, i| {
+    for (graph.inputs, 0..) |input, i| {
         out[i] = .{ .id = try allocator.dupe(u8, input.id), .kind = try allocator.dupe(u8, input.kind), .required = input.required };
         initialized += 1;
     }
@@ -282,15 +291,14 @@ pub fn freeStringList(allocator: Allocator, list: []const []u8) void {
     allocator.free(list);
 }
 
-pub fn wantsCircuitryPrompt(graph: Graph, _: []const []u8) bool {
-    for (graph.resources) |res| if (std.mem.eql(u8, res.id, "prompt_circuitry_author")) return true;
-    for (graph.resources) |res| if (resourceTextValueContains(res, "circuitry-author")) return true;
-    return false;
-}
-
 pub fn graphModel(allocator: Allocator, graph: Graph) !?[]u8 {
-    if (graph.agent_model) |model| if (!std.mem.eql(u8, model, "inherit")) return try allocator.dupe(u8, model);
-    if (graph.runtime_model) |model| if (!std.mem.eql(u8, model, "inherit")) return try allocator.dupe(u8, model);
+    if (graph.entry) |entry_id| {
+        if (resource(graph, entry_id)) |entry_res| {
+            if (resourceField(entry_res, "model")) |model| {
+                if (!std.mem.eql(u8, model, "inherit")) return try allocator.dupe(u8, model);
+            }
+        }
+    }
     return null;
 }
 
@@ -299,20 +307,20 @@ pub fn extractResourceInstructions(allocator: Allocator, graph: Graph, id: []con
     return allocator.dupe(u8, resourceField(res, "instructions") orelse return error.InvalidCircuitryGraph);
 }
 
-fn resource(graph: Graph, id: []const u8) ?Resource {
+pub fn resource(graph: Graph, id: []const u8) ?Resource {
     for (graph.resources) |res| if (std.mem.eql(u8, res.id, id)) return res;
     return null;
 }
 
-fn resourceType(res: Resource) ?[]const u8 {
+pub fn resourceType(res: Resource) ?[]const u8 {
     return resourceField(res, "type");
 }
 
-fn resourceField(res: Resource, field: []const u8) ?[]const u8 {
+pub fn resourceField(res: Resource, field: []const u8) ?[]const u8 {
     return mapScalar(res.value, field);
 }
 
-fn resourceValue(res: Resource, field: []const u8) ?std.json.Value {
+pub fn resourceValue(res: Resource, field: []const u8) ?std.json.Value {
     return objectGet(res.value, field);
 }
 
@@ -325,20 +333,62 @@ fn resourceTextValueContains(res: Resource, needle: []const u8) bool {
     return std.mem.indexOf(u8, value, needle) != null;
 }
 
-fn readList(allocator: Allocator, res: Resource, field: []const u8) ![][]u8 {
+pub fn readList(allocator: Allocator, res: Resource, field: []const u8) ![][]u8 {
     const found = resourceValue(res, field) orelse return allocator.alloc([]u8, 0);
-    if (found != .array) return error.InvalidCircuitryGraph;
-    var out = try allocator.alloc([]u8, found.array.items.len);
-    var initialized: usize = 0;
-    errdefer {
-        for (out[0..initialized]) |item| allocator.free(item);
-        allocator.free(out);
+    if (found == .array) {
+        var out = try allocator.alloc([]u8, found.array.items.len);
+        var initialized: usize = 0;
+        errdefer {
+            for (out[0..initialized]) |item| allocator.free(item);
+            allocator.free(out);
+        }
+        for (found.array.items, 0..) |item, i| {
+            out[i] = try allocator.dupe(u8, scalarText(item) orelse return error.InvalidCircuitryGraph);
+            initialized += 1;
+        }
+        return out;
     }
-    for (found.array.items, 0..) |item, i| {
-        out[i] = try allocator.dupe(u8, scalarText(item) orelse return error.InvalidCircuitryGraph);
-        initialized += 1;
+    if (found == .object) {
+        var out = try allocator.alloc([]u8, found.object.count());
+        var initialized: usize = 0;
+        errdefer {
+            for (out[0..initialized]) |item| allocator.free(item);
+            allocator.free(out);
+        }
+        var iter = found.object.iterator();
+        while (iter.next()) |entry| : (initialized += 1) {
+            out[initialized] = try allocator.dupe(u8, scalarText(entry.value_ptr.*) orelse return error.InvalidCircuitryGraph);
+        }
+        return out;
     }
-    return out;
+    return error.InvalidCircuitryGraph;
+}
+
+
+pub fn findRunInput(allocator: Allocator, graph: Graph, id: []const u8) !?RunResource {
+    const res = resource(graph, id) orelse return error.InvalidCircuitryGraph;
+    const inputs = try readList(allocator, res, "inputs");
+    defer freeStringList(allocator, inputs);
+    for (inputs) |input_id| {
+        const candidate = resource(graph, input_id) orelse continue;
+        if (!std.mem.eql(u8, resourceType(candidate) orelse "", "run")) continue;
+        const graph_path = resourceField(candidate, "graph") orelse resourceField(candidate, "path") orelse resourceField(candidate, "uri") orelse continue;
+        const source_dir = std.fs.path.dirname(candidate.source_file) orelse ".";
+        const resolved = try resolveResourceRef(allocator, source_dir, graph_path);
+        errdefer allocator.free(resolved);
+        const entry = if (resourceField(candidate, "entry")) |entry_id| try allocator.dupe(u8, entry_id) else null;
+        errdefer if (entry) |entry_id| allocator.free(entry_id);
+        return .{ .id = try allocator.dupe(u8, input_id), .graph = resolved, .entry = entry };
+    }
+    return null;
+}
+
+pub fn resourceExpectValue(res: Resource) ?std.json.Value {
+    return resourceValue(res, "expect");
+}
+
+pub fn mimeFromPathPublic(path: []const u8) []const u8 {
+    return mimeFromPath(path);
 }
 
 fn objectGet(value: std.json.Value, key: []const u8) ?std.json.Value {

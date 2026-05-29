@@ -1,86 +1,75 @@
-Circuitry graphs are programs.
+---
+id: circuitry-author
+title: Circuitry Author
+description: Use when writing or refactoring Circuitry 0.4 graphs for Zinc.
+---
 
-Contract:
+# Circuitry Author
 
-```text
-graph source + runtime inputs -> node outputs/errors
-```
+Circuitry is the source file for executable orchestration. A graph stores named resources and the relationships between them. Zinc is the runtime that resolves and runs those resources.
 
-Use Circuitry v0.3.2 authored graph shape:
+Core shape:
 
 ```yaml
-circuitry: "0.3.2"
-title: Example workflow
-args:
-  brief:
+circuitry: "0.4"
+title: Example
+entry: assistant
+inputs:
+  user_turn:
     type: text
     required: true
-runtime:
-  provider: zinc
-  model: inherit
 resources:
-  brief:
-    type: text
-    value: ""
+  user_turn:
+    type: input
+    from: user_turn
 
-  analyst:
+  bash_guide:
+    type: text
+    uri: prompt:bash-guide
+
+  assistant:
     type: agent
-    identity: Analyst
-    inputs: [brief]
+    identity: Assistant
+    inputs: [user_turn, bash_guide]
+    tools: [read, write, edit, bash, run_graph]
     expect:
-      summary: str
-      risks:
-        type: list
-        items: str
+      response: str
     instructions: |
-      Read the brief and output JSON matching expect.
+      Answer the user.
 ```
 
-Split reusable graph pieces with `imports:`:
+Mental model:
+
+- prompt = input
+- tool = runtime function
+- graph = executable topology
+- resource = the graph's unit of structure
+
+Use `type: text` for prompt inputs. If the prompt lives in Zinc's prompt store, use `uri: prompt:<id>`.
+
+Use `type: run` for declarative graph runs:
 
 ```yaml
-circuitry: "0.3.2"
-imports:
-  - path: ./context-recovery.circuitry.yaml
-    resources: "*"
-args:
-  user_turn:
-    type: text
-    required: true
 resources:
-  user_turn:
-    type: text
-    value: ""
+  recovered_context:
+    type: run
+    graph: ./context-recovery.circuitry.yaml
+    entry: focused_recovery
+    inputs:
+      user_turn: user_turn
+      session_log: session_log
+
   assistant:
     type: agent
     inputs: [user_turn, recovered_context]
 ```
 
-Rules:
+Use `run_graph` when the agent dynamically needs another graph run at runtime. Include `graph`, `entry`, `inputs`, `reason`, and `risk`.
 
-- authored files use `imports:`, `args:`, and `resources:`
-- edges are derived from executable resource `inputs:` lists
-- import paths are relative to the file that declares them
-- imported files merge selected resources before validation/execution
-- imported fragments may reference resources supplied by the parent graph
-- runtime inputs overlay existing text resources for one run
-- graph source changes only when authoring or refactoring a graph
-- request-specific values belong in runtime inputs, not source mutation
-- validate graph source before writing or running it
-- after running, inspect node outputs/errors; report graph errors as graph errors
+Authoring rules:
 
-Recursive graph execution boundary:
-
-- runtime nodes do not directly run other graphs
-- if another graph should be run, call `request_circuitry_run`
-- include reason, graph path, inputs, expected result, and risk
-- root/user-facing Zinc approves by running `zn --graph path/to/file.circuitry.yaml` or `zn run --graph path/to/file.circuitry.yaml`
-- do not recursively spawn graphs to avoid ordinary thinking
-
-Model selection precedence:
-
-1. resource `model`
-2. graph `runtime.model`
-3. Zinc runtime default
-
-`inherit` means Zinc chooses its configured default model.
+- keep graphs small and inspectable
+- put request-specific values in runtime inputs, not permanent source
+- use imports for reusable fragments
+- use `entry` so Zinc does not guess which resource to run
+- validate before running

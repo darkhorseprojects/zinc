@@ -5,26 +5,7 @@ const root = @import("../root.zig");
 const Scope = root.core.packages.Scope;
 
 pub fn run(init: std.process.Init) !void {
-    runInner(init) catch |err| {
-        switch (err) {
-            error.ProviderRequestFailed => {
-                std.debug.print("error: provider request failed. Check server/provider log at ~/.local/state/zinc/server.log for details.\n", .{});
-            },
-            error.ProviderLoadingModel => {
-                std.debug.print("error: provider is still loading the model. Please wait and try again.\n", .{});
-            },
-            error.ConnectionRefused => {
-                std.debug.print("error: connection refused. Is the Zinc model server running? Start it with 'zn serve'.\n", .{});
-            },
-            error.SessionNotFound => {
-                std.debug.print("error: session not found. Check if the session ID is correct.\n", .{});
-            },
-            else => {
-                std.debug.print("error: {s}\n", .{@errorName(err)});
-            },
-        }
-        std.process.exit(1);
-    };
+    try runInner(init);
 }
 
 fn runInner(init: std.process.Init) !void {
@@ -38,7 +19,7 @@ fn runInner(init: std.process.Init) !void {
     const cmd = args.next() orelse return commands.usage();
     if (std.mem.eql(u8, cmd, "help") or std.mem.eql(u8, cmd, "--help") or std.mem.eql(u8, cmd, "-h")) return commands.usage();
     if (std.mem.eql(u8, cmd, "check")) return commands.validate(allocator, init.io, home, args.next());
-    if (std.mem.eql(u8, cmd, "compile")) return commands.compile(allocator, init.io, home, args.next(), args.next());
+    if (std.mem.eql(u8, cmd, "compile")) return compileCommandArgs(allocator, init.io, home, &args);
     if (std.mem.eql(u8, cmd, "clean")) return cleanCommandArgs(allocator, init.io, home, &args);
     if (std.mem.eql(u8, cmd, "run")) return runCommandArgs(allocator, init.io, home, &args);
     if (std.mem.eql(u8, cmd, "serve")) return server.start(allocator, init.io, home, args.next());
@@ -56,6 +37,12 @@ fn runInner(init: std.process.Init) !void {
     try parts.append(allocator, cmd);
     while (args.next()) |part| try parts.append(allocator, part);
     return commands.runFromArgs(allocator, init.io, home, parts.items);
+}
+
+fn compileCommandArgs(allocator: std.mem.Allocator, io: std.Io, home: []const u8, args: *std.process.Args.Iterator) !void {
+    const parts = try collectArgs(allocator, args);
+    defer allocator.free(parts);
+    return commands.compileFromArgs(allocator, io, home, parts);
 }
 
 fn runCommandArgs(allocator: std.mem.Allocator, io: std.Io, home: []const u8, args: *std.process.Args.Iterator) !void {

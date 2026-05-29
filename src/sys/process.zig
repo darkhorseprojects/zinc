@@ -29,7 +29,7 @@ const builtin = [_]Tool{
     .{ .name = "write", .description = "Create or overwrite a UTF-8 file.", .prompt = "create or overwrite files", .params = &.{ .{ .name = "path" }, .{ .name = "content" } }, .run = runWrite },
     .{ .name = "edit", .description = "Replace exact text in a UTF-8 file. The old text must occur exactly once.", .prompt = "replace exact text in files", .params = &.{ .{ .name = "path" }, .{ .name = "oldText" }, .{ .name = "newText" } }, .run = runEdit },
     .{ .name = "bash", .description = "Run a shell command in the current working directory.", .prompt = "run shell commands in the current working directory", .params = &.{.{ .name = "command" }}, .run = runBashTool },
-    .{ .name = "request_circuitry_run", .description = "Request root/user approval to run another Circuitry graph. Does not execute recursively by itself.", .prompt = "request approval to run another Circuitry graph", .params = &.{ .{ .name = "reason" }, .{ .name = "graph" }, .{ .name = "expected_result" }, .{ .name = "risk" } }, .run = runCircuitryRequest },
+    .{ .name = "run_graph", .description = "Request execution of a Circuitry graph. Zinc records the request for root/user approval instead of silently recursing.", .prompt = "request a Circuitry graph run", .params = &.{ .{ .name = "reason" }, .{ .name = "graph" }, .{ .name = "entry" }, .{ .name = "inputs" }, .{ .name = "risk" } }, .run = runCircuitryRequest },
 };
 
 pub fn contains(name: []const u8) bool {
@@ -302,20 +302,23 @@ fn runBashTool(allocator: Allocator, io: std.Io, args: std.json.ObjectMap) !Tool
 fn runCircuitryRequest(allocator: Allocator, _: std.Io, args: std.json.ObjectMap) !ToolResult {
     const graph = try requireStringArg(args, "graph");
     const reason = try requireStringArg(args, "reason");
-    const expected = try requireStringArg(args, "expected_result");
+    const entry = try requireStringArg(args, "entry");
+    const inputs = try requireStringArg(args, "inputs");
     const risk = try requireStringArg(args, "risk");
     var out: std.ArrayList(u8) = .empty;
     errdefer out.deinit(allocator);
     try out.appendSlice(allocator, "{\"status\":\"pending_approval\",\"message\":");
-    const message = try std.fmt.allocPrint(allocator, "Circuitry graph execution requires root/user approval. Run `zn {s}` or `zn run {s}` from the root-facing Zinc invocation if approved.", .{ graph, graph });
+    const message = try std.fmt.allocPrint(allocator, "Circuitry graph execution requires root/user approval. Run `zn run --graph {s} --entry {s}` from the root-facing Zinc invocation if approved.", .{ graph, entry });
     defer allocator.free(message);
     try files.appendJsonString(allocator, &out, message);
     try out.appendSlice(allocator, ",\"graph\":");
     try files.appendJsonString(allocator, &out, graph);
+    try out.appendSlice(allocator, ",\"entry\":");
+    try files.appendJsonString(allocator, &out, entry);
+    try out.appendSlice(allocator, ",\"inputs\":");
+    try files.appendJsonString(allocator, &out, inputs);
     try out.appendSlice(allocator, ",\"reason\":");
     try files.appendJsonString(allocator, &out, reason);
-    try out.appendSlice(allocator, ",\"expected_result\":");
-    try files.appendJsonString(allocator, &out, expected);
     try out.appendSlice(allocator, ",\"risk\":");
     try files.appendJsonString(allocator, &out, risk);
     try out.append(allocator, '}');

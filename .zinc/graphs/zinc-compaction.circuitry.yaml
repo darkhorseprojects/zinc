@@ -1,16 +1,17 @@
-circuitry: "0.3.10"
+circuitry: "0.4"
 title: "Zinc context compaction"
 description: |
-  Converts the middle of a Zinc session transcript into a durable summary that
-  can be inserted between preserved first messages and the exact transcript tail.
-runtime:
-  provider: zinc
-  model: inherit
-resources:
+  Converts the middle of a Zinc session transcript into durable summary memory.
+entry: compaction
+inputs:
   session_log:
     type: text
+    required: true
+resources:
+  session_log:
+    type: input
     label: "Session log to compact"
-    value: ""
+    from: session_log
   compaction:
     type: agent
     identity: "Context compaction"
