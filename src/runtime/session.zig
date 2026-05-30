@@ -1,10 +1,12 @@
 const std = @import("std");
 const files = @import("../sys/fs.zig");
 const provider = @import("provider.zig");
-const tools = @import("../sys/process.zig");
+const tools = @import("tools.zig");
 
 const Allocator = std.mem.Allocator;
 const first_message_count: usize = 6;
+
+pub const ToolResult = tools.ToolResult;
 
 pub const Session = struct {
     id: []u8,
@@ -144,7 +146,7 @@ pub fn appendInvalidToolCallAttempt(allocator: Allocator, path: []const u8, call
     try appendLine(path, line.items);
 }
 
-pub fn appendToolResult(allocator: Allocator, path: []const u8, call: provider.ToolCall, result: tools.ToolResult) !void {
+pub fn appendToolResult(allocator: Allocator, path: []const u8, call: provider.ToolCall, result: ToolResult) !void {
     var line: std.ArrayList(u8) = .empty;
     defer line.deinit(allocator);
     try beginRow(allocator, &line, "tool");

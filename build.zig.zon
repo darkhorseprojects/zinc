@@ -1,6 +1,6 @@
 .{
     .name = .zinc,
-    .version = "0.3.0",
+    .version = "0.3.1",
     .fingerprint = 0x4d05198031a1f081,
     .minimum_zig_version = "0.16.0",
     .dependencies = .{},
@@ -8,9 +8,7 @@
         "build.zig",
         "build.zig.zon",
         "src",
-        ".zinc/config.yaml",
-        ".zinc/graphs",
-        ".zinc/prompts",
+        "stock",
         "scripts",
         "README.md",
         "LICENSE",

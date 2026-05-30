@@ -3,19 +3,6 @@ const files = @import("../sys/fs.zig");
 
 const Allocator = std.mem.Allocator;
 
-pub const PromptPack = struct {
-    id: []u8,
-    title: []u8,
-    description: []u8,
-    content: []u8,
-    pub fn deinit(self: PromptPack, allocator: Allocator) void {
-        allocator.free(self.id);
-        allocator.free(self.title);
-        allocator.free(self.description);
-        allocator.free(self.content);
-    }
-};
-
 pub const InputSpec = struct {
     id: []u8,
     kind: []u8,
@@ -26,33 +13,10 @@ pub const InputSpec = struct {
     }
 };
 
-pub const ImageInput = struct {
-    id: []u8,
-    path: []u8,
-    mime: []u8,
-    pub fn deinit(self: ImageInput, allocator: Allocator) void {
-        allocator.free(self.id);
-        allocator.free(self.path);
-        allocator.free(self.mime);
-    }
-};
-
 pub const Resource = struct {
     id: []const u8,
     source_file: []const u8,
     value: std.json.Value,
-};
-
-pub const RunResource = struct {
-    id: []u8,
-    graph: []u8,
-    entry: ?[]u8,
-
-    pub fn deinit(self: RunResource, allocator: Allocator) void {
-        allocator.free(self.id);
-        allocator.free(self.graph);
-        if (self.entry) |entry| allocator.free(entry);
-    }
 };
 
 pub const Graph = struct {
@@ -82,8 +46,7 @@ pub fn load(allocator: Allocator, io: std.Io, graph_path: []const u8) !Graph {
     const root = parsed.value;
 
     if (root != .object) return error.InvalidCircuitryGraph;
-    const graph_value = root;
-    const resources_value = objectGet(graph_value, "resources") orelse return error.InvalidCircuitryGraph;
+    const resources_value = root.object.get("resources") orelse return error.InvalidCircuitryGraph;
     if (resources_value != .object) return error.InvalidCircuitryGraph;
     const resources_obj = resources_value.object;
 
@@ -99,10 +62,13 @@ pub fn load(allocator: Allocator, io: std.Io, graph_path: []const u8) !Graph {
         };
     }
 
-    const inputs = try readInputs(allocator, graph_value);
+    const inputs = try readInputs(allocator, root);
     errdefer freeInputSpecs(allocator, inputs);
-    const entry_id = if (scalarAt(graph_value, &.{"entry"})) |entry| try allocator.dupe(u8, entry) else null;
-    errdefer if (entry_id) |entry| allocator.free(entry);
+    const entry_id_raw = scalarAt(root, &.{"entry"});
+    var entry_id: ?[]u8 = null;
+    if (entry_id_raw) |raw| {
+        entry_id = try allocator.dupe(u8, raw);
+    }
     return .{ .json_text = text, .parsed = parsed, .resources = resources, .inputs = inputs, .entry = entry_id };
 }
 
@@ -117,8 +83,7 @@ fn runCircuitryCommand(allocator: Allocator, io: std.Io, argv: []const []const u
         .stdout_limit = .limited(16 * 1024 * 1024),
     }) catch |err| switch (err) {
         error.FileNotFound => {
-            std.debug.print("error: 'circuitry' command not found. Please ensure circuitry is installed and in your PATH.\n", .{});
-            std.debug.print("To install circuitry, run:\n  npm install -g @darkhorseprojects/circuitry\n\n", .{});
+            std.debug.print("error: 'circuitry' command not found. Install with: npm install -g @darkhorseprojects/circuitry\n", .{});
             return error.CircuitryNotFound;
         },
         else => return err,
@@ -157,74 +122,6 @@ pub fn validate(graph: Graph) !void {
     if (graph.resources.len == 0) return error.InvalidCircuitryGraph;
 }
 
-pub fn readPromptPacks(allocator: Allocator, graph: Graph) ![]PromptPack {
-    var packs: std.ArrayList(PromptPack) = .empty;
-    errdefer {
-        for (packs.items) |pack| pack.deinit(allocator);
-        packs.deinit(allocator);
-    }
-    for (graph.resources) |res| {
-        if (!std.mem.eql(u8, resourceType(res) orelse "", "text")) continue;
-
-        if (resourceField(res, "uri")) |uri| {
-            if (std.mem.startsWith(u8, uri, "prompt:")) {
-                const id = std.mem.trim(u8, uri["prompt:".len..], " \t\r\n");
-                if (id.len == 0) continue;
-                try packs.append(allocator, .{
-                    .id = try allocator.dupe(u8, id),
-                    .title = try allocator.dupe(u8, resourceField(res, "label") orelse id),
-                    .description = try allocator.dupe(u8, resourceField(res, "description") orelse ""),
-                    .content = try std.fmt.allocPrint(allocator, "prompt:{s}", .{id}),
-                });
-                continue;
-            }
-        }
-
-        const content = resourceTextValue(allocator, res) catch continue;
-        errdefer allocator.free(content);
-        const trimmed = std.mem.trim(u8, content, " \t\r\n");
-        if (std.mem.startsWith(u8, trimmed, "prompt:")) {
-            const id = std.mem.trim(u8, trimmed["prompt:".len..], " \t\r\n");
-            if (id.len == 0) {
-                allocator.free(content);
-                continue;
-            }
-            try packs.append(allocator, .{
-                .id = try allocator.dupe(u8, id),
-                .title = try allocator.dupe(u8, resourceField(res, "label") orelse id),
-                .description = try allocator.dupe(u8, resourceField(res, "description") orelse ""),
-                .content = content,
-            });
-            continue;
-        }
-        if (!std.mem.startsWith(u8, trimmed, "---\n")) {
-            allocator.free(content);
-            continue;
-        }
-        const fm_end = std.mem.indexOf(u8, trimmed[4..], "\n---") orelse {
-            allocator.free(content);
-            continue;
-        };
-        const fm = trimmed[4 .. 4 + fm_end];
-        const id = frontmatter(fm, "id") orelse {
-            allocator.free(content);
-            continue;
-        };
-        try packs.append(allocator, .{
-            .id = try allocator.dupe(u8, id),
-            .title = try allocator.dupe(u8, frontmatter(fm, "title") orelse resourceField(res, "label") orelse id),
-            .description = try allocator.dupe(u8, frontmatter(fm, "description") orelse resourceField(res, "description") orelse ""),
-            .content = content,
-        });
-    }
-    return packs.toOwnedSlice(allocator);
-}
-
-pub fn freePromptPacks(allocator: Allocator, packs: []const PromptPack) void {
-    for (packs) |pack| pack.deinit(allocator);
-    allocator.free(packs);
-}
-
 pub fn entryResourceId(graph: Graph, override: ?[]const u8) ?[]const u8 {
     if (override) |id| return id;
     return graph.entry;
@@ -238,7 +135,7 @@ pub fn resourceIdentity(allocator: Allocator, graph: Graph, id: []const u8) ![]u
 pub fn readTools(allocator: Allocator, graph: Graph, id: []const u8) ![][]u8 {
     const res = resource(graph, id) orelse return error.InvalidCircuitryGraph;
     const items = try readList(allocator, res, "tools");
-    if (items.len == 0) return error.InvalidCircuitryGraph;
+    // Empty tools list is valid - agents can run without tools
     return items;
 }
 
@@ -257,31 +154,6 @@ pub fn readInputSpecs(allocator: Allocator, graph: Graph) ![]InputSpec {
 }
 
 pub fn freeInputSpecs(allocator: Allocator, inputs: []const InputSpec) void {
-    for (inputs) |input| input.deinit(allocator);
-    allocator.free(inputs);
-}
-
-pub fn readImageInputs(allocator: Allocator, graph: Graph, id: []const u8) ![]ImageInput {
-    const res = resource(graph, id) orelse return error.InvalidCircuitryGraph;
-    const inputs = try readList(allocator, res, "inputs");
-    defer freeStringList(allocator, inputs);
-    var out: std.ArrayList(ImageInput) = .empty;
-    errdefer {
-        for (out.items) |item| item.deinit(allocator);
-        out.deinit(allocator);
-    }
-    for (inputs) |input| {
-        const input_res = resource(graph, input) orelse continue;
-        if (!std.mem.eql(u8, resourceType(input_res) orelse "", "image")) continue;
-        const raw_path = resourceField(input_res, "path") orelse resourceField(input_res, "uri") orelse resourceField(input_res, "value") orelse return error.InvalidCircuitryGraph;
-        const resolved = try resolveResourceRef(allocator, std.fs.path.dirname(input_res.source_file) orelse ".", raw_path);
-        errdefer allocator.free(resolved);
-        try out.append(allocator, .{ .id = try allocator.dupe(u8, input), .path = resolved, .mime = try allocator.dupe(u8, resourceField(input_res, "mimeType") orelse mimeFromPath(raw_path)) });
-    }
-    return out.toOwnedSlice(allocator);
-}
-
-pub fn freeImageInputs(allocator: Allocator, inputs: []const ImageInput) void {
     for (inputs) |input| input.deinit(allocator);
     allocator.free(inputs);
 }
@@ -324,13 +196,8 @@ pub fn resourceValue(res: Resource, field: []const u8) ?std.json.Value {
     return objectGet(res.value, field);
 }
 
-fn resourceTextValue(allocator: Allocator, res: Resource) ![]u8 {
-    return allocator.dupe(u8, resourceField(res, "value") orelse return error.InvalidCircuitryGraph);
-}
-
-fn resourceTextValueContains(res: Resource, needle: []const u8) bool {
-    const value = resourceField(res, "value") orelse return false;
-    return std.mem.indexOf(u8, value, needle) != null;
+pub fn resourceExpectValue(res: Resource) ?std.json.Value {
+    return resourceValue(res, "expect");
 }
 
 pub fn readList(allocator: Allocator, res: Resource, field: []const u8) ![][]u8 {
@@ -364,31 +231,34 @@ pub fn readList(allocator: Allocator, res: Resource, field: []const u8) ![][]u8 
     return error.InvalidCircuitryGraph;
 }
 
+// Load graph from already-resolved JSON (doesn't call circuitry)
+pub fn loadFromSlice(allocator: Allocator, json_text: []const u8) !Graph {
+    var parsed = try std.json.parseFromSlice(std.json.Value, allocator, json_text, .{});
+    errdefer parsed.deinit();
+    const root = parsed.value;
 
-pub fn findRunInput(allocator: Allocator, graph: Graph, id: []const u8) !?RunResource {
-    const res = resource(graph, id) orelse return error.InvalidCircuitryGraph;
-    const inputs = try readList(allocator, res, "inputs");
-    defer freeStringList(allocator, inputs);
-    for (inputs) |input_id| {
-        const candidate = resource(graph, input_id) orelse continue;
-        if (!std.mem.eql(u8, resourceType(candidate) orelse "", "run")) continue;
-        const graph_path = resourceField(candidate, "graph") orelse resourceField(candidate, "path") orelse resourceField(candidate, "uri") orelse continue;
-        const source_dir = std.fs.path.dirname(candidate.source_file) orelse ".";
-        const resolved = try resolveResourceRef(allocator, source_dir, graph_path);
-        errdefer allocator.free(resolved);
-        const entry = if (resourceField(candidate, "entry")) |entry_id| try allocator.dupe(u8, entry_id) else null;
-        errdefer if (entry) |entry_id| allocator.free(entry_id);
-        return .{ .id = try allocator.dupe(u8, input_id), .graph = resolved, .entry = entry };
+    if (root != .object) return error.InvalidCircuitryGraph;
+    const resources_value = root.object.get("resources") orelse return error.InvalidCircuitryGraph;
+    if (resources_value != .object) return error.InvalidCircuitryGraph;
+    const resources_obj = resources_value.object;
+
+    var resources = try allocator.alloc(Resource, resources_obj.count());
+    errdefer allocator.free(resources);
+    var i: usize = 0;
+    var iter = resources_obj.iterator();
+    while (iter.next()) |entry| : (i += 1) {
+        resources[i] = .{
+            .id = entry.key_ptr.*,
+            .source_file = "",
+            .value = entry.value_ptr.*,
+        };
     }
-    return null;
-}
 
-pub fn resourceExpectValue(res: Resource) ?std.json.Value {
-    return resourceValue(res, "expect");
-}
-
-pub fn mimeFromPathPublic(path: []const u8) []const u8 {
-    return mimeFromPath(path);
+    const inputs = try readInputs(allocator, root);
+    errdefer freeInputSpecs(allocator, inputs);
+    const entry_id = scalarAt(root, &.{"entry"}) orelse null;
+    errdefer if (entry_id) |entry| allocator.free(entry);
+    return .{ .json_text = try allocator.dupe(u8, json_text), .parsed = parsed, .resources = resources, .inputs = inputs, .entry = entry_id };
 }
 
 fn objectGet(value: std.json.Value, key: []const u8) ?std.json.Value {
@@ -417,31 +287,4 @@ fn scalarText(value: std.json.Value) ?[]const u8 {
 fn mapBool(value: std.json.Value, field: []const u8) ?bool {
     const found = objectGet(value, field) orelse return null;
     return if (found == .bool) found.bool else null;
-}
-
-fn frontmatter(fm: []const u8, key: []const u8) ?[]const u8 {
-    var lines = std.mem.splitScalar(u8, fm, '\n');
-    while (lines.next()) |line| {
-        const colon = std.mem.indexOfScalar(u8, line, ':') orelse continue;
-        if (std.mem.eql(u8, std.mem.trim(u8, line[0..colon], " \t\r"), key)) return unquote(std.mem.trim(u8, line[colon + 1 ..], " \t\r"));
-    }
-    return null;
-}
-
-fn unquote(raw: []const u8) []const u8 {
-    if (raw.len >= 2 and ((raw[0] == '"' and raw[raw.len - 1] == '"') or (raw[0] == '\'' and raw[raw.len - 1] == '\''))) return raw[1 .. raw.len - 1];
-    return raw;
-}
-
-fn mimeFromPath(path: []const u8) []const u8 {
-    if (std.mem.endsWith(u8, path, ".png")) return "image/png";
-    if (std.mem.endsWith(u8, path, ".jpg") or std.mem.endsWith(u8, path, ".jpeg")) return "image/jpeg";
-    if (std.mem.endsWith(u8, path, ".webp")) return "image/webp";
-    if (std.mem.endsWith(u8, path, ".gif")) return "image/gif";
-    return "application/octet-stream";
-}
-
-fn resolveResourceRef(allocator: Allocator, source_dir: []const u8, path: []const u8) ![]u8 {
-    if (std.fs.path.isAbsolute(path)) return allocator.dupe(u8, path);
-    return std.fs.path.join(allocator, &.{ source_dir, path });
 }

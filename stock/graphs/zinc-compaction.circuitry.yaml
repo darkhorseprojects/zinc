@@ -1,0 +1,32 @@
+circuitry: "0.4"
+title: Zinc compaction
+
+inputs:
+  session_log:
+    type: text
+    required: true
+
+entry: compaction
+
+resources:
+  session_log:
+    type: input
+    from: session_log
+
+  compaction:
+    type: agent
+    identity: Session compaction
+    inputs:
+      - session_log
+    tools: []
+    expect:
+      summary: str
+    instructions: |
+      Compact this Zinc session into durable memory.
+      Preserve goals, constraints, decisions, corrections, files, commands, tool results, unresolved state, and next actions.
+      Drop filler, duplicate boilerplate, and superseded context.
+      Do not answer the user.
+
+outputs:
+  summary:
+    from: compaction.summary

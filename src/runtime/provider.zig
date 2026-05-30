@@ -1,7 +1,6 @@
 const std = @import("std");
 const config = @import("config.zig");
 const files = @import("../sys/fs.zig");
-const resource = @import("../core/resource.zig");
 
 const Allocator = std.mem.Allocator;
 
@@ -20,7 +19,6 @@ pub const Message = struct {
     name: ?[]const u8 = null,
     tool_call_id: ?[]const u8 = null,
     tool_calls: []const ToolCall = &.{},
-    parts: []const resource.ModelPart = &.{},
 };
 
 pub const ToolCall = struct {
@@ -82,12 +80,7 @@ pub fn appendMessage(allocator: Allocator, messages: *std.ArrayList(Message), me
         for (tool_calls) |tool_call| freeCall(allocator, tool_call);
         if (tool_calls.len != 0) allocator.free(tool_calls);
     }
-    const parts = try cloneParts(allocator, message.parts);
-    errdefer {
-        for (parts) |part| part.deinit(allocator);
-        if (parts.len != 0) allocator.free(parts);
-    }
-    try messages.append(allocator, .{ .role = role, .content = content, .name = name, .tool_call_id = tool_call_id, .tool_calls = tool_calls, .parts = parts });
+    try messages.append(allocator, .{ .role = role, .content = content, .name = name, .tool_call_id = tool_call_id, .tool_calls = tool_calls });
 }
 
 pub fn freeMessages(allocator: Allocator, messages: []Message) void {
@@ -257,50 +250,7 @@ fn readStringField(object: std.json.Value, field: []const u8) ![]const u8 {
 }
 
 fn writeMessageContent(allocator: Allocator, out: *std.ArrayList(u8), msg: Message) !void {
-    if (msg.parts.len == 0) return files.appendJsonString(allocator, out, msg.content);
-    try out.appendSlice(allocator, "[");
-    var wrote_any = false;
-    if (msg.content.len != 0) {
-        try out.appendSlice(allocator, "{\"type\":\"text\",\"text\":");
-        try files.appendJsonString(allocator, out, msg.content);
-        try out.append(allocator, '}');
-        wrote_any = true;
-    }
-    for (msg.parts) |part| {
-        if (wrote_any) try out.append(allocator, ',');
-        switch (part) {
-            .text => |text| {
-                try out.appendSlice(allocator, "{\"type\":\"text\",\"text\":");
-                try files.appendJsonString(allocator, out, text);
-                try out.append(allocator, '}');
-            },
-            .image_url => |url| {
-                try out.appendSlice(allocator, "{\"type\":\"image_url\",\"image_url\":{\"url\":");
-                try files.appendJsonString(allocator, out, url);
-                try out.appendSlice(allocator, "}}");
-            },
-        }
-        wrote_any = true;
-    }
-    try out.append(allocator, ']');
-}
-
-fn cloneParts(allocator: Allocator, parts: []const resource.ModelPart) ![]resource.ModelPart {
-    if (parts.len == 0) return &.{};
-    const out = try allocator.alloc(resource.ModelPart, parts.len);
-    var initialized: usize = 0;
-    errdefer {
-        for (out[0..initialized]) |part| part.deinit(allocator);
-        allocator.free(out);
-    }
-    for (parts, 0..) |part, i| {
-        out[i] = switch (part) {
-            .text => |text| .{ .text = try allocator.dupe(u8, text) },
-            .image_url => |url| .{ .image_url = try allocator.dupe(u8, url) },
-        };
-        initialized += 1;
-    }
-    return out;
+    return files.appendJsonString(allocator, out, msg.content);
 }
 
 fn cloneToolCalls(allocator: Allocator, calls: []const ToolCall) ![]ToolCall {
@@ -329,8 +279,6 @@ fn freeMessage(allocator: Allocator, message: Message) void {
     if (message.tool_call_id) |v| allocator.free(v);
     for (message.tool_calls) |tool_call| freeCall(allocator, tool_call);
     if (message.tool_calls.len != 0) allocator.free(message.tool_calls);
-    for (message.parts) |part| part.deinit(allocator);
-    if (message.parts.len != 0) allocator.free(message.parts);
 }
 
 fn freeCall(allocator: Allocator, tool_call: ToolCall) void {

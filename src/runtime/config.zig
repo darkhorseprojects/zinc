@@ -12,11 +12,9 @@ const default_served_model = "qwen3.6-27b-heretic-mtp-q3_k_s";
 
 pub const RuntimePaths = struct {
     graph: []u8,
-    compiled_plan: []u8,
     compaction_graph: []u8,
     pub fn deinit(self: RuntimePaths, allocator: Allocator) void {
         allocator.free(self.graph);
-        allocator.free(self.compiled_plan);
         allocator.free(self.compaction_graph);
     }
 };
@@ -318,24 +316,22 @@ fn loadModel(allocator: Allocator, cfg: Config, id: []const u8) !ModelConfig {
 }
 
 fn runtimePaths(allocator: Allocator, home: []const u8, cfg: Config) !RuntimePaths {
-    var paths = RuntimePaths{ .graph = try layout.sharePath(allocator, home, "graphs/zinc-loop.circuitry.yaml"), .compiled_plan = try allocator.dupe(u8, ".zinc/compiled/plan.json"), .compaction_graph = try layout.sharePath(allocator, home, "graphs/zinc-compaction.circuitry.yaml") };
+    var paths = RuntimePaths{ .graph = try allocator.dupe(u8, "stock/graphs/zinc-loop.circuitry.yaml"), .compaction_graph = try allocator.dupe(u8, "stock/graphs/zinc-compaction.circuitry.yaml") };
     errdefer paths.deinit(allocator);
-    if (files.exists(".zinc/graphs/zinc-loop.circuitry.yaml")) |_| {
+
+    // Check for user-local overrides in .zinc/
+    if (files.existsPath(".zinc/graphs/zinc-loop.circuitry.yaml")) {
         allocator.free(paths.graph);
         paths.graph = try allocator.dupe(u8, ".zinc/graphs/zinc-loop.circuitry.yaml");
-    } else |_| {}
-    if (files.exists(".zinc/graphs/zinc-compaction.circuitry.yaml")) |_| {
+    }
+    if (files.existsPath(".zinc/graphs/zinc-compaction.circuitry.yaml")) {
         allocator.free(paths.compaction_graph);
         paths.compaction_graph = try allocator.dupe(u8, ".zinc/graphs/zinc-compaction.circuitry.yaml");
-    } else |_| {}
+    }
+
     if (try cfg.optionalString(allocator, &.{ "paths", "graph" })) |v| {
         allocator.free(paths.graph);
         paths.graph = try expandHome(allocator, home, v);
-        allocator.free(v);
-    }
-    if (try cfg.optionalString(allocator, &.{ "paths", "compiled_plan" })) |v| {
-        allocator.free(paths.compiled_plan);
-        paths.compiled_plan = try expandHome(allocator, home, v);
         allocator.free(v);
     }
     if (try cfg.optionalString(allocator, &.{ "paths", "compaction_graph" })) |v| {

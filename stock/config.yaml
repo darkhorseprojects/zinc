@@ -1,9 +1,8 @@
 default_model: qwen-heretic-mtp
 
 paths:
-  graph: .zinc/graphs/zinc-loop.circuitry.yaml
-  compiled_plan: .zinc/compiled/plan.json
-  compaction_graph: .zinc/graphs/zinc-compaction.circuitry.yaml
+  graph: stock/graphs/zinc-loop.circuitry.yaml
+  compaction_graph: stock/graphs/zinc-compaction.circuitry.yaml
 
 runtime:
   max_retries: 5
@@ -26,8 +25,8 @@ models:
       mmproj_file: Qwen3.6-27B-uncensored-heretic-v2-Native-MTP-Preserved.mmproj-Q8_0.gguf
       cache_type_k: q4_0
       cache_type_v: q4_0
-      fit_ctx: 16384
-      gpu_layers: fit
+      fit_ctx: 8192
+      gpu_layers: all
       draft_tokens: 2
       reasoning_format: deepseek
       mtp: true

@@ -1,0 +1,37 @@
+circuitry: "0.4"
+title: Zinc default loop
+
+inputs:
+  user_turn:
+    type: text
+    required: true
+
+entry: assistant
+
+resources:
+  user_turn:
+    type: input
+    from: user_turn
+
+  assistant:
+    type: agent
+    identity: Zinc
+    inputs:
+      - user_turn
+    tools:
+      - read
+      - write
+      - edit
+      - bash
+      - run_graph
+    expect:
+      response: str
+    instructions: |
+      You are Zinc, a small local coding agent.
+      Be direct, accurate, and natural.
+      Use tools when useful.
+      You may write Circuitry graphs and request graph runs with run_graph.
+
+outputs:
+  response:
+    from: assistant.response
