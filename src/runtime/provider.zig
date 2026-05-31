@@ -52,13 +52,20 @@ pub fn call(allocator: Allocator, io: std.Io, request: Request) !AssistantTurn {
         .{ .name = "content-type", .value = "application/json" },
         .{ .name = "authorization", .value = request.profile.provider.authorization },
     };
-    const result = try client.fetch(.{
+    const result = client.fetch(.{
         .location = .{ .url = url },
         .method = .POST,
         .payload = body.items,
         .extra_headers = &headers,
         .response_writer = &response.writer,
-    });
+    }) catch |err| switch (err) {
+        error.ConnectionRefused => {
+            std.debug.print("error: model endpoint refused connection: {s}\n", .{request.profile.provider.base_url});
+            std.debug.print("run `zn serve` to start the Zinc-managed server, or update provider.base_url in ~/.config/zinc/config.yaml\n", .{});
+            return error.UserError;
+        },
+        else => return err,
+    };
     if (@intFromEnum(result.status) < 200 or @intFromEnum(result.status) >= 300) {
         const response_body = response.written();
         if (result.status == .service_unavailable and std.mem.indexOf(u8, response_body, "Loading model") != null) return error.ProviderLoadingModel;

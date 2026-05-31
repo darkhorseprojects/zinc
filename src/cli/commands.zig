@@ -255,28 +255,66 @@ pub fn packageShow(allocator: Allocator, io: std.Io, home: []const u8, args: []c
     std.debug.print("{s}", .{text});
 }
 
+const zinc_repo_url = "https://github.com/darkhorseprojects/zinc.git";
+
 pub fn updateFromArgs(allocator: Allocator, io: std.Io, home: []const u8, args: []const []const u8) !void {
-    _ = home;
     var ref: ?[]const u8 = null;
     var i: usize = 0;
     while (i < args.len) : (i += 1) {
         if (std.mem.eql(u8, args[i], "--ref")) {
             i += 1;
-            if (i >= args.len) return error.MissingRef;
+            if (i >= args.len) return fail("missing value after --ref", .{});
             ref = args[i];
+            continue;
         }
+        return fail("unknown update argument: {s}", .{args[i]});
     }
+
     const target = ref orelse "main";
-    try runCommand(allocator, io, &.{ "git", "pull", "origin", target });
+    const source_dir = try layout.sharePath(allocator, home, "source/zinc");
+    defer allocator.free(source_dir);
+    const git_dir = try std.fs.path.join(allocator, &.{ source_dir, ".git" });
+    defer allocator.free(git_dir);
+
+    if (!files.existsPath(git_dir)) {
+        if (std.fs.path.dirname(source_dir)) |parent| try files.mkdirP(parent);
+        try runCommand(allocator, io, &.{ "git", "clone", zinc_repo_url, source_dir }, "failed to download Zinc from git");
+    }
+
+    try runCommand(allocator, io, &.{ "git", "-C", source_dir, "fetch", "--tags", "origin" }, "failed to fetch Zinc updates");
+    if (std.mem.eql(u8, target, "main") or std.mem.eql(u8, target, "master")) {
+        try runCommand(allocator, io, &.{ "git", "-C", source_dir, "checkout", target }, "failed to checkout Zinc update branch");
+        try runCommand(allocator, io, &.{ "git", "-C", source_dir, "pull", "--ff-only", "origin", target }, "failed to update Zinc checkout");
+    } else {
+        try runCommand(allocator, io, &.{ "git", "-C", source_dir, "fetch", "origin", target }, "failed to fetch requested Zinc ref");
+        try runCommand(allocator, io, &.{ "git", "-C", source_dir, "checkout", "--detach", "FETCH_HEAD" }, "failed to checkout requested Zinc ref");
+    }
+
+    const installer = try std.fs.path.join(allocator, &.{ source_dir, "scripts", "install-linux.sh" });
+    defer allocator.free(installer);
+    try runCommand(allocator, io, &.{ installer }, "failed to install Zinc update");
+    std.debug.print("updated Zinc from {s} ({s})\n", .{ zinc_repo_url, target });
 }
 
-fn runCommand(allocator: Allocator, io: std.Io, argv: []const []const u8) !void {
-    const result = try std.process.run(allocator, io, .{ .argv = argv });
+fn runCommand(allocator: Allocator, io: std.Io, argv: []const []const u8, context: []const u8) !void {
+    const result = std.process.run(allocator, io, .{ .argv = argv, .stderr_limit = .limited(5 * 1024 * 1024), .stdout_limit = .limited(5 * 1024 * 1024) }) catch |err| switch (err) {
+        error.FileNotFound => return fail("required command not found: {s}", .{argv[0]}),
+        else => return err,
+    };
     defer allocator.free(result.stdout);
     defer allocator.free(result.stderr);
+    if (result.term == .exited and result.term.exited == 0) {
+        if (result.stdout.len != 0) std.debug.print("{s}", .{result.stdout});
+        if (result.stderr.len != 0) std.debug.print("{s}", .{result.stderr});
+        return;
+    }
+    std.debug.print("error: {s}\n", .{context});
+    if (std.mem.indexOf(u8, result.stderr, "Authentication failed") != null or std.mem.indexOf(u8, result.stderr, "Repository not found") != null) {
+        std.debug.print("Zinc is private; git must be authenticated for {s}\n", .{zinc_repo_url});
+    }
     if (result.stdout.len != 0) std.debug.print("{s}", .{result.stdout});
     if (result.stderr.len != 0) std.debug.print("{s}", .{result.stderr});
-    if (result.term != .exited or result.term.exited != 0) return error.CommandFailed;
+    return error.UserError;
 }
 
 const PackageArgs = struct { scope: ?packages.Scope = null, replace: bool = false, value: ?[]const u8 = null };
