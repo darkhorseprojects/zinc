@@ -5,8 +5,22 @@ paths:
   compaction_graph: stock/graphs/zinc-compaction.circuitry.yaml
 
 runtime:
-  max_retries: 5
+  provider_max_retries: 5
+  tool_max_turns: 12
   compaction_threshold_percent: 70
+  compaction_max_tokens: 4096
+  session_head_messages: 6
+  session_tail_messages: 12
+  replay_truncate_chars: 2048
+  bash_output_max_bytes: 51200
+  bash_output_max_lines: 2000
+  bash_capture_max_bytes: 67108864
+  file_read_max_bytes: 1048576
+  file_range_read_max_bytes: 8388608
+  file_edit_max_bytes: 8388608
+  resource_read_max_bytes: 33554432
+  input_text_file_max_bytes: 8388608
+  input_file_max_bytes: 33554432
   graph_run_policy: ask
 
 provider:
@@ -25,8 +39,8 @@ models:
       mmproj_file: Qwen3.6-27B-uncensored-heretic-v2-Native-MTP-Preserved.mmproj-Q8_0.gguf
       cache_type_k: q4_0
       cache_type_v: q4_0
-      fit_ctx: 8192
-      gpu_layers: all
+      fit_ctx: 16384
+      gpu_layers: fit
       draft_tokens: 2
       reasoning_format: deepseek
       mtp: true

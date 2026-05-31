@@ -1,31 +1,93 @@
 # Zinc
 
+[![release](https://img.shields.io/github/v/release/darkhorseprojects/zinc?color=64748b&style=flat-square)](https://github.com/darkhorseprojects/zinc/releases)
+[![build](https://img.shields.io/github/actions/workflow/status/darkhorseprojects/zinc/ci.yml?label=build&style=flat-square)](https://github.com/darkhorseprojects/zinc/actions)
+[![license](https://img.shields.io/github/license/darkhorseprojects/zinc?color=333333&style=flat-square)](https://github.com/darkhorseprojects/zinc/blob/main/LICENSE)
+
+[**Circuitry**](https://github.com/darkhorseprojects/circuitry) &nbsp;•&nbsp; [**Specification**](https://github.com/darkhorseprojects/circuitry/blob/main/SPEC.md) &nbsp;•&nbsp; [**Packages**](#packages) &nbsp;•&nbsp; [**Runtime boundary**](#runtime-boundary)
+
 Zinc is a tiny local runtime for Circuitry graphs.
 
-Circuitry describes topology.
-Zinc runs it.
-
-Prompts are inputs.
-Tools are runtime functions.
-Graphs are executable topology.
+Circuitry defines topology. Zinc supplies the local effects: model calls, tools, sessions, runtime URIs, packages, and model serving.
 
 ```bash
 zn "inspect this repo"
 ```
 
-Zinc provides:
+## The idea
 
-- local model loop via OpenAI-compatible provider
-- read/write/edit/bash tools
-- sessions with semantic JSONL logs
-- prompt packages with frontmatter
-- graph-run requests with approval policy
-- local model serving via llama.cpp
+A Circuitry graph is a durable source file. Zinc makes it executable on your machine.
 
-## Default graph
+- `input`, `text`, and `data` resources become concrete values.
+- `agent` resources run through the configured local provider.
+- `run` resources execute child graphs through the same resolver.
+- tools are Zinc runtime effects, not graph syntax.
+
+Zinc does not own nodes, edges, compiled plans, imports, or graph validation. Circuitry owns the graph format. Zinc runs resolved resources.
+
+## Why it matters
+
+A local coding agent should be small enough to inspect and direct.
+
+Zinc keeps the loop plain:
+
+```text
+prompt → Circuitry entry → resource resolver → agent loop → local tools → session log
+```
+
+The session is a JSONL log. The default loop is a Circuitry graph. Prompt packs are files. Large bash output is kept out of context and pointed to by path. Graph execution asks before dynamic runs.
+
+## Install
+
+```bash
+npm install -g @darkhorseprojects/circuitry@^0.4.3
+./scripts/install-linux.sh
+```
+
+Installs:
+
+```text
+~/.local/bin/zn
+~/.local/share/zinc/graphs/*.circuitry.yaml
+~/.local/share/zinc/prompts/*.md
+~/.config/zinc/config.yaml
+```
+
+The config file is installed with user-only permissions.
+
+## CLI
+
+```bash
+zn "prompt"
+zn run [graph|--graph id|path] [--entry id] [--input name=value] [--text name=value|@file] [--file name=path] [--image name=path] [--session id|--continue] "prompt"
+
+zn check [graph]
+zn compact [--dry-run] [--session id|--continue] [graph]
+zn clean [--local|--global] [sessions | logs | packages | state | all]
+
+zn graph list
+zn session-dir
+zn config get <path>
+
+zn pkg list
+zn pkg add [--local|--global] [--replace] <source>
+zn pkg remove [--local|--global] <name>
+zn pkg update [--local|--global] [name]
+zn pkg show [--local|--global] <name>
+
+zn update [--ref tag-or-commit]
+zn serve [model]
+zn status
+zn stop
+```
+
+## Core graph
+
+The stock loop is just a Circuitry graph:
 
 ```yaml
 circuitry: "0.4"
+title: "Zinc default loop"
 entry: assistant
 inputs:
   user_turn:
@@ -35,23 +97,99 @@ resources:
   user_turn:
     type: input
     from: user_turn
+
+  recovered_context:
+    type: text
+    uri: session:compact-context
+
+  bash_guide:
+    type: text
+    uri: prompt:bash-guide
+
+  circuitry_author:
+    type: text
+    uri: prompt:circuitry-author
+
   assistant:
     type: agent
     identity: Zinc
-    inputs: [user_turn]
+    inputs: [user_turn, recovered_context, bash_guide, circuitry_author]
     tools: [read, write, edit, bash, run_graph]
-outputs:
-  response:
-    from: assistant.response
 ```
 
-## Install
+## Runtime boundary
 
-```bash
-npm install -g @darkhorseprojects/circuitry
-./scripts/install-linux.sh
+Zinc resolves these resource types:
+
+- `input`
+- `text`
+- `data`
+- `run`
+- `agent`
+
+Zinc also provides runtime URI schemes:
+
+```text
+prompt:<id>
+session:current
+session:head
+session:tail
+session:compact-context
+session:current:messages:<index>
+session:current:tools:<tool-call-id>
+sessions:index
+sessions:dir
+input:<id>
 ```
+
+Runtime URIs support `:bytes=<start>-<end>` for bounded reads.
+
+## Graph run approval
+
+`type: run` is declarative graph topology.
+
+`run_graph` is dynamic runtime capability. With the default policy:
+
+```yaml
+runtime:
+  graph_run_policy: ask
+```
+
+Zinc prints the graph, entry, reason, risk, and inputs, then asks:
+
+```text
+Approve? [y/N]
+```
+
+Approving runs the graph through Zinc's normal child-graph resolver. Denying stops that graph run. Agent bash cannot bypass this by invoking `zn run`; direct user CLI usage of `zn run` still works.
+
+## Sessions and compaction
+
+Zinc stores sessions as JSONL under `.zinc/sessions`.
+
+Context is rendered from the session log with configurable head/tail windows and per-message truncation. If rendered context crosses the configured threshold, Zinc compacts between turns using the stock compaction graph.
+
+Large bash output is summarized in the model context. Full output is written to a temp file and referenced by exact path.
+
+## Packages
+
+A Zinc package is a directory with `zinc.pkg.yaml` and exported graphs, prompts, and assets.
+
+```yaml
+zinc: "0.3.2"
+name: browser-repair
+version: "0.1.0"
+exports:
+  graphs:
+    repair: graphs/repair.circuitry.yaml
+  prompts:
+    dom-debug: prompts/dom-debug.md
+  assets:
+    screenshot: assets/example.png
+```
+
+Packages can be local project packages or global user packages.
 
 ## License
 
-Apache-2.0.
+Apache-2.0

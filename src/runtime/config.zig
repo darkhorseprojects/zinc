@@ -19,7 +19,29 @@ pub const RuntimePaths = struct {
     }
 };
 
-pub const RuntimeSettings = struct { max_retries: usize, compaction_threshold_percent: usize, compaction_max_tokens: usize, compaction_reasoning_tokens: isize };
+pub const RuntimeSettings = struct {
+    provider_max_retries: usize,
+    tool_max_turns: usize,
+    compaction_threshold_percent: usize,
+    compaction_max_tokens: usize,
+    session_head_messages: usize,
+    session_tail_messages: usize,
+    replay_truncate_chars: usize,
+    bash_output_max_bytes: usize,
+    bash_output_max_lines: usize,
+    bash_capture_max_bytes: usize,
+    file_read_max_bytes: usize,
+    file_range_read_max_bytes: usize,
+    file_edit_max_bytes: usize,
+    resource_read_max_bytes: usize,
+    input_text_file_max_bytes: usize,
+    input_file_max_bytes: usize,
+    graph_run_policy: []u8,
+
+    pub fn deinit(self: RuntimeSettings, allocator: Allocator) void {
+        allocator.free(self.graph_run_policy);
+    }
+};
 pub const ProviderConfig = struct {
     base_url: []u8,
     authorization: []u8,
@@ -121,6 +143,7 @@ pub const RuntimeProfile = struct {
     model: ModelConfig,
     pub fn deinit(self: RuntimeProfile, allocator: Allocator) void {
         self.paths.deinit(allocator);
+        self.runtime.deinit(allocator);
         allocator.free(self.default_model);
         self.provider.deinit(allocator);
         self.model.deinit(allocator);
@@ -232,7 +255,25 @@ pub fn loadRuntimeProfile(allocator: Allocator, io: std.Io, home: []const u8, mo
     errdefer allocator.free(default_model);
     const paths = try runtimePaths(allocator, home, cfg);
     errdefer paths.deinit(allocator);
-    const runtime = RuntimeSettings{ .max_retries = try cfg.usizeValue(&.{ "runtime", "max_retries" }, 5), .compaction_threshold_percent = try cfg.usizeValue(&.{ "runtime", "compaction_threshold_percent" }, 70), .compaction_max_tokens = try cfg.usizeValue(&.{ "runtime", "compaction_max_tokens" }, 4096), .compaction_reasoning_tokens = try cfg.isizeValue(&.{ "runtime", "compaction_reasoning_tokens" }, 1024) };
+    const runtime = RuntimeSettings{
+        .provider_max_retries = try cfg.usizeValue(&.{ "runtime", "provider_max_retries" }, 5),
+        .tool_max_turns = try cfg.usizeValue(&.{ "runtime", "tool_max_turns" }, 12),
+        .compaction_threshold_percent = try cfg.usizeValue(&.{ "runtime", "compaction_threshold_percent" }, 70),
+        .compaction_max_tokens = try cfg.usizeValue(&.{ "runtime", "compaction_max_tokens" }, 4096),
+        .session_head_messages = try cfg.usizeValue(&.{ "runtime", "session_head_messages" }, 6),
+        .session_tail_messages = try cfg.usizeValue(&.{ "runtime", "session_tail_messages" }, 12),
+        .replay_truncate_chars = try cfg.usizeValue(&.{ "runtime", "replay_truncate_chars" }, 2048),
+        .bash_output_max_bytes = try cfg.usizeValue(&.{ "runtime", "bash_output_max_bytes" }, 50 * 1024),
+        .bash_output_max_lines = try cfg.usizeValue(&.{ "runtime", "bash_output_max_lines" }, 2000),
+        .bash_capture_max_bytes = try cfg.usizeValue(&.{ "runtime", "bash_capture_max_bytes" }, 64 * 1024 * 1024),
+        .file_read_max_bytes = try cfg.usizeValue(&.{ "runtime", "file_read_max_bytes" }, 1024 * 1024),
+        .file_range_read_max_bytes = try cfg.usizeValue(&.{ "runtime", "file_range_read_max_bytes" }, 8 * 1024 * 1024),
+        .file_edit_max_bytes = try cfg.usizeValue(&.{ "runtime", "file_edit_max_bytes" }, 8 * 1024 * 1024),
+        .resource_read_max_bytes = try cfg.usizeValue(&.{ "runtime", "resource_read_max_bytes" }, 32 * 1024 * 1024),
+        .input_text_file_max_bytes = try cfg.usizeValue(&.{ "runtime", "input_text_file_max_bytes" }, 8 * 1024 * 1024),
+        .input_file_max_bytes = try cfg.usizeValue(&.{ "runtime", "input_file_max_bytes" }, 32 * 1024 * 1024),
+        .graph_run_policy = try cfg.string(allocator, &.{ "runtime", "graph_run_policy" }, "ask"),
+    };
     const provider = try loadProvider(allocator, cfg);
     errdefer provider.deinit(allocator);
     const model = try loadModel(allocator, cfg, default_model);
@@ -258,14 +299,20 @@ pub fn resolveGraphModelId(allocator: Allocator, io: std.Io, loaded_graph: graph
 }
 
 pub fn readPromptPack(allocator: Allocator, home: []const u8, name: []const u8) ![]u8 {
-    const local = try std.fmt.allocPrint(allocator, ".zinc/prompts/{s}", .{name});
+    const local = try promptPath(allocator, ".zinc/prompts", name);
     defer allocator.free(local);
     if (files.readLimited(allocator, local, 128 * 1024)) |text| return text else |_| {}
-    const tail = try std.fmt.allocPrint(allocator, "prompts/{s}", .{name});
-    defer allocator.free(tail);
-    const installed = try layout.sharePath(allocator, home, tail);
+
+    const share_prompt = try promptPath(allocator, "prompts", name);
+    defer allocator.free(share_prompt);
+    const installed = try layout.sharePath(allocator, home, share_prompt);
     defer allocator.free(installed);
     return files.readLimited(allocator, installed, 128 * 1024);
+}
+
+fn promptPath(allocator: Allocator, dir: []const u8, name: []const u8) ![]u8 {
+    if (std.mem.endsWith(u8, name, ".md")) return std.fmt.allocPrint(allocator, "{s}/{s}", .{ dir, name });
+    return std.fmt.allocPrint(allocator, "{s}/{s}.md", .{ dir, name });
 }
 
 pub fn configGet(allocator: Allocator, io: std.Io, home: []const u8, path: []const []const u8) ![]u8 {
@@ -292,7 +339,7 @@ fn loadModel(allocator: Allocator, cfg: Config, id: []const u8) !ModelConfig {
             .mmproj_file = try cfg.string(allocator, &.{ "models", id, "loader", "mmproj_file" }, ""),
             .cache_type_k = try cfg.string(allocator, &.{ "models", id, "loader", "cache_type_k" }, "q4_0"),
             .cache_type_v = try cfg.string(allocator, &.{ "models", id, "loader", "cache_type_v" }, "q4_0"),
-            .fit_ctx = try cfg.usizeValue(&.{ "models", id, "loader", "fit_ctx" }, 8192),
+            .fit_ctx = try cfg.usizeValue(&.{ "models", id, "loader", "fit_ctx" }, 16384),
             .gpu_layers = try cfg.string(allocator, &.{ "models", id, "loader", "gpu_layers" }, "all"),
             .draft_tokens = try cfg.usizeValue(&.{ "models", id, "loader", "draft_tokens" }, 2),
             .reasoning_format = try cfg.string(allocator, &.{ "models", id, "loader", "reasoning_format" }, "deepseek"),
@@ -316,19 +363,8 @@ fn loadModel(allocator: Allocator, cfg: Config, id: []const u8) !ModelConfig {
 }
 
 fn runtimePaths(allocator: Allocator, home: []const u8, cfg: Config) !RuntimePaths {
-    var paths = RuntimePaths{ .graph = try allocator.dupe(u8, "stock/graphs/zinc-loop.circuitry.yaml"), .compaction_graph = try allocator.dupe(u8, "stock/graphs/zinc-compaction.circuitry.yaml") };
+    var paths = RuntimePaths{ .graph = try layout.sharePath(allocator, home, "graphs/zinc-loop.circuitry.yaml"), .compaction_graph = try layout.sharePath(allocator, home, "graphs/zinc-compaction.circuitry.yaml") };
     errdefer paths.deinit(allocator);
-
-    // Check for user-local overrides in .zinc/
-    if (files.existsPath(".zinc/graphs/zinc-loop.circuitry.yaml")) {
-        allocator.free(paths.graph);
-        paths.graph = try allocator.dupe(u8, ".zinc/graphs/zinc-loop.circuitry.yaml");
-    }
-    if (files.existsPath(".zinc/graphs/zinc-compaction.circuitry.yaml")) {
-        allocator.free(paths.compaction_graph);
-        paths.compaction_graph = try allocator.dupe(u8, ".zinc/graphs/zinc-compaction.circuitry.yaml");
-    }
-
     if (try cfg.optionalString(allocator, &.{ "paths", "graph" })) |v| {
         allocator.free(paths.graph);
         paths.graph = try expandHome(allocator, home, v);

@@ -25,20 +25,19 @@ fi
 circuitry_bin="$(command -v circuitry)"
 circuitry_version="$(node -e 'const fs=require("fs"),path=require("path"); const bin=fs.realpathSync(process.argv[1]); console.log(require(path.join(path.dirname(bin), "..", "package.json")).version)' "$circuitry_bin" 2>/dev/null || true)"
 case "$circuitry_version" in
-  0.4.*|0.[5-9].*|[1-9].*) ;;
-  *) echo "Zinc requires circuitry >= 0.4.0; found ${circuitry_version:-unknown}" >&2; exit 1 ;;
+  0.4.[3-9]|0.[5-9].*|[1-9].*) ;;
+  *) echo "Zinc requires circuitry >= 0.4.3; found ${circuitry_version:-unknown}" >&2; exit 1 ;;
 esac
 
 cd "$root"
 zig build -Doptimize=ReleaseFast
 
-mkdir -p "$bin_dir" "$share_dir/graphs" "$share_dir/compiled" "$share_dir/prompts" "$config_dir"
+mkdir -p "$bin_dir" "$share_dir/graphs" "$share_dir/prompts" "$config_dir"
 install -m 0755 "$root/zig-out/bin/zn" "$bin_dir/zn"
-install -m 0644 "$root/.zinc/graphs/zinc-loop.circuitry.yaml" "$share_dir/graphs/zinc-loop.circuitry.yaml"
-install -m 0644 "$root/.zinc/graphs/zinc-context-recovery.circuitry.yaml" "$share_dir/graphs/zinc-context-recovery.circuitry.yaml"
-install -m 0644 "$root/.zinc/graphs/zinc-compaction.circuitry.yaml" "$share_dir/graphs/zinc-compaction.circuitry.yaml"
-install -m 0644 "$root/.zinc/prompts/circuitry-author.md" "$share_dir/prompts/circuitry-author.md"
-install -m 0644 "$root/.zinc/prompts/bash-guide.md" "$share_dir/prompts/bash-guide.md"
+install -m 0644 "$root/stock/graphs/zinc-loop.circuitry.yaml" "$share_dir/graphs/zinc-loop.circuitry.yaml"
+install -m 0644 "$root/stock/graphs/zinc-compaction.circuitry.yaml" "$share_dir/graphs/zinc-compaction.circuitry.yaml"
+install -m 0644 "$root/stock/prompts/circuitry-author.md" "$share_dir/prompts/circuitry-author.md"
+install -m 0644 "$root/stock/prompts/bash-guide.md" "$share_dir/prompts/bash-guide.md"
 
 if [[ ! -f "$config_file" ]]; then
 cat > "$config_file" <<EOF_CONFIG
@@ -46,12 +45,25 @@ default_model: qwen-heretic-mtp
 
 paths:
   graph: $share_dir/graphs/zinc-loop.circuitry.yaml
-  compiled_plan: $share_dir/compiled/plan.json
   compaction_graph: $share_dir/graphs/zinc-compaction.circuitry.yaml
 
 runtime:
-  max_retries: 5
+  provider_max_retries: 5
+  tool_max_turns: 12
   compaction_threshold_percent: 70
+  compaction_max_tokens: 4096
+  session_head_messages: 6
+  session_tail_messages: 12
+  replay_truncate_chars: 2048
+  bash_output_max_bytes: 51200
+  bash_output_max_lines: 2000
+  bash_capture_max_bytes: 67108864
+  file_read_max_bytes: 1048576
+  file_range_read_max_bytes: 8388608
+  file_edit_max_bytes: 8388608
+  resource_read_max_bytes: 33554432
+  input_text_file_max_bytes: 8388608
+  input_file_max_bytes: 33554432
   graph_run_policy: ask
 
 provider:
@@ -70,7 +82,7 @@ models:
       mmproj_file: Qwen3.6-27B-uncensored-heretic-v2-Native-MTP-Preserved.mmproj-Q8_0.gguf
       cache_type_k: q4_0
       cache_type_v: q4_0
-      fit_ctx: 8192
+      fit_ctx: 16384
       gpu_layers: fit
       draft_tokens: 2
       reasoning_format: deepseek
@@ -97,9 +109,9 @@ models:
 
 EOF_CONFIG
 fi
+chmod 600 "$config_file"
 
 rm -f "$bin_dir/zn-setup-turboquant" "$bin_dir/zn-setup-beellama" "$bin_dir/zn-serve" "$share_dir/scripts/serve-model.sh" "$share_dir/scripts/setup-beellama-linux.sh" "$share_dir/scripts/setup-turboquant-linux.sh"
-"$bin_dir/zn" compile "$share_dir/graphs/zinc-loop.circuitry.yaml" "$share_dir/compiled/plan.json" >/dev/null
 
 echo "installed Zinc: $bin_dir/zn"
 echo "model server lifecycle: zn serve / zn stop / zn status"

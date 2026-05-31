@@ -1,167 +1,154 @@
 const std = @import("std");
 const files = @import("../sys/fs.zig");
-
 const Allocator = std.mem.Allocator;
 
 pub const ToolResult = struct {
     content: []u8,
     is_error: bool,
+    metadata_json: ?[]u8 = null,
 
     pub fn deinit(self: ToolResult, allocator: Allocator) void {
         allocator.free(self.content);
+        if (self.metadata_json) |v| allocator.free(v);
     }
+};
+
+const ParamKind = enum { string, object };
+const Param = struct { name: []const u8, description: []const u8 = "", required: bool = true, kind: ParamKind = .string };
+const Tool = struct {
+    name: []const u8,
+    description: []const u8,
+    prompt: []const u8,
+    params: []const Param,
+};
+
+const builtin = [_]Tool{
+    .{ .name = "read", .description = "Read a UTF-8 file from the current working directory, or a Zinc runtime URI such as prompt:<id>, session:current, session:last, or sessions:index. Supports :bytes=<start>-<end> for chunking. Use session:current:tools:<id> or session:current:messages:<index> for specific results.", .prompt = "read files and Zinc runtime URIs", .params = &.{.{ .name = "path" }} },
+    .{ .name = "write", .description = "Create or overwrite a UTF-8 file.", .prompt = "create or overwrite files", .params = &.{ .{ .name = "path" }, .{ .name = "content" } } },
+    .{ .name = "edit", .description = "Replace exact text in a UTF-8 file. The old text must occur exactly once.", .prompt = "replace exact text in files", .params = &.{ .{ .name = "path" }, .{ .name = "oldText" }, .{ .name = "newText" } } },
+    .{ .name = "bash", .description = "Run a shell command in the current working directory.", .prompt = "run shell commands in the current working directory", .params = &.{.{ .name = "command" }} },
+    .{ .name = "run_graph", .description = "Request execution of a Circuitry graph. The caller must confirm or deny the request before it runs.", .prompt = "request a Circuitry graph run", .params = &.{ .{ .name = "graph" }, .{ .name = "reason" }, .{ .name = "entry", .required = false }, .{ .name = "inputs", .required = false, .kind = .object }, .{ .name = "risk", .required = false } } },
 };
 
 pub fn contains(name: []const u8) bool {
     return find(name) != null;
 }
 
+pub fn promptSnippet(name: []const u8) ![]const u8 {
+    return (find(name) orelse return error.UnknownTool).prompt;
+}
+
 pub fn schemaJson(allocator: Allocator, names: []const []const u8) ![]u8 {
     var out: std.ArrayList(u8) = .empty;
     errdefer out.deinit(allocator);
-
     try out.append(allocator, '[');
     for (names, 0..) |name, i| {
+        const tool = find(name) orelse return error.UnknownTool;
         if (i != 0) try out.append(allocator, ',');
-        try writeSchema(allocator, &out, name);
+        try writeSchema(allocator, &out, tool);
     }
     try out.append(allocator, ']');
     return out.toOwnedSlice(allocator);
 }
 
-pub fn validateAndExecute(allocator: Allocator, io: std.Io, name: []const u8, args: []const u8, resolve_uri: ?fn (Allocator, []const u8) anyerror!?[]u8) !ToolResult {
-    if (!contains(name)) return error.UnknownTool;
-
-    const parsed = try parseArgs(allocator, args);
+pub fn validateArguments(allocator: Allocator, name: []const u8, arg_text: []const u8) !void {
+    var parsed = try parseArgs(allocator, arg_text);
     defer parsed.deinit();
-
-    if (std.mem.eql(u8, name, "read")) return executeRead(allocator, io, parsed.value.object, resolve_uri);
-    if (std.mem.eql(u8, name, "write")) return executeWrite(allocator, io, parsed.value.object);
-    if (std.mem.eql(u8, name, "edit")) return executeEdit(allocator, io, parsed.value.object);
-    if (std.mem.eql(u8, name, "bash")) return executeBash(allocator, io, parsed.value.object);
-    if (std.mem.eql(u8, name, "run_graph")) return executeRunGraph(allocator, io, parsed.value.object);
-
-    return error.UnknownTool;
+    const tool = find(name) orelse return error.UnknownTool;
+    for (tool.params) |param| try validateParam(parsed.value.object, param);
 }
 
-fn allTools() []const []const u8 {
-    return &.{ "read", "write", "edit", "bash", "run_graph" };
+pub fn requireStringArg(args: std.json.ObjectMap, name: []const u8) ![]const u8 {
+    const value = args.get(name) orelse return error.InvalidToolArguments;
+    if (value != .string) return error.InvalidToolArguments;
+    return value.string;
 }
 
-fn find(name: []const u8) ?[]const u8 {
-    for (allTools()) |tool| {
-        if (std.mem.eql(u8, tool, name)) return tool;
+fn validateParam(args: std.json.ObjectMap, param: Param) !void {
+    const value = args.get(param.name) orelse {
+        if (param.required) return error.InvalidToolArguments;
+        return;
+    };
+    switch (param.kind) {
+        .string => if (value != .string) return error.InvalidToolArguments,
+        .object => if (value != .object) return error.InvalidToolArguments,
     }
+}
+
+pub fn optionalStringArg(args: std.json.ObjectMap, name: []const u8) !?[]const u8 {
+    const value = args.get(name) orelse return null;
+    if (value != .string) return error.InvalidToolArguments;
+    return value.string;
+}
+
+fn find(name: []const u8) ?Tool {
+    for (builtin) |tool| if (std.mem.eql(u8, tool.name, name)) return tool;
     return null;
 }
 
-fn writeSchema(allocator: Allocator, out: *std.ArrayList(u8), name: []const u8) !void {
-    // Simplified JSON schema for tools
-    if (std.mem.eql(u8, name, "read")) {
-        try out.appendSlice(allocator,
-            \\{"type":"function","function":{"name":"read","description":"Read a file or runtime URI","parameters":{"type":"object","properties":{"path":{"type":"string"}},"required":["path"]}}
-        );
-    } else if (std.mem.eql(u8, name, "write")) {
-        try out.appendSlice(allocator,
-            \\{"type":"function","function":{"name":"write","description":"Write file contents","parameters":{"type":"object","properties":{"path":{"type":"string"},"content":{"type":"string"}},"required":["path","content"]}}
-        );
-    } else if (std.mem.eql(u8, name, "edit")) {
-        try out.appendSlice(allocator,
-            \\{"type":"function","function":{"name":"edit","description":"Replace exact text","parameters":{"type":"object","properties":{"path":{"type":"string"},"oldText":{"type":"string"},"newText":{"type":"string"}},"required":["path","oldText","newText"]}}
-        );
-    } else if (std.mem.eql(u8, name, "bash")) {
-        try out.appendSlice(allocator,
-            \\{"type":"function","function":{"name":"bash","description":"Execute shell command","parameters":{"type":"object","properties":{"command":{"type":"string"}},"required":["command"]}}
-        );
-    } else if (std.mem.eql(u8, name, "run_graph")) {
-        try out.appendSlice(allocator,
-            \\{"type":"function","function":{"name":"run_graph","description":"Request graph execution","parameters":{"type":"object","properties":{"graph":{"type":"string"},"entry":{"type":"string"},"inputs":{"type":"object"},"reason":{"type":"string"},"risk":{"type":"string"}},"required":["graph","reason"]}}
-        );
-    }
-}
-
-fn parseArgs(allocator: Allocator, text: []const u8) !std.json.Parsed(std.json.Value) {
-    var parsed = std.json.parseFromSlice(std.json.Value, allocator, text, .{}) catch |err| switch (err) {
+fn parseArgs(allocator: Allocator, arg_text: []const u8) !std.json.Parsed(std.json.Value) {
+    var parsed = std.json.parseFromSlice(std.json.Value, allocator, arg_text, .{}) catch |err| return switch (err) {
         error.OutOfMemory => err,
-        else => return error.InvalidToolArguments,
+        else => error.InvalidToolArguments,
     };
     errdefer parsed.deinit();
     if (parsed.value != .object) return error.InvalidToolArguments;
     return parsed;
 }
 
-fn objectGetString(object: std.json.ObjectMap, key: []const u8) ![]const u8 {
-    const value = object.get(key) orelse return error.MissingArgument;
-    if (value != .string) return error.InvalidArgumentType;
-    return value.string;
-}
-
-fn executeRead(allocator: Allocator, _io: std.Io, args: std.json.ObjectMap, resolve_uri: ?fn (Allocator, []const u8) anyerror!?[]u8) !ToolResult {
-    _ = _io;
-    const path = try objectGetString(args, "path");
-
-    // Try runtime URI resolution first
-    if (resolve_uri) |resolver| {
-        if (try resolver(allocator, path)) |content| {
-            return ToolResult{ .content = content, .is_error = false };
+fn writeSchema(allocator: Allocator, out: *std.ArrayList(u8), tool: Tool) !void {
+    try out.appendSlice(allocator, "{\"type\":\"function\",\"function\":{\"name\":");
+    try files.appendJsonString(allocator, out, tool.name);
+    try out.appendSlice(allocator, ",\"description\":");
+    try files.appendJsonString(allocator, out, tool.description);
+    try out.appendSlice(allocator, ",\"parameters\":{\"type\":\"object\",\"properties\":{");
+    for (tool.params, 0..) |param, i| {
+        if (i != 0) try out.append(allocator, ',');
+        try files.appendJsonString(allocator, out, param.name);
+        try out.appendSlice(allocator, ":{\"type\":");
+        try files.appendJsonString(allocator, out, if (param.kind == .object) "object" else "string");
+        if (param.description.len != 0) {
+            try out.appendSlice(allocator, ",\"description\":");
+            try files.appendJsonString(allocator, out, param.description);
         }
+        try out.append(allocator, '}');
     }
-
-    return executeReadFile(allocator, path);
-}
-
-fn executeReadFile(allocator: Allocator, path: []const u8) !ToolResult {
-    return ToolResult{ .content = try files.readLimited(allocator, path, 1024 * 1024), .is_error = false };
-}
-
-fn executeWrite(allocator: Allocator, io: std.Io, args: std.json.ObjectMap) !ToolResult {
-    _ = io;
-    const path = try objectGetString(args, "path");
-    const content = try objectGetString(args, "content");
-    try files.write(path, content);
-    return ToolResult{ .content = try std.fmt.allocPrint(allocator, "wrote {s}", .{path}), .is_error = false };
-}
-
-fn executeEdit(allocator: Allocator, io: std.Io, args: std.json.ObjectMap) !ToolResult {
-    _ = io;
-    const path = try objectGetString(args, "path");
-    const old_text = try objectGetString(args, "oldText");
-    const new_text = try objectGetString(args, "newText");
-    try files.edit(allocator, path, old_text, new_text);
-    return ToolResult{ .content = try std.fmt.allocPrint(allocator, "edited {s}", .{path}), .is_error = false };
-}
-
-fn executeBash(allocator: Allocator, io: std.Io, args: std.json.ObjectMap) !ToolResult {
-    const command = try objectGetString(args, "command");
-    const result = try std.process.run(allocator, io, .{ .argv = &.{ "sh", "-lc", command } });
-    defer {
-        allocator.free(result.stdout);
-        allocator.free(result.stderr);
+    try out.appendSlice(allocator, "},\"required\":[");
+    var required_i: usize = 0;
+    for (tool.params) |param| {
+        if (!param.required) continue;
+        if (required_i != 0) try out.append(allocator, ',');
+        try files.appendJsonString(allocator, out, param.name);
+        required_i += 1;
     }
-
-    const code: u8 = switch (result.term) {
-        .exited => |c| c,
-        else => 255,
-    };
-
-    return ToolResult{
-        .content = try std.fmt.allocPrint(allocator, "exit={d}\nstdout:\n{s}\nstderr:\n{s}", .{ code, result.stdout, result.stderr }),
-        .is_error = code != 0,
-    };
+    try out.appendSlice(allocator, "]}}}");
 }
 
-fn executeRunGraph(allocator: Allocator, io: std.Io, args: std.json.ObjectMap) !ToolResult {
-    _ = io;
-    const graph = try objectGetString(args, "graph");
-    const reason = try objectGetString(args, "reason");
-
+pub fn graphRunRequest(allocator: Allocator, args: std.json.ObjectMap) !ToolResult {
+    const graph = try requireStringArg(args, "graph");
+    const reason = try requireStringArg(args, "reason");
+    const entry = try optionalStringArg(args, "entry") orelse "";
+    const risk = try optionalStringArg(args, "risk") orelse "";
     var out: std.ArrayList(u8) = .empty;
     errdefer out.deinit(allocator);
-    try out.appendSlice(allocator, "{\"status\":\"pending_approval\",\"graph\":");
+    try out.appendSlice(allocator, "{\"status\":\"pending_confirmation\",\"message\":");
+    const message = try std.fmt.allocPrint(allocator, "Confirm or deny this graph run request: graph={s} entry={s}", .{ graph, if (entry.len == 0) "<default>" else entry });
+    defer allocator.free(message);
+    try files.appendJsonString(allocator, &out, message);
+    try out.appendSlice(allocator, ",\"graph\":");
     try files.appendJsonString(allocator, &out, graph);
+    try out.appendSlice(allocator, ",\"entry\":");
+    try files.appendJsonString(allocator, &out, entry);
+    try out.appendSlice(allocator, ",\"inputs\":");
+    if (args.get("inputs")) |inputs| {
+        var aw = std.Io.Writer.Allocating.fromArrayList(allocator, &out);
+        defer out = aw.toArrayList();
+        try std.json.Stringify.value(inputs, .{}, &aw.writer);
+    } else try out.appendSlice(allocator, "{}");
     try out.appendSlice(allocator, ",\"reason\":");
     try files.appendJsonString(allocator, &out, reason);
+    try out.appendSlice(allocator, ",\"risk\":");
+    try files.appendJsonString(allocator, &out, risk);
     try out.append(allocator, '}');
-
-    return ToolResult{ .content = try out.toOwnedSlice(allocator), .is_error = false };
+    return .{ .content = try out.toOwnedSlice(allocator), .is_error = false };
 }

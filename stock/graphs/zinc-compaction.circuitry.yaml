@@ -1,32 +1,28 @@
 circuitry: "0.4"
-title: Zinc compaction
-
-inputs:
-  session_log:
-    type: text
-    required: true
-
+title: "Zinc context compaction"
+description: |
+  Compacts bounded Zinc session excerpts into durable memory.
 entry: compaction
-
 resources:
-  session_log:
-    type: input
-    from: session_log
+  compact_context:
+    type: text
+    label: "Bounded session context for compaction"
+    uri: session:compact-context
 
   compaction:
     type: agent
-    identity: Session compaction
-    inputs:
-      - session_log
+    identity: "Context compaction"
+    inputs: [compact_context]
     tools: []
     expect:
       summary: str
     instructions: |
-      Compact this Zinc session into durable memory.
-      Preserve goals, constraints, decisions, corrections, files, commands, tool results, unresolved state, and next actions.
-      Drop filler, duplicate boilerplate, and superseded context.
-      Do not answer the user.
+      Compact the supplied bounded Zinc session context into durable memory.
 
-outputs:
-  summary:
-    from: compaction.summary
+      Preserve goals, constraints, corrections, decisions, important files,
+      commands, errors, test results, unresolved questions, and current task
+      state. Drop chit-chat, duplicate boilerplate, exact wording unless it
+      matters, and huge tool bodies.
+
+      Do not answer the user. Do not add advice.
+      Output ONLY valid JSON matching: {"summary": str}.

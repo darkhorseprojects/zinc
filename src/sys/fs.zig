@@ -37,7 +37,11 @@ pub fn write(path: []const u8, content: []const u8) !void {
 }
 
 pub fn edit(allocator: Allocator, path: []const u8, old: []const u8, new: []const u8) !void {
-    const original = try readLimited(allocator, path, 8 * 1024 * 1024);
+    return editLimited(allocator, path, old, new, 8 * 1024 * 1024);
+}
+
+pub fn editLimited(allocator: Allocator, path: []const u8, old: []const u8, new: []const u8, limit: usize) !void {
+    const original = try readLimited(allocator, path, limit);
     defer allocator.free(original);
     const first = std.mem.indexOf(u8, original, old) orelse return error.OldTextNotFound;
     if (std.mem.indexOf(u8, original[first + old.len ..], old) != null) return error.OldTextNotUnique;

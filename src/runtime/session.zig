@@ -4,9 +4,6 @@ const provider = @import("provider.zig");
 const tools = @import("tools.zig");
 
 const Allocator = std.mem.Allocator;
-const first_message_count: usize = 6;
-
-pub const ToolResult = tools.ToolResult;
 
 pub const Session = struct {
     id: []u8,
@@ -56,33 +53,35 @@ pub const Log = struct {
         return self.messages.len;
     }
 
-    pub fn transcript(self: Log, allocator: Allocator) ![]u8 {
+    pub fn transcript(self: Log, allocator: Allocator, head_messages: usize, tail_messages: usize, truncate_chars: usize) ![]u8 {
         var out: std.ArrayList(u8) = .empty;
         errdefer out.deinit(allocator);
-        const first_end: usize = @min(first_message_count, self.messages.len);
-        for (self.messages[0..first_end], 0..) |message, i| try renderMessageSmart(allocator, &out, message, i);
-        var tail_start = first_end;
-        if (self.compaction) |c| {
-            tail_start = @max(first_end, @as(usize, @min(c.message_count, self.messages.len)));
-            try out.print(allocator, "compaction_summary: {s}\n", .{c.summary});
-        }
-        for (self.messages[tail_start..], 0..) |message, i| {
-            try renderMessageSmart(allocator, &out, message, tail_start + i);
+        var latest_reads = try latestReadCalls(allocator, self.messages);
+        defer freeLatestReads(allocator, &latest_reads);
+        const ranges = replayRanges(self, head_messages, tail_messages);
+        for (self.messages[0..ranges.head_end], 0..) |message, i| if (shouldReplayMessage(message, i, latest_reads)) try renderMessageSmart(allocator, &out, message, i, truncate_chars);
+        if (self.compaction) |c| try out.print(allocator, "compaction_summary: {s}\n", .{c.summary});
+        for (self.messages[ranges.tail_start..], 0..) |message, i| {
+            const index = ranges.tail_start + i;
+            if (shouldReplayMessage(message, index, latest_reads)) try renderMessageSmart(allocator, &out, message, index, truncate_chars);
         }
         return out.toOwnedSlice(allocator);
     }
 
-    pub fn appendReplayMessages(self: Log, allocator: Allocator, out: *std.ArrayList(provider.Message), focused_context: []const u8) !void {
-        const first_end: usize = @min(first_message_count, self.messages.len);
-        for (self.messages[0..first_end]) |message| try appendReplayMessage(allocator, out, message);
-        var tail_start = first_end;
+    pub fn appendReplayMessages(self: Log, allocator: Allocator, out: *std.ArrayList(provider.Message), focused_context: []const u8, head_messages: usize, tail_messages: usize, truncate_chars: usize) !void {
+        var latest_reads = try latestReadCalls(allocator, self.messages);
+        defer freeLatestReads(allocator, &latest_reads);
+        const ranges = replayRanges(self, head_messages, tail_messages);
+        for (self.messages[0..ranges.head_end], 0..) |message, i| if (shouldReplayMessage(message, i, latest_reads)) try appendReplayMessage(allocator, out, message, truncate_chars);
         if (self.compaction) |c| {
-            tail_start = @max(first_end, @as(usize, @min(c.message_count, self.messages.len)));
-            const summary = try std.fmt.allocPrint(allocator, "Compacted middle conversation summary. This summary covers prior messages before the following transcript tail.\n{s}", .{c.summary});
+            const summary = try std.fmt.allocPrint(allocator, "Compacted middle conversation summary. This summary covers prior messages before the retained transcript tail. Use session:current:messages:<index> or session:current:tools:<id> when exact details are needed.\n{s}", .{c.summary});
             defer allocator.free(summary);
             try provider.appendMessage(allocator, out, .{ .role = "user", .content = summary });
         }
-        for (self.messages[tail_start..]) |message| try appendReplayMessage(allocator, out, message);
+        for (self.messages[ranges.tail_start..], 0..) |message, i| {
+            const index = ranges.tail_start + i;
+            if (shouldReplayMessage(message, index, latest_reads)) try appendReplayMessage(allocator, out, message, truncate_chars);
+        }
         if (std.mem.trim(u8, focused_context, " \t\r\n").len != 0) try provider.appendMessage(allocator, out, .{ .role = "user", .content = focused_context });
     }
 };
@@ -130,23 +129,7 @@ pub fn appendAssistantToolCalls(allocator: Allocator, path: []const u8, content:
 pub fn appendProviderError(allocator: Allocator, path: []const u8, message: []const u8) !void {
     try appendError(allocator, path, "provider_error", message);
 }
-pub fn appendContractError(allocator: Allocator, path: []const u8, message: []const u8) !void {
-    try appendError(allocator, path, "contract_error", message);
-}
-
-pub fn appendInvalidToolCallAttempt(allocator: Allocator, path: []const u8, call: provider.ToolCall, result: []const u8) !void {
-    var line: std.ArrayList(u8) = .empty;
-    defer line.deinit(allocator);
-    try beginRow(allocator, &line, "invalid_tool_call");
-    try line.appendSlice(allocator, ",\"call\":");
-    try writeToolCall(allocator, &line, call);
-    try line.appendSlice(allocator, ",\"error\":");
-    try files.appendJsonString(allocator, &line, result);
-    try line.appendSlice(allocator, "}\n");
-    try appendLine(path, line.items);
-}
-
-pub fn appendToolResult(allocator: Allocator, path: []const u8, call: provider.ToolCall, result: ToolResult) !void {
+pub fn appendToolResult(allocator: Allocator, path: []const u8, call: provider.ToolCall, result: tools.ToolResult) !void {
     var line: std.ArrayList(u8) = .empty;
     defer line.deinit(allocator);
     try beginRow(allocator, &line, "tool");
@@ -300,16 +283,84 @@ fn writeToolCall(allocator: Allocator, out: *std.ArrayList(u8), call: provider.T
     try files.appendJsonString(allocator, out, call.arguments);
     try out.append(allocator, '}');
 }
-fn renderMessage(allocator: Allocator, out: *std.ArrayList(u8), message: Message) !void {
-    if (std.mem.eql(u8, message.role, "assistant") and message.tool_calls.len != 0) {
-        for (message.tool_calls) |call| try out.print(allocator, "assistant tool call {s} {s}\n", .{ call.name, call.arguments });
+const LatestRead = struct {
+    path: []u8,
+    tool_call_id: []u8,
+    fn deinit(self: LatestRead, allocator: Allocator) void {
+        allocator.free(self.path);
+        allocator.free(self.tool_call_id);
+    }
+};
+
+fn latestReadCalls(allocator: Allocator, messages: []const Message) !std.ArrayList(LatestRead) {
+    var reads: std.ArrayList(LatestRead) = .empty;
+    errdefer {
+        for (reads.items) |read| read.deinit(allocator);
+        reads.deinit(allocator);
+    }
+    for (messages) |message| {
+        if (!std.mem.eql(u8, message.role, "assistant")) continue;
+        for (message.tool_calls) |call| {
+            if (!std.mem.eql(u8, call.name, "read")) continue;
+            const path = try readToolPath(allocator, call.arguments) orelse continue;
+            defer allocator.free(path);
+            try rememberLatestRead(allocator, &reads, path, call.id);
+        }
+    }
+    return reads;
+}
+
+fn freeLatestReads(allocator: Allocator, reads: *std.ArrayList(LatestRead)) void {
+    for (reads.items) |read| read.deinit(allocator);
+    reads.deinit(allocator);
+}
+
+fn rememberLatestRead(allocator: Allocator, reads: *std.ArrayList(LatestRead), path: []const u8, tool_call_id: []const u8) !void {
+    for (reads.items) |*read| {
+        if (!std.mem.eql(u8, read.path, path)) continue;
+        allocator.free(read.tool_call_id);
+        read.tool_call_id = try allocator.dupe(u8, tool_call_id);
         return;
     }
-    if (std.mem.eql(u8, message.role, "tool")) return out.print(allocator, "tool {s} call_id={s}: {s}\n", .{ message.name orelse "", message.tool_call_id orelse "", message.content });
-    try out.print(allocator, "{s}: {s}\n", .{ message.role, message.content });
+    try reads.append(allocator, .{ .path = try allocator.dupe(u8, path), .tool_call_id = try allocator.dupe(u8, tool_call_id) });
 }
-fn appendReplayMessage(allocator: Allocator, out: *std.ArrayList(provider.Message), message: Message) !void {
-    if (std.mem.eql(u8, message.role, "user") or std.mem.eql(u8, message.role, "assistant") or std.mem.eql(u8, message.role, "tool")) try provider.appendMessage(allocator, out, .{ .role = message.role, .content = message.content, .name = message.name, .tool_call_id = message.tool_call_id, .tool_calls = message.tool_calls });
+
+fn readToolPath(allocator: Allocator, arguments: []const u8) !?[]u8 {
+    var parsed = std.json.parseFromSlice(std.json.Value, allocator, arguments, .{}) catch return null;
+    defer parsed.deinit();
+    if (parsed.value != .object) return null;
+    const path = parsed.value.object.get("path") orelse return null;
+    if (path != .string) return null;
+    return try allocator.dupe(u8, path.string);
+}
+
+fn shouldReplayMessage(message: Message, index: usize, latest_reads: std.ArrayList(LatestRead)) bool {
+    _ = index;
+    if (std.mem.eql(u8, message.role, "assistant") and message.tool_calls.len != 0) {
+        var has_read = false;
+        for (message.tool_calls) |call| {
+            if (!std.mem.eql(u8, call.name, "read")) return true;
+            has_read = true;
+            if (isLatestReadCall(call.id, latest_reads)) return true;
+        }
+        return !has_read;
+    }
+    if (!std.mem.eql(u8, message.role, "tool")) return true;
+    if (message.name == null or !std.mem.eql(u8, message.name.?, "read")) return true;
+    const call_id = message.tool_call_id orelse return true;
+    return isLatestReadCall(call_id, latest_reads);
+}
+
+fn isLatestReadCall(call_id: []const u8, latest_reads: std.ArrayList(LatestRead)) bool {
+    for (latest_reads.items) |read| if (std.mem.eql(u8, read.tool_call_id, call_id)) return true;
+    return false;
+}
+
+fn appendReplayMessage(allocator: Allocator, out: *std.ArrayList(provider.Message), message: Message, truncate_chars: usize) !void {
+    if (!std.mem.eql(u8, message.role, "user") and !std.mem.eql(u8, message.role, "assistant") and !std.mem.eql(u8, message.role, "tool")) return;
+    const content = try truncateMessageContent(allocator, message, out.items.len, truncate_chars);
+    defer allocator.free(content);
+    try provider.appendMessage(allocator, out, .{ .role = message.role, .content = content, .name = message.name, .tool_call_id = message.tool_call_id, .tool_calls = message.tool_calls });
 }
 
 fn appendLine(path: []const u8, line: []const u8) !void {
@@ -355,31 +406,39 @@ fn freeCall(allocator: Allocator, call: provider.ToolCall) void {
     allocator.free(call.arguments);
 }
 
-fn renderMessageSmart(allocator: Allocator, out: *std.ArrayList(u8), message: Message, index: usize) !void {
+const ReplayRanges = struct { head_end: usize, tail_start: usize };
+
+fn replayRanges(log: Log, head_messages: usize, tail_messages: usize) ReplayRanges {
+    const head_end = @min(head_messages, log.messages.len);
+    if (log.compaction) |c| {
+        const compacted = @as(usize, @min(c.message_count, log.messages.len));
+        return .{ .head_end = head_end, .tail_start = @max(head_end, compacted) };
+    }
+    const tail_start = if (log.messages.len > tail_messages) log.messages.len - tail_messages else head_end;
+    return .{ .head_end = head_end, .tail_start = @max(head_end, tail_start) };
+}
+
+fn renderMessageSmart(allocator: Allocator, out: *std.ArrayList(u8), message: Message, index: usize, truncate_chars: usize) !void {
     if (std.mem.eql(u8, message.role, "assistant") and message.tool_calls.len != 0) {
         for (message.tool_calls) |call| try out.print(allocator, "assistant tool call {s} {s}\n", .{ call.name, call.arguments });
         return;
     }
     if (std.mem.eql(u8, message.role, "tool")) {
-        const content = try truncateMessageContent(allocator, message, index);
+        const content = try truncateMessageContent(allocator, message, index, truncate_chars);
         defer allocator.free(content);
         try out.print(allocator, "tool {s} call_id={s}: {s}\n", .{ message.name orelse "", message.tool_call_id orelse "", content });
         return;
     }
-    const content = try truncateMessageContent(allocator, message, index);
+    const content = try truncateMessageContent(allocator, message, index, truncate_chars);
     defer allocator.free(content);
     try out.print(allocator, "{s}: {s}\n", .{ message.role, content });
 }
 
-fn truncateMessageContent(allocator: Allocator, message: Message, index: usize) ![]u8 {
+fn truncateMessageContent(allocator: Allocator, message: Message, index: usize, truncate_chars: usize) ![]u8 {
     const content = message.content;
-    const max_preview = 2048;
+    if (truncate_chars == 0 or content.len <= truncate_chars) return try allocator.dupe(u8, content);
 
-    if (content.len <= max_preview) {
-        return try allocator.dupe(u8, content);
-    }
-
-    const preview = content[0..max_preview];
+    const preview = content[0..truncate_chars];
     if (std.mem.eql(u8, message.role, "tool")) {
         const call_id = message.tool_call_id orelse "";
         return std.fmt.allocPrint(allocator, "{s}... [truncated, {d} chars - use session:current:tools:{s} for full]", .{ preview, content.len, call_id });

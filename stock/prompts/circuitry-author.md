@@ -47,17 +47,13 @@ Mental model:
 
 Use `type: text` for prompt inputs. If the prompt lives in Zinc's prompt store, use `uri: prompt:<id>`.
 
-Use `type: run` for declarative graph runs:
+Use `type: run` for declarative child graph runs. Use runtime URIs for Zinc state:
 
 ```yaml
 resources:
   recovered_context:
-    type: run
-    graph: ./context-recovery.circuitry.yaml
-    entry: focused_recovery
-    inputs:
-      user_turn: user_turn
-      session_log: session_log
+    type: text
+    uri: session:compact-context
 
   assistant:
     type: agent

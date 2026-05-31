@@ -154,7 +154,7 @@ pub fn listPackages(allocator: Allocator, io: std.Io, home: []const u8) ![]u8 {
 pub fn listGraphs(allocator: Allocator, io: std.Io, home: []const u8) ![]u8 {
     var out: std.ArrayList(u8) = .empty;
     errdefer out.deinit(allocator);
-    try appendGraphDir(allocator, io, &out, "project", ".zinc/graphs");
+    try appendGraphDir(allocator, io, &out, "project", "graphs");
     try appendPackageGraphExports(allocator, io, &out, .local, ".zinc/packages");
     const global = try scopeRoot(allocator, home, .global);
     defer allocator.free(global);
@@ -168,12 +168,14 @@ pub fn listGraphs(allocator: Allocator, io: std.Io, home: []const u8) ![]u8 {
 pub fn resolveGraph(allocator: Allocator, io: std.Io, home: []const u8, spec: []const u8) ![]u8 {
     if (std.fs.path.isAbsolute(spec)) return allocator.dupe(u8, spec);
     if (files.existsPath(spec)) return allocator.dupe(u8, spec);
-    if (try graphInDir(allocator, ".zinc/graphs", spec)) |path| return path;
-    if (try graphInDir(allocator, "stock/graphs", spec)) |path| return path;
+    if (try graphInDir(allocator, "graphs", spec)) |path| return path;
     if (try graphExportInRoot(allocator, io, ".zinc/packages", spec)) |path| return path;
     const global = try scopeRoot(allocator, home, .global);
     defer allocator.free(global);
     if (try graphExportInRoot(allocator, io, global, spec)) |path| return path;
+    const shared_graphs = try layout.sharePath(allocator, home, "graphs");
+    defer allocator.free(shared_graphs);
+    if (try graphInDir(allocator, shared_graphs, spec)) |path| return path;
     return error.GraphNotFound;
 }
 
@@ -388,7 +390,7 @@ fn writeMetadata(allocator: Allocator, package_dir: []const u8, source: []const 
     defer allocator.free(path);
     var out: std.ArrayList(u8) = .empty;
     defer out.deinit(allocator);
-    try out.appendSlice(allocator, "{\"zinc\":\"0.3.1\",\"source\":");
+    try out.appendSlice(allocator, "{\"source\":");
     try files.appendJsonString(allocator, &out, source);
     try out.appendSlice(allocator, ",\"scope\":");
     try files.appendJsonString(allocator, &out, scopeName(scope));
