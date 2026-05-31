@@ -1,7 +1,7 @@
 # Zinc
 
 [![release](https://img.shields.io/github/v/release/darkhorseprojects/zinc?color=64748b&style=flat-square)](https://github.com/darkhorseprojects/zinc/releases)
-[![build](https://img.shields.io/github/actions/workflow/status/darkhorseprojects/zinc/ci.yml?label=build&style=flat-square)](https://github.com/darkhorseprojects/zinc/actions)
+[![build](https://img.shields.io/github/actions/workflow/status/darkhorseprojects/zinc/release.yml?label=build&style=flat-square)](https://github.com/darkhorseprojects/zinc/actions)
 [![license](https://img.shields.io/github/license/darkhorseprojects/zinc?color=333333&style=flat-square)](https://github.com/darkhorseprojects/zinc/blob/main/LICENSE)
 
 [**Circuitry**](https://github.com/darkhorseprojects/circuitry) &nbsp;•&nbsp; [**Specification**](https://github.com/darkhorseprojects/circuitry/blob/main/SPEC.md) &nbsp;•&nbsp; [**Packages**](#packages) &nbsp;•&nbsp; [**Runtime boundary**](#runtime-boundary)
