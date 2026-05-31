@@ -21,9 +21,9 @@ A Circuitry graph is a durable source file. Zinc makes it executable on your mac
 - `input`, `text`, and `data` resources become concrete values.
 - `agent` resources run through the configured local provider.
 - `run` resources execute child graphs through the same resolver.
-- tools are Zinc runtime effects, not graph syntax.
+- tools are Zinc runtime effects explicitly declared by the active Circuitry resource.
 
-Zinc does not own nodes, edges, compiled plans, imports, or graph validation. Circuitry owns the graph format. Zinc runs resolved resources.
+Zinc does not own nodes, edges, compiled plans, imports, or graph validation. Circuitry owns topology and contracts. Zinc materializes resources and supplies effects.
 
 ## Why it matters
 
@@ -38,6 +38,8 @@ prompt → Circuitry entry → resource resolver → agent loop → local tools 
 The session is a JSONL log. The default loop is a Circuitry graph. Prompt packs are files. Large bash output is kept out of context and pointed to by path. Graph execution asks before dynamic runs.
 
 ## Install
+
+Install Circuitry first, then Zinc:
 
 ```bash
 npm install -g @darkhorseprojects/circuitry@^0.4.3
@@ -54,6 +56,21 @@ Installs:
 ```
 
 The config file is installed with user-only permissions.
+
+Make sure a local model endpoint/server is available for the configured model. Zinc can manage the local server with:
+
+```bash
+zn serve
+zn status
+```
+
+First useful commands:
+
+```bash
+zn "hello"
+zn graph list
+zn run zinc-loop "hello"
+```
 
 ## CLI
 
@@ -119,6 +136,8 @@ resources:
 
 ## Runtime boundary
 
+Circuitry defines topology. Zinc supplies effects.
+
 Zinc resolves these resource types:
 
 - `input`
@@ -143,6 +162,31 @@ input:<id>
 ```
 
 Runtime URIs support `:bytes=<start>-<end>` for bounded reads.
+
+## Tool policy
+
+Zinc only exposes tools declared by the active Circuitry resource.
+
+```yaml
+resources:
+  assistant:
+    type: agent
+    tools: [read, write, edit, bash, run_graph]
+```
+
+If `bash` is not declared, the agent does not get `bash`. If `run_graph` is not declared, the agent cannot request graph runs. Circuitry defines the allowed tool surface; Zinc implements the concrete behavior.
+
+Builtin Zinc tools:
+
+- `read`: read a file or Zinc runtime URI.
+- `write`: create or overwrite a UTF-8 file.
+- `edit`: replace exact text in a UTF-8 file.
+- `bash`: run a shell command in the current working directory.
+- `run_graph`: request execution of a Circuitry graph through Zinc policy.
+
+## Safety note
+
+Zinc is a local runtime. When the active graph declares tools, Zinc can read files, write files, edit files, run shell commands, and run other graphs. Only run graphs and packages you trust, especially in sensitive directories.
 
 ## Graph run approval
 
@@ -173,6 +217,8 @@ Large bash output is summarized in the model context. Full output is written to 
 
 ## Packages
 
+A Zinc package is a runtime/ecosystem convention, not Circuitry core. Packages can export graphs, prompts, and assets while the Circuitry graphs remain portable graph files.
+
 A Zinc package is a directory with `zinc.pkg.yaml` and exported graphs, prompts, and assets.
 
 ```yaml
@@ -188,7 +234,7 @@ exports:
     screenshot: assets/example.png
 ```
 
-Packages can be local project packages or global user packages.
+Packages can be local project packages or global user packages. More default packages and capabilities may ship later without changing the Circuitry format.
 
 ## License
 

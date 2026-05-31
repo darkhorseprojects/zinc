@@ -5,7 +5,10 @@ const root = @import("../root.zig");
 const Scope = root.core.packages.Scope;
 
 pub fn run(init: std.process.Init) !void {
-    try runInner(init);
+    runInner(init) catch |err| switch (err) {
+        error.UserError => return,
+        else => return err,
+    };
 }
 
 fn runInner(init: std.process.Init) !void {

@@ -15,6 +15,11 @@ const sessions = runtime.session;
 
 const Allocator = std.mem.Allocator;
 
+fn fail(comptime fmt: []const u8, args: anytype) error{UserError}!void {
+    std.debug.print("error: " ++ fmt ++ "\n", args);
+    return error.UserError;
+}
+
 pub fn usage() void {
     std.debug.print(
         \\zn - Zinc, a tiny Circuitry-native runtime
@@ -44,7 +49,10 @@ pub fn usage() void {
 pub fn validate(allocator: Allocator, io: std.Io, home: []const u8, path_arg: ?[]const u8) !void {
     const runtime_paths = try config.loadRuntimePaths(allocator, io, home);
     defer runtime_paths.deinit(allocator);
-    const path = if (path_arg) |spec| try packages.resolveGraph(allocator, io, home, spec) else try allocator.dupe(u8, runtime_paths.graph);
+    const path = if (path_arg) |spec| packages.resolveGraph(allocator, io, home, spec) catch |err| switch (err) {
+        error.GraphNotFound => return fail("graph not found: {s}", .{spec}),
+        else => return err,
+    } else try allocator.dupe(u8, runtime_paths.graph);
     defer allocator.free(path);
     try validateGraphFile(allocator, io, path);
     std.debug.print("ok: {s}\n", .{path});
@@ -57,7 +65,10 @@ pub fn runFromArgs(allocator: Allocator, io: std.Io, home: []const u8, args: []c
 
     const runtime_paths = try config.loadRuntimePaths(allocator, io, home);
     defer runtime_paths.deinit(allocator);
-    const resolved_graph = if (parsed_args.graph_path) |spec| try packages.resolveGraph(allocator, io, home, spec) else try allocator.dupe(u8, runtime_paths.graph);
+    const resolved_graph = if (parsed_args.graph_path) |spec| packages.resolveGraph(allocator, io, home, spec) catch |err| switch (err) {
+        error.GraphNotFound => return fail("graph not found: {s}", .{spec}),
+        else => return err,
+    } else try allocator.dupe(u8, runtime_paths.graph);
     defer allocator.free(resolved_graph);
     const prompt = try std.mem.join(allocator, " ", parsed_args.prompt_parts.items);
     defer allocator.free(prompt);

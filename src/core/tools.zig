@@ -11,7 +11,11 @@ const agent = @import("agent.zig");
 const Allocator = std.mem.Allocator;
 
 pub fn execute(ctx: *ctxmod.RunContext, read_ctx: uri.Context, spec: agent.Spec, call: provider.ToolCall) !runtime_tools.ToolResult {
-    if (!hasTool(spec.tools, call.name)) return toolError(ctx.allocator, call, "ToolNotAvailable", "tool is not available in this graph");
+    if (!hasTool(spec.tools, call.name)) {
+        const message = try std.fmt.allocPrint(ctx.allocator, "tool `{s}` was requested but not declared by the active graph resource", .{call.name});
+        defer ctx.allocator.free(message);
+        return toolError(ctx.allocator, call, "ToolNotDeclared", message);
+    }
     runtime_tools.validateArguments(ctx.allocator, call.name, call.arguments) catch |err| return switch (err) {
         error.OutOfMemory => err,
         else => toolError(ctx.allocator, call, @errorName(err), "tool arguments did not match the required JSON schema"),
@@ -54,6 +58,11 @@ fn executeRead(ctx: *ctxmod.RunContext, read_ctx: uri.Context, call: provider.To
     defer parsed.deinit();
     const path = try runtime_tools.requireStringArg(parsed.value.object, "path");
     if (try uri.resolve(ctx.allocator, ctx.io, read_ctx, path)) |content| return .{ .content = content, .is_error = false };
+    if (looksLikeRuntimeUri(path)) {
+        const message = try std.fmt.allocPrint(ctx.allocator, "unsupported Zinc URI: {s}", .{path});
+        defer ctx.allocator.free(message);
+        return toolError(ctx.allocator, call, "UnsupportedZincUri", message);
+    }
     if (std.mem.indexOf(u8, path, ":bytes=")) |byte_pos| {
         const base_path = path[0..byte_pos];
         const range = path[byte_pos + ":bytes=".len ..];
@@ -106,6 +115,12 @@ fn executeBash(ctx: *ctxmod.RunContext, call: provider.ToolCall) !runtime_tools.
     };
 }
 
+fn looksLikeRuntimeUri(path: []const u8) bool {
+    const colon = std.mem.indexOfScalar(u8, path, ':') orelse return false;
+    if (colon == 0) return false;
+    return std.mem.indexOfAny(u8, path[0..colon], "/\\") == null;
+}
+
 fn commandRunsZincGraph(command: []const u8) bool {
     var it = std.mem.tokenizeAny(u8, command, " \t\r\n;&|()<>\"'");
     var previous_was_zinc = false;
@@ -128,7 +143,7 @@ fn staleWriteError(ctx: *ctxmod.RunContext, call: provider.ToolCall) !?runtime_t
         else => return err,
     };
     defer ctx.allocator.free(current);
-    if (!std.mem.eql(u8, read_content, current)) return .{ .content = try std.fmt.allocPrint(ctx.allocator, "{s} rejected: file changed since last read path={s}. Read the file again before editing.", .{ call.name, path }), .is_error = true };
+    if (!std.mem.eql(u8, read_content, current)) return .{ .content = try std.fmt.allocPrint(ctx.allocator, "file changed since Zinc last read it; read it again before editing: {s}", .{path}), .is_error = true };
     return null;
 }
 

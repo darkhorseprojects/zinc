@@ -11,6 +11,11 @@ const trace = @import("../sys/trace.zig");
 const Allocator = std.mem.Allocator;
 const context_chars_per_token: usize = 3;
 
+fn fail(comptime fmt: []const u8, args: anytype) error{UserError}!void {
+    std.debug.print("error: " ++ fmt ++ "\n", args);
+    return error.UserError;
+}
+
 pub fn run(allocator: Allocator, io: std.Io, home: []const u8, user_prompt: []const u8, resume_id: ?[]const u8, continue_last: bool, graph_path_override: ?[]const u8, runtime_inputs: []const graph.RuntimeInput) !void {
     const runtime_paths = try config.loadRuntimePaths(allocator, io, home);
     defer runtime_paths.deinit(allocator);
@@ -35,7 +40,8 @@ pub fn runGraph(allocator: Allocator, io: std.Io, home: []const u8, graph_path: 
     const loaded_graph = try graph.load(allocator, io, graph_path);
     defer loaded_graph.deinit(allocator);
     try graph.validate(loaded_graph);
-    const entry = graph.entryResourceId(loaded_graph, entry_override) orelse return error.InvalidCircuitryGraph;
+    const entry = graph.entryResourceId(loaded_graph, entry_override) orelse return fail("graph has no entry; add `entry: <resource>` or pass `--entry`", .{});
+    if (graph.resource(loaded_graph, entry) == null) return fail("entry not found: {s}", .{entry});
 
     const model_id = try config.resolveGraphModelId(allocator, io, loaded_graph, home);
     defer allocator.free(model_id);
@@ -81,7 +87,8 @@ fn runCompaction(allocator: Allocator, io: std.Io, home: []const u8, profile: *c
     if (log.messageCount() == 0) return;
     const loaded_graph = try graph.load(allocator, io, graph_path);
     defer loaded_graph.deinit(allocator);
-    const entry = loaded_graph.entry orelse return error.InvalidCircuitryGraph;
+    const entry = loaded_graph.entry orelse return fail("graph has no entry; add `entry: <resource>` or pass `--entry`", .{});
+    if (graph.resource(loaded_graph, entry) == null) return fail("entry not found: {s}", .{entry});
     var log_mut = try sessions.readParsed(allocator, session.path);
     defer log_mut.deinit(allocator);
     const bound = try resource.bindInputs(allocator, loaded_graph, "", &.{});

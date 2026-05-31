@@ -134,16 +134,17 @@ fn runCircuitryCommand(allocator: Allocator, io: std.Io, argv: []const []const u
         .stdout_limit = .limited(16 * 1024 * 1024),
     }) catch |err| switch (err) {
         error.FileNotFound => {
-            std.debug.print("error: 'circuitry' command not found. Please ensure circuitry is installed and in your PATH.\n", .{});
-            std.debug.print("To install circuitry, run:\n  npm install -g @darkhorseprojects/circuitry\n\n", .{});
-            return error.CircuitryNotFound;
+            std.debug.print("error: circuitry command not found; install @darkhorseprojects/circuitry\n", .{});
+            return error.UserError;
         },
         else => return err,
     };
     defer allocator.free(result.stderr);
     if (result.term != .exited or result.term.exited != 0) {
         allocator.free(result.stdout);
-        return error.CircuitryCommandFailed;
+        std.debug.print("error: failed to resolve graph with circuitry: {s}\n", .{argv[argv.len - 1]});
+        if (result.stderr.len != 0) std.debug.print("{s}", .{result.stderr});
+        return error.UserError;
     }
     return result.stdout;
 }

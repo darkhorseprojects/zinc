@@ -68,7 +68,8 @@ fn resolveText(ctx: *RunContext, res: graph.Resource) !ResolvedValue {
         defer read_ctx.deinit(ctx.allocator);
         const maybe = try uri.resolve(ctx.allocator, ctx.io, read_ctx.context, raw_uri);
         if (maybe) |text| return .{ .text = text };
-        return error.UnknownRuntimeUri;
+        std.debug.print("error: unsupported Zinc URI: {s}\n", .{raw_uri});
+        return error.UserError;
     }
     if (try graph.resourcePath(ctx.allocator, res)) |path| {
         defer ctx.allocator.free(path);
@@ -103,7 +104,12 @@ fn resolveAgent(ctx: *RunContext, id: []const u8, res: graph.Resource) !Resolved
     defer ctx.allocator.free(instructions);
     const tool_names = try graph.readTools(ctx.allocator, ctx.graph.*, id);
     defer graph.freeStringList(ctx.allocator, tool_names);
-    for (tool_names) |tool| if (!runtime_tools.contains(tool)) return error.UnknownTool;
+    for (tool_names) |tool| {
+        if (!runtime_tools.contains(tool)) {
+            std.debug.print("error: unsupported Zinc tool declared by graph: {s}\n", .{tool});
+            return error.UserError;
+        }
+    }
     const tools_json = try runtime_tools.schemaJson(ctx.allocator, tool_names);
     defer ctx.allocator.free(tools_json);
 
