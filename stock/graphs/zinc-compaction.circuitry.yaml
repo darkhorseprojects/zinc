@@ -14,7 +14,7 @@ resources:
     identity: "Context compaction"
     inputs: [compact_context]
     tools: []
-    expect:
+    output:
       summary: str
     instructions: |
       Compact the supplied bounded Zinc session context into durable memory.

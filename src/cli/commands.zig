@@ -26,20 +26,21 @@ pub fn usage() void {
         \\
         \\usage:
         \\  zn check [graph]
-        \\  zn clean [--local|--global] [sessions | logs | packages | state | all]
+        \\  zn clean [--local|--global] [--yes] [sessions | logs | packages | state | all]
         \\  zn serve [model-id]
         \\  zn stop
-        \\  zn status
+        \\  zn doctor
         \\  zn config get <path>
         \\  zn compact [--dry-run] [--session id|--continue] [graph]
         \\  zn update [--ref tag-or-commit] [--skip-packages] [--skip-zinc]
         \\  zn [--session id|--continue] <prompt>
         \\  zn run [graph|--graph id|path] [--entry id] [--input name=value] [--text name=value|@file] [--file name=path] [--image name=path] [--session id|--continue] <prompt>
         \\  zn graph list
+        \\  zn graph show <graph>
         \\  zn pkg list
-        \\  zn pkg add [--local|--global] [--replace] <source>
-        \\  zn pkg remove [--local|--global] <name>
-        \\  zn pkg update [--local|--global] [name]
+        \\  zn pkg add [--local|--global] [--replace] [--yes] <source>
+        \\  zn pkg remove [--local|--global] [--yes] <name>
+        \\  zn pkg update [--local|--global] [--yes] <name|--all>
         \\  zn pkg show [--local|--global] <name>
         \\  zn session-dir
         \\
@@ -216,6 +217,17 @@ pub fn graphList(allocator: Allocator, io: std.Io, home: []const u8) !void {
     defer allocator.free(text);
     if (text.len == 0) std.debug.print("no graphs found\n", .{}) else std.debug.print("{s}", .{text});
 }
+
+pub fn graphShow(allocator: Allocator, io: std.Io, home: []const u8, spec: []const u8) !void {
+    const path = packages.resolveGraph(allocator, io, home, spec) catch |err| switch (err) {
+        error.GraphNotFound => return fail("graph not found: {s}", .{spec}),
+        else => return err,
+    };
+    defer allocator.free(path);
+    const loaded_graph = try graph.load(allocator, io, path);
+    defer loaded_graph.deinit(allocator);
+    try printGraph(allocator, spec, path, loaded_graph);
+}
 pub fn packageList(allocator: Allocator, io: std.Io, home: []const u8) !void {
     const text = try packages.listPackages(allocator, io, home);
     defer allocator.free(text);
@@ -224,28 +236,46 @@ pub fn packageList(allocator: Allocator, io: std.Io, home: []const u8) !void {
 pub fn packageAdd(allocator: Allocator, io: std.Io, home: []const u8, args: []const []const u8) !void {
     const parsed = try parsePackageArgs(args, true);
     const source = parsed.value orelse return error.MissingPackageSource;
-    var package = try packages.add(allocator, io, home, source, .{ .scope = parsed.scope orelse .local, .replace = parsed.replace });
+    const options = packages.InstallOptions{ .scope = parsed.scope orelse .local, .replace = parsed.replace };
+    const plan = try packages.previewAdd(allocator, io, home, source, options);
+    defer plan.deinit(allocator, io);
+    std.debug.print("Install Zinc package\n\n{s}\n", .{plan.text});
+    if (!parsed.yes) try confirmOrFail("Install?");
+    var package = try packages.installPreviewed(allocator, io, home, plan, source, options);
     defer package.deinit(allocator);
     std.debug.print("added {s}: {s}\n", .{ scopeName(package.scope), package.path });
 }
 pub fn packageRemove(allocator: Allocator, io: std.Io, home: []const u8, args: []const []const u8) !void {
     const parsed = try parsePackageArgs(args, false);
     const name = parsed.value orelse return error.MissingPackageName;
+    const text = try packages.show(allocator, io, home, name, parsed.scope);
+    defer allocator.free(text);
+    std.debug.print("Remove Zinc package\n\n{s}\n", .{text});
+    if (!parsed.yes) try confirmOrFail("Remove?");
     var package = try packages.remove(allocator, io, home, name, parsed.scope);
     defer package.deinit(allocator);
     std.debug.print("removed {s}: {s}\n", .{ scopeName(package.scope), package.name });
 }
 pub fn packageUpdate(allocator: Allocator, io: std.Io, home: []const u8, args: []const []const u8) !void {
     const parsed = try parsePackageArgs(args, false);
-    if (parsed.value) |name| {
-        var package = try packages.update(allocator, io, home, name, parsed.scope);
-        defer package.deinit(allocator);
-        std.debug.print("updated {s}: {s}\n", .{ scopeName(package.scope), package.path });
-    } else {
-        const text = try packages.updateAll(allocator, io, home);
+    const name = parsed.value orelse return error.MissingPackageName;
+    if (std.mem.eql(u8, name, "--all")) {
+        const text = try packages.listPackages(allocator, io, home);
         defer allocator.free(text);
-        std.debug.print("{s}", .{text});
+        std.debug.print("Update all Zinc packages\n\n{s}\n", .{if (text.len == 0) "no packages found\n" else text});
+        if (!parsed.yes) try confirmOrFail("Update all?");
+        const updated = try packages.updateAll(allocator, io, home);
+        defer allocator.free(updated);
+        std.debug.print("{s}", .{updated});
+        return;
     }
+    const plan = try packages.previewUpdate(allocator, io, home, name, parsed.scope);
+    defer plan.deinit(allocator, io);
+    std.debug.print("Update Zinc package\n\n{s}\n", .{plan.text});
+    if (!parsed.yes) try confirmOrFail("Update?");
+    var package = try packages.update(allocator, io, home, name, parsed.scope);
+    defer package.deinit(allocator);
+    std.debug.print("updated {s}: {s}\n", .{ scopeName(package.scope), package.path });
 }
 pub fn packageShow(allocator: Allocator, io: std.Io, home: []const u8, args: []const []const u8) !void {
     const parsed = try parsePackageArgs(args, false);
@@ -317,11 +347,17 @@ fn runCommand(allocator: Allocator, io: std.Io, argv: []const []const u8, contex
     return error.UserError;
 }
 
-const PackageArgs = struct { scope: ?packages.Scope = null, replace: bool = false, value: ?[]const u8 = null };
+const PackageArgs = struct { scope: ?packages.Scope = null, replace: bool = false, yes: bool = false, value: ?[]const u8 = null };
 fn parsePackageArgs(args: []const []const u8, allow_replace: bool) !PackageArgs {
     var parsed = PackageArgs{};
     for (args) |arg| {
-        if (std.mem.eql(u8, arg, "--local")) parsed.scope = .local else if (std.mem.eql(u8, arg, "--global")) parsed.scope = .global else if (std.mem.eql(u8, arg, "--replace") and allow_replace) parsed.replace = true else if (parsed.value == null) parsed.value = arg else return error.TooManyArguments;
+        if (std.mem.eql(u8, arg, "--local")) {
+            if (parsed.scope != null) return error.ConflictingScopeFlags;
+            parsed.scope = .local;
+        } else if (std.mem.eql(u8, arg, "--global")) {
+            if (parsed.scope != null) return error.ConflictingScopeFlags;
+            parsed.scope = .global;
+        } else if (std.mem.eql(u8, arg, "--replace") and allow_replace) parsed.replace = true else if (std.mem.eql(u8, arg, "--yes")) parsed.yes = true else if (parsed.value == null) parsed.value = arg else return error.TooManyArguments;
     }
     return parsed;
 }
@@ -330,6 +366,108 @@ fn scopeName(scope: packages.Scope) []const u8 {
         .local => "local",
         .global => "global",
     };
+}
+
+fn confirmOrFail(prompt: []const u8) !void {
+    _ = try files.linuxWrite(2, prompt);
+    _ = try files.linuxWrite(2, " [y/N] ");
+    var buf: [16]u8 = undefined;
+    const n = std.os.linux.read(0, &buf, buf.len);
+    if (std.os.linux.errno(n) != .SUCCESS or n == 0) return fail("confirmation required", .{});
+    const answer = std.mem.trim(u8, buf[0..n], " \t\r\n");
+    if (answer.len == 1 and (answer[0] == 'y' or answer[0] == 'Y')) return;
+    if (answer.len == 1 and (answer[0] == 'n' or answer[0] == 'N')) return fail("cancelled", .{});
+    return fail("answer y or n", .{});
+}
+
+fn printGraph(allocator: Allocator, spec: []const u8, path: []const u8, loaded: graph.Graph) !void {
+    const graph_root = loaded.parsed.value;
+    std.debug.print("graph: {s}\npath: {s}\n", .{ spec, path });
+    if (scalarAt(graph_root, &.{"circuitry"})) |v| std.debug.print("circuitry: {s}\n", .{v});
+    if (scalarAt(graph_root, &.{"title"})) |v| std.debug.print("title: {s}\n", .{v});
+    std.debug.print("entry: {s}\n", .{loaded.entry orelse "(none)"});
+    if (loaded.entries.len != 0) {
+        std.debug.print("\nentries:\n", .{});
+        for (loaded.entries) |entry| std.debug.print("  {s} -> {s}\n", .{ entry.name, entry.resource_id });
+    }
+    if (loaded.inputs.len != 0) {
+        std.debug.print("\ninputs:\n", .{});
+        for (loaded.inputs) |input| std.debug.print("  {s}  {s}{s}\n", .{ input.id, input.kind, if (input.required) "  required" else "" });
+    }
+    std.debug.print("\nresources:\n", .{});
+    for (loaded.resources) |res| {
+        std.debug.print("  {s}  {s}", .{ res.id, graph.resourceType(res) orelse "?" });
+        if (graph.resourceField(res, "from")) |v| std.debug.print("  from={s}", .{v});
+        if (graph.resourceField(res, "uri")) |v| std.debug.print("  uri={s}", .{v});
+        if (graph.resourceField(res, "path")) |v| std.debug.print("  path={s}", .{v});
+        if (graph.resourceValue(res, "value") != null) std.debug.print("  value={s}", .{valueSummary(res.value.object.get("value").?)});
+        const inputs = try graph.resourceInputsList(allocator, res);
+        defer graph.freeStringList(allocator, inputs);
+        if (inputs.len != 0) {
+            const joined = try joinTemp(allocator, inputs);
+            defer allocator.free(joined);
+            std.debug.print("  inputs={s}", .{joined});
+        }
+        const tools = try graph.readList(allocator, res, "tools");
+        defer graph.freeStringList(allocator, tools);
+        if (tools.len != 0) {
+            const joined = try joinTemp(allocator, tools);
+            defer allocator.free(joined);
+            std.debug.print("  tools={s}", .{joined});
+        }
+        if (graph.resourceOutputValue(res)) |out| {
+            const text = try jsonText(allocator, out);
+            defer allocator.free(text);
+            std.debug.print("  output={s}", .{text});
+        }
+        std.debug.print("\n", .{});
+    }
+    if (objectAt(graph_root, &.{"outputs"})) |outputs| {
+        std.debug.print("\noutputs:\n", .{});
+        var iter = outputs.iterator();
+        while (iter.next()) |entry| if (entry.value_ptr.* == .object) {
+            if (scalarAt(entry.value_ptr.*, &.{"from"})) |from| std.debug.print("  {s} -> {s}\n", .{ entry.key_ptr.*, from });
+        };
+    }
+}
+
+fn joinTemp(allocator: Allocator, items: []const []u8) ![]u8 {
+    return std.mem.join(allocator, ",", items);
+}
+
+fn valueSummary(value: std.json.Value) []const u8 {
+    return switch (value) {
+        .string => |text| if (text.len > 40) text[0..40] else text,
+        else => "<literal>",
+    };
+}
+
+fn jsonText(allocator: Allocator, value: std.json.Value) ![]u8 {
+    var out: std.ArrayList(u8) = .empty;
+    errdefer out.deinit(allocator);
+    var aw = std.Io.Writer.Allocating.fromArrayList(allocator, &out);
+    try std.json.Stringify.value(value, .{}, &aw.writer);
+    out = aw.toArrayList();
+    return out.toOwnedSlice(allocator);
+}
+
+fn objectAt(value: std.json.Value, path: []const []const u8) ?std.json.ObjectMap {
+    const found = valueAt(value, path) orelse return null;
+    return if (found == .object) found.object else null;
+}
+
+fn scalarAt(value: std.json.Value, path: []const []const u8) ?[]const u8 {
+    const found = valueAt(value, path) orelse return null;
+    return if (found == .string) found.string else null;
+}
+
+fn valueAt(value: std.json.Value, path: []const []const u8) ?std.json.Value {
+    var current = value;
+    for (path) |part| {
+        if (current != .object) return null;
+        current = current.object.get(part) orelse return null;
+    }
+    return current;
 }
 
 pub fn configGet(allocator: Allocator, io: std.Io, home: []const u8, dotted_path: []const u8) !void {
@@ -348,9 +486,11 @@ fn validateGraphFile(allocator: Allocator, io: std.Io, path: []const u8) !void {
     try graph.validate(loaded_graph);
 }
 
-pub fn clean(allocator: Allocator, io: std.Io, home: []const u8, scope: packages.Scope, target_str: []const u8) !void {
+pub fn clean(allocator: Allocator, io: std.Io, home: []const u8, scope: packages.Scope, target_str: []const u8, yes: bool) !void {
     const Target = enum { sessions, logs, packages, state, all };
     const target = std.meta.stringToEnum(Target, target_str) orelse return error.InvalidCleanTarget;
+    std.debug.print("Clean Zinc artifacts\n\nscope: {s}\ntarget: {s}\n", .{ @tagName(scope), @tagName(target) });
+    if (!yes) try confirmOrFail("Continue?");
     var dir = std.Io.Dir.cwd();
     switch (scope) {
         .local => {

@@ -32,7 +32,7 @@ resources:
     identity: Assistant
     inputs: [user_turn, bash_guide]
     tools: [read, write, edit, bash, run_graph]
-    expect:
+    output:
       response: str
     instructions: |
       Answer the user.

@@ -42,7 +42,7 @@ The session is a JSONL log. The default loop is a Circuitry graph. Prompt packs 
 Install Circuitry first, then Zinc:
 
 ```bash
-npm install -g @darkhorseprojects/circuitry@^0.4.3
+npm install -g @darkhorseprojects/circuitry@^0.4.4
 ./scripts/install-linux.sh
 ```
 
@@ -61,7 +61,7 @@ Make sure a local model endpoint/server is available for the configured model. Z
 
 ```bash
 zn serve
-zn status
+zn doctor
 ```
 
 First useful commands:
@@ -80,21 +80,22 @@ zn run [graph|--graph id|path] [--entry id] [--input name=value] [--text name=va
 
 zn check [graph]
 zn compact [--dry-run] [--session id|--continue] [graph]
-zn clean [--local|--global] [sessions | logs | packages | state | all]
+zn clean [--local|--global] [--yes] [sessions | logs | packages | state | all]
 
 zn graph list
+zn graph show <graph>
 zn session-dir
 zn config get <path>
 
 zn pkg list
-zn pkg add [--local|--global] [--replace] <source>
-zn pkg remove [--local|--global] <name>
-zn pkg update [--local|--global] [name]
+zn pkg add [--local|--global] [--replace] [--yes] <source>
+zn pkg remove [--local|--global] [--yes] <name>
+zn pkg update [--local|--global] [--yes] <name|--all>
 zn pkg show [--local|--global] <name>
 
 zn update [--ref tag-or-commit]
 zn serve [model]
-zn status
+zn doctor
 zn stop
 ```
 
@@ -222,7 +223,7 @@ A Zinc package is a runtime/ecosystem convention, not Circuitry core. Packages c
 A Zinc package is a directory with `zinc.pkg.yaml` and exported graphs, prompts, and assets.
 
 ```yaml
-zinc: "0.3.2"
+zinc: "0.3.3"
 name: browser-repair
 version: "0.1.0"
 exports:

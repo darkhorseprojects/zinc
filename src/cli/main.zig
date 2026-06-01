@@ -26,7 +26,7 @@ fn runInner(init: std.process.Init) !void {
     if (std.mem.eql(u8, cmd, "run")) return runCommandArgs(allocator, init.io, home, &args);
     if (std.mem.eql(u8, cmd, "serve")) return server.start(allocator, init.io, home, args.next());
     if (std.mem.eql(u8, cmd, "stop")) return server.stop(allocator, home);
-    if (std.mem.eql(u8, cmd, "status")) return server.status(allocator, home);
+    if (std.mem.eql(u8, cmd, "doctor")) return server.doctor(allocator, init.io, home);
     if (std.mem.eql(u8, cmd, "config")) return configCommandArgs(allocator, init.io, home, &args);
     if (std.mem.eql(u8, cmd, "graph")) return graphCommandArgs(allocator, init.io, home, &args);
     if (std.mem.eql(u8, cmd, "pkg")) return packageCommandArgs(allocator, init.io, home, &args);
@@ -57,6 +57,7 @@ fn configCommandArgs(allocator: std.mem.Allocator, io: std.Io, home: []const u8,
 fn graphCommandArgs(allocator: std.mem.Allocator, io: std.Io, home: []const u8, args: *std.process.Args.Iterator) !void {
     const sub = args.next() orelse return commands.usage();
     if (std.mem.eql(u8, sub, "list")) return commands.graphList(allocator, io, home);
+    if (std.mem.eql(u8, sub, "show")) return commands.graphShow(allocator, io, home, args.next() orelse return error.MissingGraphPath);
     return commands.usage();
 }
 
@@ -87,6 +88,7 @@ fn updateCommandArgs(allocator: std.mem.Allocator, io: std.Io, home: []const u8,
 fn cleanCommandArgs(allocator: std.mem.Allocator, io: std.Io, home: []const u8, args: *std.process.Args.Iterator) !void {
     var scope: ?Scope = null;
     var target: ?[]const u8 = null;
+    var yes = false;
 
     while (args.next()) |arg| {
         if (std.mem.eql(u8, arg, "--local")) {
@@ -95,13 +97,15 @@ fn cleanCommandArgs(allocator: std.mem.Allocator, io: std.Io, home: []const u8, 
         } else if (std.mem.eql(u8, arg, "--global")) {
             if (scope != null) return error.ConflictingScopeFlags;
             scope = .global;
+        } else if (std.mem.eql(u8, arg, "--yes")) {
+            yes = true;
         } else {
             if (target != null) return error.TooManyArguments;
             target = arg;
         }
     }
 
-    return commands.clean(allocator, io, home, scope orelse .local, target orelse "all");
+    return commands.clean(allocator, io, home, scope orelse .local, target orelse "all", yes);
 }
 
 fn collectArgs(allocator: std.mem.Allocator, args: *std.process.Args.Iterator) ![][]const u8 {

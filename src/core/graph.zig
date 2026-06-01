@@ -442,8 +442,8 @@ pub fn readList(allocator: Allocator, res: Resource, field: []const u8) ![][]u8 
     return error.InvalidCircuitryGraph;
 }
 
-pub fn resourceExpectValue(res: Resource) ?std.json.Value {
-    return resourceValue(res, "expect");
+pub fn resourceOutputValue(res: Resource) ?std.json.Value {
+    return resourceValue(res, "output");
 }
 
 pub fn mimeFromPathPublic(path: []const u8) []const u8 {

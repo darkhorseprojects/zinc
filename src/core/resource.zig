@@ -152,7 +152,7 @@ fn resolveAgent(ctx: *RunContext, id: []const u8, res: graph.Resource) !Resolved
 
     const reasoning = try reasoningTokens(ctx.*);
     const max_tokens = maxTokens(ctx.*, reasoning);
-    const wants_json = graph.resourceExpectValue(res) != null;
+    const wants_json = graph.resourceOutputValue(res) != null;
     const spec = agent.Spec{ .label = id, .system = system.items, .tools = tool_names, .tools_json = tools_json, .json = wants_json, .runtime_reads = true };
     const text = try agent.run(ctx, &messages, spec, max_tokens, reasoningBudget(reasoning), executeTool);
     errdefer ctx.allocator.free(text);

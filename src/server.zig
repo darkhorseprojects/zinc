@@ -61,15 +61,38 @@ pub fn stop(allocator: Allocator, home: []const u8) !void {
     std.debug.print("Zinc server stopped\n", .{});
 }
 
-pub fn status(allocator: Allocator, home: []const u8) !void {
+pub fn doctor(allocator: Allocator, io: std.Io, home: []const u8) !void {
+    std.debug.print("Zinc doctor\n\n", .{});
+    std.debug.print("✓ zinc binary\n", .{});
+
+    const config_path = try layout.configPath(allocator, home);
+    defer allocator.free(config_path);
+    const has_config = files.existsPath(config_path);
+    std.debug.print("{s} config: {s}\n", .{ mark(has_config), config_path });
+
+    const circuitry_ok = commandOk(allocator, io, &.{"circuitry"});
+    std.debug.print("{s} circuitry CLI\n", .{mark(circuitry_ok)});
+
+    const model_id = config.resolveConfiguredModelId(allocator, io, home) catch null;
+    defer if (model_id) |id| allocator.free(id);
+    const profile = if (model_id) |id| config.loadRuntimeProfile(allocator, io, home, id) catch null else null;
+    if (profile) |p| {
+        defer p.deinit(allocator);
+        std.debug.print("✓ provider endpoint configured: {s}\n", .{p.provider.base_url});
+        const reachable = probe(allocator, io, p.provider.base_url) != 0;
+        std.debug.print("{s} provider reachable\n", .{mark(reachable)});
+        const graph_ok = files.existsPath(p.paths.graph);
+        const compact_ok = files.existsPath(p.paths.compaction_graph);
+        std.debug.print("{s} stock graph: zinc-loop\n", .{mark(graph_ok)});
+        std.debug.print("{s} stock graph: zinc-compaction\n", .{mark(compact_ok)});
+        if (!reachable) std.debug.print("\nNext:\n  run `zn serve`\n", .{});
+    } else {
+        std.debug.print("✗ runtime config\n", .{});
+    }
+
     const pid_path = try layout.statePath(allocator, home, "server.pid");
     defer allocator.free(pid_path);
-    if (try livePid(allocator, pid_path)) |pid| {
-        if (readServerInfo(allocator, home)) |info| {
-            defer allocator.free(info);
-            std.debug.print("Zinc server running: pid {d}\n{s}", .{ pid, info });
-        } else |_| std.debug.print("Zinc server running: pid {d}\n", .{pid});
-    } else std.debug.print("Zinc server stopped\n", .{});
+    if (try livePid(allocator, pid_path)) |pid| std.debug.print("✓ Zinc-managed server: pid {d}\n", .{pid}) else std.debug.print("✗ Zinc-managed server\n", .{});
 }
 
 fn ensureEngine(allocator: Allocator, io: std.Io, home: []const u8, profile: *const config.RuntimeProfile) ![]u8 {
@@ -175,6 +198,17 @@ fn waitReady(allocator: Allocator, io: std.Io, base_url: []const u8, pid: std.po
     }
     return error.ServerStartFailed;
 }
+fn mark(ok: bool) []const u8 {
+    return if (ok) "✓" else "✗";
+}
+
+fn commandOk(allocator: Allocator, io: std.Io, argv: []const []const u8) bool {
+    const result = std.process.run(allocator, io, .{ .argv = argv, .stdout_limit = .limited(1024), .stderr_limit = .limited(1024) }) catch return false;
+    defer allocator.free(result.stdout);
+    defer allocator.free(result.stderr);
+    return result.term == .exited and result.term.exited == 0;
+}
+
 fn probe(allocator: Allocator, io: std.Io, base_url: []const u8) u16 {
     const url = std.fmt.allocPrint(allocator, "{s}/models", .{base_url}) catch return 0;
     defer allocator.free(url);

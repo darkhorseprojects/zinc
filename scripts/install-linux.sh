@@ -25,8 +25,8 @@ fi
 circuitry_bin="$(command -v circuitry)"
 circuitry_version="$(node -e 'const fs=require("fs"),path=require("path"); const bin=fs.realpathSync(process.argv[1]); console.log(require(path.join(path.dirname(bin), "..", "package.json")).version)' "$circuitry_bin" 2>/dev/null || true)"
 case "$circuitry_version" in
-  0.4.[3-9]|0.[5-9].*|[1-9].*) ;;
-  *) echo "Zinc requires circuitry >= 0.4.3; found ${circuitry_version:-unknown}" >&2; exit 1 ;;
+  0.4.[4-9]|0.[5-9].*|[1-9].*) ;;
+  *) echo "Zinc requires circuitry >= 0.4.4; found ${circuitry_version:-unknown}" >&2; exit 1 ;;
 esac
 
 cd "$root"
@@ -114,4 +114,4 @@ chmod 600 "$config_file"
 rm -f "$bin_dir/zn-setup-turboquant" "$bin_dir/zn-setup-beellama" "$bin_dir/zn-serve" "$share_dir/scripts/serve-model.sh" "$share_dir/scripts/setup-beellama-linux.sh" "$share_dir/scripts/setup-turboquant-linux.sh"
 
 echo "installed Zinc: $bin_dir/zn"
-echo "model server lifecycle: zn serve / zn stop / zn status"
+echo "model server lifecycle: zn serve / zn stop / zn doctor"

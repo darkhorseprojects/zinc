@@ -24,6 +24,17 @@ pub const PackageRef = struct {
     }
 };
 
+pub const PackagePlan = struct {
+    text: []u8,
+    staging: []u8,
+
+    pub fn deinit(self: PackagePlan, allocator: Allocator, io: std.Io) void {
+        cleanupPath(io, self.staging);
+        allocator.free(self.staging);
+        allocator.free(self.text);
+    }
+};
+
 const Source = struct {
     raw: []const u8,
     kind: enum { directory, git },
@@ -71,11 +82,47 @@ const Manifest = struct {
 pub fn add(allocator: Allocator, io: std.Io, home: []const u8, source_text: []const u8, options: InstallOptions) !PackageRef {
     var source = try parseSource(allocator, source_text);
     defer source.deinit(allocator);
-
     const staging = try stageSource(allocator, io, source);
     defer cleanupPath(io, staging);
     defer allocator.free(staging);
+    return installStaged(allocator, io, home, source, staging, source_text, options);
+}
 
+pub fn previewAdd(allocator: Allocator, io: std.Io, home: []const u8, source_text: []const u8, options: InstallOptions) !PackagePlan {
+    var source = try parseSource(allocator, source_text);
+    defer source.deinit(allocator);
+    const staging = try stageSource(allocator, io, source);
+    errdefer {
+        cleanupPath(io, staging);
+        allocator.free(staging);
+    }
+    const text = try packagePlanText(allocator, io, home, source, staging, source_text, options, null);
+    return .{ .text = text, .staging = staging };
+}
+
+pub fn installPreviewed(allocator: Allocator, io: std.Io, home: []const u8, plan: PackagePlan, source_text: []const u8, options: InstallOptions) !PackageRef {
+    var source = try parseSource(allocator, source_text);
+    defer source.deinit(allocator);
+    return installStaged(allocator, io, home, source, plan.staging, source_text, options);
+}
+
+pub fn previewUpdate(allocator: Allocator, io: std.Io, home: []const u8, name: []const u8, scope: ?Scope) !PackagePlan {
+    var found = try findInstalled(allocator, home, name, scope);
+    defer found.deinit(allocator);
+    const source_text = try readMetadataSource(allocator, found.path);
+    defer allocator.free(source_text);
+    var source = try parseSource(allocator, source_text);
+    defer source.deinit(allocator);
+    const staging = try stageSource(allocator, io, source);
+    errdefer {
+        cleanupPath(io, staging);
+        allocator.free(staging);
+    }
+    const text = try packagePlanText(allocator, io, home, source, staging, source_text, .{ .scope = found.scope, .replace = true }, found.path);
+    return .{ .text = text, .staging = staging };
+}
+
+fn installStaged(allocator: Allocator, io: std.Io, home: []const u8, source: Source, staging: []const u8, source_text: []const u8, options: InstallOptions) !PackageRef {
     const package_dir = try sourcePackageDir(allocator, staging, source.subdir);
     defer allocator.free(package_dir);
     const manifest = try loadManifest(allocator, io, package_dir);
@@ -135,6 +182,29 @@ pub fn show(allocator: Allocator, io: std.Io, home: []const u8, name: []const u8
     if (manifest.version.len != 0) try out.print(allocator, "version: {s}\n", .{manifest.version});
     if (manifest.description.len != 0) try out.print(allocator, "description: {s}\n", .{manifest.description});
     if (source.len != 0) try out.print(allocator, "source: {s}\n", .{source});
+    try appendExports(allocator, &out, "graphs", manifest.graphs);
+    try appendExports(allocator, &out, "prompts", manifest.prompts);
+    try appendExports(allocator, &out, "assets", manifest.assets);
+    return out.toOwnedSlice(allocator);
+}
+
+fn packagePlanText(allocator: Allocator, io: std.Io, home: []const u8, source: Source, staging: []const u8, source_text: []const u8, options: InstallOptions, current_path: ?[]const u8) ![]u8 {
+    const package_dir = try sourcePackageDir(allocator, staging, source.subdir);
+    defer allocator.free(package_dir);
+    const manifest = try loadManifest(allocator, io, package_dir);
+    defer manifest.deinit(allocator);
+    const root = try scopeRoot(allocator, home, options.scope);
+    defer allocator.free(root);
+    const destination = try std.fs.path.join(allocator, &.{ root, manifest.name });
+    defer allocator.free(destination);
+
+    var out: std.ArrayList(u8) = .empty;
+    errdefer out.deinit(allocator);
+    try out.print(allocator, "source: {s}\nname: {s}\n", .{ source_text, manifest.name });
+    if (manifest.version.len != 0) try out.print(allocator, "version: {s}\n", .{manifest.version});
+    if (manifest.description.len != 0) try out.print(allocator, "description: {s}\n", .{manifest.description});
+    try out.print(allocator, "scope: {s}\ntarget: {s}\n", .{ scopeName(options.scope), destination });
+    if (current_path) |path| try out.print(allocator, "current: {s}\n", .{path});
     try appendExports(allocator, &out, "graphs", manifest.graphs);
     try appendExports(allocator, &out, "prompts", manifest.prompts);
     try appendExports(allocator, &out, "assets", manifest.assets);
