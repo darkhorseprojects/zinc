@@ -1,4 +1,25 @@
 default_model: qwen-heretic-mtp
+scope: project
+
+tools:
+  bash: build
+  graph_runs: ask
+
+confirm_commands:
+  - rm
+  - rmdir
+  - sudo
+  - su
+  - chmod
+  - chown
+  - dd
+  - mkfs
+  - mount
+  - umount
+  - kill
+  - pkill
+  - shutdown
+  - reboot
 
 paths:
   graph: stock/graphs/zinc-loop.circuitry.yaml
@@ -21,7 +42,6 @@ runtime:
   resource_read_max_bytes: 33554432
   input_text_file_max_bytes: 8388608
   input_file_max_bytes: 33554432
-  graph_run_policy: ask
 
 provider:
   base_url: http://127.0.0.1:30000/v1

@@ -27,8 +27,9 @@ const Tail = struct {
     }
 };
 
-pub fn runShell(allocator: Allocator, io: std.Io, command: []const u8, max_output_bytes: usize, max_capture_bytes: usize) !ProcessResult {
-    const result = try std.process.run(allocator, io, .{ .argv = &.{ "sh", "-lc", command }, .stdout_limit = .limited(max_capture_bytes), .stderr_limit = .limited(max_capture_bytes) });
+pub fn runShell(allocator: Allocator, io: std.Io, command: []const u8, cwd: ?[]const u8, max_output_bytes: usize, max_capture_bytes: usize) !ProcessResult {
+    const child_cwd: std.process.Child.Cwd = if (cwd) |path| .{ .path = path } else .inherit;
+    const result = try std.process.run(allocator, io, .{ .argv = &.{ "sh", "-lc", command }, .cwd = child_cwd, .stdout_limit = .limited(max_capture_bytes), .stderr_limit = .limited(max_capture_bytes) });
     errdefer allocator.free(result.stdout);
     errdefer allocator.free(result.stderr);
     const code: u8 = switch (result.term) {

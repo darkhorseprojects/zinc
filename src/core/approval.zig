@@ -15,7 +15,7 @@ pub fn decide(policy: []const u8) !Decision {
 }
 
 pub fn denied(allocator: Allocator) !runtime_tools.ToolResult {
-    return .{ .content = try jsonStatus(allocator, "denied", "graph runs are denied by runtime.graph_run_policy"), .is_error = false };
+    return .{ .content = try jsonStatus(allocator, "denied", "graph runs are denied by tools.graph_runs"), .is_error = false };
 }
 
 pub fn prompt(allocator: Allocator, call: provider.ToolCall) !bool {

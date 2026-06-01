@@ -50,8 +50,6 @@ fn resolveWithoutRange(allocator: Allocator, io: std.Io, ctx: Context, raw: []co
         const transcript = try log.transcript(allocator, ctx.session_head_messages, ctx.session_tail_messages, ctx.replay_truncate_chars);
         return transcript;
     }
-    if (std.mem.eql(u8, raw, "session:head")) return try sessionExcerpt(allocator, ctx, .head, ctx.session_head_messages);
-    if (std.mem.eql(u8, raw, "session:tail")) return try sessionExcerpt(allocator, ctx, .tail, ctx.session_tail_messages);
     if (std.mem.eql(u8, raw, "session:compaction")) return try sessionCompaction(allocator, ctx);
     if (std.mem.eql(u8, raw, "session:compact-context")) return try sessionCompactContext(allocator, ctx);
     if (std.mem.startsWith(u8, raw, "session:current:tools:")) return try sessionToolResult(allocator, ctx, raw["session:current:tools:".len..]);
@@ -97,25 +95,6 @@ fn sliceRange(allocator: Allocator, content: []u8, raw_range: []const u8) ![]u8 
     const end = if (range.end) |e| @min(e, content.len) else content.len;
     if (start > end) return error.InvalidByteRange;
     return allocator.dupe(u8, content[start..end]);
-}
-
-const ExcerptKind = enum { head, tail };
-
-fn sessionExcerpt(allocator: Allocator, ctx: Context, kind: ExcerptKind, count: usize) ![]u8 {
-    const log = try sessions.parseRaw(allocator, ctx.session_log);
-    defer log.deinit(allocator);
-    var out: std.ArrayList(u8) = .empty;
-    errdefer out.deinit(allocator);
-    const start: usize = switch (kind) {
-        .head => 0,
-        .tail => if (log.messages.len > count) log.messages.len - count else 0,
-    };
-    const end: usize = switch (kind) {
-        .head => @min(count, log.messages.len),
-        .tail => log.messages.len,
-    };
-    for (log.messages[start..end], start..) |message, i| try appendMessageLine(allocator, &out, i, message, ctx.replay_truncate_chars);
-    return out.toOwnedSlice(allocator);
 }
 
 fn sessionCompaction(allocator: Allocator, ctx: Context) ![]u8 {

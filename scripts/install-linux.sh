@@ -25,8 +25,8 @@ fi
 circuitry_bin="$(command -v circuitry)"
 circuitry_version="$(node -e 'const fs=require("fs"),path=require("path"); const bin=fs.realpathSync(process.argv[1]); console.log(require(path.join(path.dirname(bin), "..", "package.json")).version)' "$circuitry_bin" 2>/dev/null || true)"
 case "$circuitry_version" in
-  0.4.[4-9]|0.[5-9].*|[1-9].*) ;;
-  *) echo "Zinc requires circuitry >= 0.4.4; found ${circuitry_version:-unknown}" >&2; exit 1 ;;
+  0.4.[5-9]|0.[5-9].*|[1-9].*) ;;
+  *) echo "Zinc requires circuitry >= 0.4.5; found ${circuitry_version:-unknown}" >&2; exit 1 ;;
 esac
 
 cd "$root"
@@ -42,6 +42,27 @@ install -m 0644 "$root/stock/prompts/bash-guide.md" "$share_dir/prompts/bash-gui
 if [[ ! -f "$config_file" ]]; then
 cat > "$config_file" <<EOF_CONFIG
 default_model: qwen-heretic-mtp
+scope: project
+
+tools:
+  bash: build
+  graph_runs: ask
+
+confirm_commands:
+  - rm
+  - rmdir
+  - sudo
+  - su
+  - chmod
+  - chown
+  - dd
+  - mkfs
+  - mount
+  - umount
+  - kill
+  - pkill
+  - shutdown
+  - reboot
 
 paths:
   graph: $share_dir/graphs/zinc-loop.circuitry.yaml
@@ -64,7 +85,6 @@ runtime:
   resource_read_max_bytes: 33554432
   input_text_file_max_bytes: 8388608
   input_file_max_bytes: 33554432
-  graph_run_policy: ask
 
 provider:
   base_url: http://127.0.0.1:30000/v1

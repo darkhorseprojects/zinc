@@ -13,7 +13,7 @@ Principles:
 - Empty stdout is not a conclusion. Check exit code, stderr, byte count, headers, or alternate command shape.
 - For surprising results, run one or two focused diagnostics before answering.
 - Report exact observations: command, exit status, relevant stdout/stderr, and what it implies.
-- Avoid destructive commands unless explicitly requested.
+- Avoid write/edit command heads unless explicitly requested.
 
 Files and repo:
 - `pwd && ls -la`

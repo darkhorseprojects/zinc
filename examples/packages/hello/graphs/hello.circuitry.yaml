@@ -1,0 +1,22 @@
+circuitry: "0.4"
+title: Hello package
+inputs:
+  name:
+    type: text
+    default: friend
+entry: hello
+resources:
+  name:
+    type: input
+    from: name
+  style:
+    type: text
+    uri: prompt:hello-style
+  hello:
+    type: agent
+    inputs: [style, name]
+    output:
+      greeting: str
+outputs:
+  greeting:
+    from: hello.greeting

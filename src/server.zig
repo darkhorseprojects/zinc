@@ -63,36 +63,73 @@ pub fn stop(allocator: Allocator, home: []const u8) !void {
 
 pub fn doctor(allocator: Allocator, io: std.Io, home: []const u8) !void {
     std.debug.print("Zinc doctor\n\n", .{});
-    std.debug.print("✓ zinc binary\n", .{});
+
+    std.debug.print("Zinc\n", .{});
+    std.debug.print("  ✓ zn binary\n", .{});
+    std.debug.print("  version: 0.3.4\n", .{});
 
     const config_path = try layout.configPath(allocator, home);
     defer allocator.free(config_path);
     const has_config = files.existsPath(config_path);
-    std.debug.print("{s} config: {s}\n", .{ mark(has_config), config_path });
-
-    const circuitry_ok = commandOk(allocator, io, &.{"circuitry"});
-    std.debug.print("{s} circuitry CLI\n", .{mark(circuitry_ok)});
+    std.debug.print("\nConfig\n", .{});
+    std.debug.print("  {s} config file: {s}\n", .{ mark(has_config), config_path });
 
     const model_id = config.resolveConfiguredModelId(allocator, io, home) catch null;
     defer if (model_id) |id| allocator.free(id);
     const profile = if (model_id) |id| config.loadRuntimeProfile(allocator, io, home, id) catch null else null;
+    std.debug.print("  {s} config parses\n", .{mark(profile != null)});
+
+    std.debug.print("\nCircuitry\n", .{});
+    const circuitry_path = commandOutput(allocator, io, &.{ "sh", "-lc", "command -v circuitry" }) catch null;
+    defer if (circuitry_path) |p| allocator.free(p);
+    std.debug.print("  {s} CLI exists{s}{s}\n", .{ mark(circuitry_path != null), if (circuitry_path != null) ": " else "", if (circuitry_path) |p| std.mem.trim(u8, p, " \t\r\n") else "" });
+    const circuitry_version = commandOutput(allocator, io, &.{ "sh", "-lc", "node -e 'const fs=require(\"fs\"),path=require(\"path\"); const bin=fs.realpathSync(process.argv[1]); console.log(require(path.join(path.dirname(bin), \"..\", \"package.json\")).version)' $(command -v circuitry)" }) catch null;
+    defer if (circuitry_version) |v| allocator.free(v);
+    const version_ok = if (circuitry_version) |v| compatibleCircuitry(std.mem.trim(u8, v, " \t\r\n")) else false;
+    std.debug.print("  {s} compatible version{s}{s}\n", .{ mark(version_ok), if (circuitry_version != null) ": " else "", if (circuitry_version) |v| std.mem.trim(u8, v, " \t\r\n") else "" });
+    if (!version_ok) std.debug.print("  Fix: install @darkhorseprojects/circuitry >= 0.4.5.\n", .{});
+
+    std.debug.print("\nFiles\n", .{});
+    const global_pkg = try layout.sharePath(allocator, home, "packages");
+    defer allocator.free(global_pkg);
+    std.debug.print("  {s} global package dir writable: {s}\n", .{ mark(writableDir(global_pkg)), global_pkg });
+    std.debug.print("  {s} project package dir writable: .zinc/packages\n", .{mark(writableDir(".zinc/packages"))});
+    std.debug.print("  {s} sessions dir writable: .zinc/sessions\n", .{mark(writableDir(".zinc/sessions"))});
+    const prompt_a = try layout.sharePath(allocator, home, "prompts/bash-guide.md");
+    defer allocator.free(prompt_a);
+    const prompt_b = try layout.sharePath(allocator, home, "prompts/circuitry-author.md");
+    defer allocator.free(prompt_b);
+    std.debug.print("  {s} stock prompt: bash-guide\n", .{mark(files.existsPath(prompt_a))});
+    std.debug.print("  {s} stock prompt: circuitry-author\n", .{mark(files.existsPath(prompt_b))});
+
     if (profile) |p| {
         defer p.deinit(allocator);
-        std.debug.print("✓ provider endpoint configured: {s}\n", .{p.provider.base_url});
-        const reachable = probe(allocator, io, p.provider.base_url) != 0;
-        std.debug.print("{s} provider reachable\n", .{mark(reachable)});
+        std.debug.print("\nGraphs\n", .{});
         const graph_ok = files.existsPath(p.paths.graph);
         const compact_ok = files.existsPath(p.paths.compaction_graph);
-        std.debug.print("{s} stock graph: zinc-loop\n", .{mark(graph_ok)});
-        std.debug.print("{s} stock graph: zinc-compaction\n", .{mark(compact_ok)});
-        if (!reachable) std.debug.print("\nNext:\n  run `zn serve`\n", .{});
+        std.debug.print("  {s} stock graph: {s}\n", .{ mark(graph_ok), p.paths.graph });
+        std.debug.print("  {s} stock graph: {s}\n", .{ mark(compact_ok), p.paths.compaction_graph });
+        std.debug.print("  {s} circuitry check: zinc-loop\n", .{mark(graph_ok and commandOk(allocator, io, &.{ "circuitry", "check", p.paths.graph }))});
+        std.debug.print("  {s} circuitry check: zinc-compaction\n", .{mark(compact_ok and commandOk(allocator, io, &.{ "circuitry", "check", p.paths.compaction_graph }))});
+
+        std.debug.print("\nProvider and model\n", .{});
+        std.debug.print("  ✓ provider configured: {s}\n", .{p.provider.base_url});
+        std.debug.print("  ✓ model id: {s}\n", .{p.model.id});
+        std.debug.print("  {s} llama.cpp loader configured\n", .{mark(std.mem.eql(u8, p.model.loader.engine, "llama.cpp"))});
+        std.debug.print("  {s} HF model configured: {s}/{s}\n", .{ mark(p.model.loader.hf_repo.len != 0 and p.model.loader.hf_file.len != 0), p.model.loader.hf_repo, p.model.loader.hf_file });
+        std.debug.print("  {s} required command: git\n", .{mark(commandOk(allocator, io, &.{ "git", "--version" }))});
+        std.debug.print("  {s} required command: cmake\n", .{mark(commandOk(allocator, io, &.{ "cmake", "--version" }))});
+        std.debug.print("  {s} required command: hf\n", .{mark(commandOk(allocator, io, &.{ "hf", "--version" }))});
+        const reachable = probe(allocator, io, p.provider.base_url) != 0;
+        std.debug.print("  {s} model server reachable\n", .{mark(reachable)});
+        if (!reachable) std.debug.print("\nFix: run `zn serve` to build/download and start the configured local model server.\n", .{});
     } else {
-        std.debug.print("✗ runtime config\n", .{});
+        std.debug.print("\nFix: create a valid config at {s}. If Zinc is installed, rerun scripts/install-linux.sh.\n", .{config_path});
     }
 
     const pid_path = try layout.statePath(allocator, home, "server.pid");
     defer allocator.free(pid_path);
-    if (try livePid(allocator, pid_path)) |pid| std.debug.print("✓ Zinc-managed server: pid {d}\n", .{pid}) else std.debug.print("✗ Zinc-managed server\n", .{});
+    if (try livePid(allocator, pid_path)) |pid| std.debug.print("\nServer\n  ✓ Zinc-managed llama-server: pid {d}\n", .{pid}) else std.debug.print("\nServer\n  - Zinc-managed llama-server is not running\n", .{});
 }
 
 fn ensureEngine(allocator: Allocator, io: std.Io, home: []const u8, profile: *const config.RuntimeProfile) ![]u8 {
@@ -207,6 +244,36 @@ fn commandOk(allocator: Allocator, io: std.Io, argv: []const []const u8) bool {
     defer allocator.free(result.stdout);
     defer allocator.free(result.stderr);
     return result.term == .exited and result.term.exited == 0;
+}
+
+fn commandOutput(allocator: Allocator, io: std.Io, argv: []const []const u8) ![]u8 {
+    const result = try std.process.run(allocator, io, .{ .argv = argv, .stdout_limit = .limited(4096), .stderr_limit = .limited(4096) });
+    defer allocator.free(result.stdout);
+    defer allocator.free(result.stderr);
+    if (result.term != .exited or result.term.exited != 0) return error.CommandFailed;
+    return allocator.dupe(u8, result.stdout);
+}
+
+fn compatibleCircuitry(version: []const u8) bool {
+    if (std.mem.startsWith(u8, version, "0.4.")) {
+        const patch = std.fmt.parseInt(usize, version["0.4.".len..], 10) catch return false;
+        return patch >= 5;
+    }
+    return std.mem.startsWith(u8, version, "0.5.") or (version.len != 0 and version[0] >= '1' and version[0] <= '9');
+}
+
+fn writableDir(path: []const u8) bool {
+    files.mkdirP(path) catch return false;
+    var buffer: [std.Io.Dir.max_path_bytes:0]u8 = undefined;
+    if (path.len + "/.zinc-doctor-write-test".len >= buffer.len) return false;
+    @memcpy(buffer[0..path.len], path);
+    @memcpy(buffer[path.len .. path.len + "/.zinc-doctor-write-test".len], "/.zinc-doctor-write-test");
+    buffer[path.len + "/.zinc-doctor-write-test".len] = 0;
+    const fd = std.os.linux.open(&buffer, .{ .ACCMODE = .WRONLY, .CREAT = true, .TRUNC = true }, 0o600);
+    if (std.os.linux.errno(fd) != .SUCCESS) return false;
+    _ = std.os.linux.close(@intCast(fd));
+    _ = std.os.linux.unlink(&buffer);
+    return true;
 }
 
 fn probe(allocator: Allocator, io: std.Io, base_url: []const u8) u16 {

@@ -59,6 +59,17 @@ pub const RuntimeReadContext = struct {
     }
 };
 
+pub const BashAllowance = struct {
+    head: []u8,
+    remaining: usize,
+
+    pub fn deinit(self: BashAllowance, allocator: Allocator) void {
+        allocator.free(self.head);
+    }
+};
+
+pub const BashAllowances = std.ArrayList(BashAllowance);
+
 pub const RunContext = struct {
     allocator: Allocator,
     io: std.Io,
@@ -70,4 +81,5 @@ pub const RunContext = struct {
     log: *sessions.Log,
     inputs: []const BoundInput,
     frame: ExecutionFrame,
+    bash_allowances: *BashAllowances,
 };

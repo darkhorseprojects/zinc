@@ -9,6 +9,7 @@ const default_base_url = "http://127.0.0.1:30000/v1";
 const default_authorization = "Bearer zinc";
 const default_model_id = "qwen-heretic-mtp";
 const default_served_model = "qwen3.6-27b-heretic-mtp-q3_k_s";
+const default_confirm_commands = &.{ "rm", "rmdir", "sudo", "su", "chmod", "chown", "dd", "mkfs", "mount", "umount", "kill", "pkill", "shutdown", "reboot" };
 
 pub const RuntimePaths = struct {
     graph: []u8,
@@ -19,7 +20,13 @@ pub const RuntimePaths = struct {
     }
 };
 
+pub const Scope = enum { readonly, project, open };
+pub const BashMode = enum { inspect, build, open };
+
 pub const RuntimeSettings = struct {
+    scope: Scope,
+    bash_mode: BashMode,
+    confirm_commands: [][]u8,
     provider_max_retries: usize,
     tool_max_turns: usize,
     compaction_threshold_percent: usize,
@@ -36,10 +43,12 @@ pub const RuntimeSettings = struct {
     resource_read_max_bytes: usize,
     input_text_file_max_bytes: usize,
     input_file_max_bytes: usize,
-    graph_run_policy: []u8,
+    graph_runs: []u8,
 
     pub fn deinit(self: RuntimeSettings, allocator: Allocator) void {
-        allocator.free(self.graph_run_policy);
+        for (self.confirm_commands) |command| allocator.free(command);
+        allocator.free(self.confirm_commands);
+        allocator.free(self.graph_runs);
     }
 };
 pub const ProviderConfig = struct {
@@ -256,6 +265,9 @@ pub fn loadRuntimeProfile(allocator: Allocator, io: std.Io, home: []const u8, mo
     const paths = try runtimePaths(allocator, home, cfg);
     errdefer paths.deinit(allocator);
     const runtime = RuntimeSettings{
+        .scope = try parseScope(cfg.value(&.{"scope"})),
+        .bash_mode = try parseBashMode(cfg.value(&.{ "tools", "bash" })),
+        .confirm_commands = try cfg.stringList(allocator, &.{"confirm_commands"}, default_confirm_commands),
         .provider_max_retries = try cfg.usizeValue(&.{ "runtime", "provider_max_retries" }, 5),
         .tool_max_turns = try cfg.usizeValue(&.{ "runtime", "tool_max_turns" }, 12),
         .compaction_threshold_percent = try cfg.usizeValue(&.{ "runtime", "compaction_threshold_percent" }, 70),
@@ -272,7 +284,7 @@ pub fn loadRuntimeProfile(allocator: Allocator, io: std.Io, home: []const u8, mo
         .resource_read_max_bytes = try cfg.usizeValue(&.{ "runtime", "resource_read_max_bytes" }, 32 * 1024 * 1024),
         .input_text_file_max_bytes = try cfg.usizeValue(&.{ "runtime", "input_text_file_max_bytes" }, 8 * 1024 * 1024),
         .input_file_max_bytes = try cfg.usizeValue(&.{ "runtime", "input_file_max_bytes" }, 32 * 1024 * 1024),
-        .graph_run_policy = try cfg.string(allocator, &.{ "runtime", "graph_run_policy" }, "ask"),
+        .graph_runs = try cfg.string(allocator, &.{ "tools", "graph_runs" }, "ask"),
     };
     const provider = try loadProvider(allocator, cfg);
     errdefer provider.deinit(allocator);
@@ -320,6 +332,22 @@ pub fn configGet(allocator: Allocator, io: std.Io, home: []const u8, path: []con
     defer cfg.deinit(allocator);
     const value = cfg.value(path) orelse return error.ConfigKeyNotFound;
     return allocator.dupe(u8, scalarText(value) orelse return error.ConfigKeyNotFound);
+}
+
+fn parseScope(value: ?std.json.Value) !Scope {
+    const raw = scalarText(value) orelse return .project;
+    if (std.mem.eql(u8, raw, "readonly")) return .readonly;
+    if (std.mem.eql(u8, raw, "project")) return .project;
+    if (std.mem.eql(u8, raw, "open")) return .open;
+    return error.InvalidConfigValue;
+}
+
+fn parseBashMode(value: ?std.json.Value) !BashMode {
+    const raw = scalarText(value) orelse return .build;
+    if (std.mem.eql(u8, raw, "inspect")) return .inspect;
+    if (std.mem.eql(u8, raw, "build")) return .build;
+    if (std.mem.eql(u8, raw, "open")) return .open;
+    return error.InvalidConfigValue;
 }
 
 fn loadProvider(allocator: Allocator, cfg: Config) !ProviderConfig {

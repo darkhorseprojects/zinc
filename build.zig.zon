@@ -1,6 +1,6 @@
 .{
     .name = .zinc,
-    .version = "0.3.3",
+    .version = "0.3.4",
     .fingerprint = 0x4d05198031a1f081,
     .minimum_zig_version = "0.16.0",
     .dependencies = .{},
@@ -10,6 +10,7 @@
         "src",
         "stock",
         "scripts",
+        "examples",
         "README.md",
         "LICENSE",
     },

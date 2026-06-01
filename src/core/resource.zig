@@ -52,7 +52,7 @@ pub fn runChildGraph(ctx: *RunContext, graph_path: []const u8, entry_override: ?
     defer child_graph.deinit(ctx.allocator);
     try graph.validate(child_graph);
     const child_entry = graph.entryResourceId(child_graph, entry_override) orelse return error.InvalidCircuitryGraph;
-    var child_ctx = RunContext{ .allocator = ctx.allocator, .io = ctx.io, .home = ctx.home, .profile = ctx.profile, .graph_path = graph_path, .graph = &child_graph, .session = ctx.session, .log = ctx.log, .inputs = inputs, .frame = ctx.frame.child(child_entry) };
+    var child_ctx = RunContext{ .allocator = ctx.allocator, .io = ctx.io, .home = ctx.home, .profile = ctx.profile, .graph_path = graph_path, .graph = &child_graph, .session = ctx.session, .log = ctx.log, .inputs = inputs, .frame = ctx.frame.child(child_entry), .bash_allowances = ctx.bash_allowances };
     return resolve(&child_ctx, child_entry);
 }
 
@@ -174,7 +174,7 @@ fn executeTool(ctx: *RunContext, read_ctx: uri.Context, spec: agent.Spec, call: 
 }
 
 fn executeRunGraph(ctx: *RunContext, call: provider.ToolCall) !runtime_tools.ToolResult {
-    const decision = try approval.decide(ctx.profile.runtime.graph_run_policy);
+    const decision = try approval.decide(ctx.profile.runtime.graph_runs);
     if (decision == .deny) return approval.denied(ctx.allocator);
 
     var parsed = try std.json.parseFromSlice(std.json.Value, ctx.allocator, call.arguments, .{});

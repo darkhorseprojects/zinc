@@ -62,7 +62,12 @@ pub fn runGraph(allocator: Allocator, io: std.Io, home: []const u8, graph_path: 
     const bound_inputs = try resource.bindInputs(allocator, loaded_graph, user_prompt, runtime_inputs);
     defer resource.freeBoundInputs(allocator, bound_inputs);
 
-    var ctx = ctxmod.RunContext{ .allocator = allocator, .io = io, .home = home, .profile = &profile, .graph_path = graph_path, .graph = &loaded_graph, .session = session, .log = &log, .inputs = bound_inputs, .frame = .interactive(entry) };
+    var bash_allowances: ctxmod.BashAllowances = .empty;
+    defer {
+        for (bash_allowances.items) |item| item.deinit(allocator);
+        bash_allowances.deinit(allocator);
+    }
+    var ctx = ctxmod.RunContext{ .allocator = allocator, .io = io, .home = home, .profile = &profile, .graph_path = graph_path, .graph = &loaded_graph, .session = session, .log = &log, .inputs = bound_inputs, .frame = .interactive(entry), .bash_allowances = &bash_allowances };
     const result = resource.resolve(&ctx, entry) catch |err| switch (err) {
         error.GraphRunDeniedByUser => {
             _ = try files.linuxWrite(1, "graph run denied\n");
@@ -93,7 +98,12 @@ fn runCompaction(allocator: Allocator, io: std.Io, home: []const u8, profile: *c
     defer log_mut.deinit(allocator);
     const bound = try resource.bindInputs(allocator, loaded_graph, "", &.{});
     defer resource.freeBoundInputs(allocator, bound);
-    var ctx = ctxmod.RunContext{ .allocator = allocator, .io = io, .home = home, .profile = profile, .graph_path = graph_path, .graph = &loaded_graph, .session = session, .log = &log_mut, .inputs = bound, .frame = .maintenance(entry) };
+    var bash_allowances: ctxmod.BashAllowances = .empty;
+    defer {
+        for (bash_allowances.items) |item| item.deinit(allocator);
+        bash_allowances.deinit(allocator);
+    }
+    var ctx = ctxmod.RunContext{ .allocator = allocator, .io = io, .home = home, .profile = profile, .graph_path = graph_path, .graph = &loaded_graph, .session = session, .log = &log_mut, .inputs = bound, .frame = .maintenance(entry), .bash_allowances = &bash_allowances };
     const result = try resource.resolve(&ctx, entry);
     defer result.deinit(allocator);
     const summary = try parseSummary(allocator, result.text);

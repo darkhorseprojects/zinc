@@ -42,7 +42,7 @@ The session is a JSONL log. The default loop is a Circuitry graph. Prompt packs 
 Install Circuitry first, then Zinc:
 
 ```bash
-npm install -g @darkhorseprojects/circuitry@^0.4.4
+npm install -g @darkhorseprojects/circuitry@^0.4.5
 ./scripts/install-linux.sh
 ```
 
@@ -57,12 +57,14 @@ Installs:
 
 The config file is installed with user-only permissions.
 
-Make sure a local model endpoint/server is available for the configured model. Zinc can manage the local server with:
+Zinc is local-first. Model selection is config-driven under `default_model` and `models.*`. To swap models, point a model entry at another compatible local/HF/GGUF file set, set `default_model`, then run the local llama.cpp serve flow:
 
 ```bash
 zn serve
 zn doctor
 ```
+
+`zn serve` reads the same config, builds/uses llama.cpp, downloads missing HF/GGUF files when configured, and serves the selected model locally.
 
 First useful commands:
 
@@ -147,22 +149,31 @@ Zinc resolves these resource types:
 - `run`
 - `agent`
 
-Zinc also provides runtime URI schemes:
+Zinc also provides runtime URI schemes.
 
-```text
-prompt:<id>
-session:current
-session:head
-session:tail
-session:compact-context
-session:current:messages:<index>
-session:current:tools:<tool-call-id>
-sessions:index
-sessions:dir
-input:<id>
-```
+### Prompts
 
-Runtime URIs support `:bytes=<start>-<end>` for bounded reads.
+`prompt:<id>`
+
+### Inputs
+
+`input:<id>`
+
+### Sessions
+
+`session:current`
+`sessions:index`
+`sessions:dir`
+
+### Session objects
+
+`session:current:messages:<index>`
+`session:current:tools:<tool-call-id>`
+`session:compact-context`
+
+### Byte ranges
+
+`<readable-uri>:bytes=<start>-<end>`
 
 ## Tool policy
 
@@ -175,7 +186,29 @@ resources:
     tools: [read, write, edit, bash, run_graph]
 ```
 
-If `bash` is not declared, the agent does not get `bash`. If `run_graph` is not declared, the agent cannot request graph runs. Circuitry defines the allowed tool surface; Zinc implements the concrete behavior.
+If `bash` is not declared, the agent does not get `bash`. If `run_graph` is not declared, the agent cannot request graph runs.
+
+Circuitry decides which tools a graph may request.
+Zinc decides how those tools behave locally.
+
+Minimal local behavior config:
+
+```yaml
+scope: project
+
+tools:
+  bash: build
+  graph_runs: ask
+
+confirm_commands:
+  - rm
+  - sudo
+  - chmod
+```
+
+`scope` is `readonly`, `project`, or `open`. The default `project` scope keeps Zinc-controlled file tools and bash in the current project/workdir where Zinc can cheaply recognize paths. This is not a sandbox.
+
+`tools.bash` is `inspect`, `build`, or `open`. `inspect` allows code-defined inspection command heads and asks for configured confirmations. `build` allows commands except configured confirmations. `open` allows all shell commands.
 
 Builtin Zinc tools:
 
@@ -196,8 +229,8 @@ Zinc is a local runtime. When the active graph declares tools, Zinc can read fil
 `run_graph` is dynamic runtime capability. With the default policy:
 
 ```yaml
-runtime:
-  graph_run_policy: ask
+tools:
+  graph_runs: ask
 ```
 
 Zinc prints the graph, entry, reason, risk, and inputs, then asks:
@@ -223,7 +256,6 @@ A Zinc package is a runtime/ecosystem convention, not Circuitry core. Packages c
 A Zinc package is a directory with `zinc.pkg.yaml` and exported graphs, prompts, and assets.
 
 ```yaml
-zinc: "0.3.3"
 name: browser-repair
 version: "0.1.0"
 exports:
@@ -235,7 +267,15 @@ exports:
     screenshot: assets/example.png
 ```
 
-Packages can be local project packages or global user packages. More default packages and capabilities may ship later without changing the Circuitry format.
+Packages can be local project packages or global user packages. The repository includes `examples/packages/hello`:
+
+```bash
+zn pkg add --local examples/packages/hello
+zn graph list
+zn run hello "Ada"
+```
+
+The hello package exports one graph and one prompt.
 
 ## License
 

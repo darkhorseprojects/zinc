@@ -322,7 +322,7 @@ pub fn updateFromArgs(allocator: Allocator, io: std.Io, home: []const u8, args: 
 
     const installer = try std.fs.path.join(allocator, &.{ source_dir, "scripts", "install-linux.sh" });
     defer allocator.free(installer);
-    try runCommand(allocator, io, &.{ installer }, "failed to install Zinc update");
+    try runCommand(allocator, io, &.{installer}, "failed to install Zinc update");
     std.debug.print("updated Zinc from {s} ({s})\n", .{ zinc_repo_url, target });
 }
 
@@ -340,7 +340,7 @@ fn runCommand(allocator: Allocator, io: std.Io, argv: []const []const u8, contex
     }
     std.debug.print("error: {s}\n", .{context});
     if (std.mem.indexOf(u8, result.stderr, "Authentication failed") != null or std.mem.indexOf(u8, result.stderr, "Repository not found") != null) {
-        std.debug.print("Zinc is private; git must be authenticated for {s}\n", .{zinc_repo_url});
+        std.debug.print("Could not fetch Zinc repository. Check your internet connection, git installation, or repository URL: {s}\n", .{zinc_repo_url});
     }
     if (result.stdout.len != 0) std.debug.print("{s}", .{result.stdout});
     if (result.stderr.len != 0) std.debug.print("{s}", .{result.stderr});
