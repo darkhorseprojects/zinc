@@ -42,6 +42,10 @@ zn pkg add [--local|--global] [--replace] [--yes] <source>
 zn pkg remove [--local|--global] [--yes] <name>
 zn pkg update [--local|--global] [--yes] <name|--all>
 zn pkg show [--local|--global] <name>
+zn pkg exec <package> <script>
+zn pkg attach <package>
+zn pkg detach <package>
+zn pkg attachments
 zn serve [model]
 zn doctor
 zn stop
@@ -131,7 +135,7 @@ Zinc only exposes tools declared by the active `model` resource.
 resources:
   assistant:
     model:
-      tools: [read, write, edit, bash, run_graph]
+      tools: [read, write, edit, bash, run_graph, hello_process]
 ```
 
 Builtin Zinc tools:
@@ -141,6 +145,15 @@ Builtin Zinc tools:
 - `edit`
 - `bash`
 - `run_graph`
+
+Package tools are model-callable schemas backed by Zinc-owned handlers:
+
+- `graph`
+- `process`
+- `http`
+- `mcp`
+
+Package scripts are operator commands run with `zn pkg exec`; they are not exposed to the model.
 
 ## Safety
 

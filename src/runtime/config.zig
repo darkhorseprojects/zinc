@@ -3,6 +3,7 @@ const files = @import("../sys/fs.zig");
 const graph = @import("../core/graph.zig");
 const packages = @import("../core/packages.zig");
 const layout = @import("../sys/layout.zig");
+const circuitry = @import("circuitry");
 
 const Allocator = std.mem.Allocator;
 
@@ -457,67 +458,15 @@ fn loadConfig(allocator: Allocator, io: std.Io, home: []const u8) !Config {
 fn loadConfigValue(allocator: Allocator, io: std.Io, path: []const u8, json_texts: *std.ArrayList([]u8), parsed: *std.ArrayList(std.json.Parsed(std.json.Value))) !void {
     if (!files.existsPath(path)) return;
 
-    const cache_path = blk: {
-        if (std.mem.endsWith(u8, path, ".yaml")) {
-            break :blk try std.fmt.allocPrint(allocator, "{s}.json", .{path[0 .. path.len - ".yaml".len]});
-        } else if (std.mem.endsWith(u8, path, ".yml")) {
-            break :blk try std.fmt.allocPrint(allocator, "{s}.json", .{path[0 .. path.len - ".yml".len]});
-        } else {
-            break :blk try std.fmt.allocPrint(allocator, "{s}.json", .{path});
-        }
-    };
-    defer allocator.free(cache_path);
-
-    var cache_valid = false;
-    if (files.existsPath(cache_path)) {
-        var dir = std.Io.Dir.cwd();
-        const yaml_stat = dir.statFile(io, path, .{}) catch null;
-        const cache_stat = dir.statFile(io, cache_path, .{}) catch null;
-        if (yaml_stat != null and cache_stat != null) {
-            if (cache_stat.?.mtime.nanoseconds >= yaml_stat.?.mtime.nanoseconds) {
-                cache_valid = true;
-            }
-        }
-    }
-
-    const json = if (cache_valid)
-        try files.readLimited(allocator, cache_path, 16 * 1024 * 1024)
-    else blk: {
-        const fresh_json = try parseYamlFileToJSON(allocator, io, path);
-        errdefer allocator.free(fresh_json);
-        files.write(cache_path, fresh_json) catch {};
-        break :blk fresh_json;
-    };
+    var document = try circuitry.loadYamlFile(allocator, io, path);
+    defer document.deinit();
+    const json = try circuitry.value.writeJsonLike(allocator, &document.root);
     defer allocator.free(json);
 
     var p = try std.json.parseFromSlice(std.json.Value, allocator, json, .{});
     errdefer p.deinit();
     try json_texts.append(allocator, try allocator.dupe(u8, json));
     try parsed.append(allocator, p);
-}
-
-fn parseYamlFileToJSON(allocator: Allocator, io: std.Io, path: []const u8) ![]u8 {
-    const result = std.process.run(allocator, io, .{
-        .argv = &.{ "circuitry", "parse", path },
-        .stderr_limit = .limited(64 * 1024),
-        .stdout_limit = .limited(16 * 1024 * 1024),
-    }) catch |err| switch (err) {
-        error.FileNotFound => {
-            std.debug.print("error: 'circuitry' command not found. Please ensure circuitry is installed and in your PATH.\n", .{});
-            std.debug.print("To install circuitry, run:\n  npm install -g @darkhorseprojects/circuitry\n\n", .{});
-            return error.CircuitryNotFound;
-        },
-        else => return err,
-    };
-    defer {
-        allocator.free(result.stdout);
-        allocator.free(result.stderr);
-    }
-    if (result.term != .exited or result.term.exited != 0) {
-        std.debug.print("circuitry YAML parse failed for config:\n{s}\n", .{result.stderr});
-        return error.CircuitryParseFailed;
-    }
-    return allocator.dupe(u8, result.stdout);
 }
 
 fn findPath(root: std.json.Value, path: []const []const u8) ?std.json.Value {

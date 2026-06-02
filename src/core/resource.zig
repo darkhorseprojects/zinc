@@ -107,18 +107,21 @@ fn resolveModel(ctx: *RunContext, id: []const u8, res: graph.Resource) !Resolved
     const tool_names = try graph.readTools(ctx.allocator, ctx.graph.*, id);
     defer graph.freeStringList(ctx.allocator, tool_names);
     for (tool_names) |tool| {
-        if (!runtime_tools.contains(tool)) {
-            std.debug.print("error: unsupported Zinc tool declared by graph: {s}\n", .{tool});
-            return error.UserError;
+        if (runtime_tools.contains(tool)) continue;
+        if (try packages.findTool(ctx.allocator, ctx.io, ctx.home, tool)) |package_tool| {
+            package_tool.deinit(ctx.allocator);
+            continue;
         }
+        std.debug.print("error: unsupported Zinc tool declared by graph: {s}\n", .{tool});
+        return error.UserError;
     }
-    const tools_json = try runtime_tools.schemaJson(ctx.allocator, tool_names);
+    const tools_json = try schemaJson(ctx, tool_names);
     defer ctx.allocator.free(tools_json);
 
     var system: std.ArrayList(u8) = .empty;
     defer system.deinit(ctx.allocator);
     try system.print(ctx.allocator, "Identity: {s}\n\n{s}", .{ identity, instructions });
-    try appendToolPromptSections(ctx.allocator, &system, tool_names);
+    try appendToolPromptSections(ctx, &system, tool_names);
     const catalog = try runtimeUriCatalog(ctx.allocator);
     defer ctx.allocator.free(catalog);
     try system.print(ctx.allocator, "\n\n{s}", .{catalog});
@@ -170,11 +173,110 @@ fn executeTool(ctx: *RunContext, read_ctx: uri.Context, spec: model.Spec, call: 
         error.OutOfMemory, error.GraphRunDeniedByUser => err,
         else => tool_exec.toolError(ctx.allocator, call, @errorName(err), "graph run request failed"),
     };
+    if (!runtime_tools.contains(call.name)) return executePackageTool(ctx, call) catch |err| switch (err) {
+        error.OutOfMemory => err,
+        else => tool_exec.toolError(ctx.allocator, call, @errorName(err), "package tool execution failed"),
+    };
     return tool_exec.execute(ctx, read_ctx, spec, call) catch |err| switch (err) {
         error.ToolNotHandled => tool_exec.toolError(ctx.allocator, call, "ToolNotExecutable", "tool has no runtime execution path"),
         error.OutOfMemory => err,
         else => tool_exec.toolError(ctx.allocator, call, @errorName(err), "tool execution failed"),
     };
+}
+
+fn executePackageTool(ctx: *RunContext, call: provider.ToolCall) !runtime_tools.ToolResult {
+    var tool = (try packages.findTool(ctx.allocator, ctx.io, ctx.home, call.name)) orelse return error.UnknownTool;
+    defer tool.deinit(ctx.allocator);
+    try runtime_tools.validatePackageArguments(ctx.allocator, tool, call.arguments);
+    return switch (tool.handler) {
+        .graph => |h| executeGraphTool(ctx, tool, h.graph, h.export_name, call),
+        .process => |h| executeProcessTool(ctx, tool, h.command, call.arguments),
+        .http => |h| executeHttpTool(ctx, h.url, h.method, call.arguments),
+        .mcp => |h| executeMcpTool(ctx, tool, h.command, h.tool, call.arguments),
+    };
+}
+
+fn executeGraphTool(ctx: *RunContext, tool: packages.Tool, graph_spec: []const u8, selected_export: []const u8, call: provider.ToolCall) !runtime_tools.ToolResult {
+    const graph_path = if (std.mem.startsWith(u8, graph_spec, "graph:"))
+        try packages.resolveGraph(ctx.allocator, ctx.io, ctx.home, graph_spec["graph:".len..])
+    else if (std.fs.path.isAbsolute(graph_spec))
+        try ctx.allocator.dupe(u8, graph_spec)
+    else
+        try std.fs.path.join(ctx.allocator, &.{ tool.package_dir, graph_spec });
+    defer ctx.allocator.free(graph_path);
+    const child_graph = try graph.load(ctx.allocator, ctx.io, graph_path);
+    defer child_graph.deinit(ctx.allocator);
+    try graph.validate(child_graph);
+    var parsed = try std.json.parseFromSlice(std.json.Value, ctx.allocator, call.arguments, .{});
+    defer parsed.deinit();
+    const child_inputs = try inputsFromToolObject(ctx.allocator, child_graph, selected_export, parsed.value);
+    defer freeBoundInputs(ctx.allocator, child_inputs);
+    const result = try runChildGraph(ctx, graph_path, selected_export, child_inputs);
+    defer result.deinit(ctx.allocator);
+    return .{ .content = try ctx.allocator.dupe(u8, result.text), .is_error = false };
+}
+
+fn executeProcessTool(ctx: *RunContext, tool: packages.Tool, command: []const u8, arguments: []const u8) !runtime_tools.ToolResult {
+    const result = try runWithInput(ctx.allocator, ctx.io, &.{command}, .{ .path = tool.package_dir }, arguments, 1024 * 1024);
+    defer ctx.allocator.free(result.stderr);
+    if (result.term != .exited or result.term.exited != 0) {
+        ctx.allocator.free(result.stdout);
+        return .{ .content = try ctx.allocator.dupe(u8, result.stderr), .is_error = true };
+    }
+    return .{ .content = result.stdout, .is_error = false };
+}
+
+fn executeHttpTool(ctx: *RunContext, url: []const u8, method: []const u8, arguments: []const u8) !runtime_tools.ToolResult {
+    var response = std.Io.Writer.Allocating.init(ctx.allocator);
+    defer response.deinit();
+    var client = std.http.Client{ .allocator = ctx.allocator, .io = ctx.io };
+    defer client.deinit();
+    const headers = [_]std.http.Header{.{ .name = "content-type", .value = "application/json" }};
+    const result = try client.fetch(.{ .location = .{ .url = url }, .method = if (std.mem.eql(u8, method, "GET")) .GET else .POST, .payload = if (std.mem.eql(u8, method, "GET")) null else arguments, .extra_headers = &headers, .response_writer = &response.writer });
+    return .{ .content = try ctx.allocator.dupe(u8, response.written()), .is_error = @intFromEnum(result.status) < 200 or @intFromEnum(result.status) >= 300 };
+}
+
+fn executeMcpTool(ctx: *RunContext, tool: packages.Tool, command: []const u8, mcp_tool: []const u8, arguments: []const u8) !runtime_tools.ToolResult {
+    var stdin: std.ArrayList(u8) = .empty;
+    defer stdin.deinit(ctx.allocator);
+    try stdin.appendSlice(ctx.allocator, "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"initialize\",\"params\":{\"protocolVersion\":\"2025-03-26\",\"capabilities\":{},\"clientInfo\":{\"name\":\"zinc\",\"version\":\"0.5.0\"}}}\n");
+    try stdin.appendSlice(ctx.allocator, "{\"jsonrpc\":\"2.0\",\"method\":\"notifications/initialized\"}\n");
+    try stdin.appendSlice(ctx.allocator, "{\"jsonrpc\":\"2.0\",\"id\":2,\"method\":\"tools/call\",\"params\":{\"name\":");
+    try files.appendJsonString(ctx.allocator, &stdin, mcp_tool);
+    try stdin.appendSlice(ctx.allocator, ",\"arguments\":");
+    try stdin.appendSlice(ctx.allocator, arguments);
+    try stdin.appendSlice(ctx.allocator, "}}\n");
+    const result = try runWithInput(ctx.allocator, ctx.io, &.{command}, .{ .path = tool.package_dir }, stdin.items, 1024 * 1024);
+    defer ctx.allocator.free(result.stderr);
+    if (result.term != .exited or result.term.exited != 0) {
+        ctx.allocator.free(result.stdout);
+        return .{ .content = try ctx.allocator.dupe(u8, result.stderr), .is_error = true };
+    }
+    return .{ .content = result.stdout, .is_error = false };
+}
+
+fn runWithInput(allocator: Allocator, io: std.Io, argv: []const []const u8, cwd: std.process.Child.Cwd, stdin: []const u8, limit: usize) !std.process.RunResult {
+    var child = try std.process.spawn(io, .{ .argv = argv, .cwd = cwd, .stdin = .pipe, .stdout = .pipe, .stderr = .pipe });
+    defer child.kill(io);
+    try child.stdin.?.writeStreamingAll(io, stdin);
+    child.stdin.?.close(io);
+    child.stdin = null;
+
+    var buffer: std.Io.File.MultiReader.Buffer(2) = undefined;
+    var multi: std.Io.File.MultiReader = undefined;
+    multi.init(allocator, io, buffer.toStreams(), &.{ child.stdout.?, child.stderr.? });
+    defer multi.deinit();
+    const stdout_reader = multi.reader(0);
+    const stderr_reader = multi.reader(1);
+    while (multi.fill(64, .none)) |_| {
+        if (stdout_reader.buffered().len > limit or stderr_reader.buffered().len > limit) return error.StreamTooLong;
+    } else |err| switch (err) {
+        error.EndOfStream => {},
+        else => |e| return e,
+    }
+    try multi.checkAnyError();
+    const term = try child.wait(io);
+    return .{ .term = term, .stdout = try multi.toOwnedSlice(0), .stderr = try multi.toOwnedSlice(1) };
 }
 
 fn executeRunGraph(ctx: *RunContext, call: provider.ToolCall) !runtime_tools.ToolResult {
@@ -325,10 +427,38 @@ fn maxTokens(ctx: RunContext, reasoning: isize) ?usize {
     };
 }
 
-fn appendToolPromptSections(allocator: Allocator, prompt: *std.ArrayList(u8), tool_names: []const []const u8) !void {
+fn schemaJson(ctx: *RunContext, tool_names: []const []const u8) ![]u8 {
+    var out: std.ArrayList(u8) = .empty;
+    errdefer out.deinit(ctx.allocator);
+    try out.append(ctx.allocator, '[');
+    for (tool_names, 0..) |tool, i| {
+        if (i != 0) try out.append(ctx.allocator, ',');
+        if (runtime_tools.contains(tool)) {
+            const one = try runtime_tools.schemaJson(ctx.allocator, &.{tool});
+            defer ctx.allocator.free(one);
+            try out.appendSlice(ctx.allocator, one[1 .. one.len - 1]);
+        } else if (try packages.findTool(ctx.allocator, ctx.io, ctx.home, tool)) |package_tool| {
+            defer package_tool.deinit(ctx.allocator);
+            try runtime_tools.appendPackageSchema(ctx.allocator, &out, package_tool);
+        } else return error.UnknownTool;
+    }
+    try out.append(ctx.allocator, ']');
+    return out.toOwnedSlice(ctx.allocator);
+}
+
+fn appendToolPromptSections(ctx: *RunContext, prompt: *std.ArrayList(u8), tool_names: []const []const u8) !void {
     if (tool_names.len == 0) return;
-    try prompt.appendSlice(allocator, "\n\nTools");
-    for (tool_names) |tool| try prompt.print(allocator, "\n\n- {s}: {s}", .{ tool, runtime_tools.promptSnippet(tool) catch "available tool" });
+    try prompt.appendSlice(ctx.allocator, "\n\nTools");
+    for (tool_names) |tool| {
+        const snippet = if (runtime_tools.contains(tool)) runtime_tools.promptSnippet(tool) catch "available tool" else blk: {
+            if (try packages.findTool(ctx.allocator, ctx.io, ctx.home, tool)) |package_tool| {
+                defer package_tool.deinit(ctx.allocator);
+                break :blk package_tool.prompt;
+            }
+            break :blk "package tool";
+        };
+        try prompt.print(ctx.allocator, "\n\n- {s}: {s}", .{ tool, snippet });
+    }
 }
 fn runtimeUriCatalog(allocator: Allocator) ![]u8 {
     return allocator.dupe(u8, "Runtime reads\n\n- session:current: current session transcript with tool calls and tool results\n- session:last: current session id and path\n- sessions:index: session file index with latest user turns\n- sessions:dir: session directory\n- input:<id>: content for bound graph inputs");

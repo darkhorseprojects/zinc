@@ -3,6 +3,7 @@ const builtin = @import("builtin");
 const config = @import("runtime/config.zig");
 const files = @import("sys/fs.zig");
 const layout = @import("sys/layout.zig");
+const graph = @import("core/graph.zig");
 
 const Allocator = std.mem.Allocator;
 const root = ".local/share/zinc";
@@ -75,7 +76,7 @@ pub fn doctor(allocator: Allocator, io: std.Io, home: []const u8) !void {
 
     std.debug.print("Zinc\n", .{});
     std.debug.print("  ✓ zn binary\n", .{});
-    std.debug.print("  version: 0.4.0\n", .{});
+    std.debug.print("  version: 0.5.0\n", .{});
 
     const config_path = try layout.configPath(allocator, home);
     defer allocator.free(config_path);
@@ -89,14 +90,7 @@ pub fn doctor(allocator: Allocator, io: std.Io, home: []const u8) !void {
     std.debug.print("  {s} config parses\n", .{mark(profile != null)});
 
     std.debug.print("\nCircuitry\n", .{});
-    const circuitry_path = commandOutput(allocator, io, &.{ "sh", "-lc", "command -v circuitry" }) catch null;
-    defer if (circuitry_path) |p| allocator.free(p);
-    std.debug.print("  {s} CLI exists{s}{s}\n", .{ mark(circuitry_path != null), if (circuitry_path != null) ": " else "", if (circuitry_path) |p| std.mem.trim(u8, p, " \t\r\n") else "" });
-    const circuitry_version = commandOutput(allocator, io, &.{ "sh", "-lc", "node -e 'const fs=require(\"fs\"),path=require(\"path\"); const bin=fs.realpathSync(process.argv[1]); console.log(require(path.join(path.dirname(bin), \"..\", \"package.json\")).version)' $(command -v circuitry)" }) catch null;
-    defer if (circuitry_version) |v| allocator.free(v);
-    const version_ok = if (circuitry_version) |v| compatibleCircuitry(std.mem.trim(u8, v, " \t\r\n")) else false;
-    std.debug.print("  {s} compatible version{s}{s}\n", .{ mark(version_ok), if (circuitry_version != null) ": " else "", if (circuitry_version) |v| std.mem.trim(u8, v, " \t\r\n") else "" });
-    if (!version_ok) std.debug.print("  Fix: install @darkhorseprojects/circuitry >= 0.5.0.\n", .{});
+    std.debug.print("  ✓ native circuitry-zig runtime linked\n", .{});
 
     std.debug.print("\nFiles\n", .{});
     const global_pkg = try layout.sharePath(allocator, home, "packages");
@@ -120,9 +114,9 @@ pub fn doctor(allocator: Allocator, io: std.Io, home: []const u8) !void {
         std.debug.print("  {s} stock graph: {s}\n", .{ mark(graph_ok), p.paths.graph });
         std.debug.print("  {s} stock graph: {s}\n", .{ mark(context_ok), p.paths.context_graph });
         std.debug.print("  {s} stock graph: {s}\n", .{ mark(compact_ok), p.paths.compaction_graph });
-        std.debug.print("  {s} circuitry check: zinc-loop\n", .{mark(graph_ok and commandOk(allocator, io, &.{ "circuitry", "check", p.paths.graph }))});
-        std.debug.print("  {s} circuitry check: zinc-context-recovery\n", .{mark(context_ok and commandOk(allocator, io, &.{ "circuitry", "check", p.paths.context_graph }))});
-        std.debug.print("  {s} circuitry check: zinc-compaction\n", .{mark(compact_ok and commandOk(allocator, io, &.{ "circuitry", "check", p.paths.compaction_graph }))});
+        std.debug.print("  {s} circuitry check: zinc-loop\n", .{mark(graph_ok and graphValid(allocator, io, p.paths.graph))});
+        std.debug.print("  {s} circuitry check: zinc-context-recovery\n", .{mark(context_ok and graphValid(allocator, io, p.paths.context_graph))});
+        std.debug.print("  {s} circuitry check: zinc-compaction\n", .{mark(compact_ok and graphValid(allocator, io, p.paths.compaction_graph))});
 
         std.debug.print("\nProvider and model\n", .{});
         std.debug.print("  ✓ provider configured: {s}\n", .{p.provider.base_url});
@@ -253,23 +247,18 @@ fn mark(ok: bool) []const u8 {
     return if (ok) "✓" else "✗";
 }
 
+fn graphValid(allocator: Allocator, io: std.Io, path: []const u8) bool {
+    const loaded = graph.load(allocator, io, path) catch return false;
+    defer loaded.deinit(allocator);
+    graph.validate(loaded) catch return false;
+    return true;
+}
+
 fn commandOk(allocator: Allocator, io: std.Io, argv: []const []const u8) bool {
     const result = std.process.run(allocator, io, .{ .argv = argv, .stdout_limit = .limited(1024), .stderr_limit = .limited(1024) }) catch return false;
     defer allocator.free(result.stdout);
     defer allocator.free(result.stderr);
     return result.term == .exited and result.term.exited == 0;
-}
-
-fn commandOutput(allocator: Allocator, io: std.Io, argv: []const []const u8) ![]u8 {
-    const result = try std.process.run(allocator, io, .{ .argv = argv, .stdout_limit = .limited(4096), .stderr_limit = .limited(4096) });
-    defer allocator.free(result.stdout);
-    defer allocator.free(result.stderr);
-    if (result.term != .exited or result.term.exited != 0) return error.CommandFailed;
-    return allocator.dupe(u8, result.stdout);
-}
-
-fn compatibleCircuitry(version: []const u8) bool {
-    return std.mem.startsWith(u8, version, "0.5.") or (version.len != 0 and version[0] >= '1' and version[0] <= '9');
 }
 
 fn writableDir(path: []const u8) bool {

@@ -1,8 +1,64 @@
 name: hello
-version: "0.1.0"
+version: "0.2.0"
 description: Tiny Zinc package example.
 assets:
   graphs:
     hello: graphs/hello.circuitry.yaml
   prompts:
     hello-style: prompts/hello-style.md
+scripts:
+  check: scripts/check
+tools:
+  hello_graph:
+    label: Hello graph
+    description: Run the packaged hello graph.
+    prompt: run the packaged hello graph
+    parameters:
+      name:
+        type: string
+        description: Name to greet
+        required: true
+    handler:
+      kind: graph
+      graph: graphs/hello.circuitry.yaml
+      export: main
+  hello_process:
+    label: Hello process
+    description: Run the packaged hello process tool.
+    prompt: run the packaged hello process tool
+    parameters:
+      name:
+        type: string
+        description: Name to greet
+        required: true
+    handler:
+      kind: process
+      command:
+        linux: tools/hello-process
+        macos: tools/hello-process
+        windows: tools/hello-process.cmd
+  hello_http:
+    label: Hello HTTP
+    description: Example HTTP tool definition.
+    parameters:
+      name:
+        type: string
+        required: true
+    handler:
+      kind: http
+      method: POST
+      url: http://127.0.0.1:8787/hello
+  hello_mcp:
+    label: Hello MCP
+    description: Example MCP tool definition.
+    parameters:
+      name:
+        type: string
+        required: true
+    handler:
+      kind: mcp
+      command:
+        linux: tools/hello-mcp
+        macos: tools/hello-mcp
+        windows: tools/hello-mcp.cmd
+      tool: hello

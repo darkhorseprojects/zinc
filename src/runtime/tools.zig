@@ -38,6 +38,48 @@ pub fn promptSnippet(name: []const u8) ![]const u8 {
     return (find(name) orelse return error.UnknownTool).prompt;
 }
 
+pub fn appendPackageSchema(allocator: Allocator, out: *std.ArrayList(u8), tool: anytype) !void {
+    try out.appendSlice(allocator, "{\"type\":\"function\",\"function\":{\"name\":");
+    try files.appendJsonString(allocator, out, tool.name);
+    try out.appendSlice(allocator, ",\"description\":");
+    try files.appendJsonString(allocator, out, tool.description);
+    try out.appendSlice(allocator, ",\"parameters\":{\"type\":\"object\",\"properties\":{");
+    for (tool.params, 0..) |param, i| {
+        if (i != 0) try out.append(allocator, ',');
+        try files.appendJsonString(allocator, out, param.name);
+        try out.appendSlice(allocator, ":{\"type\":");
+        try files.appendJsonString(allocator, out, param.kind);
+        if (param.description.len != 0) {
+            try out.appendSlice(allocator, ",\"description\":");
+            try files.appendJsonString(allocator, out, param.description);
+        }
+        try out.append(allocator, '}');
+    }
+    try out.appendSlice(allocator, "},\"required\":[");
+    var required_i: usize = 0;
+    for (tool.params) |param| {
+        if (!param.required) continue;
+        if (required_i != 0) try out.append(allocator, ',');
+        try files.appendJsonString(allocator, out, param.name);
+        required_i += 1;
+    }
+    try out.appendSlice(allocator, "]}}}");
+}
+
+pub fn validatePackageArguments(allocator: Allocator, tool: anytype, arg_text: []const u8) !void {
+    var parsed = try parseArgs(allocator, arg_text);
+    defer parsed.deinit();
+    for (tool.params) |param| {
+        const value = parsed.value.object.get(param.name) orelse {
+            if (param.required) return error.InvalidToolArguments;
+            continue;
+        };
+        if (!std.mem.eql(u8, param.kind, "object") and !std.mem.eql(u8, param.kind, "string")) return error.InvalidToolArguments;
+        if (std.mem.eql(u8, param.kind, "object") and value != .object) return error.InvalidToolArguments;
+        if (std.mem.eql(u8, param.kind, "string") and value != .string) return error.InvalidToolArguments;
+    }
+}
+
 pub fn schemaJson(allocator: Allocator, names: []const []const u8) ![]u8 {
     var out: std.ArrayList(u8) = .empty;
     errdefer out.deinit(allocator);

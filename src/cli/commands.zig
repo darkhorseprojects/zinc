@@ -42,6 +42,10 @@ pub fn usage() void {
         \\  zn pkg remove [--local|--global] [--yes] <name>
         \\  zn pkg update [--local|--global] [--yes] <name|--all>
         \\  zn pkg show [--local|--global] <name>
+        \\  zn pkg exec <package> <script>
+        \\  zn pkg attach <package>
+        \\  zn pkg detach <package>
+        \\  zn pkg attachments
         \\  zn session-dir
         \\
     , .{});
@@ -292,6 +296,36 @@ pub fn packageShow(allocator: Allocator, io: std.Io, home: []const u8, args: []c
     const text = try packages.show(allocator, io, home, name, parsed.scope);
     defer allocator.free(text);
     std.debug.print("{s}", .{text});
+}
+
+pub fn packageExec(allocator: Allocator, io: std.Io, home: []const u8, args: []const []const u8) !void {
+    if (args.len < 2) return error.MissingPackageScript;
+    const out = try packages.execScript(allocator, io, home, args[0], args[1]);
+    defer allocator.free(out);
+    std.debug.print("{s}", .{out});
+}
+
+pub fn packageAttach(allocator: Allocator, io: std.Io, home: []const u8, args: []const []const u8) !void {
+    if (args.len != 1) return error.MissingPackageName;
+    const out = try packages.attach(allocator, io, home, args[0]);
+    defer allocator.free(out);
+    std.debug.print("{s}", .{out});
+}
+
+pub fn packageDetach(allocator: Allocator, io: std.Io, home: []const u8, args: []const []const u8) !void {
+    if (args.len != 1) return error.MissingPackageName;
+    const out = try packages.detach(allocator, io, home, args[0]);
+    defer allocator.free(out);
+    std.debug.print("{s}", .{out});
+}
+
+pub fn packageAttachments(allocator: Allocator, io: std.Io, home: []const u8, args: []const []const u8) !void {
+    _ = io;
+    _ = home;
+    if (args.len != 0) return error.TooManyArguments;
+    const out = try packages.attachments(allocator);
+    defer allocator.free(out);
+    std.debug.print("{s}", .{out});
 }
 
 const zinc_repo_url = "https://github.com/darkhorseprojects/zinc.git";

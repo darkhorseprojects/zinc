@@ -73,6 +73,10 @@ fn packageCommandArgs(allocator: std.mem.Allocator, io: std.Io, home: []const u8
     if (std.mem.eql(u8, sub, "remove")) return commands.packageRemove(allocator, io, home, parts);
     if (std.mem.eql(u8, sub, "update")) return commands.packageUpdate(allocator, io, home, parts);
     if (std.mem.eql(u8, sub, "show")) return commands.packageShow(allocator, io, home, parts);
+    if (std.mem.eql(u8, sub, "exec")) return commands.packageExec(allocator, io, home, parts);
+    if (std.mem.eql(u8, sub, "attach")) return commands.packageAttach(allocator, io, home, parts);
+    if (std.mem.eql(u8, sub, "detach")) return commands.packageDetach(allocator, io, home, parts);
+    if (std.mem.eql(u8, sub, "attachments")) return commands.packageAttachments(allocator, io, home, parts);
     return commands.usage();
 }
 
