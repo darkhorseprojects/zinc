@@ -8,10 +8,24 @@ const circuitry = @import("circuitry");
 const Allocator = std.mem.Allocator;
 
 const default_base_url = "http://127.0.0.1:30000/v1";
+const default_provider_id = "local";
+const default_provider_kind = "local";
 const default_authorization = "Bearer zinc";
+const openai_base_url = "https://api.openai.com/v1";
 const default_model_id = "qwen-heretic-mtp";
 const default_served_model = "qwen3.6-27b-heretic-mtp-q3_k_s";
 const default_confirm_commands = &.{ "rm", "rmdir", "sudo", "su", "chmod", "chown", "dd", "mkfs", "mount", "umount", "kill", "pkill", "shutdown", "reboot" };
+
+var process_env: ?*std.process.Environ.Map = null;
+
+pub fn setEnvironmentMap(env: *std.process.Environ.Map) void {
+    process_env = env;
+}
+
+pub fn envPresent(name: []const u8) bool {
+    const env = process_env orelse return false;
+    return env.get(name) != null;
+}
 
 pub const RuntimePaths = struct {
     graph: []u8,
@@ -55,12 +69,21 @@ pub const RuntimeSettings = struct {
         allocator.free(self.graph_runs);
     }
 };
+pub const ProviderKind = enum { local, openai, openai_compatible };
+
 pub const ProviderConfig = struct {
+    id: []u8,
+    kind: ProviderKind,
+    model: []u8,
     base_url: []u8,
-    authorization: []u8,
+    api_key_env: ?[]u8,
+    authorization: ?[]u8,
     pub fn deinit(self: ProviderConfig, allocator: Allocator) void {
+        allocator.free(self.id);
+        allocator.free(self.model);
         allocator.free(self.base_url);
-        allocator.free(self.authorization);
+        if (self.api_key_env) |value| allocator.free(value);
+        if (self.authorization) |value| allocator.free(value);
     }
 };
 pub const GenerationConfig = struct { temperature: f64, max_tokens: usize };
@@ -290,10 +313,14 @@ pub fn loadRuntimeProfile(allocator: Allocator, io: std.Io, home: []const u8, mo
         .input_file_max_bytes = try cfg.usizeValue(&.{ "runtime", "input_file_max_bytes" }, 32 * 1024 * 1024),
         .graph_runs = try cfg.string(allocator, &.{ "tools", "graph_runs" }, "ask"),
     };
-    const provider = try loadProvider(allocator, cfg);
+    var provider = try loadProvider(allocator, cfg, default_model);
     errdefer provider.deinit(allocator);
-    const model = try loadModel(allocator, cfg, default_model);
+    var model = try loadModel(allocator, cfg, default_model);
     errdefer model.deinit(allocator);
+    if (provider.model.len != 0) {
+        allocator.free(model.model);
+        model.model = try allocator.dupe(u8, provider.model);
+    }
     return .{ .paths = paths, .runtime = runtime, .default_model = default_model, .provider = provider, .model = model };
 }
 
@@ -359,8 +386,99 @@ fn parseBashMode(value: ?std.json.Value) !BashMode {
     return error.InvalidConfigValue;
 }
 
-fn loadProvider(allocator: Allocator, cfg: Config) !ProviderConfig {
-    return .{ .base_url = try cfg.string(allocator, &.{ "provider", "base_url" }, default_base_url), .authorization = try cfg.string(allocator, &.{ "provider", "authorization" }, default_authorization) };
+fn loadProvider(allocator: Allocator, cfg: Config, model_id: []const u8) !ProviderConfig {
+    const provider_id = try selectedProviderId(allocator, cfg, model_id);
+    errdefer allocator.free(provider_id);
+    const kind_text = try providerFieldString(allocator, cfg, provider_id, "kind", if (std.mem.eql(u8, provider_id, "openai")) "openai" else default_provider_kind);
+    defer allocator.free(kind_text);
+    const kind = try parseProviderKind(kind_text);
+    const raw_model = if (try cfg.optionalString(allocator, &.{ "model_bindings", model_id, "model" })) |binding_model| binding_model else try providerFieldString(allocator, cfg, provider_id, "model", "");
+    errdefer allocator.free(raw_model);
+    const raw_base = switch (kind) {
+        .openai => try providerFieldString(allocator, cfg, provider_id, "base_url", openai_base_url),
+        .local => try providerFieldString(allocator, cfg, provider_id, "base_url", default_base_url),
+        .openai_compatible => try requiredProviderFieldString(allocator, cfg, provider_id, "base_url"),
+    };
+    defer allocator.free(raw_base);
+    const base_url = try normalizeBaseUrl(allocator, raw_base);
+    errdefer allocator.free(base_url);
+    const api_key_env = try optionalProviderFieldString(allocator, cfg, provider_id, "api_key_env");
+    errdefer if (api_key_env) |value| allocator.free(value);
+    const authorization = try providerAuthorization(allocator, cfg, provider_id, kind, api_key_env);
+    errdefer if (authorization) |value| allocator.free(value);
+    return .{ .id = provider_id, .kind = kind, .model = raw_model, .base_url = base_url, .api_key_env = api_key_env, .authorization = authorization };
+}
+
+fn selectedProviderId(allocator: Allocator, cfg: Config, model_id: []const u8) ![]u8 {
+    if (try cfg.optionalString(allocator, &.{ "model_bindings", model_id, "provider" })) |provider| return provider;
+    if (try cfg.optionalString(allocator, &.{ "providers", "default" })) |provider| return provider;
+    if (cfg.value(&.{"providers"}) != null) return allocator.dupe(u8, default_provider_id);
+    return allocator.dupe(u8, default_provider_id);
+}
+
+fn providerFieldString(allocator: Allocator, cfg: Config, provider_id: []const u8, field: []const u8, default: []const u8) ![]u8 {
+    if (try cfg.optionalString(allocator, &.{ "providers", provider_id, field })) |value| return value;
+    if (try cfg.optionalString(allocator, &.{ "provider", field })) |value| return value;
+    return allocator.dupe(u8, default);
+}
+
+fn requiredProviderFieldString(allocator: Allocator, cfg: Config, provider_id: []const u8, field: []const u8) ![]u8 {
+    if (try optionalProviderFieldString(allocator, cfg, provider_id, field)) |value| return value;
+    std.debug.print("Provider {s} is kind openai_compatible but has no {s}.\n", .{ provider_id, field });
+    return error.InvalidConfigValue;
+}
+
+fn optionalProviderFieldString(allocator: Allocator, cfg: Config, provider_id: []const u8, field: []const u8) !?[]u8 {
+    if (try cfg.optionalString(allocator, &.{ "providers", provider_id, field })) |value| return value;
+    if (try cfg.optionalString(allocator, &.{ "provider", field })) |value| return value;
+    return null;
+}
+
+fn providerAuthorization(allocator: Allocator, cfg: Config, provider_id: []const u8, kind: ProviderKind, api_key_env: ?[]const u8) !?[]u8 {
+    if (api_key_env) |env_name| {
+        const secret = envValue(allocator, env_name) catch |err| switch (err) {
+            error.EnvironmentVariableMissing => {
+                if (kind == .openai) {
+                    std.debug.print("Provider {s} is missing API key.\n\nExpected environment variable:\n  {s}\n\nFix:\n  export {s}=...\n", .{ provider_id, env_name, env_name });
+                    return error.MissingProviderApiKey;
+                }
+                return null;
+            },
+            else => return err,
+        };
+        defer allocator.free(secret);
+        const authorization = try std.fmt.allocPrint(allocator, "Bearer {s}", .{secret});
+        return authorization;
+    }
+    if (kind == .openai) {
+        std.debug.print("Provider {s} is missing API key.\n\nExpected environment variable:\n  OPENAI_API_KEY\n\nFix:\n  export OPENAI_API_KEY=...\n", .{provider_id});
+        return error.MissingProviderApiKey;
+    }
+    if (try cfg.optionalString(allocator, &.{ "provider", "authorization" })) |legacy| return legacy;
+    if (kind == .local) {
+        const authorization = try allocator.dupe(u8, default_authorization);
+        return authorization;
+    }
+    return null;
+}
+
+fn envValue(allocator: Allocator, name: []const u8) ![]u8 {
+    const env = process_env orelse return error.EnvironmentVariableMissing;
+    const value = env.get(name) orelse return error.EnvironmentVariableMissing;
+    return allocator.dupe(u8, value);
+}
+
+fn parseProviderKind(text: []const u8) !ProviderKind {
+    if (std.mem.eql(u8, text, "local")) return .local;
+    if (std.mem.eql(u8, text, "openai")) return .openai;
+    if (std.mem.eql(u8, text, "openai_compatible")) return .openai_compatible;
+    return error.InvalidConfigValue;
+}
+
+fn normalizeBaseUrl(allocator: Allocator, raw: []const u8) ![]u8 {
+    var end = raw.len;
+    while (end > 0 and raw[end - 1] == '/') end -= 1;
+    return allocator.dupe(u8, raw[0..end]);
 }
 
 fn loadModel(allocator: Allocator, cfg: Config, id: []const u8) !ModelConfig {

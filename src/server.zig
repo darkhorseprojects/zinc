@@ -76,7 +76,7 @@ pub fn doctor(allocator: Allocator, io: std.Io, home: []const u8) !void {
 
     std.debug.print("Zinc\n", .{});
     std.debug.print("  ✓ zn binary\n", .{});
-    std.debug.print("  version: 0.5.0\n", .{});
+    std.debug.print("  version: 0.4.1\n", .{});
 
     const config_path = try layout.configPath(allocator, home);
     defer allocator.free(config_path);
@@ -119,16 +119,22 @@ pub fn doctor(allocator: Allocator, io: std.Io, home: []const u8) !void {
         std.debug.print("  {s} circuitry check: zinc-compaction\n", .{mark(compact_ok and graphValid(allocator, io, p.paths.compaction_graph))});
 
         std.debug.print("\nProvider and model\n", .{});
-        std.debug.print("  ✓ provider configured: {s}\n", .{p.provider.base_url});
+        std.debug.print("  ✓ default provider: {s}\n", .{p.provider.id});
+        std.debug.print("  ✓ provider kind: {s}\n", .{providerKindName(p.provider.kind)});
+        std.debug.print("  ✓ base URL: {s}\n", .{p.provider.base_url});
+        std.debug.print("  ✓ model name: {s}\n", .{p.model.model});
+        if (p.provider.api_key_env) |env_name| {
+            std.debug.print("  {s} api_key_env {s} present\n", .{ mark(envPresent(allocator, env_name)), env_name });
+        } else std.debug.print("  - api_key_env: none\n", .{});
         std.debug.print("  ✓ model id: {s}\n", .{p.model.id});
         std.debug.print("  {s} llama.cpp loader configured\n", .{mark(std.mem.eql(u8, p.model.loader.engine, "llama.cpp"))});
         std.debug.print("  {s} HF model configured: {s}/{s}\n", .{ mark(p.model.loader.hf_repo.len != 0 and p.model.loader.hf_file.len != 0), p.model.loader.hf_repo, p.model.loader.hf_file });
         std.debug.print("  {s} required command: git\n", .{mark(commandOk(allocator, io, &.{ "git", "--version" }))});
         std.debug.print("  {s} required command: cmake\n", .{mark(commandOk(allocator, io, &.{ "cmake", "--version" }))});
         std.debug.print("  {s} required command: hf\n", .{mark(commandOk(allocator, io, &.{ "hf", "--version" }))});
-        const reachable = probe(allocator, io, p.provider.base_url) != 0;
-        std.debug.print("  {s} model server reachable\n", .{mark(reachable)});
-        if (!reachable) std.debug.print("\nFix: run `zn serve` to build/download and start the configured local model server.\n", .{});
+        const reachable = if (p.provider.kind == .local or p.provider.kind == .openai_compatible) probe(allocator, io, p.provider.base_url) != 0 else false;
+        std.debug.print("  {s} local/OpenAI-compatible endpoint reachable\n", .{mark(reachable)});
+        if (!reachable and p.provider.kind == .local) std.debug.print("\nFix: run `zn serve` to build/download and start the configured local model server.\n", .{});
     } else {
         std.debug.print("\nFix: create a valid config at {s}. If Zinc is installed, rerun scripts/install-linux.sh.\n", .{config_path});
     }
@@ -245,6 +251,19 @@ fn waitReady(allocator: Allocator, io: std.Io, base_url: []const u8, pid: std.po
 }
 fn mark(ok: bool) []const u8 {
     return if (ok) "✓" else "✗";
+}
+
+fn providerKindName(kind: config.ProviderKind) []const u8 {
+    return switch (kind) {
+        .local => "local",
+        .openai => "openai",
+        .openai_compatible => "openai_compatible",
+    };
+}
+
+fn envPresent(allocator: Allocator, name: []const u8) bool {
+    _ = allocator;
+    return config.envPresent(name);
 }
 
 fn graphValid(allocator: Allocator, io: std.Io, path: []const u8) bool {

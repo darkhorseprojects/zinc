@@ -1,4 +1,5 @@
 const std = @import("std");
+const circuitry = @import("circuitry");
 const ctxmod = @import("context.zig");
 const provider = @import("../runtime/provider.zig");
 const sessions = @import("../runtime/session.zig");
@@ -15,6 +16,7 @@ pub const Spec = struct {
     tools: []const []const u8,
     tools_json: []const u8,
     json: bool = false,
+    schema: ?*const circuitry.value.Value = null,
     runtime_reads: bool = false,
 };
 
@@ -47,6 +49,13 @@ pub fn run(ctx: *ctxmod.RunContext, messages: *std.ArrayList(provider.Message), 
                 try provider.appendMessage(ctx.allocator, messages, .{ .role = "user", .content = "Return a non-empty final response for this turn." });
                 continue;
             }
+            if (spec.schema) |schema| if (!isValidSchemaJson(ctx.allocator, schema, clean) and retries < ctx.profile.runtime.tool_max_turns) {
+                ctx.allocator.free(clean);
+                retries += 1;
+                try provider.appendMessage(ctx.allocator, messages, .{ .role = "assistant", .content = turn.text });
+                try provider.appendMessage(ctx.allocator, messages, .{ .role = "user", .content = "Return only valid JSON matching the requested Circuitry schema. Do not include markdown or prose." });
+                continue;
+            };
             if (spec.json and !isValidJson(ctx.allocator, clean) and retries < ctx.profile.runtime.tool_max_turns) {
                 ctx.allocator.free(clean);
                 retries += 1;
@@ -81,6 +90,10 @@ pub fn run(ctx: *ctxmod.RunContext, messages: *std.ArrayList(provider.Message), 
 
 pub fn validateJson(allocator: Allocator, text: []const u8) !void {
     if (!isValidJson(allocator, text)) return error.InvalidModelJson;
+}
+
+pub fn validateJsonSchema(allocator: Allocator, schema: *const circuitry.value.Value, text: []const u8) !void {
+    if (!isValidSchemaJson(allocator, schema, text)) return error.InvalidModelJson;
 }
 
 fn finalToolFailure(ctx: *ctxmod.RunContext, messages: *std.ArrayList(provider.Message), spec: Spec, last_failure: []const u8, max_tokens: ?usize, reasoning: ?usize) ![]u8 {
@@ -152,6 +165,42 @@ fn isTransient(err: anyerror) bool {
 
 fn sleepMillis(ms: usize) void {
     std.Io.sleep(std.Options.debug_io, .{ .nanoseconds = @as(i96, @intCast(ms)) * std.time.ns_per_ms }, .awake) catch return;
+}
+
+fn isValidSchemaJson(allocator: Allocator, schema: *const circuitry.value.Value, text: []const u8) bool {
+    const trimmed = std.mem.trim(u8, text, " \t\r\n");
+    var parsed = std.json.parseFromSlice(std.json.Value, allocator, trimmed, .{}) catch return false;
+    defer parsed.deinit();
+    var arena = std.heap.ArenaAllocator.init(allocator);
+    defer arena.deinit();
+    const converted = jsonToCircuitryValue(arena.allocator(), parsed.value) catch return false;
+    return circuitry.schema.validateValue(schema, &converted);
+}
+
+fn jsonToCircuitryValue(allocator: Allocator, value: std.json.Value) !circuitry.value.Value {
+    return switch (value) {
+        .null => .{ .null_val = {} },
+        .bool => |v| .{ .boolean = v },
+        .integer => |v| .{ .integer = v },
+        .float => |v| .{ .float = v },
+        .number_string => |v| .{ .string = try allocator.dupe(u8, v) },
+        .string => |v| .{ .string = try allocator.dupe(u8, v) },
+        .array => |arr| blk: {
+            const items = try allocator.alloc(circuitry.value.Value, arr.items.len);
+            for (arr.items, 0..) |item, i| items[i] = try jsonToCircuitryValue(allocator, item);
+            break :blk .{ .sequence = items };
+        },
+        .object => |obj| blk: {
+            var map: circuitry.value.Mapping = .{};
+            var it = obj.iterator();
+            while (it.next()) |entry| {
+                const key = try allocator.dupe(u8, entry.key_ptr.*);
+                const converted = try jsonToCircuitryValue(allocator, entry.value_ptr.*);
+                try map.put(allocator, key, converted);
+            }
+            break :blk .{ .mapping = map };
+        },
+    };
 }
 
 fn isValidJson(allocator: Allocator, text: []const u8) bool {

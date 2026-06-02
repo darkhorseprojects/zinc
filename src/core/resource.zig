@@ -3,6 +3,7 @@ const model = @import("model.zig");
 const approval = @import("approval.zig");
 const ctxmod = @import("context.zig");
 const files = @import("../sys/fs.zig");
+const config = @import("../runtime/config.zig");
 const graph = @import("graph.zig");
 const packages = @import("packages.zig");
 const provider = @import("../runtime/provider.zig");
@@ -159,11 +160,12 @@ fn resolveModel(ctx: *RunContext, id: []const u8, res: graph.Resource) !Resolved
 
     const reasoning = try reasoningTokens(ctx.*);
     const max_tokens = maxTokens(ctx.*, reasoning);
-    const wants_json = graph.resourceSchemaValue(res) != null;
-    const spec = model.Spec{ .label = id, .system = system.items, .tools = tool_names, .tools_json = tools_json, .json = wants_json, .runtime_reads = true };
+    const schema_value = graph.resourceSchemaValue(res);
+    const wants_json = schema_value != null;
+    const spec = model.Spec{ .label = id, .system = system.items, .tools = tool_names, .tools_json = tools_json, .json = wants_json, .schema = schema_value, .runtime_reads = true };
     const text = try model.run(ctx, &messages, spec, max_tokens, reasoningBudget(reasoning), executeTool);
     errdefer ctx.allocator.free(text);
-    if (wants_json) try model.validateJson(ctx.allocator, text);
+    if (schema_value) |schema| try model.validateJsonSchema(ctx.allocator, schema, text) else if (wants_json) try model.validateJson(ctx.allocator, text);
     if (is_root) try sessions.appendAssistantText(ctx.allocator, ctx.session.path, std.mem.trim(u8, text, " \t\r\n"));
     return .{ .text = text };
 }
@@ -182,6 +184,23 @@ fn executeTool(ctx: *RunContext, read_ctx: uri.Context, spec: model.Spec, call: 
         error.OutOfMemory => err,
         else => tool_exec.toolError(ctx.allocator, call, @errorName(err), "tool execution failed"),
     };
+}
+
+pub fn callPackageTool(allocator: Allocator, io: std.Io, home: []const u8, name: []const u8, arguments: []const u8) !runtime_tools.ToolResult {
+    const model_id = try config.resolveConfiguredModelId(allocator, io, home);
+    defer allocator.free(model_id);
+    const profile = try config.loadRuntimeProfile(allocator, io, home, model_id);
+    defer profile.deinit(allocator);
+    const loaded_graph = try graph.load(allocator, io, profile.paths.graph);
+    defer loaded_graph.deinit(allocator);
+    const session = try sessions.open(allocator, null, false);
+    defer session.deinit(allocator);
+    var log = try sessions.readParsed(allocator, session.path);
+    defer log.deinit(allocator);
+    var bash_allowances: ctxmod.BashAllowances = .empty;
+    defer bash_allowances.deinit(allocator);
+    var ctx = RunContext{ .allocator = allocator, .io = io, .home = home, .profile = &profile, .graph_path = profile.paths.graph, .graph = &loaded_graph, .session = session, .log = &log, .inputs = &.{}, .frame = .maintenance(name), .bash_allowances = &bash_allowances };
+    return executePackageTool(&ctx, .{ .id = "pkg-call", .name = name, .arguments = arguments });
 }
 
 fn executePackageTool(ctx: *RunContext, call: provider.ToolCall) !runtime_tools.ToolResult {
@@ -237,32 +256,33 @@ fn executeHttpTool(ctx: *RunContext, url: []const u8, method: []const u8, argume
 }
 
 fn executeMcpTool(ctx: *RunContext, tool: packages.Tool, command: []const u8, mcp_tool: []const u8, arguments: []const u8) !runtime_tools.ToolResult {
-    var child = try std.process.spawn(ctx.io, .{ .argv = &.{command}, .cwd = .{ .path = tool.package_dir }, .stdin = .pipe, .stdout = .pipe, .stderr = .ignore });
-    defer child.kill(ctx.io);
-    var writer = child.stdin.?.writerStreaming(ctx.io, &.{});
-    var reader_buffer: [64 * 1024]u8 = undefined;
-    var reader = child.stdout.?.readerStreaming(ctx.io, &reader_buffer);
-
-    try writer.interface.writeAll("{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"initialize\",\"params\":{\"protocolVersion\":\"2025-03-26\",\"capabilities\":{},\"clientInfo\":{\"name\":\"zinc\",\"version\":\"0.5.0\"}}}\n");
-    try writer.interface.flush();
-    _ = try readJsonRpcResponse(ctx.allocator, &reader.interface, 1);
-    try writer.interface.writeAll("{\"jsonrpc\":\"2.0\",\"method\":\"notifications/initialized\"}\n");
-    try writer.interface.writeAll("{\"jsonrpc\":\"2.0\",\"id\":2,\"method\":\"tools/call\",\"params\":{\"name\":");
-    try writeJsonString(&writer.interface, mcp_tool);
-    try writer.interface.writeAll(",\"arguments\":");
-    try writer.interface.writeAll(arguments);
-    try writer.interface.writeAll("}}\n");
-    try writer.interface.flush();
-    const response = try readJsonRpcResponse(ctx.allocator, &reader.interface, 2);
-    child.stdin.?.close(ctx.io);
-    child.stdin = null;
-    _ = try child.wait(ctx.io);
+    var input: std.ArrayList(u8) = .empty;
+    defer input.deinit(ctx.allocator);
+    try input.appendSlice(ctx.allocator, "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"initialize\",\"params\":{\"protocolVersion\":\"2025-03-26\",\"capabilities\":{},\"clientInfo\":{\"name\":\"zinc\",\"version\":\"0.4.1\"}}}\n");
+    try input.appendSlice(ctx.allocator, "{\"jsonrpc\":\"2.0\",\"method\":\"notifications/initialized\"}\n");
+    try input.appendSlice(ctx.allocator, "{\"jsonrpc\":\"2.0\",\"id\":2,\"method\":\"tools/call\",\"params\":{\"name\":");
+    try appendJsonString(ctx.allocator, &input, mcp_tool);
+    try input.appendSlice(ctx.allocator, ",\"arguments\":");
+    try input.appendSlice(ctx.allocator, arguments);
+    try input.appendSlice(ctx.allocator, "}}\n");
+    const result = try runWithInput(ctx.allocator, ctx.io, &.{command}, .{ .path = tool.package_dir }, input.items, 1024 * 1024);
+    defer ctx.allocator.free(result.stdout);
+    defer ctx.allocator.free(result.stderr);
+    if (result.term != .exited or result.term.exited != 0) return error.McpToolFailed;
+    const response = try findJsonRpcResponse(ctx.allocator, result.stdout, 2);
     return .{ .content = response, .is_error = false };
 }
 
-fn readJsonRpcResponse(allocator: Allocator, reader: *std.Io.Reader, id: i64) ![]u8 {
-    while (true) {
-        const line = try reader.takeDelimiterExclusive('\n');
+fn appendJsonString(allocator: Allocator, out: *std.ArrayList(u8), text: []const u8) !void {
+    var aw = std.Io.Writer.Allocating.fromArrayList(allocator, out);
+    defer out.* = aw.toArrayList();
+    try std.json.Stringify.value(text, .{}, &aw.writer);
+}
+
+fn findJsonRpcResponse(allocator: Allocator, text: []const u8, id: i64) ![]u8 {
+    var lines = std.mem.splitScalar(u8, text, '\n');
+    while (lines.next()) |line| {
+        if (std.mem.trim(u8, line, " \t\r").len == 0) continue;
         var parsed = std.json.parseFromSlice(std.json.Value, allocator, line, .{}) catch continue;
         defer parsed.deinit();
         if (parsed.value != .object) continue;
@@ -271,10 +291,7 @@ fn readJsonRpcResponse(allocator: Allocator, reader: *std.Io.Reader, id: i64) ![
         if (parsed.value.object.get("error") != null) return error.McpToolFailed;
         return allocator.dupe(u8, line);
     }
-}
-
-fn writeJsonString(writer: *std.Io.Writer, text: []const u8) !void {
-    try std.json.Stringify.value(text, .{}, writer);
+    return error.McpToolFailed;
 }
 
 fn runWithInput(allocator: Allocator, io: std.Io, argv: []const []const u8, cwd: std.process.Child.Cwd, stdin: []const u8, limit: usize) !std.process.RunResult {

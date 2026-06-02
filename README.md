@@ -127,6 +127,45 @@ Byte ranges:
 <readable-uri>:bytes=<start>-<end>
 ```
 
+## Providers
+
+Provider configuration is Zinc runtime config. Circuitry graphs do not contain provider settings.
+
+```yaml
+providers:
+  default: local
+
+  local:
+    kind: local
+    model: qwen2.5-coder:7b
+    base_url: http://127.0.0.1:11434/v1
+
+  openai:
+    kind: openai
+    model: gpt-4.1-mini
+    api_key_env: OPENAI_API_KEY
+
+  openrouter:
+    kind: openai_compatible
+    model: openai/gpt-4.1-mini
+    base_url: https://openrouter.ai/api/v1
+    api_key_env: OPENROUTER_API_KEY
+
+  vllm:
+    kind: openai_compatible
+    model: Qwen/Qwen2.5-Coder-7B-Instruct
+    base_url: http://127.0.0.1:8000/v1
+
+model_bindings:
+  Researcher:
+    provider: openrouter
+    model: openai/gpt-4.1-mini
+```
+
+`kind: openai` defaults to `https://api.openai.com/v1` and requires an API key environment variable. `kind: openai_compatible` requires `base_url` and may omit `api_key_env` for self-hosted endpoints. Zinc normalizes trailing slashes so `/v1/chat/completions` is not doubled. `model.identity` is a portable label that Zinc may bind to a provider/model; the binding stays outside the graph.
+
+`zn doctor` reports the selected provider id, kind, base URL, model name, `api_key_env` name, and whether the env var is present. It never prints secret values and does not make paid API calls.
+
 ## Tools
 
 Zinc only exposes tools declared by the active `model` resource.

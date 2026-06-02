@@ -1,11 +1,11 @@
 .{
     .name = .zinc,
-    .version = "0.5.0",
+    .version = "0.4.1",
     .fingerprint = 0x4d05198031a1f081,
     .minimum_zig_version = "0.16.0",
     .dependencies = .{
         .circuitry = .{
-            .url = "git+https://github.com/darkhorseprojects/circuitry-zig#75b9a52aa32a33e7ddba217e8f51ed4d6df84e83",
+            .url = "git+https://github.com/darkhorseprojects/circuitry-zig#5886d8370fe088075fbfb30a1a8631db531e82ae",
             .hash = "circuitry-0.1.2-pvX_DUgxAQCLOT2Sgpegzf01WH96VuSX0FFT3nJZus7a",
         },
     },

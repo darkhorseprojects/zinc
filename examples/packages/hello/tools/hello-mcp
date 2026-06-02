@@ -1,0 +1,13 @@
+#!/usr/bin/env python3
+import json, sys
+
+for line in sys.stdin:
+    msg = json.loads(line)
+    mid = msg.get("id")
+    method = msg.get("method")
+    if method == "initialize":
+        print(json.dumps({"jsonrpc":"2.0","id":mid,"result":{"protocolVersion":"2024-11-05","capabilities":{"tools":{}},"serverInfo":{"name":"hello-mcp","version":"0.1.0"}}}), flush=True)
+    elif method == "tools/call":
+        args = msg.get("params", {}).get("arguments", {})
+        name = args.get("name", "world")
+        print(json.dumps({"jsonrpc":"2.0","id":mid,"result":{"content":[{"type":"text","text":"hello mcp " + name}],"isError":False}}), flush=True)

@@ -1,0 +1,10 @@
+circuitry: "0.5"
+title: Hello package graph tool
+exports:
+  main:
+    run: greeting
+    input:
+      name: string
+resources:
+  greeting:
+    text: Hello from the package graph tool.

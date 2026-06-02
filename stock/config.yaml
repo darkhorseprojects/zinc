@@ -44,9 +44,33 @@ runtime:
   input_text_file_max_bytes: 8388608
   input_file_max_bytes: 33554432
 
-provider:
-  base_url: http://127.0.0.1:30000/v1
-  authorization: Bearer zinc
+providers:
+  default: local
+
+  local:
+    kind: local
+    model: qwen3.6-27b-heretic-mtp-q3_k_s
+    base_url: http://127.0.0.1:30000/v1
+
+  openai:
+    kind: openai
+    model: gpt-4.1-mini
+    api_key_env: OPENAI_API_KEY
+
+  openrouter:
+    kind: openai_compatible
+    model: openai/gpt-4.1-mini
+    base_url: https://openrouter.ai/api/v1
+    api_key_env: OPENROUTER_API_KEY
+
+  vllm:
+    kind: openai_compatible
+    model: Qwen/Qwen2.5-Coder-7B-Instruct
+    base_url: http://127.0.0.1:8000/v1
+
+model_bindings:
+  Zinc:
+    provider: local
 
 models:
   qwen-heretic-mtp:

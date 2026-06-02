@@ -48,15 +48,15 @@ pub fn call(allocator: Allocator, io: std.Io, request: Request) !AssistantTurn {
     var client = std.http.Client{ .allocator = allocator, .io = io };
     defer client.deinit();
 
-    const headers = [_]std.http.Header{
-        .{ .name = "content-type", .value = "application/json" },
-        .{ .name = "authorization", .value = request.profile.provider.authorization },
-    };
+    var headers: std.ArrayList(std.http.Header) = .empty;
+    defer headers.deinit(allocator);
+    try headers.append(allocator, .{ .name = "content-type", .value = "application/json" });
+    if (request.profile.provider.authorization) |authorization| try headers.append(allocator, .{ .name = "authorization", .value = authorization });
     const result = client.fetch(.{
         .location = .{ .url = url },
         .method = .POST,
         .payload = body.items,
-        .extra_headers = &headers,
+        .extra_headers = headers.items,
         .response_writer = &response.writer,
     }) catch |err| switch (err) {
         error.ConnectionRefused => {
@@ -70,7 +70,7 @@ pub fn call(allocator: Allocator, io: std.Io, request: Request) !AssistantTurn {
         const response_body = response.written();
         if (result.status == .service_unavailable and std.mem.indexOf(u8, response_body, "Loading model") != null) return error.ProviderLoadingModel;
         const preview = response_body[0..@min(response_body.len, error_preview_chars)];
-        std.debug.print("provider request failed: status={d}\n{s}\n", .{ @intFromEnum(result.status), preview });
+        std.debug.print("OpenAI-compatible provider {s} request failed.\n\nBase URL:\n  {s}\n\nEndpoint:\n  /chat/completions\n\nStatus:\n  {d}\n\nHint:\n  check that the server exposes an OpenAI-compatible /v1/chat/completions endpoint.\n\n{s}\n", .{ request.profile.provider.id, request.profile.provider.base_url, @intFromEnum(result.status), preview });
         return error.ProviderRequestFailed;
     }
     return parseAssistantTurn(allocator, response.written(), request.profile);

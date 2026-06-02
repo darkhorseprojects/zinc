@@ -1,5 +1,5 @@
 name: hello
-version: "0.2.0"
+version: "0.1.0"
 description: Tiny Zinc package example.
 assets:
   graphs:
@@ -13,14 +13,10 @@ tools:
     label: Hello graph
     description: Run the packaged hello graph.
     prompt: run the packaged hello graph
-    parameters:
-      name:
-        type: string
-        description: Name to greet
-        required: true
+    parameters: {}
     handler:
       kind: graph
-      graph: graphs/hello.circuitry.yaml
+      graph: graphs/hello-tool.circuitry.yaml
       export: main
   hello_process:
     label: Hello process

@@ -1,5 +1,6 @@
 const std = @import("std");
 const commands = @import("commands.zig");
+const config = @import("../runtime/config.zig");
 const server = @import("../server.zig");
 const root = @import("../root.zig");
 const Scope = root.core.packages.Scope;
@@ -14,6 +15,7 @@ pub fn run(init: std.process.Init) !void {
 
 fn runInner(init: std.process.Init) !void {
     const allocator = init.gpa;
+    config.setEnvironmentMap(init.environ_map);
     const platform_dirs = try platform.dirs.fromProcess(allocator, init.environ_map);
     defer platform_dirs.deinit(allocator);
     const home = platform_dirs.home;
@@ -77,6 +79,7 @@ fn packageCommandArgs(allocator: std.mem.Allocator, io: std.Io, home: []const u8
     if (std.mem.eql(u8, sub, "attach")) return commands.packageAttach(allocator, io, home, parts);
     if (std.mem.eql(u8, sub, "detach")) return commands.packageDetach(allocator, io, home, parts);
     if (std.mem.eql(u8, sub, "attachments")) return commands.packageAttachments(allocator, io, home, parts);
+    if (std.mem.eql(u8, sub, "call")) return commands.packageCall(allocator, io, home, parts);
     return commands.usage();
 }
 

@@ -46,6 +46,7 @@ pub fn usage() void {
         \\  zn pkg attach <package>
         \\  zn pkg detach <package>
         \\  zn pkg attachments
+        \\  zn pkg call <tool> <json-arguments>
         \\  zn session-dir
         \\
     , .{});
@@ -326,6 +327,15 @@ pub fn packageAttachments(allocator: Allocator, io: std.Io, home: []const u8, ar
     const out = try packages.attachments(allocator);
     defer allocator.free(out);
     std.debug.print("{s}", .{out});
+}
+
+pub fn packageCall(allocator: Allocator, io: std.Io, home: []const u8, args: []const []const u8) !void {
+    if (args.len != 2) return error.InvalidToolArguments;
+    const result = try resource.callPackageTool(allocator, io, home, args[0], args[1]);
+    defer result.deinit(allocator);
+    try files.writeAllOut(result.content);
+    try files.writeAllOut("\n");
+    if (result.is_error) return error.UserError;
 }
 
 const zinc_repo_url = "https://github.com/darkhorseprojects/zinc.git";
