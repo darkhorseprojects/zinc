@@ -237,22 +237,44 @@ fn executeHttpTool(ctx: *RunContext, url: []const u8, method: []const u8, argume
 }
 
 fn executeMcpTool(ctx: *RunContext, tool: packages.Tool, command: []const u8, mcp_tool: []const u8, arguments: []const u8) !runtime_tools.ToolResult {
-    var stdin: std.ArrayList(u8) = .empty;
-    defer stdin.deinit(ctx.allocator);
-    try stdin.appendSlice(ctx.allocator, "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"initialize\",\"params\":{\"protocolVersion\":\"2025-03-26\",\"capabilities\":{},\"clientInfo\":{\"name\":\"zinc\",\"version\":\"0.5.0\"}}}\n");
-    try stdin.appendSlice(ctx.allocator, "{\"jsonrpc\":\"2.0\",\"method\":\"notifications/initialized\"}\n");
-    try stdin.appendSlice(ctx.allocator, "{\"jsonrpc\":\"2.0\",\"id\":2,\"method\":\"tools/call\",\"params\":{\"name\":");
-    try files.appendJsonString(ctx.allocator, &stdin, mcp_tool);
-    try stdin.appendSlice(ctx.allocator, ",\"arguments\":");
-    try stdin.appendSlice(ctx.allocator, arguments);
-    try stdin.appendSlice(ctx.allocator, "}}\n");
-    const result = try runWithInput(ctx.allocator, ctx.io, &.{command}, .{ .path = tool.package_dir }, stdin.items, 1024 * 1024);
-    defer ctx.allocator.free(result.stderr);
-    if (result.term != .exited or result.term.exited != 0) {
-        ctx.allocator.free(result.stdout);
-        return .{ .content = try ctx.allocator.dupe(u8, result.stderr), .is_error = true };
+    var child = try std.process.spawn(ctx.io, .{ .argv = &.{command}, .cwd = .{ .path = tool.package_dir }, .stdin = .pipe, .stdout = .pipe, .stderr = .ignore });
+    defer child.kill(ctx.io);
+    var writer = child.stdin.?.writerStreaming(ctx.io, &.{});
+    var reader_buffer: [64 * 1024]u8 = undefined;
+    var reader = child.stdout.?.readerStreaming(ctx.io, &reader_buffer);
+
+    try writer.interface.writeAll("{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"initialize\",\"params\":{\"protocolVersion\":\"2025-03-26\",\"capabilities\":{},\"clientInfo\":{\"name\":\"zinc\",\"version\":\"0.5.0\"}}}\n");
+    try writer.interface.flush();
+    _ = try readJsonRpcResponse(ctx.allocator, &reader.interface, 1);
+    try writer.interface.writeAll("{\"jsonrpc\":\"2.0\",\"method\":\"notifications/initialized\"}\n");
+    try writer.interface.writeAll("{\"jsonrpc\":\"2.0\",\"id\":2,\"method\":\"tools/call\",\"params\":{\"name\":");
+    try writeJsonString(&writer.interface, mcp_tool);
+    try writer.interface.writeAll(",\"arguments\":");
+    try writer.interface.writeAll(arguments);
+    try writer.interface.writeAll("}}\n");
+    try writer.interface.flush();
+    const response = try readJsonRpcResponse(ctx.allocator, &reader.interface, 2);
+    child.stdin.?.close(ctx.io);
+    child.stdin = null;
+    _ = try child.wait(ctx.io);
+    return .{ .content = response, .is_error = false };
+}
+
+fn readJsonRpcResponse(allocator: Allocator, reader: *std.Io.Reader, id: i64) ![]u8 {
+    while (true) {
+        const line = try reader.takeDelimiterExclusive('\n');
+        var parsed = std.json.parseFromSlice(std.json.Value, allocator, line, .{}) catch continue;
+        defer parsed.deinit();
+        if (parsed.value != .object) continue;
+        const found_id = parsed.value.object.get("id") orelse continue;
+        if (found_id != .integer or found_id.integer != id) continue;
+        if (parsed.value.object.get("error") != null) return error.McpToolFailed;
+        return allocator.dupe(u8, line);
     }
-    return .{ .content = result.stdout, .is_error = false };
+}
+
+fn writeJsonString(writer: *std.Io.Writer, text: []const u8) !void {
+    try std.json.Stringify.value(text, .{}, writer);
 }
 
 fn runWithInput(allocator: Allocator, io: std.Io, argv: []const []const u8, cwd: std.process.Child.Cwd, stdin: []const u8, limit: usize) !std.process.RunResult {
