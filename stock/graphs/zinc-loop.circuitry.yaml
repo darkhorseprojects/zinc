@@ -1,52 +1,43 @@
-circuitry: "0.4"
-title: "Zinc default loop"
-description: |
-  Zinc's default assistant loop. Circuitry stores executable topology;
-  Zinc supplies the local runtime, tools, sessions, prompts, and model loop.
-entry: assistant
-inputs:
-  user_turn:
-    type: text
-    required: true
+circuitry: "0.5"
+title: Zinc loop
+description: Zinc's default assistant loop.
+
+exports:
+  main:
+    run: assistant
+    input:
+      user_turn: string
+      recovered_context: string
+
 resources:
-  user_turn:
-    type: input
-    label: "Current user turn"
-    from: user_turn
-
-  recovered_context:
-    type: text
-    label: "Recovered session context"
-    uri: session:compact-context
-
   bash_guide:
-    type: text
-    label: "Bash Guide"
-    uri: prompt:bash-guide
+    text:
+      uri: prompt:bash-guide
 
   circuitry_author:
-    type: text
-    label: "Circuitry Author"
-    uri: prompt:circuitry-author
+    text:
+      uri: prompt:circuitry-author
 
   assistant:
-    type: agent
-    identity: "Zinc"
-    inputs:
-      - user_turn
-      - recovered_context
-      - bash_guide
-      - circuitry_author
-    tools:
-      - read
-      - write
-      - edit
-      - bash
-      - run_graph
-    instructions: |
-      You are Zinc, a small local coding agent.
-      Be direct, accurate, and natural.
-      Use tools when useful.
-      Treat recovered_context as bounded session memory with URI hints for exact reads.
-      Read prompt resources when relevant.
-      You may write Circuitry graphs and request graph runs with run_graph.
+    model:
+      identity: Zinc
+      input:
+        - $user_turn
+        - $recovered_context
+        - bash_guide
+        - circuitry_author
+      tools:
+        - read
+        - write
+        - edit
+        - bash
+        - run_graph
+      instructions: |
+        You are Zinc, a small local coding model runtime.
+        Be direct, accurate, and natural.
+        Use tools when useful.
+        Treat recovered_context as bounded session memory with URI hints for exact reads.
+        Read prompt resources when relevant.
+        You may write Circuitry graphs and request graph runs with run_graph.
+      schema:
+        response: string

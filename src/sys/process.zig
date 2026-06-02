@@ -1,5 +1,7 @@
 const std = @import("std");
 const files = @import("fs.zig");
+const platform = @import("../platform.zig");
+const shell = @import("../platform/shell.zig");
 
 const Allocator = std.mem.Allocator;
 
@@ -29,7 +31,10 @@ const Tail = struct {
 
 pub fn runShell(allocator: Allocator, io: std.Io, command: []const u8, cwd: ?[]const u8, max_output_bytes: usize, max_capture_bytes: usize) !ProcessResult {
     const child_cwd: std.process.Child.Cwd = if (cwd) |path| .{ .path = path } else .inherit;
-    const result = try std.process.run(allocator, io, .{ .argv = &.{ "sh", "-lc", command }, .cwd = child_cwd, .stdout_limit = .limited(max_capture_bytes), .stderr_limit = .limited(max_capture_bytes) });
+    const shell_name = shell.defaultName(platform.currentOS());
+    const argv = try shell.argv(allocator, shell_name, command);
+    defer shell.freeArgv(allocator, argv);
+    const result = try std.process.run(allocator, io, .{ .argv = argv, .cwd = child_cwd, .stdout_limit = .limited(max_capture_bytes), .stderr_limit = .limited(max_capture_bytes) });
     errdefer allocator.free(result.stdout);
     errdefer allocator.free(result.stderr);
     const code: u8 = switch (result.term) {
@@ -53,9 +58,9 @@ pub fn shellSummary(allocator: Allocator, command: []const u8, result: ProcessRe
     errdefer out.deinit(allocator);
     try out.print(allocator, "exit={d}\nstdout:\n{s}\nstderr:\n{s}", .{ result.code, stdout_tail.text, stderr_tail.text });
     if (result.output_path) |path| {
-        try out.print(allocator, "\n\n[output truncated: stdout {d} bytes, stderr {d} bytes. Full output: {s}]", .{ result.stdout.len, result.stderr.len, path });
+        try out.print(allocator, "\n\n[streams truncated: stdout {d} bytes, stderr {d} bytes. Full capture: {s}]", .{ result.stdout.len, result.stderr.len, path });
     } else if (stdout_tail.truncated or stderr_tail.truncated) {
-        try out.print(allocator, "\n\n[output truncated: stdout {d} bytes, stderr {d} bytes]", .{ result.stdout.len, result.stderr.len });
+        try out.print(allocator, "\n\n[streams truncated: stdout {d} bytes, stderr {d} bytes]", .{ result.stdout.len, result.stderr.len });
     }
     return out.toOwnedSlice(allocator);
 }
@@ -120,8 +125,14 @@ fn writeTempOutput(allocator: Allocator, stdout: []const u8, stderr: []const u8)
 }
 
 fn tempPath(allocator: Allocator) ![]u8 {
+    try files.mkdirP(".zinc/tmp");
     var bytes: [8]u8 = undefined;
-    const rc = std.os.linux.getrandom(&bytes, bytes.len, 0);
-    if (std.os.linux.errno(rc) != .SUCCESS or rc != bytes.len) return error.RandomFailed;
-    return std.fmt.allocPrint(allocator, "/tmp/zinc-bash-{x:0>2}{x:0>2}{x:0>2}{x:0>2}{x:0>2}{x:0>2}{x:0>2}{x:0>2}.out", .{ bytes[0], bytes[1], bytes[2], bytes[3], bytes[4], bytes[5], bytes[6], bytes[7] });
+    randomBytes(&bytes);
+    return std.fmt.allocPrint(allocator, ".zinc/tmp/zinc-shell-{x:0>2}{x:0>2}{x:0>2}{x:0>2}{x:0>2}{x:0>2}{x:0>2}{x:0>2}.out", .{ bytes[0], bytes[1], bytes[2], bytes[3], bytes[4], bytes[5], bytes[6], bytes[7] });
+}
+
+fn randomBytes(bytes: []u8) void {
+    const ts = std.Io.Clock.real.now(std.Options.debug_io);
+    var prng = std.Random.DefaultPrng.init(@as(u64, @truncate(@as(u96, @bitCast(ts.nanoseconds)))));
+    prng.random().bytes(bytes);
 }

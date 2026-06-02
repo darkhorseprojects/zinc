@@ -1,7 +1,7 @@
 name: hello
 version: "0.1.0"
 description: Tiny Zinc package example.
-exports:
+assets:
   graphs:
     hello: graphs/hello.circuitry.yaml
   prompts:

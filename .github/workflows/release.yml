@@ -11,14 +11,53 @@ permissions:
 jobs:
   build:
     runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - target: x86_64-linux-gnu
+            archive: zinc-linux-x86_64.tar.gz
+            binary: zn
+          - target: x86_64-macos
+            archive: zinc-macos-x86_64.tar.gz
+            binary: zn
+          - target: aarch64-macos
+            archive: zinc-macos-aarch64.tar.gz
+            binary: zn
+          - target: x86_64-windows
+            archive: zinc-windows-x86_64.zip
+            binary: zn.exe
     steps:
       - uses: actions/checkout@v4
       - uses: mlugg/setup-zig@v2
         with:
           version: 0.16.0
       - run: zig build test
-      - run: zig build -Doptimize=ReleaseFast
-      - run: tar -czf zinc-linux-x86_64.tar.gz -C zig-out/bin zn
+      - run: zig build -Doptimize=ReleaseFast -Dtarget=${{ matrix.target }}
+      - name: Package archive
+        run: |
+          if [[ "${{ matrix.archive }}" == *.zip ]]; then
+            (cd zig-out/bin && zip "../../${{ matrix.archive }}" "${{ matrix.binary }}")
+          else
+            tar -czf "${{ matrix.archive }}" -C zig-out/bin "${{ matrix.binary }}"
+          fi
+          sha256sum "${{ matrix.archive }}" > "${{ matrix.archive }}.sha256"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.archive }}
+          path: |
+            ${{ matrix.archive }}
+            ${{ matrix.archive }}.sha256
+          if-no-files-found: error
+
+  release:
+    runs-on: ubuntu-latest
+    needs: build
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: dist
+          merge-multiple: true
       - uses: softprops/action-gh-release@v2
         with:
-          files: zinc-linux-x86_64.tar.gz
+          files: dist/*

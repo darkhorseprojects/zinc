@@ -1,6 +1,7 @@
 const std = @import("std");
 const files = @import("../sys/fs.zig");
 const graph = @import("../core/graph.zig");
+const packages = @import("../core/packages.zig");
 const layout = @import("../sys/layout.zig");
 
 const Allocator = std.mem.Allocator;
@@ -13,9 +14,11 @@ const default_confirm_commands = &.{ "rm", "rmdir", "sudo", "su", "chmod", "chow
 
 pub const RuntimePaths = struct {
     graph: []u8,
+    context_graph: []u8,
     compaction_graph: []u8,
     pub fn deinit(self: RuntimePaths, allocator: Allocator) void {
         allocator.free(self.graph);
+        allocator.free(self.context_graph);
         allocator.free(self.compaction_graph);
     }
 };
@@ -305,15 +308,20 @@ pub fn resolveConfiguredModelId(allocator: Allocator, io: std.Io, home: []const 
     return cfg.string(allocator, &.{"default_model"}, default_model_id);
 }
 
-pub fn resolveGraphModelId(allocator: Allocator, io: std.Io, loaded_graph: graph.Graph, home: []const u8) ![]u8 {
-    if (try graph.graphModel(allocator, loaded_graph)) |model| return model;
+pub fn resolveGraphModelId(allocator: Allocator, io: std.Io, loaded_graph: graph.Graph, selected_export: ?[]const u8, home: []const u8) ![]u8 {
+    if (try graph.graphModel(allocator, loaded_graph, selected_export)) |model| return model;
     return resolveConfiguredModelId(allocator, io, home);
 }
 
-pub fn readPromptPack(allocator: Allocator, home: []const u8, name: []const u8) ![]u8 {
+pub fn readPromptPack(allocator: Allocator, io: std.Io, home: []const u8, name: []const u8) ![]u8 {
     const local = try promptPath(allocator, ".zinc/prompts", name);
     defer allocator.free(local);
     if (files.readLimited(allocator, local, 128 * 1024)) |text| return text else |_| {}
+
+    if (packages.resolvePrompt(allocator, io, home, name)) |path| {
+        defer allocator.free(path);
+        return files.readLimited(allocator, path, 128 * 1024);
+    } else |_| {}
 
     const share_prompt = try promptPath(allocator, "prompts", name);
     defer allocator.free(share_prompt);
@@ -391,11 +399,20 @@ fn loadModel(allocator: Allocator, cfg: Config, id: []const u8) !ModelConfig {
 }
 
 fn runtimePaths(allocator: Allocator, home: []const u8, cfg: Config) !RuntimePaths {
-    var paths = RuntimePaths{ .graph = try layout.sharePath(allocator, home, "graphs/zinc-loop.circuitry.yaml"), .compaction_graph = try layout.sharePath(allocator, home, "graphs/zinc-compaction.circuitry.yaml") };
+    var paths = RuntimePaths{
+        .graph = try layout.sharePath(allocator, home, "graphs/zinc-loop.circuitry.yaml"),
+        .context_graph = try layout.sharePath(allocator, home, "graphs/zinc-context-recovery.circuitry.yaml"),
+        .compaction_graph = try layout.sharePath(allocator, home, "graphs/zinc-compaction.circuitry.yaml"),
+    };
     errdefer paths.deinit(allocator);
     if (try cfg.optionalString(allocator, &.{ "paths", "graph" })) |v| {
         allocator.free(paths.graph);
         paths.graph = try expandHome(allocator, home, v);
+        allocator.free(v);
+    }
+    if (try cfg.optionalString(allocator, &.{ "paths", "context_graph" })) |v| {
+        allocator.free(paths.context_graph);
+        paths.context_graph = try expandHome(allocator, home, v);
         allocator.free(v);
     }
     if (try cfg.optionalString(allocator, &.{ "paths", "compaction_graph" })) |v| {

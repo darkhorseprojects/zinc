@@ -1,0 +1,34 @@
+circuitry: "0.5"
+title: Zinc context recovery
+description: Builds bounded session memory for the active Zinc loop.
+
+exports:
+  main:
+    run: recovery
+    input:
+      session_head: string
+      existing_compaction: string
+      retained_tail: string
+    returns:
+      context: recovery.context
+
+resources:
+  recovery:
+    model:
+      identity: Context recovery
+      input:
+        - $session_head
+        - $existing_compaction
+        - $retained_tail
+      tools: []
+      instructions: |
+        Build concise context for the next Zinc turn.
+
+        Preserve active goals, user corrections, constraints, recent decisions,
+        important file paths, failing commands, validation state, and exact URI
+        hints for details that may need rereading.
+
+        Do not answer the user. Do not invent missing facts.
+        Output ONLY valid JSON matching: {"context": string}.
+      schema:
+        context: string

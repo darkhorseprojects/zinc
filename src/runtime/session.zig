@@ -106,7 +106,7 @@ pub fn rememberLast(session: Session) !void {
 }
 pub fn readLog(allocator: Allocator, path: []const u8) ![]u8 {
     return files.readLimited(allocator, path, std.math.maxInt(usize)) catch |err| switch (err) {
-        error.FileNotFound, error.ReadFailed => try allocator.dupe(u8, ""),
+        error.FileNotFound => try allocator.dupe(u8, ""),
         else => err,
     };
 }
@@ -242,13 +242,13 @@ fn beginRow(allocator: Allocator, out: *std.ArrayList(u8), kind: []const u8) !vo
 }
 
 fn timestamp(allocator: Allocator) ![]u8 {
-    var ts: std.os.linux.timespec = undefined;
-    if (std.os.linux.errno(std.os.linux.clock_gettime(.REALTIME, &ts)) != .SUCCESS) return error.ClockFailed;
-    const epoch = std.time.epoch.EpochSeconds{ .secs = @intCast(ts.sec) };
+    const ts = std.Io.Clock.real.now(std.Options.debug_io);
+    const ns = @max(ts.nanoseconds, 0);
+    const epoch = std.time.epoch.EpochSeconds{ .secs = @intCast(@divTrunc(ns, std.time.ns_per_s)) };
     const day = epoch.getEpochDay().calculateYearDay();
     const md = day.calculateMonthDay();
     const s = epoch.getDaySeconds();
-    return std.fmt.allocPrint(allocator, "{d:0>4}-{d:0>2}-{d:0>2}T{d:0>2}:{d:0>2}:{d:0>2}.{d:0>3}Z", .{ day.year, md.month.numeric(), md.day_index + 1, s.getHoursIntoDay(), s.getMinutesIntoHour(), s.getSecondsIntoMinute(), @as(u64, @intCast(ts.nsec)) / std.time.ns_per_ms });
+    return std.fmt.allocPrint(allocator, "{d:0>4}-{d:0>2}-{d:0>2}T{d:0>2}:{d:0>2}:{d:0>2}.{d:0>3}Z", .{ day.year, md.month.numeric(), md.day_index + 1, s.getHoursIntoDay(), s.getMinutesIntoHour(), s.getSecondsIntoMinute(), @as(u64, @intCast(@mod(ns, std.time.ns_per_s))) / std.time.ns_per_ms });
 }
 
 fn readMessage(allocator: Allocator, row: std.json.ObjectMap) !Message {
@@ -364,10 +364,7 @@ fn appendReplayMessage(allocator: Allocator, out: *std.ArrayList(provider.Messag
 }
 
 fn appendLine(path: []const u8, line: []const u8) !void {
-    const fd = try std.posix.openat(std.posix.AT.FDCWD, path, .{ .ACCMODE = .WRONLY, .APPEND = true }, 0);
-    defer _ = std.os.linux.close(fd);
-    var n: usize = 0;
-    while (n < line.len) n += try files.linuxWrite(fd, line[n..]);
+    try files.append(path, line);
 }
 pub fn readLastId(allocator: Allocator) ![]u8 {
     const raw = try files.readLimited(allocator, ".zinc/sessions/last", 256);
@@ -378,10 +375,15 @@ pub fn readLastId(allocator: Allocator) ![]u8 {
 }
 fn newId(allocator: Allocator) ![]u8 {
     var bytes: [8]u8 = undefined;
-    const rc = std.os.linux.getrandom(&bytes, bytes.len, 0);
-    if (std.os.linux.errno(rc) != .SUCCESS or rc != bytes.len) return error.RandomFailed;
+    randomBytes(&bytes);
     return std.fmt.allocPrint(allocator, "s{x:0>2}{x:0>2}{x:0>2}{x:0>2}{x:0>2}{x:0>2}{x:0>2}{x:0>2}", .{ bytes[0], bytes[1], bytes[2], bytes[3], bytes[4], bytes[5], bytes[6], bytes[7] });
 }
+fn randomBytes(bytes: []u8) void {
+    const ts = std.Io.Clock.real.now(std.Options.debug_io);
+    var prng = std.Random.DefaultPrng.init(@as(u64, @truncate(@as(u96, @bitCast(ts.nanoseconds)))));
+    prng.random().bytes(bytes);
+}
+
 fn validateId(id: []const u8) !void {
     if (id.len == 0 or id.len > 96) return error.InvalidSessionId;
     for (id) |c| if (!std.ascii.isAlphanumeric(c) and c != '-' and c != '_') return error.InvalidSessionId;

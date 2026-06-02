@@ -34,7 +34,7 @@ pub fn usage() void {
         \\  zn compact [--dry-run] [--session id|--continue] [graph]
         \\  zn update [--ref tag-or-commit] [--skip-packages] [--skip-zinc]
         \\  zn [--session id|--continue] <prompt>
-        \\  zn run [graph|--graph id|path] [--entry id] [--input name=value] [--text name=value|@file] [--file name=path] [--image name=path] [--session id|--continue] <prompt>
+        \\  zn run [graph|--graph id|path] [--export id] [--input name=value] [--text name=value|@file] [--file name=path] [--image name=path] [--session id|--continue] <prompt>
         \\  zn graph list
         \\  zn graph show <graph>
         \\  zn pkg list
@@ -66,6 +66,15 @@ pub fn runFromArgs(allocator: Allocator, io: std.Io, home: []const u8, args: []c
 
     const runtime_paths = try config.loadRuntimePaths(allocator, io, home);
     defer runtime_paths.deinit(allocator);
+    if (parsed_args.graph_path == null and parsed_args.prompt_parts.items.len != 0) {
+        if (packages.resolveGraph(allocator, io, home, parsed_args.prompt_parts.items[0])) |path| {
+            allocator.free(path);
+            parsed_args.graph_path = parsed_args.prompt_parts.orderedRemove(0);
+        } else |err| switch (err) {
+            error.GraphNotFound => {},
+            else => return err,
+        }
+    }
     const resolved_graph = if (parsed_args.graph_path) |spec| packages.resolveGraph(allocator, io, home, spec) catch |err| switch (err) {
         error.GraphNotFound => return fail("graph not found: {s}", .{spec}),
         else => return err,
@@ -73,14 +82,14 @@ pub fn runFromArgs(allocator: Allocator, io: std.Io, home: []const u8, args: []c
     defer allocator.free(resolved_graph);
     const prompt = try std.mem.join(allocator, " ", parsed_args.prompt_parts.items);
     defer allocator.free(prompt);
-    try engine.runGraph(allocator, io, home, resolved_graph, parsed_args.entry, prompt, parsed_args.resume_id, parsed_args.continue_last, parsed_args.inputs.items);
+    try engine.runGraph(allocator, io, home, resolved_graph, parsed_args.selected_export, prompt, parsed_args.resume_id, parsed_args.continue_last, parsed_args.inputs.items);
 }
 
 const RunArgs = struct {
     prompt_parts: std.ArrayList([]const u8),
     inputs: std.ArrayList(graph.RuntimeInput),
     graph_path: ?[]const u8 = null,
-    entry: ?[]const u8 = null,
+    selected_export: ?[]const u8 = null,
     resume_id: ?[]const u8 = null,
     continue_last: bool = false,
 
@@ -115,10 +124,10 @@ fn parseRunArgs(allocator: Allocator, args: []const []const u8) !RunArgs {
             parsed.graph_path = args[i];
             continue;
         }
-        if (std.mem.eql(u8, arg, "--entry")) {
+        if (std.mem.eql(u8, arg, "--export")) {
             i += 1;
-            if (i >= args.len) return error.MissingEntry;
-            parsed.entry = args[i];
+            if (i >= args.len) return error.MissingExport;
+            parsed.selected_export = args[i];
             continue;
         }
         if (std.mem.eql(u8, arg, "--input") or std.mem.eql(u8, arg, "--text") or std.mem.eql(u8, arg, "--file") or std.mem.eql(u8, arg, "--image")) {
@@ -132,8 +141,8 @@ fn parseRunArgs(allocator: Allocator, args: []const []const u8) !RunArgs {
             parsed.graph_path = arg["--graph=".len..];
             continue;
         }
-        if (std.mem.startsWith(u8, arg, "--entry=")) {
-            parsed.entry = arg["--entry=".len..];
+        if (std.mem.startsWith(u8, arg, "--export=")) {
+            parsed.selected_export = arg["--export=".len..];
             continue;
         }
         if (std.mem.startsWith(u8, arg, "--input=") or std.mem.startsWith(u8, arg, "--text=") or std.mem.startsWith(u8, arg, "--file=") or std.mem.startsWith(u8, arg, "--image=")) {
@@ -161,7 +170,7 @@ fn appendInputArg(allocator: Allocator, inputs: *std.ArrayList(graph.RuntimeInpu
     const id = raw[0..eq];
     const value = raw[eq + 1 ..];
     if (id.len == 0 or value.len == 0) return error.InvalidRunInput;
-    try inputs.append(allocator, .{ .id = try allocator.dupe(u8, id), .kind = kind, .value = try allocator.dupe(u8, value), .mime = try allocator.dupe(u8, if (kind == .image or kind == .file) resource.mimeFromPath(value) else "text/plain") });
+    try inputs.append(allocator, .{ .id = try allocator.dupe(u8, id), .kind = kind, .value = try allocator.dupe(u8, value), .content_type = try allocator.dupe(u8, if (kind == .image or kind == .file) resource.contentTypeFromPath(value) else "text/plain") });
 }
 
 fn looksLikeGraphPath(arg: []const u8) bool {
@@ -369,11 +378,11 @@ fn scopeName(scope: packages.Scope) []const u8 {
 }
 
 fn confirmOrFail(prompt: []const u8) !void {
-    _ = try files.linuxWrite(2, prompt);
-    _ = try files.linuxWrite(2, " [y/N] ");
+    try files.writeAllErr(prompt);
+    try files.writeAllErr(" [y/N] ");
     var buf: [16]u8 = undefined;
-    const n = std.os.linux.read(0, &buf, buf.len);
-    if (std.os.linux.errno(n) != .SUCCESS or n == 0) return fail("confirmation required", .{});
+    const n = try files.readStdin(&buf);
+    if (n == 0) return fail("confirmation required", .{});
     const answer = std.mem.trim(u8, buf[0..n], " \t\r\n");
     if (answer.len == 1 and (answer[0] == 'y' or answer[0] == 'Y')) return;
     if (answer.len == 1 and (answer[0] == 'n' or answer[0] == 'N')) return fail("cancelled", .{});
@@ -381,54 +390,10 @@ fn confirmOrFail(prompt: []const u8) !void {
 }
 
 fn printGraph(allocator: Allocator, spec: []const u8, path: []const u8, loaded: graph.Graph) !void {
-    const graph_root = loaded.parsed.value;
-    std.debug.print("graph: {s}\npath: {s}\n", .{ spec, path });
-    if (scalarAt(graph_root, &.{"circuitry"})) |v| std.debug.print("circuitry: {s}\n", .{v});
-    if (scalarAt(graph_root, &.{"title"})) |v| std.debug.print("title: {s}\n", .{v});
-    std.debug.print("entry: {s}\n", .{loaded.entry orelse "(none)"});
-    if (loaded.entries.len != 0) {
-        std.debug.print("\nentries:\n", .{});
-        for (loaded.entries) |entry| std.debug.print("  {s} -> {s}\n", .{ entry.name, entry.resource_id });
-    }
-    if (loaded.inputs.len != 0) {
-        std.debug.print("\ninputs:\n", .{});
-        for (loaded.inputs) |input| std.debug.print("  {s}  {s}{s}\n", .{ input.id, input.kind, if (input.required) "  required" else "" });
-    }
-    std.debug.print("\nresources:\n", .{});
-    for (loaded.resources) |res| {
-        std.debug.print("  {s}  {s}", .{ res.id, graph.resourceType(res) orelse "?" });
-        if (graph.resourceField(res, "from")) |v| std.debug.print("  from={s}", .{v});
-        if (graph.resourceField(res, "uri")) |v| std.debug.print("  uri={s}", .{v});
-        if (graph.resourceField(res, "path")) |v| std.debug.print("  path={s}", .{v});
-        if (graph.resourceValue(res, "value") != null) std.debug.print("  value={s}", .{valueSummary(res.value.object.get("value").?)});
-        const inputs = try graph.resourceInputsList(allocator, res);
-        defer graph.freeStringList(allocator, inputs);
-        if (inputs.len != 0) {
-            const joined = try joinTemp(allocator, inputs);
-            defer allocator.free(joined);
-            std.debug.print("  inputs={s}", .{joined});
-        }
-        const tools = try graph.readList(allocator, res, "tools");
-        defer graph.freeStringList(allocator, tools);
-        if (tools.len != 0) {
-            const joined = try joinTemp(allocator, tools);
-            defer allocator.free(joined);
-            std.debug.print("  tools={s}", .{joined});
-        }
-        if (graph.resourceOutputValue(res)) |out| {
-            const text = try jsonText(allocator, out);
-            defer allocator.free(text);
-            std.debug.print("  output={s}", .{text});
-        }
-        std.debug.print("\n", .{});
-    }
-    if (objectAt(graph_root, &.{"outputs"})) |outputs| {
-        std.debug.print("\noutputs:\n", .{});
-        var iter = outputs.iterator();
-        while (iter.next()) |entry| if (entry.value_ptr.* == .object) {
-            if (scalarAt(entry.value_ptr.*, &.{"from"})) |from| std.debug.print("  {s} -> {s}\n", .{ entry.key_ptr.*, from });
-        };
-    }
+    std.debug.print("graph: {s}\npath: {s}\n\n", .{ spec, path });
+    const text = try graph.inspectText(allocator, loaded);
+    defer allocator.free(text);
+    std.debug.print("{s}", .{text});
 }
 
 fn joinTemp(allocator: Allocator, items: []const []u8) ![]u8 {

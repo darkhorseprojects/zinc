@@ -1,5 +1,5 @@
 const std = @import("std");
-const agent = @import("agent.zig");
+const model = @import("model.zig");
 const approval = @import("approval.zig");
 const ctxmod = @import("context.zig");
 const files = @import("../sys/fs.zig");
@@ -29,7 +29,7 @@ pub const ModelPart = union(enum) {
     }
 };
 
-pub fn mimeFromPath(path: []const u8) []const u8 {
+pub fn contentTypeFromPath(path: []const u8) []const u8 {
     if (std.mem.endsWith(u8, path, ".png")) return "image/png";
     if (std.mem.endsWith(u8, path, ".jpg") or std.mem.endsWith(u8, path, ".jpeg")) return "image/jpeg";
     if (std.mem.endsWith(u8, path, ".webp")) return "image/webp";
@@ -38,27 +38,26 @@ pub fn mimeFromPath(path: []const u8) []const u8 {
 }
 
 pub fn resolve(ctx: *RunContext, id: []const u8) anyerror!ResolvedValue {
+    if (runtimeInputName(id)) |name| return resolveBoundInput(ctx, name);
     const res = graph.resource(ctx.graph.*, id) orelse return error.InvalidCircuitryGraph;
     const kind = graph.resourceType(res) orelse return error.InvalidCircuitryGraph;
-    if (std.mem.eql(u8, kind, "input")) return resolveInput(ctx, res);
-    if (std.mem.eql(u8, kind, "text") or std.mem.eql(u8, kind, "data")) return resolveText(ctx, res);
+    if (std.mem.eql(u8, kind, "text") or std.mem.eql(u8, kind, "data") or std.mem.eql(u8, kind, "file")) return resolveText(ctx, res);
     if (std.mem.eql(u8, kind, "run")) return resolveRun(ctx, res);
-    if (std.mem.eql(u8, kind, "agent")) return resolveAgent(ctx, id, res);
+    if (std.mem.eql(u8, kind, "model")) return resolveModel(ctx, id, res);
     return error.UnsupportedResourceType;
 }
 
-pub fn runChildGraph(ctx: *RunContext, graph_path: []const u8, entry_override: ?[]const u8, inputs: []const BoundInput) !ResolvedValue {
+pub fn runChildGraph(ctx: *RunContext, graph_path: []const u8, selected_export: ?[]const u8, inputs: []const BoundInput) !ResolvedValue {
     const child_graph = try graph.load(ctx.allocator, ctx.io, graph_path);
     defer child_graph.deinit(ctx.allocator);
     try graph.validate(child_graph);
-    const child_entry = graph.entryResourceId(child_graph, entry_override) orelse return error.InvalidCircuitryGraph;
-    var child_ctx = RunContext{ .allocator = ctx.allocator, .io = ctx.io, .home = ctx.home, .profile = ctx.profile, .graph_path = graph_path, .graph = &child_graph, .session = ctx.session, .log = ctx.log, .inputs = inputs, .frame = ctx.frame.child(child_entry), .bash_allowances = ctx.bash_allowances };
-    return resolve(&child_ctx, child_entry);
+    const target = graph.exportTargetResourceId(child_graph, selected_export) orelse return error.InvalidCircuitryGraph;
+    var child_ctx = RunContext{ .allocator = ctx.allocator, .io = ctx.io, .home = ctx.home, .profile = ctx.profile, .graph_path = graph_path, .graph = &child_graph, .session = ctx.session, .log = ctx.log, .inputs = inputs, .frame = ctx.frame.child(target), .bash_allowances = ctx.bash_allowances };
+    return resolve(&child_ctx, target);
 }
 
-fn resolveInput(ctx: *RunContext, res: graph.Resource) !ResolvedValue {
-    const from = graph.resourceField(res, "from") orelse return error.InvalidCircuitryGraph;
-    const input = findBoundInput(ctx.inputs, from) orelse return error.MissingRequiredGraphInput;
+fn resolveBoundInput(ctx: *RunContext, name: []const u8) !ResolvedValue {
+    const input = findBoundInput(ctx.inputs, name) orelse return error.MissingRequiredGraphInput;
     return .{ .text = try readInputValue(ctx, input) };
 }
 
@@ -85,19 +84,22 @@ fn resolveRun(ctx: *RunContext, res: graph.Resource) !ResolvedValue {
     var child_inputs: std.ArrayList(BoundInput) = .empty;
     errdefer freeBoundInputs(ctx.allocator, child_inputs.items);
     if (graph.resourceInputMapValue(res)) |input_map| {
-        var iter = input_map.object.iterator();
+        if (input_map.* != .mapping) return error.InvalidCircuitryGraph;
+        var iter = input_map.mapping.iterator();
         while (iter.next()) |entry| {
             if (entry.value_ptr.* != .string) return error.InvalidCircuitryGraph;
-            const parent_value = try resolve(ctx, entry.value_ptr.string);
+            const parent_id = try graph.qualifyDependency(ctx.allocator, res, entry.value_ptr.string);
+            defer ctx.allocator.free(parent_id);
+            const parent_value = try resolve(ctx, parent_id);
             defer parent_value.deinit(ctx.allocator);
-            try child_inputs.append(ctx.allocator, .{ .id = try ctx.allocator.dupe(u8, entry.key_ptr.*), .kind = .text, .value = try ctx.allocator.dupe(u8, parent_value.text), .mime = try ctx.allocator.dupe(u8, "text/plain") });
+            try child_inputs.append(ctx.allocator, .{ .id = try ctx.allocator.dupe(u8, entry.key_ptr.*), .kind = .text, .value = try ctx.allocator.dupe(u8, parent_value.text), .content_type = try ctx.allocator.dupe(u8, "text/plain") });
         }
     }
     defer freeBoundInputs(ctx.allocator, child_inputs.items);
-    return runChildGraph(ctx, child_path, graph.resourceField(res, "entry"), child_inputs.items);
+    return runChildGraph(ctx, child_path, graph.resourceField(res, "export"), child_inputs.items);
 }
 
-fn resolveAgent(ctx: *RunContext, id: []const u8, res: graph.Resource) !ResolvedValue {
+fn resolveModel(ctx: *RunContext, id: []const u8, res: graph.Resource) !ResolvedValue {
     const identity = try graph.resourceIdentity(ctx.allocator, ctx.graph.*, id);
     defer ctx.allocator.free(identity);
     const instructions = try graph.extractResourceInstructions(ctx.allocator, ctx.graph.*, id);
@@ -129,7 +131,9 @@ fn resolveAgent(ctx: *RunContext, id: []const u8, res: graph.Resource) !Resolved
         input_texts.deinit(ctx.allocator);
     }
     for (inputs) |input_id| {
-        const value = try resolve(ctx, input_id);
+        const scoped_id = try graph.qualifyDependency(ctx.allocator, res, input_id);
+        defer ctx.allocator.free(scoped_id);
+        const value = try resolve(ctx, scoped_id);
         try input_texts.append(ctx.allocator, value.text);
     }
 
@@ -138,10 +142,10 @@ fn resolveAgent(ctx: *RunContext, id: []const u8, res: graph.Resource) !Resolved
     defer provider.freeMessages(ctx.allocator, messages.items);
     try provider.appendMessage(ctx.allocator, &messages, .{ .role = "system", .content = system.items });
 
-    const is_root = ctx.frame.isInteractiveEntry(id);
+    const is_root = ctx.frame.isInteractiveTarget(id);
     if (is_root) try ctx.log.appendReplayMessages(ctx.allocator, &messages, "", ctx.profile.runtime.session_head_messages, ctx.profile.runtime.session_tail_messages, ctx.profile.runtime.replay_truncate_chars);
 
-    const user_content = try agentUserContent(ctx.allocator, inputs, input_texts.items);
+    const user_content = try modelUserContent(ctx.allocator, inputs, input_texts.items);
     defer ctx.allocator.free(user_content);
     try provider.appendMessage(ctx.allocator, &messages, .{ .role = "user", .content = user_content });
     if (is_root) {
@@ -152,16 +156,16 @@ fn resolveAgent(ctx: *RunContext, id: []const u8, res: graph.Resource) !Resolved
 
     const reasoning = try reasoningTokens(ctx.*);
     const max_tokens = maxTokens(ctx.*, reasoning);
-    const wants_json = graph.resourceOutputValue(res) != null;
-    const spec = agent.Spec{ .label = id, .system = system.items, .tools = tool_names, .tools_json = tools_json, .json = wants_json, .runtime_reads = true };
-    const text = try agent.run(ctx, &messages, spec, max_tokens, reasoningBudget(reasoning), executeTool);
+    const wants_json = graph.resourceSchemaValue(res) != null;
+    const spec = model.Spec{ .label = id, .system = system.items, .tools = tool_names, .tools_json = tools_json, .json = wants_json, .runtime_reads = true };
+    const text = try model.run(ctx, &messages, spec, max_tokens, reasoningBudget(reasoning), executeTool);
     errdefer ctx.allocator.free(text);
-    if (wants_json) try agent.validateJson(ctx.allocator, text);
+    if (wants_json) try model.validateJson(ctx.allocator, text);
     if (is_root) try sessions.appendAssistantText(ctx.allocator, ctx.session.path, std.mem.trim(u8, text, " \t\r\n"));
     return .{ .text = text };
 }
 
-fn executeTool(ctx: *RunContext, read_ctx: uri.Context, spec: agent.Spec, call: provider.ToolCall) !runtime_tools.ToolResult {
+fn executeTool(ctx: *RunContext, read_ctx: uri.Context, spec: model.Spec, call: provider.ToolCall) !runtime_tools.ToolResult {
     if (std.mem.eql(u8, call.name, "run_graph")) return executeRunGraph(ctx, call) catch |err| switch (err) {
         error.OutOfMemory, error.GraphRunDeniedByUser => err,
         else => tool_exec.toolError(ctx.allocator, call, @errorName(err), "graph run request failed"),
@@ -183,37 +187,39 @@ fn executeRunGraph(ctx: *RunContext, call: provider.ToolCall) !runtime_tools.Too
     const graph_spec = try runtime_tools.requireStringArg(args, "graph");
     const graph_path = try packages.resolveGraph(ctx.allocator, ctx.io, ctx.home, graph_spec);
     defer ctx.allocator.free(graph_path);
-    const entry_override = try runtime_tools.optionalStringArg(args, "entry");
+    const selected_export = try runtime_tools.optionalStringArg(args, "export");
     const child_graph = try graph.load(ctx.allocator, ctx.io, graph_path);
     defer child_graph.deinit(ctx.allocator);
     try graph.validate(child_graph);
-    const child_entry = graph.entryResourceId(child_graph, entry_override) orelse return error.InvalidCircuitryGraph;
-    const child_inputs = try inputsFromToolObject(ctx.allocator, child_graph, args.get("inputs"));
+    const target = graph.exportTargetResourceId(child_graph, selected_export) orelse return error.InvalidCircuitryGraph;
+    const child_inputs = try inputsFromToolObject(ctx.allocator, child_graph, selected_export, args.get("inputs"));
     defer freeBoundInputs(ctx.allocator, child_inputs);
 
     if (decision == .ask and !try approval.prompt(ctx.allocator, call)) return error.GraphRunDeniedByUser;
 
-    const result = try runChildGraph(ctx, graph_path, entry_override, child_inputs);
+    const result = try runChildGraph(ctx, graph_path, selected_export, child_inputs);
     defer result.deinit(ctx.allocator);
-    return .{ .content = try approval.resultJson(ctx.allocator, graph_path, child_entry, result.text), .is_error = false };
+    return .{ .content = try approval.resultJson(ctx.allocator, graph_path, target, result.text), .is_error = false };
 }
 
-pub fn bindInputs(allocator: Allocator, loaded_graph: graph.Graph, user_prompt: []const u8, runtime_inputs: []const graph.RuntimeInput) ![]BoundInput {
+pub fn bindInputs(allocator: Allocator, loaded_graph: graph.Graph, selected_export: ?[]const u8, user_prompt: []const u8, runtime_inputs: []const graph.RuntimeInput) ![]BoundInput {
+    const input_specs = try graph.readInputSpecsForExport(allocator, loaded_graph, selected_export);
+    defer graph.freeInputSpecs(allocator, input_specs);
     var out: std.ArrayList(BoundInput) = .empty;
     errdefer {
         for (out.items) |input| input.deinit(allocator);
         out.deinit(allocator);
     }
     for (runtime_inputs) |input| {
-        const spec = inputSpec(loaded_graph, input.id) orelse return error.UnknownGraphInput;
+        const spec = inputSpec(input_specs, input.id) orelse return error.UnknownGraphInput;
         if (!kindMatches(spec.kind, input.kind)) return error.GraphInputTypeMismatch;
         try out.append(allocator, try cloneRuntimeInput(allocator, input));
     }
-    if (user_prompt.len != 0) if (inputSpec(loaded_graph, "user_turn")) |spec| if (!hasBoundInput(out.items, "user_turn")) {
-        if (!std.mem.eql(u8, spec.kind, "text")) return error.GraphInputTypeMismatch;
-        try out.append(allocator, .{ .id = try allocator.dupe(u8, "user_turn"), .kind = .text, .value = try allocator.dupe(u8, user_prompt), .mime = try allocator.dupe(u8, "text/plain") });
+    if (user_prompt.len != 0) if (inputSpec(input_specs, "user_turn")) |spec| if (!hasBoundInput(out.items, "user_turn")) {
+        if (!kindMatches(spec.kind, .text)) return error.GraphInputTypeMismatch;
+        try out.append(allocator, .{ .id = try allocator.dupe(u8, "user_turn"), .kind = .text, .value = try allocator.dupe(u8, user_prompt), .content_type = try allocator.dupe(u8, "text/plain") });
     };
-    for (loaded_graph.inputs) |spec| if (spec.required and !hasBoundInput(out.items, spec.id)) return error.MissingRequiredGraphInput;
+    for (input_specs) |spec| if (spec.required and !hasBoundInput(out.items, spec.id)) return error.MissingRequiredGraphInput;
     return out.toOwnedSlice(allocator);
 }
 
@@ -222,8 +228,8 @@ pub fn freeBoundInputs(allocator: Allocator, inputs: []const BoundInput) void {
     allocator.free(inputs);
 }
 
-fn inputsFromToolObject(allocator: Allocator, loaded_graph: graph.Graph, maybe_inputs: ?std.json.Value) ![]BoundInput {
-    const value = maybe_inputs orelse return bindInputs(allocator, loaded_graph, "", &.{});
+fn inputsFromToolObject(allocator: Allocator, loaded_graph: graph.Graph, selected_export: ?[]const u8, maybe_inputs: ?std.json.Value) ![]BoundInput {
+    const value = maybe_inputs orelse return bindInputs(allocator, loaded_graph, selected_export, "", &.{});
     if (value != .object) return error.InvalidToolArguments;
     var runtime_inputs: std.ArrayList(graph.RuntimeInput) = .empty;
     defer runtime_inputs.deinit(allocator);
@@ -232,9 +238,9 @@ fn inputsFromToolObject(allocator: Allocator, loaded_graph: graph.Graph, maybe_i
     while (iter.next()) |entry| {
         const text = try jsonInputText(allocator, entry.value_ptr.*);
         errdefer allocator.free(text);
-        try runtime_inputs.append(allocator, .{ .id = try allocator.dupe(u8, entry.key_ptr.*), .kind = .text, .value = text, .mime = try allocator.dupe(u8, "text/plain") });
+        try runtime_inputs.append(allocator, .{ .id = try allocator.dupe(u8, entry.key_ptr.*), .kind = .text, .value = text, .content_type = try allocator.dupe(u8, "text/plain") });
     }
-    const bound = try bindInputs(allocator, loaded_graph, "", runtime_inputs.items);
+    const bound = try bindInputs(allocator, loaded_graph, selected_export, "", runtime_inputs.items);
     for (runtime_inputs.items) |input| input.deinit(allocator);
     return bound;
 }
@@ -250,18 +256,22 @@ fn jsonInputText(allocator: Allocator, value: std.json.Value) ![]u8 {
 }
 
 fn cloneRuntimeInput(allocator: Allocator, input: graph.RuntimeInput) !BoundInput {
-    return .{ .id = try allocator.dupe(u8, input.id), .kind = input.kind, .value = try allocator.dupe(u8, input.value), .mime = try allocator.dupe(u8, input.mime) };
+    return .{ .id = try allocator.dupe(u8, input.id), .kind = input.kind, .value = try allocator.dupe(u8, input.value), .content_type = try allocator.dupe(u8, input.content_type) };
 }
-fn inputSpec(loaded_graph: graph.Graph, id: []const u8) ?graph.InputSpec {
-    for (loaded_graph.inputs) |input| if (std.mem.eql(u8, input.id, id)) return input;
+fn runtimeInputName(raw: []const u8) ?[]const u8 {
+    return if (raw.len > 1 and raw[0] == '$') raw[1..] else null;
+}
+
+fn inputSpec(input_specs: []const graph.InputSpec, id: []const u8) ?graph.InputSpec {
+    for (input_specs) |input| if (std.mem.eql(u8, input.id, id)) return input;
     return null;
 }
 fn kindMatches(spec: []const u8, kind: graph.InputKind) bool {
-    return std.mem.eql(u8, spec, switch (kind) {
-        .text => "text",
-        .file => "file",
-        .image => "image",
-    });
+    return switch (kind) {
+        .text => std.mem.eql(u8, spec, "text") or std.mem.eql(u8, spec, "string"),
+        .file => std.mem.eql(u8, spec, "file"),
+        .image => std.mem.eql(u8, spec, "image"),
+    };
 }
 fn hasBoundInput(inputs: []const BoundInput, id: []const u8) bool {
     for (inputs) |input| if (std.mem.eql(u8, input.id, id)) return true;
@@ -292,7 +302,7 @@ fn sessionUserContent(ctx: *RunContext, fallback: []const u8) []const u8 {
     return fallback;
 }
 
-fn agentUserContent(allocator: Allocator, input_ids: []const []u8, input_texts: []const []u8) ![]u8 {
+fn modelUserContent(allocator: Allocator, input_ids: []const []u8, input_texts: []const []u8) ![]u8 {
     var out: std.ArrayList(u8) = .empty;
     errdefer out.deinit(allocator);
     for (input_texts, 0..) |text, i| {

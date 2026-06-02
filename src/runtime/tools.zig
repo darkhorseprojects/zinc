@@ -27,7 +27,7 @@ const builtin = [_]Tool{
     .{ .name = "write", .description = "Create or overwrite a UTF-8 file.", .prompt = "create or overwrite files", .params = &.{ .{ .name = "path" }, .{ .name = "content" } } },
     .{ .name = "edit", .description = "Replace exact text in a UTF-8 file. The old text must occur exactly once.", .prompt = "replace exact text in files", .params = &.{ .{ .name = "path" }, .{ .name = "oldText" }, .{ .name = "newText" } } },
     .{ .name = "bash", .description = "Run a shell command in the current working directory.", .prompt = "run shell commands in the current working directory", .params = &.{.{ .name = "command" }} },
-    .{ .name = "run_graph", .description = "Request execution of a Circuitry graph. The caller must confirm or deny the request before it runs.", .prompt = "request a Circuitry graph run", .params = &.{ .{ .name = "graph" }, .{ .name = "reason" }, .{ .name = "entry", .required = false }, .{ .name = "inputs", .required = false, .kind = .object }, .{ .name = "risk", .required = false } } },
+    .{ .name = "run_graph", .description = "Request execution of a Circuitry graph. The caller must confirm or deny the request before it runs.", .prompt = "request a Circuitry graph run", .params = &.{ .{ .name = "graph" }, .{ .name = "reason" }, .{ .name = "export", .required = false }, .{ .name = "inputs", .required = false, .kind = .object }, .{ .name = "risk", .required = false } } },
 };
 
 pub fn contains(name: []const u8) bool {
@@ -127,18 +127,18 @@ fn writeSchema(allocator: Allocator, out: *std.ArrayList(u8), tool: Tool) !void 
 pub fn graphRunRequest(allocator: Allocator, args: std.json.ObjectMap) !ToolResult {
     const graph = try requireStringArg(args, "graph");
     const reason = try requireStringArg(args, "reason");
-    const entry = try optionalStringArg(args, "entry") orelse "";
+    const selected_export = try optionalStringArg(args, "export") orelse "";
     const risk = try optionalStringArg(args, "risk") orelse "";
     var out: std.ArrayList(u8) = .empty;
     errdefer out.deinit(allocator);
     try out.appendSlice(allocator, "{\"status\":\"pending_confirmation\",\"message\":");
-    const message = try std.fmt.allocPrint(allocator, "Confirm or deny this graph run request: graph={s} entry={s}", .{ graph, if (entry.len == 0) "<default>" else entry });
+    const message = try std.fmt.allocPrint(allocator, "Confirm or deny this graph run request: graph={s} export={s}", .{ graph, if (selected_export.len == 0) "<default>" else selected_export });
     defer allocator.free(message);
     try files.appendJsonString(allocator, &out, message);
     try out.appendSlice(allocator, ",\"graph\":");
     try files.appendJsonString(allocator, &out, graph);
-    try out.appendSlice(allocator, ",\"entry\":");
-    try files.appendJsonString(allocator, &out, entry);
+    try out.appendSlice(allocator, ",\"export\":");
+    try files.appendJsonString(allocator, &out, selected_export);
     try out.appendSlice(allocator, ",\"inputs\":");
     if (args.get("inputs")) |inputs| {
         var aw = std.Io.Writer.Allocating.fromArrayList(allocator, &out);

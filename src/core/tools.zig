@@ -2,17 +2,16 @@ const std = @import("std");
 const ctxmod = @import("context.zig");
 const config = @import("../runtime/config.zig");
 const files = @import("../sys/fs.zig");
+const platform = @import("../platform.zig");
 const process = @import("../sys/process.zig");
 const provider = @import("../runtime/provider.zig");
 const runtime_tools = @import("../runtime/tools.zig");
 const sessions = @import("../runtime/session.zig");
 const uri = @import("../runtime/uri.zig");
-const agent = @import("agent.zig");
+const model = @import("model.zig");
 
 const Allocator = std.mem.Allocator;
-const inspect_commands = &.{ "pwd", "ls", "cat", "head", "tail", "grep", "rg", "find", "tree", "wc", "du", "stat", "file", "git" };
-
-pub fn execute(ctx: *ctxmod.RunContext, read_ctx: uri.Context, spec: agent.Spec, call: provider.ToolCall) !runtime_tools.ToolResult {
+pub fn execute(ctx: *ctxmod.RunContext, read_ctx: uri.Context, spec: model.Spec, call: provider.ToolCall) !runtime_tools.ToolResult {
     if (!hasTool(spec.tools, call.name)) {
         const message = try std.fmt.allocPrint(ctx.allocator, "tool `{s}` was requested but not declared by the active graph resource", .{call.name});
         defer ctx.allocator.free(message);
@@ -113,7 +112,7 @@ fn executeBash(ctx: *ctxmod.RunContext, call: provider.ToolCall) !runtime_tools.
     var parsed = try std.json.parseFromSlice(std.json.Value, ctx.allocator, call.arguments, .{});
     defer parsed.deinit();
     const command = try runtime_tools.requireStringArg(parsed.value.object, "command");
-    if (commandRunsZincGraph(command)) return .{ .content = try ctx.allocator.dupe(u8, "graph runs from agent bash are blocked; use run_graph so Zinc can apply tools.graph_runs approval"), .is_error = true };
+    if (commandRunsZincGraph(command)) return .{ .content = try ctx.allocator.dupe(u8, "graph runs from model bash are blocked; use run_graph so Zinc can apply tools.graph_runs approval"), .is_error = true };
     const head = commandHead(command) orelse return toolError(ctx.allocator, call, "BashDenied", "empty shell command");
     if (!try bashAllowed(ctx, command, head)) return toolError(ctx.allocator, call, "BashDenied", "shell command denied by tools.bash policy");
     if (ctx.profile.runtime.scope == .readonly and obviouslyWrites(command, head)) return toolError(ctx.allocator, call, "ScopeDenied", "command rejected by scope: readonly");
@@ -132,7 +131,7 @@ fn bashAllowed(ctx: *ctxmod.RunContext, command: []const u8, head: []const u8) !
     if (ctx.profile.runtime.bash_mode == .open) return true;
     if (hasHead(ctx.profile.runtime.confirm_commands, head)) return try confirmCommand(ctx, command, head);
     if (ctx.profile.runtime.bash_mode == .build) return true;
-    return hasHead(inspect_commands, head);
+    return platform.shell.classify(platform.currentOS(), command) == .inspect;
 }
 
 fn confirmCommand(ctx: *ctxmod.RunContext, command: []const u8, head: []const u8) !bool {
@@ -145,10 +144,10 @@ fn confirmCommand(ctx: *ctxmod.RunContext, command: []const u8, head: []const u8
     var text: std.ArrayList(u8) = .empty;
     defer text.deinit(ctx.allocator);
     try text.print(ctx.allocator, "\nConfirm shell command\n\n{s}\n\nMatched command: {s}\n\n[y] allow once\n[a] allow 3 total for {s}\n[b] allow 5 total for {s}\n[n] deny\n", .{ command, head, head, head });
-    _ = try files.linuxWrite(2, text.items);
+    try files.writeAllErr(text.items);
     var buf: [16]u8 = undefined;
-    const n = std.os.linux.read(0, &buf, buf.len);
-    if (std.os.linux.errno(n) != .SUCCESS or n == 0) return false;
+    const n = try files.readStdin(&buf);
+    if (n == 0) return false;
     const answer = std.mem.trim(u8, buf[0..n], " \t\r\n");
     if (answer.len == 0) return false;
     if (answer[0] == 'y' or answer[0] == 'Y') return true;
@@ -177,11 +176,11 @@ fn hasHead(list: []const []const u8, head: []const u8) bool {
 }
 
 fn pathAllowed(allocator: Allocator, raw_path: []const u8, scope: config.Scope) !bool {
-    if (scope == .open) return true;
-    if (std.fs.path.isAbsolute(raw_path)) return false;
-    var it = std.mem.splitScalar(u8, raw_path, '/');
-    while (it.next()) |part| if (std.mem.eql(u8, part, "..")) return false;
     _ = allocator;
+    if (scope == .open) return true;
+    if (std.fs.path.isAbsolute(raw_path) or platform.path.isAbsolute(.windows, raw_path)) return false;
+    var it = std.mem.tokenizeAny(u8, raw_path, "/\\");
+    while (it.next()) |part| if (std.mem.eql(u8, part, "..")) return false;
     return true;
 }
 
@@ -193,8 +192,10 @@ fn obviouslyWrites(command: []const u8, head: []const u8) bool {
 fn obviousOutsidePath(command: []const u8) bool {
     var it = std.mem.tokenizeAny(u8, command, " \t\r\n;&|()<>\"'");
     while (it.next()) |token| {
-        if (std.mem.startsWith(u8, token, "/")) return true;
-        if (std.mem.eql(u8, token, "..") or std.mem.startsWith(u8, token, "../") or std.mem.indexOf(u8, token, "/../") != null) return true;
+        if (std.fs.path.isAbsolute(token) or platform.path.isAbsolute(.windows, token)) return true;
+        if (std.mem.eql(u8, token, "..")) return true;
+        var parts = std.mem.tokenizeAny(u8, token, "/\\");
+        while (parts.next()) |part| if (std.mem.eql(u8, part, "..")) return true;
     }
     return false;
 }

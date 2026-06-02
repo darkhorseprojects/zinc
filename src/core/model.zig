@@ -24,7 +24,7 @@ pub fn run(ctx: *ctxmod.RunContext, messages: *std.ArrayList(provider.Message), 
     var retries: usize = 0;
     var last_parsed_size: usize = ctx.log.raw.len;
     while (true) {
-        if (ctx.frame.isInteractiveEntry(spec.label)) {
+        if (ctx.frame.isInteractiveTarget(spec.label)) {
             var dir = std.Io.Dir.cwd();
             if (dir.statFile(ctx.io, ctx.session.path, .{})) |stat| {
                 if (stat.size != last_parsed_size) {
@@ -34,7 +34,7 @@ pub fn run(ctx: *ctxmod.RunContext, messages: *std.ArrayList(provider.Message), 
                 }
             } else |_| {}
         }
-        const session_path = if (ctx.frame.isInteractiveEntry(spec.label)) ctx.session.path else null;
+        const session_path = if (ctx.frame.isInteractiveTarget(spec.label)) ctx.session.path else null;
         const turn = try callProvider(ctx.allocator, ctx.io, session_path, ctx.profile.runtime.provider_max_retries, spec.label, .{ .profile = ctx.profile, .max_tokens = max_tokens, .reasoning_budget_tokens = reasoning, .json_response = spec.json, .tools_json = spec.tools_json, .messages = messages.items });
         defer provider.freeTurn(ctx.allocator, turn);
         if (turn.tool_calls.len == 0) {
@@ -57,13 +57,13 @@ pub fn run(ctx: *ctxmod.RunContext, messages: *std.ArrayList(provider.Message), 
             return clean;
         }
         try provider.appendMessage(ctx.allocator, messages, .{ .role = "assistant", .content = turn.text, .tool_calls = turn.tool_calls });
-        if (ctx.frame.isInteractiveEntry(spec.label)) try sessions.appendAssistantToolCalls(ctx.allocator, ctx.session.path, turn.text, turn.tool_calls);
+        if (ctx.frame.isInteractiveTarget(spec.label)) try sessions.appendAssistantToolCalls(ctx.allocator, ctx.session.path, turn.text, turn.tool_calls);
         const read_ctx = try runtimeReadContext(ctx);
         defer read_ctx.deinit(ctx.allocator);
         for (turn.tool_calls) |call| {
             const result = try execute_tool(ctx, read_ctx.context, spec, call);
             defer result.deinit(ctx.allocator);
-            if (ctx.frame.isInteractiveEntry(spec.label)) try sessions.appendToolResult(ctx.allocator, ctx.session.path, call, result);
+            if (ctx.frame.isInteractiveTarget(spec.label)) try sessions.appendToolResult(ctx.allocator, ctx.session.path, call, result);
             if (result.is_error) {
                 if (retries >= ctx.profile.runtime.tool_max_turns) return finalToolFailure(ctx, messages, spec, result.content, max_tokens, reasoning);
                 retries += 1;
@@ -80,11 +80,11 @@ pub fn run(ctx: *ctxmod.RunContext, messages: *std.ArrayList(provider.Message), 
 }
 
 pub fn validateJson(allocator: Allocator, text: []const u8) !void {
-    if (!isValidJson(allocator, text)) return error.InvalidAgentJson;
+    if (!isValidJson(allocator, text)) return error.InvalidModelJson;
 }
 
 fn finalToolFailure(ctx: *ctxmod.RunContext, messages: *std.ArrayList(provider.Message), spec: Spec, last_failure: []const u8, max_tokens: ?usize, reasoning: ?usize) ![]u8 {
-    const instruction = try std.fmt.allocPrint(ctx.allocator, "Tool attempts reached runtime.tool_max_turns={d}. Stop calling tools. Explain what failed, what was learned, and what the user can try next. Include the relevant command/output details from the failed tool results. Last failure:\n{s}", .{ ctx.profile.runtime.tool_max_turns, last_failure });
+    const instruction = try std.fmt.allocPrint(ctx.allocator, "Tool attempts reached runtime.tool_max_turns={d}. Stop calling tools. Explain what failed, what was learned, and what the user can try next. Include the relevant command/result details from the failed tool results. Last failure:\n{s}", .{ ctx.profile.runtime.tool_max_turns, last_failure });
     defer ctx.allocator.free(instruction);
     try provider.appendMessage(ctx.allocator, messages, .{ .role = "user", .content = instruction });
     const turn = callProvider(ctx.allocator, ctx.io, null, ctx.profile.runtime.provider_max_retries, spec.label, .{ .profile = ctx.profile, .max_tokens = max_tokens, .reasoning_budget_tokens = reasoning, .json_response = false, .tools_json = "[]", .messages = messages.items }) catch {
@@ -151,15 +151,7 @@ fn isTransient(err: anyerror) bool {
 }
 
 fn sleepMillis(ms: usize) void {
-    var req = std.os.linux.timespec{ .sec = @intCast(ms / 1000), .nsec = @intCast((ms % 1000) * std.time.ns_per_ms) };
-    while (true) {
-        var rem: std.os.linux.timespec = undefined;
-        const rc = std.os.linux.nanosleep(&req, &rem);
-        const errno = std.os.linux.errno(rc);
-        if (errno == .SUCCESS) return;
-        if (errno != .INTR) return;
-        req = rem;
-    }
+    std.Io.sleep(std.Options.debug_io, .{ .nanoseconds = @as(i96, @intCast(ms)) * std.time.ns_per_ms }, .awake) catch return;
 }
 
 fn isValidJson(allocator: Allocator, text: []const u8) bool {

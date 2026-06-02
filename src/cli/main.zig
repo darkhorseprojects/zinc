@@ -3,6 +3,7 @@ const commands = @import("commands.zig");
 const server = @import("../server.zig");
 const root = @import("../root.zig");
 const Scope = root.core.packages.Scope;
+const platform = root.platform;
 
 pub fn run(init: std.process.Init) !void {
     runInner(init) catch |err| switch (err) {
@@ -13,7 +14,9 @@ pub fn run(init: std.process.Init) !void {
 
 fn runInner(init: std.process.Init) !void {
     const allocator = init.gpa;
-    const home = std.process.Environ.getPosix(init.minimal.environ, "HOME") orelse return error.HomeNotSet;
+    const platform_dirs = try platform.dirs.fromProcess(allocator, init.environ_map);
+    defer platform_dirs.deinit(allocator);
+    const home = platform_dirs.home;
 
     var args = try std.process.Args.Iterator.initAllocator(init.minimal.args, allocator);
     defer args.deinit();
@@ -25,7 +28,7 @@ fn runInner(init: std.process.Init) !void {
     if (std.mem.eql(u8, cmd, "clean")) return cleanCommandArgs(allocator, init.io, home, &args);
     if (std.mem.eql(u8, cmd, "run")) return runCommandArgs(allocator, init.io, home, &args);
     if (std.mem.eql(u8, cmd, "serve")) return server.start(allocator, init.io, home, args.next());
-    if (std.mem.eql(u8, cmd, "stop")) return server.stop(allocator, home);
+    if (std.mem.eql(u8, cmd, "stop")) return server.stop(allocator, init.io, home);
     if (std.mem.eql(u8, cmd, "doctor")) return server.doctor(allocator, init.io, home);
     if (std.mem.eql(u8, cmd, "config")) return configCommandArgs(allocator, init.io, home, &args);
     if (std.mem.eql(u8, cmd, "graph")) return graphCommandArgs(allocator, init.io, home, &args);

@@ -1,4 +1,5 @@
 const std = @import("std");
+const builtin = @import("builtin");
 const config = @import("runtime/config.zig");
 const files = @import("sys/fs.zig");
 const layout = @import("sys/layout.zig");
@@ -7,6 +8,10 @@ const Allocator = std.mem.Allocator;
 const root = ".local/share/zinc";
 
 pub fn start(allocator: Allocator, io: std.Io, home: []const u8, model_arg: ?[]const u8) !void {
+    if (builtin.os.tag != .linux) {
+        std.debug.print("error: zn serve is only available on Linux. Use an external OpenAI-compatible provider and set provider.base_url.\n", .{});
+        return error.UnsupportedPlatform;
+    }
     const pid_path = try layout.statePath(allocator, home, "server.pid");
     defer allocator.free(pid_path);
     const model_id = if (model_arg) |m| try allocator.dupe(u8, m) else try config.resolveConfiguredModelId(allocator, io, home);
@@ -37,7 +42,7 @@ pub fn start(allocator: Allocator, io: std.Io, home: []const u8, model_arg: ?[]c
     try serverArgs(allocator, &argv, server, model, mmproj, log, &profile, ctx_text, draft_text);
     const child = try std.process.spawn(io, .{ .argv = argv.items, .stdin = .ignore, .stdout = .ignore, .stderr = .ignore });
     const pid: std.posix.pid_t = @intCast(child.id orelse return error.ServerStartFailed);
-    sleep(250);
+    try sleep(io, 250);
     if (!alive(allocator, pid)) return error.ServerStartFailed;
     try waitReady(allocator, io, profile.provider.base_url, pid);
     const pid_text = try std.fmt.allocPrint(allocator, "{d}\n", .{pid});
@@ -47,7 +52,11 @@ pub fn start(allocator: Allocator, io: std.Io, home: []const u8, model_arg: ?[]c
     std.debug.print("Zinc server serving {s}: pid {d}, log {s}\n", .{ model_id, pid, log });
 }
 
-pub fn stop(allocator: Allocator, home: []const u8) !void {
+pub fn stop(allocator: Allocator, io: std.Io, home: []const u8) !void {
+    if (builtin.os.tag != .linux) {
+        std.debug.print("error: zn stop is only available on Linux because Zinc-managed server processes are Linux-only.\n", .{});
+        return error.UnsupportedPlatform;
+    }
     const pid_path = try layout.statePath(allocator, home, "server.pid");
     defer allocator.free(pid_path);
     const pid = try storedPid(allocator, pid_path) orelse return std.debug.print("Zinc server is not running\n", .{});
@@ -56,8 +65,8 @@ pub fn stop(allocator: Allocator, home: []const u8) !void {
     if (!alive(allocator, pid)) return std.debug.print("Zinc server was not running\n", .{});
     if (!ours(allocator, pid)) return error.PidIsNotZincServer;
     try std.posix.kill(pid, .TERM);
-    if (!waitStopped(allocator, pid, 5000)) try std.posix.kill(pid, .KILL);
-    if (!waitStopped(allocator, pid, 5000)) return error.ServerStopFailed;
+    if (!waitStopped(allocator, io, pid, 5000)) try std.posix.kill(pid, .KILL);
+    if (!waitStopped(allocator, io, pid, 5000)) return error.ServerStopFailed;
     std.debug.print("Zinc server stopped\n", .{});
 }
 
@@ -66,7 +75,7 @@ pub fn doctor(allocator: Allocator, io: std.Io, home: []const u8) !void {
 
     std.debug.print("Zinc\n", .{});
     std.debug.print("  ✓ zn binary\n", .{});
-    std.debug.print("  version: 0.3.4\n", .{});
+    std.debug.print("  version: 0.4.0\n", .{});
 
     const config_path = try layout.configPath(allocator, home);
     defer allocator.free(config_path);
@@ -87,7 +96,7 @@ pub fn doctor(allocator: Allocator, io: std.Io, home: []const u8) !void {
     defer if (circuitry_version) |v| allocator.free(v);
     const version_ok = if (circuitry_version) |v| compatibleCircuitry(std.mem.trim(u8, v, " \t\r\n")) else false;
     std.debug.print("  {s} compatible version{s}{s}\n", .{ mark(version_ok), if (circuitry_version != null) ": " else "", if (circuitry_version) |v| std.mem.trim(u8, v, " \t\r\n") else "" });
-    if (!version_ok) std.debug.print("  Fix: install @darkhorseprojects/circuitry >= 0.4.5.\n", .{});
+    if (!version_ok) std.debug.print("  Fix: install @darkhorseprojects/circuitry >= 0.5.0.\n", .{});
 
     std.debug.print("\nFiles\n", .{});
     const global_pkg = try layout.sharePath(allocator, home, "packages");
@@ -106,10 +115,13 @@ pub fn doctor(allocator: Allocator, io: std.Io, home: []const u8) !void {
         defer p.deinit(allocator);
         std.debug.print("\nGraphs\n", .{});
         const graph_ok = files.existsPath(p.paths.graph);
+        const context_ok = files.existsPath(p.paths.context_graph);
         const compact_ok = files.existsPath(p.paths.compaction_graph);
         std.debug.print("  {s} stock graph: {s}\n", .{ mark(graph_ok), p.paths.graph });
+        std.debug.print("  {s} stock graph: {s}\n", .{ mark(context_ok), p.paths.context_graph });
         std.debug.print("  {s} stock graph: {s}\n", .{ mark(compact_ok), p.paths.compaction_graph });
         std.debug.print("  {s} circuitry check: zinc-loop\n", .{mark(graph_ok and commandOk(allocator, io, &.{ "circuitry", "check", p.paths.graph }))});
+        std.debug.print("  {s} circuitry check: zinc-context-recovery\n", .{mark(context_ok and commandOk(allocator, io, &.{ "circuitry", "check", p.paths.context_graph }))});
         std.debug.print("  {s} circuitry check: zinc-compaction\n", .{mark(compact_ok and commandOk(allocator, io, &.{ "circuitry", "check", p.paths.compaction_graph }))});
 
         std.debug.print("\nProvider and model\n", .{});
@@ -129,7 +141,9 @@ pub fn doctor(allocator: Allocator, io: std.Io, home: []const u8) !void {
 
     const pid_path = try layout.statePath(allocator, home, "server.pid");
     defer allocator.free(pid_path);
-    if (try livePid(allocator, pid_path)) |pid| std.debug.print("\nServer\n  ✓ Zinc-managed llama-server: pid {d}\n", .{pid}) else std.debug.print("\nServer\n  - Zinc-managed llama-server is not running\n", .{});
+    if (builtin.os.tag != .linux) {
+        std.debug.print("\nServer\n  ✗ Zinc-managed llama-server is Linux-only\n  Fix: configure provider.base_url for an external OpenAI-compatible server.\n", .{});
+    } else if (try livePid(allocator, pid_path)) |pid| std.debug.print("\nServer\n  ✓ Zinc-managed llama-server: pid {d}\n", .{pid}) else std.debug.print("\nServer\n  - Zinc-managed llama-server is not running\n", .{});
 }
 
 fn ensureEngine(allocator: Allocator, io: std.Io, home: []const u8, profile: *const config.RuntimeProfile) ![]u8 {
@@ -231,7 +245,7 @@ fn waitReady(allocator: Allocator, io: std.Io, base_url: []const u8, pid: std.po
         if (s >= 200 and s < 300) return;
         if (s >= 400 and s < 500) return error.ServerReadinessFailed;
         if (attempt != 0 and attempt % 10 == 0) std.debug.print("Zinc server still loading model...\n", .{});
-        sleep(1000);
+        try sleep(io, 1000);
     }
     return error.ServerStartFailed;
 }
@@ -255,24 +269,16 @@ fn commandOutput(allocator: Allocator, io: std.Io, argv: []const []const u8) ![]
 }
 
 fn compatibleCircuitry(version: []const u8) bool {
-    if (std.mem.startsWith(u8, version, "0.4.")) {
-        const patch = std.fmt.parseInt(usize, version["0.4.".len..], 10) catch return false;
-        return patch >= 5;
-    }
     return std.mem.startsWith(u8, version, "0.5.") or (version.len != 0 and version[0] >= '1' and version[0] <= '9');
 }
 
 fn writableDir(path: []const u8) bool {
     files.mkdirP(path) catch return false;
-    var buffer: [std.Io.Dir.max_path_bytes:0]u8 = undefined;
-    if (path.len + "/.zinc-doctor-write-test".len >= buffer.len) return false;
-    @memcpy(buffer[0..path.len], path);
-    @memcpy(buffer[path.len .. path.len + "/.zinc-doctor-write-test".len], "/.zinc-doctor-write-test");
-    buffer[path.len + "/.zinc-doctor-write-test".len] = 0;
-    const fd = std.os.linux.open(&buffer, .{ .ACCMODE = .WRONLY, .CREAT = true, .TRUNC = true }, 0o600);
-    if (std.os.linux.errno(fd) != .SUCCESS) return false;
-    _ = std.os.linux.close(@intCast(fd));
-    _ = std.os.linux.unlink(&buffer);
+    const probe_path = std.fs.path.join(std.heap.page_allocator, &.{ path, ".zinc-doctor-write-test" }) catch return false;
+    defer std.heap.page_allocator.free(probe_path);
+    files.write(probe_path, "ok") catch return false;
+    var dir = std.Io.Dir.cwd();
+    dir.deleteFile(std.Options.debug_io, probe_path) catch {};
     return true;
 }
 
@@ -286,45 +292,51 @@ fn probe(allocator: Allocator, io: std.Io, base_url: []const u8) u16 {
     const result = client.fetch(.{ .location = .{ .url = url }, .method = .GET, .response_writer = &response.writer }) catch return 0;
     return @intFromEnum(result.status);
 }
-fn waitStopped(allocator: Allocator, pid: std.posix.pid_t, ms: usize) bool {
+fn waitStopped(allocator: Allocator, io: std.Io, pid: std.posix.pid_t, ms: usize) bool {
     var waited: usize = 0;
     while (waited < ms) : (waited += 100) {
-        sleep(100);
+        sleep(io, 100) catch return false;
         if (!alive(allocator, pid)) return true;
     }
     return !alive(allocator, pid);
 }
 fn ours(allocator: Allocator, pid: std.posix.pid_t) bool {
-    const p = std.fmt.allocPrint(allocator, "/proc/{d}/cmdline", .{pid}) catch return false;
-    defer allocator.free(p);
-    const c = files.readLimited(allocator, p, 4096) catch return false;
-    defer allocator.free(c);
-    return std.mem.indexOf(u8, c, "llama-server") != null;
+    var cmdline: [64 * 1024]u8 = undefined;
+    const cmdline_path = std.fmt.allocPrint(allocator, "/proc/{d}/cmdline", .{pid}) catch return false;
+    defer allocator.free(cmdline_path);
+    if (readProcFile(cmdline_path, &cmdline)) |text| if (std.mem.indexOf(u8, text, "llama-server") != null) return true;
+
+    var comm: [256]u8 = undefined;
+    const comm_path = std.fmt.allocPrint(allocator, "/proc/{d}/comm", .{pid}) catch return false;
+    defer allocator.free(comm_path);
+    const text = readProcFile(comm_path, &comm) orelse return false;
+    return std.mem.eql(u8, std.mem.trim(u8, text, " \t\r\n"), "llama-server");
+}
+
+fn readProcFile(path: []const u8, buffer: []u8) ?[]const u8 {
+    var path_z: [std.Io.Dir.max_path_bytes:0]u8 = undefined;
+    if (path.len >= path_z.len) return null;
+    @memcpy(path_z[0..path.len], path);
+    path_z[path.len] = 0;
+    const raw_fd = std.os.linux.open(&path_z, .{ .ACCMODE = .RDONLY }, 0);
+    if (std.os.linux.errno(raw_fd) != .SUCCESS) return null;
+    const fd: i32 = @intCast(raw_fd);
+    defer _ = std.os.linux.close(fd);
+    const raw_n = std.os.linux.read(fd, buffer.ptr, buffer.len);
+    if (std.os.linux.errno(raw_n) != .SUCCESS) return null;
+    return buffer[0..raw_n];
 }
 fn alive(allocator: Allocator, pid: std.posix.pid_t) bool {
+    _ = allocator;
     std.posix.kill(pid, @as(std.posix.SIG, @enumFromInt(0))) catch return false;
-    const p = std.fmt.allocPrint(allocator, "/proc/{d}/stat", .{pid}) catch return true;
-    defer allocator.free(p);
-    const stat = files.readLimited(allocator, p, 512) catch return true;
-    defer allocator.free(stat);
-    const r = std.mem.trim(u8, stat[(std.mem.lastIndexOfScalar(u8, stat, ')') orelse return true) + 1 ..], " ");
-    return r.len == 0 or r[0] != 'Z';
+    return true;
 }
-fn sleep(ms: usize) void {
-    var req = std.os.linux.timespec{ .sec = @intCast(ms / 1000), .nsec = @intCast((ms % 1000) * std.time.ns_per_ms) };
-    while (true) {
-        var left: std.os.linux.timespec = undefined;
-        const errno = std.os.linux.errno(std.os.linux.nanosleep(&req, &left));
-        if (errno == .SUCCESS or errno != .INTR) return;
-        req = left;
-    }
+fn sleep(io: std.Io, ms: usize) !void {
+    try std.Io.sleep(io, .fromMilliseconds(@intCast(ms)), .awake);
 }
 fn remove(path: []const u8) void {
-    var b: [std.Io.Dir.max_path_bytes:0]u8 = undefined;
-    if (path.len >= b.len) return;
-    @memcpy(b[0..path.len], path);
-    b[path.len] = 0;
-    _ = std.os.linux.unlink(&b);
+    var dir = std.Io.Dir.cwd();
+    dir.deleteFile(std.Options.debug_io, path) catch {};
 }
 fn safeModelId(model: []const u8) !void {
     if (model.len == 0) return error.InvalidModelId;

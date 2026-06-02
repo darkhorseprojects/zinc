@@ -1,4 +1,4 @@
-pub const agent = @import("core/agent.zig");
+pub const model = @import("core/model.zig");
 pub const approval = @import("core/approval.zig");
 pub const context = @import("core/context.zig");
 pub const engine = @import("core/engine.zig");

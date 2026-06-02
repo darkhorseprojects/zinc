@@ -1,22 +1,23 @@
-circuitry: "0.4"
+circuitry: "0.5"
 title: Hello package
-inputs:
-  name:
-    type: text
-    default: friend
-entry: hello
+
+exports:
+  main:
+    run: hello
+    input:
+      name: string
+    returns:
+      greeting: hello
+
 resources:
-  name:
-    type: input
-    from: name
   style:
-    type: text
-    uri: prompt:hello-style
+    text:
+      uri: prompt:hello-style
+
   hello:
-    type: agent
-    inputs: [style, name]
-    output:
-      greeting: str
-outputs:
-  greeting:
-    from: hello.greeting
+    model:
+      identity: Hello package
+      instructions: Write one friendly greeting using the requested style and name.
+      input: [style, $name]
+      schema:
+        greeting: string

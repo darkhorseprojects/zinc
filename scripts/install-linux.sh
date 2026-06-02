@@ -25,8 +25,8 @@ fi
 circuitry_bin="$(command -v circuitry)"
 circuitry_version="$(node -e 'const fs=require("fs"),path=require("path"); const bin=fs.realpathSync(process.argv[1]); console.log(require(path.join(path.dirname(bin), "..", "package.json")).version)' "$circuitry_bin" 2>/dev/null || true)"
 case "$circuitry_version" in
-  0.4.[5-9]|0.[5-9].*|[1-9].*) ;;
-  *) echo "Zinc requires circuitry >= 0.4.5; found ${circuitry_version:-unknown}" >&2; exit 1 ;;
+  0.5.*|[1-9].*) ;;
+  *) echo "Zinc requires circuitry >= 0.5.0; found ${circuitry_version:-unknown}" >&2; exit 1 ;;
 esac
 
 cd "$root"
@@ -35,6 +35,7 @@ zig build -Doptimize=ReleaseFast
 mkdir -p "$bin_dir" "$share_dir/graphs" "$share_dir/prompts" "$config_dir"
 install -m 0755 "$root/zig-out/bin/zn" "$bin_dir/zn"
 install -m 0644 "$root/stock/graphs/zinc-loop.circuitry.yaml" "$share_dir/graphs/zinc-loop.circuitry.yaml"
+install -m 0644 "$root/stock/graphs/zinc-context-recovery.circuitry.yaml" "$share_dir/graphs/zinc-context-recovery.circuitry.yaml"
 install -m 0644 "$root/stock/graphs/zinc-compaction.circuitry.yaml" "$share_dir/graphs/zinc-compaction.circuitry.yaml"
 install -m 0644 "$root/stock/prompts/circuitry-author.md" "$share_dir/prompts/circuitry-author.md"
 install -m 0644 "$root/stock/prompts/bash-guide.md" "$share_dir/prompts/bash-guide.md"
@@ -66,6 +67,7 @@ confirm_commands:
 
 paths:
   graph: $share_dir/graphs/zinc-loop.circuitry.yaml
+  context_graph: $share_dir/graphs/zinc-context-recovery.circuitry.yaml
   compaction_graph: $share_dir/graphs/zinc-compaction.circuitry.yaml
 
 runtime:

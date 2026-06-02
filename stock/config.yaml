@@ -23,6 +23,7 @@ confirm_commands:
 
 paths:
   graph: stock/graphs/zinc-loop.circuitry.yaml
+  context_graph: stock/graphs/zinc-context-recovery.circuitry.yaml
   compaction_graph: stock/graphs/zinc-compaction.circuitry.yaml
 
 runtime:

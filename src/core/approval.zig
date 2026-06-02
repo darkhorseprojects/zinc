@@ -24,11 +24,11 @@ pub fn prompt(allocator: Allocator, call: provider.ToolCall) !bool {
     const args = parsed.value.object;
     const graph = try runtime_tools.requireStringArg(args, "graph");
     const reason = try runtime_tools.requireStringArg(args, "reason");
-    const entry = try runtime_tools.optionalStringArg(args, "entry") orelse "<default>";
+    const selected_export = try runtime_tools.optionalStringArg(args, "export") orelse "<default>";
     const risk = try runtime_tools.optionalStringArg(args, "risk") orelse "";
     var text: std.ArrayList(u8) = .empty;
     defer text.deinit(allocator);
-    try text.print(allocator, "\nZinc wants to run a Circuitry graph\n\ngraph: {s}\nentry: {s}\nreason: {s}\n", .{ graph, entry, reason });
+    try text.print(allocator, "\nZinc wants to run a Circuitry graph\n\ngraph: {s}\nexport: {s}\nreason: {s}\n", .{ graph, selected_export, reason });
     if (risk.len != 0) try text.print(allocator, "risk: {s}\n", .{risk});
     if (args.get("inputs")) |inputs| {
         try text.appendSlice(allocator, "inputs: ");
@@ -38,10 +38,10 @@ pub fn prompt(allocator: Allocator, call: provider.ToolCall) !bool {
         try aw.writer.writeByte('\n');
     }
     try text.appendSlice(allocator, "\nApprove? [y/N] ");
-    _ = try files.linuxWrite(2, text.items);
+    try files.writeAllErr(text.items);
     var buf: [16]u8 = undefined;
-    const n = std.os.linux.read(0, &buf, buf.len);
-    if (std.os.linux.errno(n) != .SUCCESS or n == 0) return false;
+    const n = try files.readStdin(&buf);
+    if (n == 0) return false;
     const answer = std.mem.trim(u8, buf[0..n], " \t\r\n");
     return answer.len != 0 and (answer[0] == 'y' or answer[0] == 'Y');
 }
@@ -52,15 +52,15 @@ pub fn pending(allocator: Allocator, call: provider.ToolCall) !runtime_tools.Too
     return runtime_tools.graphRunRequest(allocator, parsed.value.object);
 }
 
-pub fn resultJson(allocator: Allocator, graph_path: []const u8, entry: []const u8, output: []const u8) ![]u8 {
+pub fn resultJson(allocator: Allocator, graph_path: []const u8, target: []const u8, result: []const u8) ![]u8 {
     var out: std.ArrayList(u8) = .empty;
     errdefer out.deinit(allocator);
     try out.appendSlice(allocator, "{\"status\":\"ok\",\"graph\":");
     try files.appendJsonString(allocator, &out, graph_path);
-    try out.appendSlice(allocator, ",\"entry\":");
-    try files.appendJsonString(allocator, &out, entry);
-    try out.appendSlice(allocator, ",\"output\":");
-    try files.appendJsonString(allocator, &out, output);
+    try out.appendSlice(allocator, ",\"target\":");
+    try files.appendJsonString(allocator, &out, target);
+    try out.appendSlice(allocator, ",\"result\":");
+    try files.appendJsonString(allocator, &out, result);
     try out.append(allocator, '}');
     return out.toOwnedSlice(allocator);
 }

@@ -10,12 +10,12 @@ pub const BoundInput = struct {
     id: []u8,
     kind: graph.InputKind,
     value: []u8,
-    mime: []u8,
+    content_type: []u8,
 
     pub fn deinit(self: BoundInput, allocator: Allocator) void {
         allocator.free(self.id);
         allocator.free(self.value);
-        allocator.free(self.mime);
+        allocator.free(self.content_type);
     }
 };
 
@@ -31,22 +31,22 @@ pub const ExecutionKind = enum { interactive, graph_run, maintenance };
 
 pub const ExecutionFrame = struct {
     kind: ExecutionKind,
-    entry: []const u8,
+    target: []const u8,
 
-    pub fn interactive(entry: []const u8) ExecutionFrame {
-        return .{ .kind = .interactive, .entry = entry };
+    pub fn interactive(target: []const u8) ExecutionFrame {
+        return .{ .kind = .interactive, .target = target };
     }
 
-    pub fn child(_: ExecutionFrame, entry: []const u8) ExecutionFrame {
-        return .{ .kind = .graph_run, .entry = entry };
+    pub fn child(_: ExecutionFrame, target: []const u8) ExecutionFrame {
+        return .{ .kind = .graph_run, .target = target };
     }
 
-    pub fn maintenance(entry: []const u8) ExecutionFrame {
-        return .{ .kind = .maintenance, .entry = entry };
+    pub fn maintenance(target: []const u8) ExecutionFrame {
+        return .{ .kind = .maintenance, .target = target };
     }
 
-    pub fn isInteractiveEntry(self: ExecutionFrame, id: []const u8) bool {
-        return self.kind == .interactive and std.mem.eql(u8, id, self.entry);
+    pub fn isInteractiveTarget(self: ExecutionFrame, id: []const u8) bool {
+        return self.kind == .interactive and std.mem.eql(u8, id, self.target);
     }
 };
 

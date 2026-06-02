@@ -1,6 +1,7 @@
 const std = @import("std");
 const files = @import("../sys/fs.zig");
 const layout = @import("../sys/layout.zig");
+const platform = @import("../platform.zig");
 
 const Allocator = std.mem.Allocator;
 
@@ -49,13 +50,13 @@ const Source = struct {
     }
 };
 
-const ExportKind = enum { graphs, prompts, assets };
+const AssetKind = enum { graphs, prompts, files };
 
-const Export = struct {
+const Asset = struct {
     id: []u8,
     path: []u8,
 
-    fn deinit(self: Export, allocator: Allocator) void {
+    fn deinit(self: Asset, allocator: Allocator) void {
         allocator.free(self.id);
         allocator.free(self.path);
     }
@@ -65,17 +66,17 @@ const Manifest = struct {
     name: []u8,
     version: []u8,
     description: []u8,
-    graphs: []Export,
-    prompts: []Export,
-    assets: []Export,
+    graphs: []Asset,
+    prompts: []Asset,
+    files: []Asset,
 
     fn deinit(self: Manifest, allocator: Allocator) void {
         allocator.free(self.name);
         allocator.free(self.version);
         allocator.free(self.description);
-        freeExports(allocator, self.graphs);
-        freeExports(allocator, self.prompts);
-        freeExports(allocator, self.assets);
+        freeAssets(allocator, self.graphs);
+        freeAssets(allocator, self.prompts);
+        freeAssets(allocator, self.files);
     }
 };
 
@@ -182,9 +183,9 @@ pub fn show(allocator: Allocator, io: std.Io, home: []const u8, name: []const u8
     if (manifest.version.len != 0) try out.print(allocator, "version: {s}\n", .{manifest.version});
     if (manifest.description.len != 0) try out.print(allocator, "description: {s}\n", .{manifest.description});
     if (source.len != 0) try out.print(allocator, "source: {s}\n", .{source});
-    try appendExports(allocator, &out, "graphs", manifest.graphs);
-    try appendExports(allocator, &out, "prompts", manifest.prompts);
-    try appendExports(allocator, &out, "assets", manifest.assets);
+    try appendAssets(allocator, &out, "graphs", manifest.graphs);
+    try appendAssets(allocator, &out, "prompts", manifest.prompts);
+    try appendAssets(allocator, &out, "files", manifest.files);
     return out.toOwnedSlice(allocator);
 }
 
@@ -205,9 +206,9 @@ fn packagePlanText(allocator: Allocator, io: std.Io, home: []const u8, source: S
     if (manifest.description.len != 0) try out.print(allocator, "description: {s}\n", .{manifest.description});
     try out.print(allocator, "scope: {s}\ntarget: {s}\n", .{ scopeName(options.scope), destination });
     if (current_path) |path| try out.print(allocator, "current: {s}\n", .{path});
-    try appendExports(allocator, &out, "graphs", manifest.graphs);
-    try appendExports(allocator, &out, "prompts", manifest.prompts);
-    try appendExports(allocator, &out, "assets", manifest.assets);
+    try appendAssets(allocator, &out, "graphs", manifest.graphs);
+    try appendAssets(allocator, &out, "prompts", manifest.prompts);
+    try appendAssets(allocator, &out, "files", manifest.files);
     return out.toOwnedSlice(allocator);
 }
 
@@ -225,10 +226,10 @@ pub fn listGraphs(allocator: Allocator, io: std.Io, home: []const u8) ![]u8 {
     var out: std.ArrayList(u8) = .empty;
     errdefer out.deinit(allocator);
     try appendGraphDir(allocator, io, &out, "project", "graphs");
-    try appendPackageGraphExports(allocator, io, &out, .local, ".zinc/packages");
+    try appendPackageGraphAssets(allocator, io, &out, .local, ".zinc/packages");
     const global = try scopeRoot(allocator, home, .global);
     defer allocator.free(global);
-    try appendPackageGraphExports(allocator, io, &out, .global, global);
+    try appendPackageGraphAssets(allocator, io, &out, .global, global);
     const shared = try layout.sharePath(allocator, home, "graphs");
     defer allocator.free(shared);
     try appendGraphDir(allocator, io, &out, "stock", shared);
@@ -239,10 +240,10 @@ pub fn resolveGraph(allocator: Allocator, io: std.Io, home: []const u8, spec: []
     if (std.fs.path.isAbsolute(spec)) return allocator.dupe(u8, spec);
     if (files.existsPath(spec)) return allocator.dupe(u8, spec);
     if (try graphInDir(allocator, "graphs", spec)) |path| return path;
-    if (try graphExportInRoot(allocator, io, ".zinc/packages", spec)) |path| return path;
+    if (try graphAssetInRoot(allocator, io, ".zinc/packages", spec)) |path| return path;
     const global = try scopeRoot(allocator, home, .global);
     defer allocator.free(global);
-    if (try graphExportInRoot(allocator, io, global, spec)) |path| return path;
+    if (try graphAssetInRoot(allocator, io, global, spec)) |path| return path;
     const shared_graphs = try layout.sharePath(allocator, home, "graphs");
     defer allocator.free(shared_graphs);
     if (try graphInDir(allocator, shared_graphs, spec)) |path| return path;
@@ -250,18 +251,18 @@ pub fn resolveGraph(allocator: Allocator, io: std.Io, home: []const u8, spec: []
 }
 
 pub fn resolvePrompt(allocator: Allocator, io: std.Io, home: []const u8, spec: []const u8) ![]u8 {
-    if (try exportInRoot(allocator, io, ".zinc/packages", spec, .prompts)) |path| return path;
+    if (try assetInRoot(allocator, io, ".zinc/packages", spec, .prompts)) |path| return path;
     const global = try scopeRoot(allocator, home, .global);
     defer allocator.free(global);
-    if (try exportInRoot(allocator, io, global, spec, .prompts)) |path| return path;
+    if (try assetInRoot(allocator, io, global, spec, .prompts)) |path| return path;
     return error.PromptNotFound;
 }
 
 pub fn resolveAsset(allocator: Allocator, io: std.Io, home: []const u8, spec: []const u8) ![]u8 {
-    if (try exportInRoot(allocator, io, ".zinc/packages", spec, .assets)) |path| return path;
+    if (try assetInRoot(allocator, io, ".zinc/packages", spec, .files)) |path| return path;
     const global = try scopeRoot(allocator, home, .global);
     defer allocator.free(global);
-    if (try exportInRoot(allocator, io, global, spec, .assets)) |path| return path;
+    if (try assetInRoot(allocator, io, global, spec, .files)) |path| return path;
     return error.AssetNotFound;
 }
 
@@ -269,7 +270,8 @@ fn stageSource(allocator: Allocator, io: std.Io, source: Source) ![]u8 {
     switch (source.kind) {
         .directory => return allocator.dupe(u8, source.url),
         .git => {
-            const base = try tempPath(allocator, "zinc-pkg-");
+            try files.mkdirP(".zinc/tmp");
+            const base = try tempPath(allocator, io, "zinc-pkg-");
             errdefer allocator.free(base);
             if (source.ref.len == 0) {
                 try run(allocator, io, &.{ "git", "clone", "--depth", "1", source.url, base });
@@ -369,13 +371,15 @@ fn loadManifest(allocator: Allocator, io: std.Io, package_dir: []const u8) !Mani
     const root = parsed.value;
     if (root != .object) return error.InvalidPackageManifest;
 
+    const name = scalarAt(root, &.{"name"}) orelse return error.InvalidPackageManifest;
+    if (!portableAtom(name)) return error.InvalidPackageManifest;
     return .{
-        .name = try allocator.dupe(u8, scalarAt(root, &.{"name"}) orelse return error.InvalidPackageManifest),
+        .name = try allocator.dupe(u8, name),
         .version = try allocator.dupe(u8, scalarAt(root, &.{"version"}) orelse ""),
         .description = try allocator.dupe(u8, scalarAt(root, &.{"description"}) orelse ""),
-        .graphs = try readExports(allocator, root, &.{ "exports", "graphs" }),
-        .prompts = try readExports(allocator, root, &.{ "exports", "prompts" }),
-        .assets = try readExports(allocator, root, &.{ "exports", "assets" }),
+        .graphs = try readAssets(allocator, root, &.{ "assets", "graphs" }),
+        .prompts = try readAssets(allocator, root, &.{ "assets", "prompts" }),
+        .files = try readAssets(allocator, root, &.{ "assets", "files" }),
     };
 }
 
@@ -402,19 +406,20 @@ fn parseYamlFileToJSON(allocator: Allocator, io: std.Io, path: []const u8) ![]u8
     return allocator.dupe(u8, result.stdout);
 }
 
-fn readExports(allocator: Allocator, root: std.json.Value, path: []const []const u8) ![]Export {
-    const value = valueAt(root, path) orelse return allocator.alloc(Export, 0);
-    if (value != .object) return allocator.alloc(Export, 0);
+fn readAssets(allocator: Allocator, root: std.json.Value, path: []const []const u8) ![]Asset {
+    const value = valueAt(root, path) orelse return allocator.alloc(Asset, 0);
+    if (value != .object) return allocator.alloc(Asset, 0);
     const obj = value.object;
-    var out: std.ArrayList(Export) = .empty;
+    var out: std.ArrayList(Asset) = .empty;
     errdefer {
-        freeExports(allocator, out.items);
+        freeAssets(allocator, out.items);
         out.deinit(allocator);
     }
     var iter = obj.iterator();
     while (iter.next()) |entry| {
         const id = entry.key_ptr.*;
         const raw_path = scalarText(entry.value_ptr.*) orelse return error.InvalidPackageManifest;
+        if (!portableAtom(id) or !portableRelativePath(raw_path)) return error.InvalidPackageManifest;
         try out.append(allocator, .{ .id = try allocator.dupe(u8, id), .path = try allocator.dupe(u8, raw_path) });
     }
     return out.toOwnedSlice(allocator);
@@ -493,11 +498,11 @@ fn graphInDir(allocator: Allocator, dir: []const u8, spec: []const u8) !?[]u8 {
     return null;
 }
 
-fn graphExportInRoot(allocator: Allocator, io: std.Io, root_path: []const u8, spec: []const u8) !?[]u8 {
-    return exportInRoot(allocator, io, root_path, spec, .graphs);
+fn graphAssetInRoot(allocator: Allocator, io: std.Io, root_path: []const u8, spec: []const u8) !?[]u8 {
+    return assetInRoot(allocator, io, root_path, spec, .graphs);
 }
 
-fn exportInRoot(allocator: Allocator, io: std.Io, root_path: []const u8, spec: []const u8, kind: ExportKind) !?[]u8 {
+fn assetInRoot(allocator: Allocator, io: std.Io, root_path: []const u8, spec: []const u8, kind: AssetKind) !?[]u8 {
     var root = std.Io.Dir.cwd().openDir(io, root_path, .{ .iterate = true }) catch return null;
     defer root.close(io);
     var iter = root.iterate();
@@ -507,8 +512,8 @@ fn exportInRoot(allocator: Allocator, io: std.Io, root_path: []const u8, spec: [
         defer allocator.free(package_dir);
         const manifest = loadManifest(allocator, io, package_dir) catch continue;
         defer manifest.deinit(allocator);
-        const exports = exportsFor(manifest, kind);
-        for (exports) |item| {
+        const assets = assetsFor(manifest, kind);
+        for (assets) |item| {
             if (std.mem.eql(u8, item.id, spec)) {
                 const path = try std.fs.path.join(allocator, &.{ package_dir, item.path });
                 return path;
@@ -534,7 +539,7 @@ fn appendPackageNames(allocator: Allocator, io: std.Io, out: *std.ArrayList(u8),
     }
 }
 
-fn appendPackageGraphExports(allocator: Allocator, io: std.Io, out: *std.ArrayList(u8), scope: Scope, root_path: []const u8) !void {
+fn appendPackageGraphAssets(allocator: Allocator, io: std.Io, out: *std.ArrayList(u8), scope: Scope, root_path: []const u8) !void {
     var root = std.Io.Dir.cwd().openDir(io, root_path, .{ .iterate = true }) catch return;
     defer root.close(io);
     var iter = root.iterate();
@@ -578,23 +583,23 @@ fn appendGraphDir(allocator: Allocator, io: std.Io, out: *std.ArrayList(u8), sco
     }
 }
 
-fn appendExports(allocator: Allocator, out: *std.ArrayList(u8), label: []const u8, exports: []const Export) !void {
-    if (exports.len == 0) return;
+fn appendAssets(allocator: Allocator, out: *std.ArrayList(u8), label: []const u8, assets: []const Asset) !void {
+    if (assets.len == 0) return;
     try out.print(allocator, "{s}:\n", .{label});
-    for (exports) |item| try out.print(allocator, "  {s}: {s}\n", .{ item.id, item.path });
+    for (assets) |item| try out.print(allocator, "  {s}: {s}\n", .{ item.id, item.path });
 }
 
-fn exportsFor(manifest: Manifest, kind: ExportKind) []const Export {
+fn assetsFor(manifest: Manifest, kind: AssetKind) []const Asset {
     return switch (kind) {
         .graphs => manifest.graphs,
         .prompts => manifest.prompts,
-        .assets => manifest.assets,
+        .files => manifest.files,
     };
 }
 
-fn freeExports(allocator: Allocator, exports: []Export) void {
-    for (exports) |item| item.deinit(allocator);
-    allocator.free(exports);
+fn freeAssets(allocator: Allocator, assets: []Asset) void {
+    for (assets) |item| item.deinit(allocator);
+    allocator.free(assets);
 }
 
 fn valueAt(value: std.json.Value, path: []const []const u8) ?std.json.Value {
@@ -623,12 +628,28 @@ fn scopeName(scope: Scope) []const u8 {
     };
 }
 
-fn tempPath(allocator: Allocator, prefix: []const u8) ![]u8 {
+fn tempPath(allocator: Allocator, io: std.Io, prefix: []const u8) ![]u8 {
     var bytes: [8]u8 = undefined;
-    const rc = std.os.linux.getrandom(&bytes, bytes.len, 0);
-    const err = std.os.linux.errno(rc);
-    if (err != .SUCCESS or rc != bytes.len) return error.RandomFailed;
-    return std.fmt.allocPrint(allocator, "/tmp/{s}{x:0>2}{x:0>2}{x:0>2}{x:0>2}{x:0>2}{x:0>2}{x:0>2}{x:0>2}", .{ prefix, bytes[0], bytes[1], bytes[2], bytes[3], bytes[4], bytes[5], bytes[6], bytes[7] });
+    io.random(&bytes);
+    return std.fmt.allocPrint(allocator, ".zinc/tmp/{s}{x:0>2}{x:0>2}{x:0>2}{x:0>2}{x:0>2}{x:0>2}{x:0>2}{x:0>2}", .{ prefix, bytes[0], bytes[1], bytes[2], bytes[3], bytes[4], bytes[5], bytes[6], bytes[7] });
+}
+
+fn portableAtom(raw: []const u8) bool {
+    if (raw.len == 0 or std.mem.eql(u8, raw, ".") or std.mem.eql(u8, raw, "..")) return false;
+    if (platform.path.hasPathSeparator(raw) or platform.path.isAbsolute(.windows, raw)) return false;
+    for (raw) |c| if (!(std.ascii.isAlphanumeric(c) or c == '_' or c == '-' or c == '.')) return false;
+    return true;
+}
+
+fn portableRelativePath(raw: []const u8) bool {
+    if (raw.len == 0 or std.fs.path.isAbsolute(raw) or platform.path.isAbsolute(.windows, raw)) return false;
+    var it = std.mem.tokenizeAny(u8, raw, "/\\");
+    var parts: usize = 0;
+    while (it.next()) |part| {
+        if (!portableAtom(part)) return false;
+        parts += 1;
+    }
+    return parts != 0;
 }
 
 fn copyTree(allocator: Allocator, io: std.Io, source: []const u8, destination: []const u8) !void {
@@ -661,7 +682,7 @@ fn removePath(io: std.Io, path: []const u8) !void {
 }
 
 fn cleanupPath(io: std.Io, path: []const u8) void {
-    if (std.mem.startsWith(u8, path, "/tmp/zinc-pkg-")) removePath(io, path) catch {};
+    if (std.mem.startsWith(u8, path, ".zinc/tmp/zinc-pkg-")) removePath(io, path) catch {};
 }
 
 fn run(allocator: Allocator, io: std.Io, argv: []const []const u8) !void {

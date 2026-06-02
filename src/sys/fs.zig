@@ -1,10 +1,10 @@
 const std = @import("std");
 
 const Allocator = std.mem.Allocator;
+const io = std.Options.debug_io;
 
 pub fn exists(path: []const u8) !void {
-    const fd = try std.posix.openat(std.posix.AT.FDCWD, path, .{ .ACCMODE = .RDONLY }, 0);
-    _ = std.os.linux.close(fd);
+    _ = try std.Io.Dir.cwd().statFile(io, path, .{});
 }
 
 pub fn existsPath(path: []const u8) bool {
@@ -13,27 +13,26 @@ pub fn existsPath(path: []const u8) bool {
 }
 
 pub fn readLimited(allocator: Allocator, path: []const u8, limit: usize) ![]u8 {
-    const fd = try std.posix.openat(std.posix.AT.FDCWD, path, .{ .ACCMODE = .RDONLY }, 0);
-    defer _ = std.os.linux.close(fd);
-
-    var out: std.ArrayList(u8) = .empty;
-    errdefer out.deinit(allocator);
-    var buffer: [8192]u8 = undefined;
-    while (true) {
-        const n = try linuxRead(fd, &buffer);
-        if (n == 0) break;
-        if (out.items.len + n > limit) return error.FileTooLarge;
-        try out.appendSlice(allocator, buffer[0..n]);
-    }
-    return out.toOwnedSlice(allocator);
+    return std.Io.Dir.cwd().readFileAlloc(io, path, allocator, .limited(limit)) catch |err| switch (err) {
+        error.StreamTooLong => error.FileTooLarge,
+        else => err,
+    };
 }
 
 pub fn write(path: []const u8, content: []const u8) !void {
     if (std.fs.path.dirname(path)) |dir| try mkdirP(dir);
-    const fd = try std.posix.openat(std.posix.AT.FDCWD, path, .{ .ACCMODE = .WRONLY, .CREAT = true, .TRUNC = true }, 0o644);
-    defer _ = std.os.linux.close(fd);
-    var written: usize = 0;
-    while (written < content.len) written += try linuxWrite(fd, content[written..]);
+    try std.Io.Dir.cwd().writeFile(io, .{ .sub_path = path, .data = content });
+}
+
+pub fn append(path: []const u8, content: []const u8) !void {
+    if (std.fs.path.dirname(path)) |dir| try mkdirP(dir);
+    var file = std.Io.Dir.cwd().openFile(io, path, .{ .mode = .read_write }) catch |err| switch (err) {
+        error.FileNotFound => try std.Io.Dir.cwd().createFile(io, path, .{ .read = true, .truncate = false }),
+        else => return err,
+    };
+    defer file.close(io);
+    const stat = try file.stat(io);
+    try file.writePositionalAll(io, content, stat.size);
 }
 
 pub fn edit(allocator: Allocator, path: []const u8, old: []const u8, new: []const u8) !void {
@@ -55,13 +54,7 @@ pub fn editLimited(allocator: Allocator, path: []const u8, old: []const u8, new:
 
 pub fn mkdirP(path: []const u8) !void {
     if (path.len == 0) return;
-    var end: usize = if (path[0] == '/') 1 else 0;
-    while (end < path.len) {
-        while (end < path.len and path[end] != '/') end += 1;
-        if (end > 0) try mkdirOne(path[0..end]);
-        while (end < path.len and path[end] == '/') end += 1;
-    }
-    if (path[path.len - 1] != '/') try mkdirOne(path);
+    try std.Io.Dir.cwd().createDirPath(io, path);
 }
 
 pub fn appendJsonString(allocator: Allocator, out: *std.ArrayList(u8), value: []const u8) !void {
@@ -70,27 +63,22 @@ pub fn appendJsonString(allocator: Allocator, out: *std.ArrayList(u8), value: []
     try std.json.Stringify.value(value, .{}, &aw.writer);
 }
 
-pub fn linuxRead(fd: i32, buffer: []u8) !usize {
-    const rc = std.os.linux.read(fd, buffer.ptr, buffer.len);
-    const errno = std.os.linux.errno(rc);
-    if (errno != .SUCCESS) return error.ReadFailed;
-    return rc;
+pub fn writeAllErr(bytes: []const u8) !void {
+    var buffer: [4096]u8 = undefined;
+    var writer = std.Io.File.stderr().writer(io, &buffer);
+    try writer.interface.writeAll(bytes);
+    try writer.interface.flush();
 }
 
-pub fn linuxWrite(fd: i32, buffer: []const u8) !usize {
-    const rc = std.os.linux.write(fd, buffer.ptr, buffer.len);
-    const errno = std.os.linux.errno(rc);
-    if (errno != .SUCCESS) return error.WriteFailed;
-    return rc;
+pub fn writeAllOut(bytes: []const u8) !void {
+    var buffer: [4096]u8 = undefined;
+    var writer = std.Io.File.stdout().writer(io, &buffer);
+    try writer.interface.writeAll(bytes);
+    try writer.interface.flush();
 }
 
-fn mkdirOne(path: []const u8) !void {
-    var buffer: [std.Io.Dir.max_path_bytes:0]u8 = undefined;
-    if (path.len >= buffer.len) return error.NameTooLong;
-    @memcpy(buffer[0..path.len], path);
-    buffer[path.len] = 0;
-    const rc = std.os.linux.mkdir(&buffer, 0o755);
-    const errno = std.os.linux.errno(rc);
-    if (errno == .SUCCESS or errno == .EXIST) return;
-    return error.MkdirFailed;
+pub fn readStdin(buffer: []u8) !usize {
+    var stdin_buffer: [1024]u8 = undefined;
+    var reader = std.Io.File.stdin().readerStreaming(io, &stdin_buffer);
+    return reader.interface.readSliceShort(buffer);
 }

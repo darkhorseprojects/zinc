@@ -33,7 +33,7 @@ pub fn resolve(allocator: Allocator, io: std.Io, ctx: Context, raw: []const u8) 
 
 fn resolveWithoutRange(allocator: Allocator, io: std.Io, ctx: Context, raw: []const u8) !?[]u8 {
     if (std.mem.startsWith(u8, raw, "prompt:")) {
-        const prompt = try config.readPromptPack(allocator, ctx.home, raw["prompt:".len..]);
+        const prompt = try config.readPromptPack(allocator, io, ctx.home, raw["prompt:".len..]);
         return prompt;
     }
     if (std.mem.startsWith(u8, raw, "input:")) {
@@ -51,7 +51,6 @@ fn resolveWithoutRange(allocator: Allocator, io: std.Io, ctx: Context, raw: []co
         return transcript;
     }
     if (std.mem.eql(u8, raw, "session:compaction")) return try sessionCompaction(allocator, ctx);
-    if (std.mem.eql(u8, raw, "session:compact-context")) return try sessionCompactContext(allocator, ctx);
     if (std.mem.startsWith(u8, raw, "session:current:tools:")) return try sessionToolResult(allocator, ctx, raw["session:current:tools:".len..]);
     if (std.mem.startsWith(u8, raw, "session:current:messages:")) return try sessionMessage(allocator, ctx, raw["session:current:messages:".len..]);
     if (std.mem.eql(u8, raw, "session:last")) {
@@ -102,41 +101,6 @@ fn sessionCompaction(allocator: Allocator, ctx: Context) ![]u8 {
     defer log.deinit(allocator);
     if (log.compaction) |c| return std.fmt.allocPrint(allocator, "compacted_messages: {d}\nsummary: {s}\n", .{ c.message_count, c.summary });
     return allocator.dupe(u8, "");
-}
-
-fn sessionCompactContext(allocator: Allocator, ctx: Context) ![]u8 {
-    const log = try sessions.parseRaw(allocator, ctx.session_log);
-    defer log.deinit(allocator);
-    var out: std.ArrayList(u8) = .empty;
-    errdefer out.deinit(allocator);
-
-    const head_end = @min(ctx.session_head_messages, log.messages.len);
-    const tail_start = if (log.messages.len > ctx.session_tail_messages) log.messages.len - ctx.session_tail_messages else head_end;
-    const compact_start = if (log.compaction) |c| @max(head_end, @as(usize, @min(c.message_count, log.messages.len))) else head_end;
-
-    try out.appendSlice(allocator, "session_head:\n");
-    for (log.messages[0..head_end], 0..) |message, i| try appendMessageLine(allocator, &out, i, message, ctx.replay_truncate_chars);
-
-    try out.appendSlice(allocator, "existing_compaction:\n");
-    if (log.compaction) |c| try out.print(allocator, "compacted_messages: {d}\nsummary: {s}\n", .{ c.message_count, c.summary });
-
-    try out.appendSlice(allocator, "span_to_compact:\n");
-    const compact_end = @max(compact_start, tail_start);
-    for (log.messages[compact_start..compact_end], compact_start..) |message, i| try appendMessageLine(allocator, &out, i, message, ctx.replay_truncate_chars);
-
-    try out.appendSlice(allocator, "retained_tail:\n");
-    for (log.messages[tail_start..], tail_start..) |message, i| try appendMessageLine(allocator, &out, i, message, ctx.replay_truncate_chars);
-    return out.toOwnedSlice(allocator);
-}
-
-fn appendMessageLine(allocator: Allocator, out: *std.ArrayList(u8), index: usize, message: sessions.Message, max_chars: usize) !void {
-    const content = std.mem.trim(u8, message.content, " \t\r\n");
-    const limit = if (max_chars == 0) content.len else max_chars;
-    try out.print(allocator, "[{d}] {s}: ", .{ index, message.role });
-    if (content.len > limit) try out.print(allocator, "{s}... [truncated {d} chars; use session:current:messages:{d}]", .{ content[0..limit], content.len, index }) else try out.appendSlice(allocator, content);
-    if (message.tool_call_id) |id| try out.print(allocator, " [tool_call_id={s}]", .{id});
-    if (message.tool_calls.len != 0) try out.print(allocator, " [tool_calls={d}]", .{message.tool_calls.len});
-    try out.append(allocator, '\n');
 }
 
 fn sessionToolResult(allocator: Allocator, ctx: Context, tool_id: []const u8) ![]u8 {
