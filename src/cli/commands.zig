@@ -1,17 +1,12 @@
 const std = @import("std");
-const root = @import("../root.zig");
-const sys = root.sys;
-const core = root.core;
-const runtime = root.runtime;
-
-const config = runtime.config;
-const engine = core.engine;
-const files = sys.fs;
-const graph = core.graph;
-const layout = sys.layout;
-const packages = core.packages;
-const resource = core.resource;
-const sessions = runtime.session;
+const config = @import("../config/mod.zig");
+const engine = @import("../graph/engine.zig");
+const files = @import("../io/fs.zig");
+const graph = @import("../graph/mod.zig");
+const layout = @import("../io/layout.zig");
+const packages = @import("../packages/mod.zig");
+const resource = @import("../graph/resource.zig");
+const sessions = @import("../session/mod.zig");
 
 const Allocator = std.mem.Allocator;
 

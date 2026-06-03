@@ -5,8 +5,8 @@
     .minimum_zig_version = "0.16.0",
     .dependencies = .{
         .circuitry = .{
-            .url = "git+https://github.com/darkhorseprojects/circuitry-zig#5886d8370fe088075fbfb30a1a8631db531e82ae",
-            .hash = "circuitry-0.1.2-pvX_DUgxAQCLOT2Sgpegzf01WH96VuSX0FFT3nJZus7a",
+            .url = "git+https://github.com/darkhorseprojects/circuitry-zig#352e6ded03aa2aeba40dc6c4e95098552ce1d804",
+            .hash = "circuitry-0.1.3-pvX_DX6tAQDQHTcqPEw3y9CH0-heSmM7O-uAzNpx2KOE",
         },
     },
     .paths = .{

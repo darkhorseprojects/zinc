@@ -403,9 +403,7 @@ fn sourceString(res: Resource, field: []const u8) ?[]const u8 {
 fn appendStringList(allocator: Allocator, out: *std.ArrayList([]u8), value: *const Value) !void {
     if (value.* != .sequence) return error.InvalidCircuitryGraph;
     for (value.sequence) |*item| {
-        if (item.* == .sequence) try appendStringList(allocator, out, item)
-        else if (item.* == .string) try out.append(allocator, try allocator.dupe(u8, item.string))
-        else return error.InvalidCircuitryGraph;
+        if (item.* == .sequence) try appendStringList(allocator, out, item) else if (item.* == .string) try out.append(allocator, try allocator.dupe(u8, item.string)) else return error.InvalidCircuitryGraph;
     }
 }
 

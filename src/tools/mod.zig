@@ -1,14 +1,14 @@
 const std = @import("std");
-const ctxmod = @import("context.zig");
-const config = @import("../runtime/config.zig");
-const files = @import("../sys/fs.zig");
+const ctxmod = @import("../graph/context.zig");
+const config = @import("../config/mod.zig");
+const files = @import("../io/fs.zig");
 const platform = @import("../platform.zig");
-const process = @import("../sys/process.zig");
-const provider = @import("../runtime/provider.zig");
-const runtime_tools = @import("../runtime/tools.zig");
-const sessions = @import("../runtime/session.zig");
-const uri = @import("../runtime/uri.zig");
-const model = @import("model.zig");
+const process = @import("../io/process.zig");
+const provider = @import("../model/provider.zig");
+const runtime_tools = @import("schema.zig");
+const sessions = @import("../session/mod.zig");
+const uri = @import("../io/uri.zig");
+const model = @import("../model/mod.zig");
 
 const Allocator = std.mem.Allocator;
 pub fn execute(ctx: *ctxmod.RunContext, read_ctx: uri.Context, spec: model.Spec, call: provider.ToolCall) !runtime_tools.ToolResult {

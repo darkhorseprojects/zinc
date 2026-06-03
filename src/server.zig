@@ -1,9 +1,9 @@
 const std = @import("std");
 const builtin = @import("builtin");
-const config = @import("runtime/config.zig");
-const files = @import("sys/fs.zig");
-const layout = @import("sys/layout.zig");
-const graph = @import("core/graph.zig");
+const config = @import("config/mod.zig");
+const files = @import("io/fs.zig");
+const layout = @import("io/layout.zig");
+const graph = @import("graph/mod.zig");
 
 const Allocator = std.mem.Allocator;
 const root = ".local/share/zinc";

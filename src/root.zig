@@ -1,4 +1,14 @@
 pub const platform = @import("platform.zig");
-pub const sys = @import("sys.zig");
-pub const runtime = @import("runtime.zig");
-pub const core = @import("core.zig");
+pub const graph = @import("graph/mod.zig");
+pub const model = @import("model/mod.zig");
+pub const provider = @import("model/provider.zig");
+pub const tools = @import("tools/mod.zig");
+pub const tool_schema = @import("tools/schema.zig");
+pub const packages = @import("packages/mod.zig");
+pub const config = @import("config/mod.zig");
+pub const session = @import("session/mod.zig");
+pub const fs = @import("io/fs.zig");
+pub const layout = @import("io/layout.zig");
+pub const process = @import("io/process.zig");
+pub const trace = @import("io/trace.zig");
+pub const uri = @import("io/uri.zig");

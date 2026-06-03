@@ -32,7 +32,10 @@ pub fn run(allocator: Allocator, io: std.Io, argv: []const []const u8, cwd: ?[]c
     });
     errdefer allocator.free(result.stdout);
     errdefer allocator.free(result.stderr);
-    return .{ .stdout = result.stdout, .stderr = result.stderr, .code = switch (result.term) { .exited => |c| c, else => 255 } };
+    return .{ .stdout = result.stdout, .stderr = result.stderr, .code = switch (result.term) {
+        .exited => |c| c,
+        else => 255,
+    } };
 }
 
 pub fn pathEntries(allocator: Allocator, os: platform.OS, raw_path: []const u8) ![][]u8 {

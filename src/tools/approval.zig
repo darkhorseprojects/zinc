@@ -1,7 +1,7 @@
 const std = @import("std");
-const files = @import("../sys/fs.zig");
-const provider = @import("../runtime/provider.zig");
-const runtime_tools = @import("../runtime/tools.zig");
+const files = @import("../io/fs.zig");
+const provider = @import("../model/provider.zig");
+const runtime_tools = @import("../tools/schema.zig");
 
 const Allocator = std.mem.Allocator;
 

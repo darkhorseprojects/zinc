@@ -1,7 +1,7 @@
 const std = @import("std");
-const config = @import("config.zig");
-const files = @import("../sys/fs.zig");
-const resource = @import("../core/resource.zig");
+const config = @import("../config/mod.zig");
+const files = @import("../io/fs.zig");
+const resource = @import("../graph/resource.zig");
 
 const Allocator = std.mem.Allocator;
 const error_preview_chars: usize = 1200;

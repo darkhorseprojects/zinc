@@ -1,7 +1,7 @@
 const std = @import("std");
-const config = @import("config.zig");
-const files = @import("../sys/fs.zig");
-const sessions = @import("session.zig");
+const config = @import("../config/mod.zig");
+const files = @import("../io/fs.zig");
+const sessions = @import("../session/mod.zig");
 
 const Allocator = std.mem.Allocator;
 const sessions_index_limit: usize = 64;

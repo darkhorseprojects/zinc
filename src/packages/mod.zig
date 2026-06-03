@@ -1,6 +1,6 @@
 const std = @import("std");
-const files = @import("../sys/fs.zig");
-const layout = @import("../sys/layout.zig");
+const files = @import("../io/fs.zig");
+const layout = @import("../io/layout.zig");
 const platform = @import("../platform.zig");
 const circuitry = @import("circuitry");
 
@@ -97,10 +97,19 @@ pub const Handler = union(HandlerKind) {
 
     pub fn deinit(self: Handler, allocator: Allocator) void {
         switch (self) {
-            .graph => |h| { allocator.free(h.graph); allocator.free(h.export_name); },
+            .graph => |h| {
+                allocator.free(h.graph);
+                allocator.free(h.export_name);
+            },
             .process => |h| allocator.free(h.command),
-            .http => |h| { allocator.free(h.url); allocator.free(h.method); },
-            .mcp => |h| { allocator.free(h.command); allocator.free(h.tool); },
+            .http => |h| {
+                allocator.free(h.url);
+                allocator.free(h.method);
+            },
+            .mcp => |h| {
+                allocator.free(h.command);
+                allocator.free(h.tool);
+            },
         }
     }
 };
@@ -381,7 +390,7 @@ pub fn execScript(allocator: Allocator, io: std.Io, home: []const u8, package_na
     const manifest = try loadManifest(allocator, io, found.path);
     defer manifest.deinit(allocator);
     for (manifest.scripts) |script| if (std.mem.eql(u8, script.name, script_name)) {
-        const result = try std.process.run(allocator, io, .{ .argv = &.{ script.command }, .cwd = .{ .path = found.path }, .stdout_limit = .limited(1024 * 1024), .stderr_limit = .limited(1024 * 1024) });
+        const result = try std.process.run(allocator, io, .{ .argv = &.{script.command}, .cwd = .{ .path = found.path }, .stdout_limit = .limited(1024 * 1024), .stderr_limit = .limited(1024 * 1024) });
         defer allocator.free(result.stderr);
         if (result.term != .exited or result.term.exited != 0) {
             allocator.free(result.stdout);

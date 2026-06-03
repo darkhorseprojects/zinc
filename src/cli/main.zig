@@ -1,10 +1,10 @@
 const std = @import("std");
 const commands = @import("commands.zig");
-const config = @import("../runtime/config.zig");
+const config = @import("../config/mod.zig");
 const server = @import("../server.zig");
-const root = @import("../root.zig");
-const Scope = root.core.packages.Scope;
-const platform = root.platform;
+const packages = @import("../packages/mod.zig");
+const platform = @import("../platform.zig");
+const Scope = packages.Scope;
 
 pub fn run(init: std.process.Init) !void {
     runInner(init) catch |err| switch (err) {

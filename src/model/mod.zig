@@ -1,11 +1,11 @@
 const std = @import("std");
 const circuitry = @import("circuitry");
-const ctxmod = @import("context.zig");
-const provider = @import("../runtime/provider.zig");
-const sessions = @import("../runtime/session.zig");
-const runtime_tools = @import("../runtime/tools.zig");
-const uri = @import("../runtime/uri.zig");
-const trace = @import("../sys/trace.zig");
+const ctxmod = @import("../graph/context.zig");
+const provider = @import("provider.zig");
+const sessions = @import("../session/mod.zig");
+const runtime_tools = @import("../tools/schema.zig");
+const uri = @import("../io/uri.zig");
+const trace = @import("../io/trace.zig");
 
 const Allocator = std.mem.Allocator;
 const provider_retry_delay_ms: usize = 1000;

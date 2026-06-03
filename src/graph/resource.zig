@@ -1,16 +1,16 @@
 const std = @import("std");
-const model = @import("model.zig");
-const approval = @import("approval.zig");
+const model = @import("../model/mod.zig");
+const approval = @import("../tools/approval.zig");
 const ctxmod = @import("context.zig");
-const files = @import("../sys/fs.zig");
-const config = @import("../runtime/config.zig");
-const graph = @import("graph.zig");
-const packages = @import("packages.zig");
-const provider = @import("../runtime/provider.zig");
-const runtime_tools = @import("../runtime/tools.zig");
-const sessions = @import("../runtime/session.zig");
-const tool_exec = @import("tools.zig");
-const uri = @import("../runtime/uri.zig");
+const files = @import("../io/fs.zig");
+const config = @import("../config/mod.zig");
+const graph = @import("mod.zig");
+const packages = @import("../packages/mod.zig");
+const provider = @import("../model/provider.zig");
+const runtime_tools = @import("../tools/schema.zig");
+const sessions = @import("../session/mod.zig");
+const tool_exec = @import("../tools/mod.zig");
+const uri = @import("../io/uri.zig");
 
 const Allocator = std.mem.Allocator;
 

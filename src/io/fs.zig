@@ -64,17 +64,11 @@ pub fn appendJsonString(allocator: Allocator, out: *std.ArrayList(u8), value: []
 }
 
 pub fn writeAllErr(bytes: []const u8) !void {
-    var buffer: [4096]u8 = undefined;
-    var writer = std.Io.File.stderr().writer(io, &buffer);
-    try writer.interface.writeAll(bytes);
-    try writer.interface.flush();
+    try std.Io.File.stderr().writeStreamingAll(io, bytes);
 }
 
 pub fn writeAllOut(bytes: []const u8) !void {
-    var buffer: [4096]u8 = undefined;
-    var writer = std.Io.File.stdout().writer(io, &buffer);
-    try writer.interface.writeAll(bytes);
-    try writer.interface.flush();
+    try std.Io.File.stdout().writeStreamingAll(io, bytes);
 }
 
 pub fn readStdin(buffer: []u8) !usize {

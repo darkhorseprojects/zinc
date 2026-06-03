@@ -1,8 +1,8 @@
 const std = @import("std");
-const config = @import("../runtime/config.zig");
-const graph = @import("graph.zig");
-const sessions = @import("../runtime/session.zig");
-const uri = @import("../runtime/uri.zig");
+const config = @import("../config/mod.zig");
+const graph = @import("mod.zig");
+const sessions = @import("../session/mod.zig");
+const uri = @import("../io/uri.zig");
 
 const Allocator = std.mem.Allocator;
 

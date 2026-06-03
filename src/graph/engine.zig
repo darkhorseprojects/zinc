@@ -1,12 +1,12 @@
 const std = @import("std");
-const config = @import("../runtime/config.zig");
+const config = @import("../config/mod.zig");
 const ctxmod = @import("context.zig");
-const files = @import("../sys/fs.zig");
-const graph = @import("graph.zig");
-const provider = @import("../runtime/provider.zig");
+const files = @import("../io/fs.zig");
+const graph = @import("mod.zig");
+const provider = @import("../model/provider.zig");
 const resource = @import("resource.zig");
-const sessions = @import("../runtime/session.zig");
-const trace = @import("../sys/trace.zig");
+const sessions = @import("../session/mod.zig");
+const trace = @import("../io/trace.zig");
 
 const Allocator = std.mem.Allocator;
 const context_chars_per_token: usize = 3;

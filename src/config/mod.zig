@@ -1,8 +1,8 @@
 const std = @import("std");
-const files = @import("../sys/fs.zig");
-const graph = @import("../core/graph.zig");
-const packages = @import("../core/packages.zig");
-const layout = @import("../sys/layout.zig");
+const files = @import("../io/fs.zig");
+const graph = @import("../graph/mod.zig");
+const packages = @import("../packages/mod.zig");
+const layout = @import("../io/layout.zig");
 const circuitry = @import("circuitry");
 
 const Allocator = std.mem.Allocator;
@@ -195,20 +195,17 @@ pub const RuntimeProfile = struct {
 };
 
 const Config = struct {
-    json_texts: [][]u8,
-    parsed: []std.json.Parsed(std.json.Value),
+    documents: []circuitry.Graph,
 
     fn deinit(self: *Config, allocator: Allocator) void {
-        for (self.json_texts) |text| allocator.free(text);
-        allocator.free(self.json_texts);
-        for (self.parsed) |*p| p.deinit();
-        allocator.free(self.parsed);
+        for (self.documents) |*document| document.deinit();
+        allocator.free(self.documents);
     }
-    fn value(self: Config, path: []const []const u8) ?std.json.Value {
-        var i = self.parsed.len;
+    fn value(self: Config, path: []const []const u8) ?*const circuitry.value.Value {
+        var i = self.documents.len;
         while (i > 0) {
             i -= 1;
-            if (findPath(self.parsed[i].value, path)) |v| return v;
+            if (findPath(&self.documents[i].root, path)) |v| return v;
         }
         return null;
     }
@@ -221,47 +218,35 @@ const Config = struct {
     }
     fn usizeValue(self: Config, path: []const []const u8, default: usize) !usize {
         const found = self.value(path) orelse return default;
-        switch (found) {
+        switch (found.*) {
             .integer => |val| {
                 if (val < 0) return error.InvalidConfigValue;
                 return @intCast(val);
             },
-            .string => |val| {
-                return std.fmt.parseInt(usize, val, 10) catch error.InvalidConfigValue;
-            },
+            .string => |val| return std.fmt.parseInt(usize, val, 10) catch error.InvalidConfigValue,
             else => return error.InvalidConfigValue,
         }
     }
     fn isizeValue(self: Config, path: []const []const u8, default: isize) !isize {
         const found = self.value(path) orelse return default;
-        switch (found) {
-            .integer => |val| {
-                return @intCast(val);
-            },
-            .string => |val| {
-                return std.fmt.parseInt(isize, val, 10) catch error.InvalidConfigValue;
-            },
+        switch (found.*) {
+            .integer => |val| return @intCast(val),
+            .string => |val| return std.fmt.parseInt(isize, val, 10) catch error.InvalidConfigValue,
             else => return error.InvalidConfigValue,
         }
     }
     fn f64Value(self: Config, path: []const []const u8, default: f64) !f64 {
         const found = self.value(path) orelse return default;
-        switch (found) {
-            .float => |val| {
-                return val;
-            },
-            .integer => |val| {
-                return @floatFromInt(val);
-            },
-            .string => |val| {
-                return std.fmt.parseFloat(f64, val) catch error.InvalidConfigValue;
-            },
+        switch (found.*) {
+            .float => |val| return val,
+            .integer => |val| return @floatFromInt(val),
+            .string => |val| return std.fmt.parseFloat(f64, val) catch error.InvalidConfigValue,
             else => return error.InvalidConfigValue,
         }
     }
     fn boolValue(self: Config, path: []const []const u8, default: bool) !bool {
         const found = self.value(path) orelse return default;
-        if (found == .bool) return found.bool;
+        if (found.* == .boolean) return found.boolean;
         const raw = scalarText(found) orelse return error.InvalidConfigValue;
         if (std.mem.eql(u8, raw, "true")) return true;
         if (std.mem.eql(u8, raw, "false")) return false;
@@ -269,15 +254,15 @@ const Config = struct {
     }
     fn stringList(self: Config, allocator: Allocator, path: []const []const u8, defaults: []const []const u8) ![][]u8 {
         const found = self.value(path) orelse return dupeList(allocator, defaults);
-        if (found != .array) return error.InvalidConfigValue;
-        var out = try allocator.alloc([]u8, found.array.items.len);
+        if (found.* != .sequence) return error.InvalidConfigValue;
+        var out = try allocator.alloc([]u8, found.sequence.len);
         var initialized: usize = 0;
         errdefer {
             for (out[0..initialized]) |item| allocator.free(item);
             allocator.free(out);
         }
-        for (found.array.items, 0..) |item, i| {
-            out[i] = try allocator.dupe(u8, scalarText(item) orelse return error.InvalidConfigValue);
+        for (found.sequence, 0..) |item, i| {
+            out[i] = try allocator.dupe(u8, scalarText(&item) orelse return error.InvalidConfigValue);
             initialized += 1;
         }
         return out;
@@ -370,7 +355,7 @@ pub fn configGet(allocator: Allocator, io: std.Io, home: []const u8, path: []con
     return allocator.dupe(u8, scalarText(value) orelse return error.ConfigKeyNotFound);
 }
 
-fn parseScope(value: ?std.json.Value) !Scope {
+fn parseScope(value: ?*const circuitry.value.Value) !Scope {
     const raw = scalarText(value) orelse return .project;
     if (std.mem.eql(u8, raw, "readonly")) return .readonly;
     if (std.mem.eql(u8, raw, "project")) return .project;
@@ -378,7 +363,7 @@ fn parseScope(value: ?std.json.Value) !Scope {
     return error.InvalidConfigValue;
 }
 
-fn parseBashMode(value: ?std.json.Value) !BashMode {
+fn parseBashMode(value: ?*const circuitry.value.Value) !BashMode {
     const raw = scalarText(value) orelse return .build;
     if (std.mem.eql(u8, raw, "inspect")) return .inspect;
     if (std.mem.eql(u8, raw, "build")) return .build;
@@ -555,50 +540,36 @@ fn reasoningMarkers(allocator: Allocator, cfg: Config, id: []const u8) !?Reasoni
 }
 
 fn loadConfig(allocator: Allocator, io: std.Io, home: []const u8) !Config {
-    var json_texts: std.ArrayList([]u8) = .empty;
+    var documents: std.ArrayList(circuitry.Graph) = .empty;
     errdefer {
-        for (json_texts.items) |text| allocator.free(text);
-        json_texts.deinit(allocator);
-    }
-    var parsed: std.ArrayList(std.json.Parsed(std.json.Value)) = .empty;
-    errdefer {
-        for (parsed.items) |*p| p.deinit();
-        parsed.deinit(allocator);
+        for (documents.items) |*document| document.deinit();
+        documents.deinit(allocator);
     }
 
     const global = try layout.configPath(allocator, home);
     defer allocator.free(global);
-    try loadConfigValue(allocator, io, global, &json_texts, &parsed);
-    try loadConfigValue(allocator, io, ".zinc/config.yaml", &json_texts, &parsed);
-    return .{ .json_texts = try json_texts.toOwnedSlice(allocator), .parsed = try parsed.toOwnedSlice(allocator) };
+    try loadConfigValue(allocator, io, global, &documents);
+    try loadConfigValue(allocator, io, ".zinc/config.yaml", &documents);
+    return .{ .documents = try documents.toOwnedSlice(allocator) };
 }
 
-fn loadConfigValue(allocator: Allocator, io: std.Io, path: []const u8, json_texts: *std.ArrayList([]u8), parsed: *std.ArrayList(std.json.Parsed(std.json.Value))) !void {
+fn loadConfigValue(allocator: Allocator, io: std.Io, path: []const u8, documents: *std.ArrayList(circuitry.Graph)) !void {
     if (!files.existsPath(path)) return;
-
-    var document = try circuitry.loadYamlFile(allocator, io, path);
-    defer document.deinit();
-    const json = try circuitry.value.writeJsonLike(allocator, &document.root);
-    defer allocator.free(json);
-
-    var p = try std.json.parseFromSlice(std.json.Value, allocator, json, .{});
-    errdefer p.deinit();
-    try json_texts.append(allocator, try allocator.dupe(u8, json));
-    try parsed.append(allocator, p);
+    try documents.append(allocator, try circuitry.loadYamlFile(allocator, io, path));
 }
 
-fn findPath(root: std.json.Value, path: []const []const u8) ?std.json.Value {
+fn findPath(root: *const circuitry.value.Value, path: []const []const u8) ?*const circuitry.value.Value {
     var value = root;
     for (path) |part| {
-        if (value != .object) return null;
-        value = value.object.get(part) orelse return null;
+        if (value.* != .mapping) return null;
+        value = value.mapping.getPtr(part) orelse return null;
     }
     return value;
 }
 
-fn scalarText(value: ?std.json.Value) ?[]const u8 {
+fn scalarText(value: ?*const circuitry.value.Value) ?[]const u8 {
     const v = value orelse return null;
-    return if (v == .string) v.string else null;
+    return if (v.* == .string) v.string else null;
 }
 
 fn dupeList(allocator: Allocator, defaults: []const []const u8) ![][]u8 {

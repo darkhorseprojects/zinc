@@ -1,5 +1,5 @@
 const std = @import("std");
-const files = @import("../sys/fs.zig");
+const files = @import("../io/fs.zig");
 const Allocator = std.mem.Allocator;
 
 pub const ToolResult = struct {
