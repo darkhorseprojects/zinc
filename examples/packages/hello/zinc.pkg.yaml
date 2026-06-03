@@ -4,57 +4,72 @@ description: Tiny Zinc package example.
 assets:
   graphs:
     hello: graphs/hello.circuitry.yaml
+    hello_tool: graphs/hello-tool.circuitry.yaml
   prompts:
-    hello-style: prompts/hello-style.md
+    hello_prompt: prompts/hello-style.md
+  files:
+    hello_asset: assets/hello.txt
 scripts:
-  check: scripts/check
+  check:
+    linux: scripts/check
+    macos: scripts/check
+    windows: scripts/check.cmd
+attach:
+  target:
+    kind: model
+  resources:
+    - hello_prompt
+  input:
+    - hello_prompt
+  tools:
+    - hello_process
 tools:
   hello_graph:
     label: Hello graph
     description: Run the packaged hello graph.
     prompt: run the packaged hello graph
-    parameters: {}
+    input: {}
+    docs: {}
     handler:
-      kind: graph
-      graph: graphs/hello-tool.circuitry.yaml
-      export: main
+      graph:
+        graph: graphs/hello-tool.circuitry.yaml
+        export: main
   hello_process:
     label: Hello process
     description: Run the packaged hello process tool.
     prompt: run the packaged hello process tool
-    parameters:
-      name:
-        type: string
-        description: Name to greet
-        required: true
+    input:
+      name: string
+    docs:
+      name: Name to greet
     handler:
-      kind: process
-      command:
-        linux: tools/hello-process
-        macos: tools/hello-process
-        windows: tools/hello-process.cmd
+      process:
+        command:
+          linux: tools/hello-process
+          macos: tools/hello-process
+          windows: tools/hello-process.cmd
   hello_http:
     label: Hello HTTP
     description: Example HTTP tool definition.
-    parameters:
-      name:
-        type: string
-        required: true
+    input:
+      name: string
+    docs:
+      name: Name to greet
     handler:
-      kind: http
-      method: POST
-      url: http://127.0.0.1:8787/hello
+      http:
+        method: POST
+        url: http://127.0.0.1:8787/hello
   hello_mcp:
     label: Hello MCP
     description: Example MCP tool definition.
-    parameters:
-      name:
-        type: string
-        required: true
+    input:
+      name: string
+    docs:
+      name: Name to greet
     handler:
-      kind: mcp
-      command:
-        linux: tools/hello-mcp
-        macos: tools/hello-mcp
-        windows: tools/hello-mcp.cmd
-      tool: hello
+      mcp:
+        command:
+          linux: tools/hello-mcp
+          macos: tools/hello-mcp
+          windows: tools/hello-mcp.cmd
+        tool: hello

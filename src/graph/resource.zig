@@ -6,6 +6,7 @@ const files = @import("../io/fs.zig");
 const config = @import("../config/mod.zig");
 const graph = @import("mod.zig");
 const packages = @import("../packages/mod.zig");
+const platform = @import("../platform.zig");
 const provider = @import("../model/provider.zig");
 const runtime_tools = @import("../tools/schema.zig");
 const sessions = @import("../session/mod.zig");
@@ -116,7 +117,7 @@ fn resolveModel(ctx: *RunContext, id: []const u8, res: graph.Resource) !Resolved
         std.debug.print("error: unsupported Zinc tool declared by graph: {s}\n", .{tool});
         return error.UserError;
     }
-    const tools_json = try schemaJson(ctx, tool_names);
+    const tools_json = try providerToolsJson(ctx, tool_names);
     defer ctx.allocator.free(tools_json);
 
     var system: std.ArrayList(u8) = .empty;
@@ -236,7 +237,9 @@ fn executeGraphTool(ctx: *RunContext, tool: packages.Tool, graph_spec: []const u
 }
 
 fn executeProcessTool(ctx: *RunContext, tool: packages.Tool, command: []const u8, arguments: []const u8) !runtime_tools.ToolResult {
-    const result = try runWithInput(ctx.allocator, ctx.io, &.{command}, .{ .path = tool.package_dir }, arguments, 1024 * 1024);
+    const resolved = try platform.process.resolveCommand(ctx.allocator, ctx.io, platform.currentOS(), .{}, command, tool.package_dir);
+    defer ctx.allocator.free(resolved);
+    const result = try runWithInput(ctx.allocator, ctx.io, &.{resolved}, .{ .path = tool.package_dir }, arguments, 1024 * 1024);
     defer ctx.allocator.free(result.stderr);
     if (result.term != .exited or result.term.exited != 0) {
         ctx.allocator.free(result.stdout);
@@ -258,14 +261,16 @@ fn executeHttpTool(ctx: *RunContext, url: []const u8, method: []const u8, argume
 fn executeMcpTool(ctx: *RunContext, tool: packages.Tool, command: []const u8, mcp_tool: []const u8, arguments: []const u8) !runtime_tools.ToolResult {
     var input: std.ArrayList(u8) = .empty;
     defer input.deinit(ctx.allocator);
-    try input.appendSlice(ctx.allocator, "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"initialize\",\"params\":{\"protocolVersion\":\"2025-03-26\",\"capabilities\":{},\"clientInfo\":{\"name\":\"zinc\",\"version\":\"0.4.1\"}}}\n");
+    try input.appendSlice(ctx.allocator, "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"initialize\",\"params\":{\"protocolVersion\":\"2025-03-26\",\"capabilities\":{},\"clientInfo\":{\"name\":\"zinc\",\"version\":\"0.4.2\"}}}\n");
     try input.appendSlice(ctx.allocator, "{\"jsonrpc\":\"2.0\",\"method\":\"notifications/initialized\"}\n");
     try input.appendSlice(ctx.allocator, "{\"jsonrpc\":\"2.0\",\"id\":2,\"method\":\"tools/call\",\"params\":{\"name\":");
     try appendJsonString(ctx.allocator, &input, mcp_tool);
     try input.appendSlice(ctx.allocator, ",\"arguments\":");
     try input.appendSlice(ctx.allocator, arguments);
     try input.appendSlice(ctx.allocator, "}}\n");
-    const result = try runWithInput(ctx.allocator, ctx.io, &.{command}, .{ .path = tool.package_dir }, input.items, 1024 * 1024);
+    const resolved = try platform.process.resolveCommand(ctx.allocator, ctx.io, platform.currentOS(), .{}, command, tool.package_dir);
+    defer ctx.allocator.free(resolved);
+    const result = try runWithInput(ctx.allocator, ctx.io, &.{resolved}, .{ .path = tool.package_dir }, input.items, 1024 * 1024);
     defer ctx.allocator.free(result.stdout);
     defer ctx.allocator.free(result.stderr);
     if (result.term != .exited or result.term.exited != 0) return error.McpToolFailed;
@@ -466,19 +471,19 @@ fn maxTokens(ctx: RunContext, reasoning: isize) ?usize {
     };
 }
 
-fn schemaJson(ctx: *RunContext, tool_names: []const []const u8) ![]u8 {
+fn providerToolsJson(ctx: *RunContext, tool_names: []const []const u8) ![]u8 {
     var out: std.ArrayList(u8) = .empty;
     errdefer out.deinit(ctx.allocator);
     try out.append(ctx.allocator, '[');
     for (tool_names, 0..) |tool, i| {
         if (i != 0) try out.append(ctx.allocator, ',');
         if (runtime_tools.contains(tool)) {
-            const one = try runtime_tools.schemaJson(ctx.allocator, &.{tool});
+            const one = try runtime_tools.providerToolsJson(ctx.allocator, &.{tool});
             defer ctx.allocator.free(one);
             try out.appendSlice(ctx.allocator, one[1 .. one.len - 1]);
         } else if (try packages.findTool(ctx.allocator, ctx.io, ctx.home, tool)) |package_tool| {
             defer package_tool.deinit(ctx.allocator);
-            try runtime_tools.appendPackageSchema(ctx.allocator, &out, package_tool);
+            try runtime_tools.appendPackageProviderTool(ctx.allocator, &out, package_tool);
         } else return error.UnknownTool;
     }
     try out.append(ctx.allocator, ']');

@@ -20,13 +20,12 @@ pub const Result = struct {
     }
 };
 
-pub fn run(allocator: Allocator, io: std.Io, argv: []const []const u8, cwd: ?[]const u8, stdin: ?[]const u8, max_capture_bytes: usize) !Result {
+pub fn run(allocator: Allocator, io: std.Io, argv: []const []const u8, cwd: ?[]const u8, max_capture_bytes: usize) !Result {
     if (argv.len == 0) return error.MissingExecutable;
     const child_cwd: std.process.Child.Cwd = if (cwd) |dir| .{ .path = dir } else .inherit;
     const result = try std.process.run(allocator, io, .{
         .argv = argv,
         .cwd = child_cwd,
-        .stdin = if (stdin) |bytes| .{ .bytes = bytes } else .none,
         .stdout_limit = .limited(max_capture_bytes),
         .stderr_limit = .limited(max_capture_bytes),
     });
@@ -63,7 +62,14 @@ pub fn resolveCommand(allocator: Allocator, io: std.Io, os: platform.OS, env: En
     if (command.len == 0) return error.MissingExecutable;
     if (path_mod.isAbsolute(os, command)) return allocator.dupe(u8, command);
     if (path_mod.hasPathSeparator(command)) {
-        if (package_dir) |dir| return path_mod.joinDisplay(allocator, os, &.{ dir, command });
+        if (package_dir) |dir| {
+            const candidate = try path_mod.joinDisplay(allocator, os, &.{ dir, command });
+            defer allocator.free(candidate);
+            _ = std.Io.Dir.cwd().statFile(io, candidate, .{}) catch |err| switch (err) {
+                error.FileNotFound => return error.ExecutableNotFound,
+                else => return err,
+            };
+        }
         return allocator.dupe(u8, command);
     }
     const path_text = env.path orelse return error.ExecutableNotFound;
@@ -83,7 +89,7 @@ fn candidateExists(allocator: Allocator, io: std.Io, os: platform.OS, dir: []con
     defer allocator.free(name);
     const candidate = try path_mod.joinDisplay(allocator, os, &.{ dir, name });
     errdefer allocator.free(candidate);
-    std.Io.Dir.cwd().statFile(io, candidate, .{}) catch |err| switch (err) {
+    _ = std.Io.Dir.cwd().statFile(io, candidate, .{}) catch |err| switch (err) {
         error.FileNotFound => return null,
         else => return null,
     };

@@ -174,7 +174,7 @@ fn isValidSchemaJson(allocator: Allocator, schema: *const circuitry.value.Value,
     var arena = std.heap.ArenaAllocator.init(allocator);
     defer arena.deinit();
     const converted = jsonToCircuitryValue(arena.allocator(), parsed.value) catch return false;
-    return circuitry.schema.validateValue(schema, &converted);
+    return circuitry.schema.validateValue(allocator, schema, &converted) catch false;
 }
 
 fn jsonToCircuitryValue(allocator: Allocator, value: std.json.Value) !circuitry.value.Value {

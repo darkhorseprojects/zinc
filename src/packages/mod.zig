@@ -6,7 +6,7 @@ const circuitry = @import("circuitry");
 
 const Allocator = std.mem.Allocator;
 
-const meta_file = ".zinc-package.json";
+const meta_file = ".zinc-package.yaml";
 
 pub const Scope = enum { local, global };
 
@@ -124,6 +124,20 @@ pub const Script = struct {
     }
 };
 
+const AttachSpec = struct {
+    target_kind: []u8,
+    resources: [][]u8,
+    input: [][]u8,
+    tools: [][]u8,
+
+    fn deinit(self: AttachSpec, allocator: Allocator) void {
+        allocator.free(self.target_kind);
+        freeStringList(allocator, self.resources);
+        freeStringList(allocator, self.input);
+        freeStringList(allocator, self.tools);
+    }
+};
+
 const Asset = struct {
     id: []u8,
     path: []u8,
@@ -143,6 +157,7 @@ const Manifest = struct {
     files: []Asset,
     tools: []Tool,
     scripts: []Script,
+    attach: ?AttachSpec,
 
     fn deinit(self: Manifest, allocator: Allocator) void {
         allocator.free(self.name);
@@ -153,6 +168,7 @@ const Manifest = struct {
         freeAssets(allocator, self.files);
         freeTools(allocator, self.tools);
         freeScripts(allocator, self.scripts);
+        if (self.attach) |spec| spec.deinit(allocator);
     }
 };
 
@@ -354,34 +370,72 @@ pub fn findTool(allocator: Allocator, io: std.Io, home: []const u8, name: []cons
 pub fn attach(allocator: Allocator, io: std.Io, home: []const u8, package_name: []const u8) ![]u8 {
     var found = try findInstalled(allocator, home, package_name, null);
     defer found.deinit(allocator);
-    var names = try readAttachmentNames(allocator);
+    const manifest = try loadManifest(allocator, io, found.path);
+    defer manifest.deinit(allocator);
+    const spec = manifest.attach orelse return error.PackageHasNoAttach;
+    const loop_path = try layout.sharePath(allocator, home, "graphs/zinc-loop.circuitry.yaml");
+    defer allocator.free(loop_path);
+    const model = try selectAttachTarget(allocator, io, loop_path, spec.target_kind);
+    defer allocator.free(model);
+
+    var names = try graphAttachmentNames(allocator, io);
     defer freeStringList(allocator, names);
     if (!stringListContains(names, found.name)) {
         const next = try appendString(allocator, names, found.name);
         allocator.free(names);
         names = next;
     }
-    try writeAttachmentNames(allocator, names);
-    try regenerateAttachments(allocator, io, home, names);
+
+    var preview: std.ArrayList(u8) = .empty;
+    defer preview.deinit(allocator);
+    try preview.print(allocator, "Attach package {s}\n\n", .{found.name});
+    try preview.print(allocator, "extension graph: .zinc/graphs/zinc-extensions.circuitry.yaml\nloop graph: {s}\nmodel: {s}\n\n", .{ loop_path, model });
+    try preview.appendSlice(allocator, "add input:\n");
+    for (spec.input) |id| try preview.print(allocator, "  - extensions.{s}\n", .{id});
+    try preview.appendSlice(allocator, "add tools:\n");
+    for (spec.tools) |tool| try preview.print(allocator, "  - {s}\n", .{tool});
+    try confirmApply(preview.items);
+
+    try regenerateAttachments(allocator, io, home, names, model);
+    try wireLoopGraph(allocator, io, loop_path, model, spec);
     return std.fmt.allocPrint(allocator, "attached {s}\n.zinc/graphs/zinc-extensions.circuitry.yaml\n.zinc/generated/extensions.md\n", .{found.name});
 }
 
 pub fn detach(allocator: Allocator, io: std.Io, home: []const u8, package_name: []const u8) ![]u8 {
-    const names = try readAttachmentNames(allocator);
+    const loop_path = try layout.sharePath(allocator, home, "graphs/zinc-loop.circuitry.yaml");
+    defer allocator.free(loop_path);
+    const metadata = try extensionMetadata(allocator, io, package_name);
+    defer metadata.deinit(allocator);
+    var preview: std.ArrayList(u8) = .empty;
+    defer preview.deinit(allocator);
+    try preview.print(allocator, "Detach package {s}\n\n", .{package_name});
+    try preview.print(allocator, "extension graph: .zinc/graphs/zinc-extensions.circuitry.yaml\nloop graph: {s}\nmodel: {s}\n\n", .{ loop_path, metadata.model });
+    try preview.appendSlice(allocator, "remove input:\n");
+    for (metadata.input) |id| try preview.print(allocator, "  - extensions.{s}\n", .{id});
+    try preview.appendSlice(allocator, "remove tools:\n");
+    for (metadata.tools) |tool| try preview.print(allocator, "  - {s}\n", .{tool});
+    try confirmApply(preview.items);
+
+    const names = try graphAttachmentNames(allocator, io);
     defer freeStringList(allocator, names);
     const next = try removeString(allocator, names, package_name);
     defer freeStringList(allocator, next);
-    try writeAttachmentNames(allocator, next);
+    try unwireLoopGraph(allocator, io, loop_path, metadata);
     if (next.len == 0) {
         std.Io.Dir.cwd().deleteFile(std.Options.debug_io, ".zinc/graphs/zinc-extensions.circuitry.yaml") catch {};
         std.Io.Dir.cwd().deleteFile(std.Options.debug_io, ".zinc/generated/extensions.md") catch {};
-    } else try regenerateAttachments(allocator, io, home, next);
+    } else try regenerateAttachments(allocator, io, home, next, metadata.model);
     return std.fmt.allocPrint(allocator, "detached {s}\n", .{package_name});
 }
 
-pub fn attachments(allocator: Allocator) ![]u8 {
-    if (!files.existsPath(".zinc/packages/attachments.txt")) return allocator.dupe(u8, "no package attachments\n");
-    return files.readLimited(allocator, ".zinc/packages/attachments.txt", 1024 * 1024);
+pub fn attachments(allocator: Allocator, io: std.Io) ![]u8 {
+    const names = try graphAttachmentNames(allocator, io);
+    defer freeStringList(allocator, names);
+    if (names.len == 0) return allocator.dupe(u8, "no package attachments\n");
+    var out: std.ArrayList(u8) = .empty;
+    errdefer out.deinit(allocator);
+    for (names) |name| try out.print(allocator, "{s}\n", .{name});
+    return out.toOwnedSlice(allocator);
 }
 
 pub fn execScript(allocator: Allocator, io: std.Io, home: []const u8, package_name: []const u8, script_name: []const u8) ![]u8 {
@@ -390,9 +444,11 @@ pub fn execScript(allocator: Allocator, io: std.Io, home: []const u8, package_na
     const manifest = try loadManifest(allocator, io, found.path);
     defer manifest.deinit(allocator);
     for (manifest.scripts) |script| if (std.mem.eql(u8, script.name, script_name)) {
-        const result = try std.process.run(allocator, io, .{ .argv = &.{script.command}, .cwd = .{ .path = found.path }, .stdout_limit = .limited(1024 * 1024), .stderr_limit = .limited(1024 * 1024) });
+        const command = try platform.process.resolveCommand(allocator, io, platform.currentOS(), .{}, script.command, found.path);
+        defer allocator.free(command);
+        const result = try platform.process.run(allocator, io, &.{command}, found.path, 1024 * 1024);
         defer allocator.free(result.stderr);
-        if (result.term != .exited or result.term.exited != 0) {
+        if (result.code != 0) {
             allocator.free(result.stdout);
             return error.PackageScriptFailed;
         }
@@ -484,6 +540,7 @@ fn loadManifest(allocator: Allocator, io: std.Io, package_dir: []const u8) !Mani
         .files = try readAssets(allocator, root, &.{ "assets", "files" }),
         .tools = try readTools(allocator, root, package_dir),
         .scripts = try readScripts(allocator, root),
+        .attach = try readAttach(allocator, root),
     };
 }
 
@@ -506,57 +563,100 @@ fn readAssets(allocator: Allocator, root: *const circuitry.value.Value, path: []
     return out.toOwnedSlice(allocator);
 }
 
-fn readAttachmentNames(allocator: Allocator) ![][]u8 {
-    if (!files.existsPath(".zinc/packages/attachments.txt")) return allocator.alloc([]u8, 0);
-    const text = try files.readLimited(allocator, ".zinc/packages/attachments.txt", 1024 * 1024);
-    defer allocator.free(text);
+const ExtensionMetadata = struct {
+    package: []u8,
+    model: []u8,
+    resources: [][]u8,
+    input: [][]u8,
+    tools: [][]u8,
+
+    fn deinit(self: ExtensionMetadata, allocator: Allocator) void {
+        allocator.free(self.package);
+        allocator.free(self.model);
+        freeStringList(allocator, self.resources);
+        freeStringList(allocator, self.input);
+        freeStringList(allocator, self.tools);
+    }
+};
+
+fn confirmApply(preview: []const u8) !void {
+    try files.writeAllErr(preview);
+    try files.writeAllErr("\nApply? [y/N] ");
+    var buf: [16]u8 = undefined;
+    const n = try files.readStdin(&buf);
+    if (n == 0) return error.UserCancelled;
+    const answer = std.mem.trim(u8, buf[0..n], " \t\r\n");
+    if (answer.len == 0 or (answer[0] != 'y' and answer[0] != 'Y')) return error.UserCancelled;
+}
+
+fn selectAttachTarget(allocator: Allocator, io: std.Io, loop_path: []const u8, kind: []const u8) ![]u8 {
+    var graph = try circuitry.loadFile(allocator, io, loop_path);
+    defer graph.deinit();
+    const matches = try circuitry.query.resourcesByKind(allocator, &graph, kind);
+    defer allocator.free(matches);
+    if (matches.len == 0) return error.NoCompatibleAttachTarget;
+    if (matches.len == 1) return allocator.dupe(u8, matches[0].id);
+    try files.writeAllErr("Choose attach target:\n");
+    for (matches, 0..) |item, i| {
+        const line = try std.fmt.allocPrint(allocator, "  {d}) {s}\n", .{ i + 1, item.id });
+        defer allocator.free(line);
+        try files.writeAllErr(line);
+    }
+    try files.writeAllErr("Target number: ");
+    var buf: [32]u8 = undefined;
+    const n = try files.readStdin(&buf);
+    const raw = std.mem.trim(u8, buf[0..n], " \t\r\n");
+    const index = try std.fmt.parseInt(usize, raw, 10);
+    if (index == 0 or index > matches.len) return error.InvalidAttachTarget;
+    return allocator.dupe(u8, matches[index - 1].id);
+}
+
+fn extensionMetadata(allocator: Allocator, io: std.Io, package_name: []const u8) !ExtensionMetadata {
+    var graph = try circuitry.loadFile(allocator, io, ".zinc/graphs/zinc-extensions.circuitry.yaml");
+    defer graph.deinit();
+    const resources = graph.resources() orelse return error.PackageNotAttached;
+    if (resources.* != .mapping) return error.PackageNotAttached;
+    var iter = resources.mapping.iterator();
+    while (iter.next()) |entry| {
+        const payload = circuitry.query.customResourcePayload(&graph, entry.key_ptr.*, "extension") orelse continue;
+        const package = scalarAt(payload, &.{"package"}) orelse continue;
+        if (!std.mem.eql(u8, package, package_name)) continue;
+        return .{
+            .package = try allocator.dupe(u8, package),
+            .model = try allocator.dupe(u8, scalarAt(payload, &.{ "bound", "model" }) orelse return error.PackageNotAttached),
+            .resources = try readStringListField(allocator, payload, "resources"),
+            .input = try readStringListField(allocator, payload, "input"),
+            .tools = try readStringListField(allocator, payload, "tools"),
+        };
+    }
+    return error.PackageNotAttached;
+}
+
+fn graphAttachmentNames(allocator: Allocator, io: std.Io) ![][]u8 {
+    if (!files.existsPath(".zinc/graphs/zinc-extensions.circuitry.yaml")) return allocator.alloc([]u8, 0);
+    var graph = try circuitry.loadFile(allocator, io, ".zinc/graphs/zinc-extensions.circuitry.yaml");
+    defer graph.deinit();
+    const resources = graph.resources() orelse return allocator.alloc([]u8, 0);
+    if (resources.* != .mapping) return allocator.alloc([]u8, 0);
     var out: std.ArrayList([]u8) = .empty;
     errdefer freeStringList(allocator, out.items);
-    var lines = std.mem.splitScalar(u8, text, '\n');
-    while (lines.next()) |line| {
-        const name = std.mem.trim(u8, line, " \t\r");
-        if (name.len != 0) try out.append(allocator, try allocator.dupe(u8, name));
+    var iter = resources.mapping.iterator();
+    while (iter.next()) |entry| {
+        const payload = circuitry.query.customResourcePayload(&graph, entry.key_ptr.*, "extension") orelse continue;
+        const package = scalarAt(payload, &.{"package"}) orelse continue;
+        if (!stringListContains(out.items, package)) try out.append(allocator, try allocator.dupe(u8, package));
     }
     return out.toOwnedSlice(allocator);
 }
 
-fn writeAttachmentNames(allocator: Allocator, names: []const []u8) !void {
-    try files.mkdirP(".zinc/packages");
-    var out: std.ArrayList(u8) = .empty;
-    defer out.deinit(allocator);
-    for (names) |name| {
-        try out.appendSlice(allocator, name);
-        try out.append(allocator, '\n');
-    }
-    try files.write(".zinc/packages/attachments.txt", out.items);
-}
-
-fn regenerateAttachments(allocator: Allocator, io: std.Io, home: []const u8, names: []const []u8) !void {
+fn regenerateAttachments(allocator: Allocator, io: std.Io, home: []const u8, names: []const []u8, model: []const u8) !void {
     try files.mkdirP(".zinc/graphs");
     try files.mkdirP(".zinc/generated");
-    const graph_text = try extensionGraph(allocator);
-    defer allocator.free(graph_text);
-    try files.write(".zinc/graphs/zinc-extensions.circuitry.yaml", graph_text);
+    var graph_text: std.ArrayList(u8) = .empty;
+    errdefer graph_text.deinit(allocator);
     var md: std.ArrayList(u8) = .empty;
     errdefer md.deinit(allocator);
-    try md.appendSlice(allocator, "# Zinc package extensions\n\n");
-    for (names) |name| {
-        var found = try findInstalled(allocator, home, name, null);
-        defer found.deinit(allocator);
-        const manifest = try loadManifest(allocator, io, found.path);
-        defer manifest.deinit(allocator);
-        const section = try extensionMarkdown(allocator, manifest);
-        defer allocator.free(section);
-        try md.appendSlice(allocator, section);
-    }
-    try files.write(".zinc/generated/extensions.md", md.items);
-    md.deinit(allocator);
-}
-
-fn extensionGraph(allocator: Allocator) ![]u8 {
-    var out: std.ArrayList(u8) = .empty;
-    errdefer out.deinit(allocator);
-    try out.print(allocator,
+    try graph_text.appendSlice(allocator,
         \\circuitry: "0.5"
         \\title: Zinc package extensions
         \\exports:
@@ -566,7 +666,162 @@ fn extensionGraph(allocator: Allocator) ![]u8 {
         \\    text:
         \\      path: ../generated/extensions.md
         \\
-    , .{});
+    );
+    try md.appendSlice(allocator, "# Zinc package extensions\n\n");
+    for (names) |name| {
+        var found = try findInstalled(allocator, home, name, null);
+        defer found.deinit(allocator);
+        const manifest = try loadManifest(allocator, io, found.path);
+        defer manifest.deinit(allocator);
+        try appendExtensionResources(allocator, &graph_text, manifest, model);
+        const section = try extensionMarkdown(allocator, manifest);
+        defer allocator.free(section);
+        try md.appendSlice(allocator, section);
+    }
+    try files.write(".zinc/graphs/zinc-extensions.circuitry.yaml", graph_text.items);
+    try files.write(".zinc/generated/extensions.md", md.items);
+    graph_text.deinit(allocator);
+    md.deinit(allocator);
+}
+
+fn appendExtensionResources(allocator: Allocator, out: *std.ArrayList(u8), manifest: Manifest, model: []const u8) !void {
+    const spec = manifest.attach orelse return;
+    for (manifest.prompts) |prompt| {
+        try out.print(allocator,
+            \\  {s}:
+            \\    text:
+            \\      uri: prompt:{s}
+            \\
+        , .{ prompt.id, prompt.id });
+    }
+    try out.print(allocator,
+        \\  {s}_extension:
+        \\    extension:
+        \\      package: {s}
+        \\      resources:
+        \\
+    , .{ manifest.name, manifest.name });
+    for (spec.resources) |id| try out.print(allocator, "        - {s}\n", .{id});
+    try out.appendSlice(allocator, "      input:\n");
+    for (spec.input) |id| try out.print(allocator, "        - {s}\n", .{id});
+    try out.appendSlice(allocator, "      tools:\n");
+    for (spec.tools) |tool| try out.print(allocator, "        - {s}\n", .{tool});
+    try out.print(allocator, "      bound:\n        model: {s}\n", .{model});
+}
+
+fn wireLoopGraph(allocator: Allocator, io: std.Io, loop_path: []const u8, model: []const u8, spec: AttachSpec) !void {
+    const text = try files.readLimited(allocator, loop_path, 1024 * 1024);
+    defer allocator.free(text);
+    var edited = try ensureExtensionsImport(allocator, io, text);
+    defer allocator.free(edited);
+    for (spec.input) |id| {
+        const item = try std.fmt.allocPrint(allocator, "extensions.{s}", .{id});
+        defer allocator.free(item);
+        const next = try ensureModelListItem(allocator, edited, model, "input", item);
+        allocator.free(edited);
+        edited = next;
+    }
+    for (spec.tools) |tool| {
+        const next = try ensureModelListItem(allocator, edited, model, "tools", tool);
+        allocator.free(edited);
+        edited = next;
+    }
+    try files.write(loop_path, edited);
+}
+
+fn unwireLoopGraph(allocator: Allocator, io: std.Io, loop_path: []const u8, metadata: ExtensionMetadata) !void {
+    _ = io;
+    const text = try files.readLimited(allocator, loop_path, 1024 * 1024);
+    defer allocator.free(text);
+    var edited = try allocator.dupe(u8, text);
+    defer allocator.free(edited);
+    for (metadata.input) |id| {
+        const item = try std.fmt.allocPrint(allocator, "extensions.{s}", .{id});
+        defer allocator.free(item);
+        const next = try removeModelListItem(allocator, edited, metadata.model, "input", item);
+        allocator.free(edited);
+        edited = next;
+    }
+    for (metadata.tools) |tool| {
+        const next = try removeModelListItem(allocator, edited, metadata.model, "tools", tool);
+        allocator.free(edited);
+        edited = next;
+    }
+    try files.write(loop_path, edited);
+}
+
+fn ensureExtensionsImport(allocator: Allocator, io: std.Io, text: []const u8) ![]u8 {
+    if (std.mem.indexOf(u8, text, "\n  extensions:") != null) return allocator.dupe(u8, text);
+    const cwd = try currentWorkingDirectory(allocator, io);
+    defer allocator.free(cwd);
+    const import_path = try std.fs.path.join(allocator, &.{ cwd, ".zinc/graphs/zinc-extensions.circuitry.yaml" });
+    defer allocator.free(import_path);
+    const line = try std.fmt.allocPrint(allocator, "imports:\n  extensions: {s}\n\n", .{import_path});
+    defer allocator.free(line);
+    if (std.mem.indexOf(u8, text, "\nexports:\n")) |pos| return splice(allocator, text, pos + 1, line);
+    return std.fmt.allocPrint(allocator, "{s}\n{s}", .{ line, text });
+}
+
+fn ensureModelListItem(allocator: Allocator, text: []const u8, model: []const u8, field: []const u8, item: []const u8) ![]u8 {
+    const field_pos = try modelFieldPosition(allocator, text, model, field);
+    const block_end = nextResourcePosition(text, field_pos) orelse text.len;
+    if (std.mem.indexOf(u8, text[field_pos..block_end], item) != null) return allocator.dupe(u8, text);
+    const header_end = std.mem.indexOfScalarPos(u8, text, field_pos, '\n') orelse return error.AttachTargetFieldNotFound;
+    const insert = try std.fmt.allocPrint(allocator, "        - {s}\n", .{item});
+    defer allocator.free(insert);
+    return splice(allocator, text, header_end + 1, insert);
+}
+
+fn removeModelListItem(allocator: Allocator, text: []const u8, model: []const u8, field: []const u8, item: []const u8) ![]u8 {
+    const field_pos = modelFieldPosition(allocator, text, model, field) catch return allocator.dupe(u8, text);
+    const block_end = nextResourcePosition(text, field_pos) orelse text.len;
+    const item_line = try std.fmt.allocPrint(allocator, "        - {s}\n", .{item});
+    defer allocator.free(item_line);
+    const rel = std.mem.indexOf(u8, text[field_pos..block_end], item_line) orelse return allocator.dupe(u8, text);
+    return spliceRemove(allocator, text, field_pos + rel, item_line.len);
+}
+
+fn modelFieldPosition(allocator: Allocator, text: []const u8, model: []const u8, field: []const u8) !usize {
+    const model_header = try std.fmt.allocPrint(allocator, "  {s}:\n    model:\n", .{model});
+    defer allocator.free(model_header);
+    const model_pos = std.mem.indexOf(u8, text, model_header) orelse return error.AttachTargetNotFound;
+    const model_end = nextResourcePosition(text, model_pos + model_header.len) orelse text.len;
+    const field_header = try std.fmt.allocPrint(allocator, "      {s}:\n", .{field});
+    defer allocator.free(field_header);
+    const rel = std.mem.indexOf(u8, text[model_pos..model_end], field_header) orelse return error.AttachTargetFieldNotFound;
+    return model_pos + rel;
+}
+
+fn nextResourcePosition(text: []const u8, start: usize) ?usize {
+    var pos = start;
+    while (std.mem.indexOf(u8, text[pos..], "\n  ")) |rel| {
+        pos += rel + 1;
+        if (pos + 2 < text.len and text[pos + 2] != ' ') return pos;
+        pos += 2;
+    }
+    return null;
+}
+
+fn currentWorkingDirectory(allocator: Allocator, io: std.Io) ![]u8 {
+    const cwd_z = try std.process.currentPathAlloc(io, allocator);
+    defer allocator.free(cwd_z);
+    return allocator.dupe(u8, cwd_z[0..cwd_z.len]);
+}
+
+fn splice(allocator: Allocator, text: []const u8, pos: usize, insert: []const u8) ![]u8 {
+    var out: std.ArrayList(u8) = .empty;
+    errdefer out.deinit(allocator);
+    try out.appendSlice(allocator, text[0..pos]);
+    try out.appendSlice(allocator, insert);
+    try out.appendSlice(allocator, text[pos..]);
+    return out.toOwnedSlice(allocator);
+}
+
+fn spliceRemove(allocator: Allocator, text: []const u8, pos: usize, len: usize) ![]u8 {
+    var out: std.ArrayList(u8) = .empty;
+    errdefer out.deinit(allocator);
+    try out.appendSlice(allocator, text[0..pos]);
+    try out.appendSlice(allocator, text[pos + len ..]);
     return out.toOwnedSlice(allocator);
 }
 
@@ -584,6 +839,31 @@ fn extensionMarkdown(allocator: Allocator, manifest: Manifest) ![]u8 {
         try out.appendSlice(allocator, "### Graphs\n\n");
         for (manifest.graphs) |item| try out.print(allocator, "- `{s}`: `{s}`\n", .{ item.id, item.path });
         try out.append(allocator, '\n');
+    }
+    return out.toOwnedSlice(allocator);
+}
+
+fn readAttach(allocator: Allocator, root: *const circuitry.value.Value) !?AttachSpec {
+    const value = valueAt(root, &.{"attach"}) orelse return null;
+    if (value.* != .mapping) return error.InvalidPackageManifest;
+    const target_kind = scalarAt(value, &.{ "target", "kind" }) orelse return error.InvalidPackageManifest;
+    return .{
+        .target_kind = try allocator.dupe(u8, target_kind),
+        .resources = try readStringListField(allocator, value, "resources"),
+        .input = try readStringListField(allocator, value, "input"),
+        .tools = try readStringListField(allocator, value, "tools"),
+    };
+}
+
+fn readStringListField(allocator: Allocator, root: *const circuitry.value.Value, field: []const u8) ![][]u8 {
+    const value = valueAt(root, &.{field}) orelse return allocator.alloc([]u8, 0);
+    if (value.* != .sequence) return error.InvalidPackageManifest;
+    var out: std.ArrayList([]u8) = .empty;
+    errdefer freeStringList(allocator, out.items);
+    for (value.sequence) |*item| {
+        const text = scalarText(item) orelse return error.InvalidPackageManifest;
+        if (!portableAtom(text)) return error.InvalidPackageManifest;
+        try out.append(allocator, try allocator.dupe(u8, text));
     }
     return out.toOwnedSlice(allocator);
 }
@@ -615,34 +895,48 @@ fn readTools(allocator: Allocator, root: *const circuitry.value.Value, package_d
 }
 
 fn readParams(allocator: Allocator, tool: *const circuitry.value.Value) ![]Param {
-    const value = valueAt(tool, &.{"parameters"}) orelse return allocator.alloc(Param, 0);
-    if (value.* != .mapping) return error.InvalidPackageManifest;
+    const input = valueAt(tool, &.{"input"}) orelse return allocator.alloc(Param, 0);
+    if (input.* != .mapping) return error.InvalidPackageManifest;
+    const docs = valueAt(tool, &.{"docs"});
     var out: std.ArrayList(Param) = .empty;
     errdefer {
         for (out.items) |param| param.deinit(allocator);
         out.deinit(allocator);
     }
-    var iter = value.mapping.iterator();
+    var iter = input.mapping.iterator();
     while (iter.next()) |entry| {
         if (!portableAtom(entry.key_ptr.*)) return error.InvalidPackageManifest;
-        const spec = entry.value_ptr;
+        const parsed = try parseInputSchema(entry.value_ptr);
         try out.append(allocator, .{
             .name = try allocator.dupe(u8, entry.key_ptr.*),
-            .kind = try allocator.dupe(u8, scalarAt(spec, &.{"type"}) orelse "string"),
-            .description = try allocator.dupe(u8, scalarAt(spec, &.{"description"}) orelse ""),
-            .required = boolAt(spec, &.{"required"}) orelse true,
+            .kind = try allocator.dupe(u8, parsed.kind),
+            .description = try allocator.dupe(u8, if (docs) |d| scalarAt(d, &.{entry.key_ptr.*}) orelse "" else ""),
+            .required = parsed.required,
         });
     }
     return out.toOwnedSlice(allocator);
 }
 
+const ParsedInput = struct { kind: []const u8, required: bool };
+
+fn parseInputSchema(value: *const circuitry.value.Value) !ParsedInput {
+    if (value.* == .string) return .{ .kind = value.string, .required = true };
+    const optional = valueAt(value, &.{"optional"}) orelse return error.InvalidPackageManifest;
+    if (optional.* != .string) return error.InvalidPackageManifest;
+    return .{ .kind = optional.string, .required = false };
+}
+
 fn readHandler(allocator: Allocator, value: *const circuitry.value.Value) !Handler {
-    if (value.* != .mapping) return error.InvalidPackageManifest;
-    const kind = scalarAt(value, &.{"kind"}) orelse return error.InvalidPackageManifest;
-    if (std.mem.eql(u8, kind, "graph")) return .{ .graph = .{ .graph = try allocator.dupe(u8, scalarAt(value, &.{"graph"}) orelse return error.InvalidPackageManifest), .export_name = try allocator.dupe(u8, scalarAt(value, &.{"export"}) orelse "main") } };
-    if (std.mem.eql(u8, kind, "process")) return .{ .process = .{ .command = try allocator.dupe(u8, platformCommand(value) orelse return error.InvalidPackageManifest) } };
-    if (std.mem.eql(u8, kind, "http")) return .{ .http = .{ .url = try allocator.dupe(u8, scalarAt(value, &.{"url"}) orelse return error.InvalidPackageManifest), .method = try allocator.dupe(u8, scalarAt(value, &.{"method"}) orelse "POST") } };
-    if (std.mem.eql(u8, kind, "mcp")) return .{ .mcp = .{ .command = try allocator.dupe(u8, platformCommand(value) orelse return error.InvalidPackageManifest), .tool = try allocator.dupe(u8, scalarAt(value, &.{"tool"}) orelse return error.InvalidPackageManifest) } };
+    if (value.* != .mapping or value.mapping.count() != 1) return error.InvalidPackageManifest;
+    var iter = value.mapping.iterator();
+    const entry = iter.next().?;
+    const kind = entry.key_ptr.*;
+    const body = entry.value_ptr;
+    if (body.* != .mapping) return error.InvalidPackageManifest;
+    if (std.mem.eql(u8, kind, "graph")) return .{ .graph = .{ .graph = try allocator.dupe(u8, scalarAt(body, &.{"graph"}) orelse return error.InvalidPackageManifest), .export_name = try allocator.dupe(u8, scalarAt(body, &.{"export"}) orelse "main") } };
+    if (std.mem.eql(u8, kind, "process")) return .{ .process = .{ .command = try allocator.dupe(u8, platformCommand(body) orelse return error.InvalidPackageManifest) } };
+    if (std.mem.eql(u8, kind, "http")) return .{ .http = .{ .url = try allocator.dupe(u8, scalarAt(body, &.{"url"}) orelse return error.InvalidPackageManifest), .method = try allocator.dupe(u8, scalarAt(body, &.{"method"}) orelse "POST") } };
+    if (std.mem.eql(u8, kind, "mcp")) return .{ .mcp = .{ .command = try allocator.dupe(u8, platformCommand(body) orelse return error.InvalidPackageManifest), .tool = try allocator.dupe(u8, scalarAt(body, &.{"tool"}) orelse return error.InvalidPackageManifest) } };
     return error.InvalidPackageManifest;
 }
 
@@ -709,25 +1003,17 @@ fn writeMetadata(allocator: Allocator, package_dir: []const u8, source: []const 
     defer allocator.free(path);
     var out: std.ArrayList(u8) = .empty;
     defer out.deinit(allocator);
-    try out.appendSlice(allocator, "{\"source\":");
-    try files.appendJsonString(allocator, &out, source);
-    try out.appendSlice(allocator, ",\"scope\":");
-    try files.appendJsonString(allocator, &out, scopeName(scope));
-    try out.appendSlice(allocator, "}\n");
+    try out.print(allocator, "source: {s}\nscope: {s}\n", .{ source, scopeName(scope) });
     try files.write(path, out.items);
 }
 
 fn readMetadataSource(allocator: Allocator, package_dir: []const u8) ![]u8 {
     const path = try std.fs.path.join(allocator, &.{ package_dir, meta_file });
     defer allocator.free(path);
-    const text = try files.readLimited(allocator, path, 16 * 1024);
-    defer allocator.free(text);
-    var parsed = try std.json.parseFromSlice(std.json.Value, allocator, text, .{});
+    var parsed = try circuitry.loadYamlFile(allocator, std.Options.debug_io, path);
     defer parsed.deinit();
-    if (parsed.value != .object) return error.InvalidPackageMetadata;
-    const source = parsed.value.object.get("source") orelse return error.InvalidPackageMetadata;
-    if (source != .string) return error.InvalidPackageMetadata;
-    return allocator.dupe(u8, source.string);
+    const source = scalarAt(&parsed.root, &.{"source"}) orelse return error.InvalidPackageMetadata;
+    return allocator.dupe(u8, source);
 }
 
 fn graphInDir(allocator: Allocator, dir: []const u8, spec: []const u8) !?[]u8 {

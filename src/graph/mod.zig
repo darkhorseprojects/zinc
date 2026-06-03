@@ -114,7 +114,7 @@ pub fn load(allocator: Allocator, io: std.Io, graph_path: []const u8) !Graph {
     errdefer if (default_export_name) |name| allocator.free(name);
     const default_export_target = if (default_export_name) |name| try exportTargetByName(allocator, &resolved.graph, name) else null;
     errdefer if (default_export_target) |id| allocator.free(id);
-    const inputs = if (default_export_name) |name| try readInputsForExportName(allocator, &resolved.graph, name) else try allocator.alloc(InputSpec, 0);
+    const inputs = if (default_export_name) |name| try readInputsForExportName(allocator, &resolved, name) else try allocator.alloc(InputSpec, 0);
     errdefer freeInputSpecs(allocator, inputs);
 
     return .{ .resolved = resolved, .resources = resources, .inputs = inputs, .exports = exports, .default_export_name = default_export_name, .default_export_target = default_export_target };
@@ -226,7 +226,7 @@ pub fn readInputSpecs(allocator: Allocator, graph: Graph) ![]InputSpec {
 
 pub fn readInputSpecsForExport(allocator: Allocator, graph: Graph, selected_export: ?[]const u8) ![]InputSpec {
     const name = exportName(graph, selected_export) orelse return allocator.alloc(InputSpec, 0);
-    return readInputsForExportName(allocator, &graph.resolved.graph, name);
+    return readInputsForExportName(allocator, &graph.resolved, name);
 }
 
 pub fn readPromptPacks(allocator: Allocator, graph: Graph) ![]PromptPack {
@@ -298,8 +298,8 @@ fn appendModuleResources(allocator: Allocator, out: *std.ArrayList(Resource), pa
     }
 }
 
-fn readInputsForExportName(allocator: Allocator, graph: *const circuitry.Graph, export_name: []const u8) ![]InputSpec {
-    const names = try circuitry.requiredInputs(allocator, graph, export_name);
+fn readInputsForExportName(allocator: Allocator, resolved: *const circuitry.ResolvedGraph, export_name: []const u8) ![]InputSpec {
+    const names = try circuitry.requiredInputs(allocator, resolved, export_name);
     defer circuitry.validation.freeStrings(allocator, names);
     var out = try allocator.alloc(InputSpec, names.len);
     var initialized: usize = 0;
@@ -308,7 +308,7 @@ fn readInputsForExportName(allocator: Allocator, graph: *const circuitry.Graph, 
         allocator.free(out);
     }
     for (names, 0..) |name, i| {
-        out[i] = .{ .id = try allocator.dupe(u8, name), .kind = try allocator.dupe(u8, exportInputKind(graph, export_name, name) orelse return error.InvalidCircuitryGraph), .required = true };
+        out[i] = .{ .id = try allocator.dupe(u8, name), .kind = try allocator.dupe(u8, exportInputKind(&resolved.graph, export_name, name) orelse return error.InvalidCircuitryGraph), .required = true };
         initialized += 1;
     }
     return out;

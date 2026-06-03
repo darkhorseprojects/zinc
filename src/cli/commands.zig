@@ -316,10 +316,9 @@ pub fn packageDetach(allocator: Allocator, io: std.Io, home: []const u8, args: [
 }
 
 pub fn packageAttachments(allocator: Allocator, io: std.Io, home: []const u8, args: []const []const u8) !void {
-    _ = io;
     _ = home;
     if (args.len != 0) return error.TooManyArguments;
-    const out = try packages.attachments(allocator);
+    const out = try packages.attachments(allocator, io);
     defer allocator.free(out);
     std.debug.print("{s}", .{out});
 }

@@ -76,7 +76,7 @@ pub fn doctor(allocator: Allocator, io: std.Io, home: []const u8) !void {
 
     std.debug.print("Zinc\n", .{});
     std.debug.print("  ✓ zn binary\n", .{});
-    std.debug.print("  version: 0.4.1\n", .{});
+    std.debug.print("  version: 0.4.2\n", .{});
 
     const config_path = try layout.configPath(allocator, home);
     defer allocator.free(config_path);

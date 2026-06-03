@@ -38,7 +38,7 @@ pub fn promptSnippet(name: []const u8) ![]const u8 {
     return (find(name) orelse return error.UnknownTool).prompt;
 }
 
-pub fn appendPackageSchema(allocator: Allocator, out: *std.ArrayList(u8), tool: anytype) !void {
+pub fn appendPackageProviderTool(allocator: Allocator, out: *std.ArrayList(u8), tool: anytype) !void {
     try out.appendSlice(allocator, "{\"type\":\"function\",\"function\":{\"name\":");
     try files.appendJsonString(allocator, out, tool.name);
     try out.appendSlice(allocator, ",\"description\":");
@@ -48,7 +48,7 @@ pub fn appendPackageSchema(allocator: Allocator, out: *std.ArrayList(u8), tool: 
         if (i != 0) try out.append(allocator, ',');
         try files.appendJsonString(allocator, out, param.name);
         try out.appendSlice(allocator, ":{\"type\":");
-        try files.appendJsonString(allocator, out, param.kind);
+        try files.appendJsonString(allocator, out, providerType(param.kind));
         if (param.description.len != 0) {
             try out.appendSlice(allocator, ",\"description\":");
             try files.appendJsonString(allocator, out, param.description);
@@ -74,13 +74,34 @@ pub fn validatePackageArguments(allocator: Allocator, tool: anytype, arg_text: [
             if (param.required) return error.InvalidToolArguments;
             continue;
         };
-        if (!std.mem.eql(u8, param.kind, "object") and !std.mem.eql(u8, param.kind, "string")) return error.InvalidToolArguments;
-        if (std.mem.eql(u8, param.kind, "object") and value != .object) return error.InvalidToolArguments;
-        if (std.mem.eql(u8, param.kind, "string") and value != .string) return error.InvalidToolArguments;
+        try validateJsonValueKind(value, param.kind);
     }
 }
 
-pub fn schemaJson(allocator: Allocator, names: []const []const u8) ![]u8 {
+fn providerType(kind: []const u8) []const u8 {
+    if (std.mem.eql(u8, kind, "integer")) return "integer";
+    if (std.mem.eql(u8, kind, "number")) return "number";
+    if (std.mem.eql(u8, kind, "boolean")) return "boolean";
+    if (std.mem.eql(u8, kind, "list")) return "array";
+    if (std.mem.eql(u8, kind, "array")) return "array";
+    if (std.mem.eql(u8, kind, "map")) return "object";
+    if (std.mem.eql(u8, kind, "object")) return "object";
+    return "string";
+}
+
+fn validateJsonValueKind(value: std.json.Value, kind: []const u8) !void {
+    if (std.mem.eql(u8, kind, "any")) return;
+    if (std.mem.eql(u8, kind, "string") and value == .string) return;
+    if (std.mem.eql(u8, kind, "integer") and value == .integer) return;
+    if (std.mem.eql(u8, kind, "number") and (value == .integer or value == .float)) return;
+    if (std.mem.eql(u8, kind, "boolean") and value == .bool) return;
+    if ((std.mem.eql(u8, kind, "list") or std.mem.eql(u8, kind, "array")) and value == .array) return;
+    if ((std.mem.eql(u8, kind, "map") or std.mem.eql(u8, kind, "object")) and value == .object) return;
+    if (std.mem.eql(u8, kind, "null") and value == .null) return;
+    return error.InvalidToolArguments;
+}
+
+pub fn providerToolsJson(allocator: Allocator, names: []const []const u8) ![]u8 {
     var out: std.ArrayList(u8) = .empty;
     errdefer out.deinit(allocator);
     try out.append(allocator, '[');

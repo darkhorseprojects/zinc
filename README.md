@@ -185,14 +185,28 @@ Builtin Zinc tools:
 - `bash`
 - `run_graph`
 
-Package tools are model-callable schemas backed by Zinc-owned handlers:
+Package tools use YAML-native input schemas and primary-key handlers:
 
-- `graph`
-- `process`
-- `http`
-- `mcp`
+```yaml
+tools:
+  hello_process:
+    description: Run the packaged hello process tool.
+    input:
+      name: string
+      loud:
+        optional: boolean
+    docs:
+      name: Name to greet
+      loud: Whether to shout
+    handler:
+      process:
+        command:
+          linux: tools/hello-process
+          macos: tools/hello-process
+          windows: tools/hello-process.cmd
+```
 
-Package scripts are operator commands run with `zn pkg exec`; they are not exposed to the model.
+Handlers are `graph`, `process`, `http`, or `mcp`. Package scripts are operator commands run with `zn pkg exec`; they are not exposed to the model.
 
 ## Safety
 
@@ -200,11 +214,11 @@ Zinc is a local runtime. When the active graph declares tools, Zinc can read fil
 
 ## Sessions and compaction
 
-Zinc stores sessions as JSONL under `.zinc/sessions`. Compaction runs through the configured stock compaction graph when the replay context crosses the configured threshold.
+Zinc stores sessions as JSONL under `.zinc/sessions`; that is an internal storage detail, not a user-authored format. Compaction runs through the configured stock compaction graph when the replay context crosses the configured threshold.
 
 ## Packages
 
-A Zinc package is a runtime/ecosystem convention, not Circuitry core. Packages can provide graphs, prompts, files, tools, scripts, and attach options while their graphs remain Circuitry source files.
+A Zinc package is a runtime/ecosystem convention, not Circuitry core. Packages are YAML-native and can provide graphs, prompts, files, tools, scripts, and attach options while their graphs remain Circuitry source files. Package attach state is graph-native in `.zinc/graphs/zinc-extensions.circuitry.yaml`.
 
 ## License
 
