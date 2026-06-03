@@ -3,15 +3,13 @@ const files = @import("../io/fs.zig");
 const graph = @import("../graph/mod.zig");
 const packages = @import("../packages/mod.zig");
 const layout = @import("../io/layout.zig");
+const platform = @import("../platform.zig");
 const circuitry = @import("circuitry");
 
 const Allocator = std.mem.Allocator;
 
 const default_base_url = "http://127.0.0.1:30000/v1";
-const default_provider_id = "local";
-const default_provider_kind = "local";
 const default_authorization = "Bearer zinc";
-const openai_base_url = "https://api.openai.com/v1";
 const default_model_id = "qwen-heretic-mtp";
 const default_served_model = "qwen3.6-27b-heretic-mtp-q3_k_s";
 const default_confirm_commands = &.{ "rm", "rmdir", "sudo", "su", "chmod", "chown", "dd", "mkfs", "mount", "umount", "kill", "pkill", "shutdown", "reboot" };
@@ -69,11 +67,11 @@ pub const RuntimeSettings = struct {
         allocator.free(self.graph_runs);
     }
 };
-pub const ProviderKind = enum { local, openai, openai_compatible };
+pub const ModelKind = enum { local, openai };
 
 pub const ProviderConfig = struct {
     id: []u8,
-    kind: ProviderKind,
+    kind: ModelKind,
     model: []u8,
     base_url: []u8,
     api_key_env: ?[]u8,
@@ -156,7 +154,10 @@ pub const ReasoningMarkers = struct {
 };
 pub const ModelConfig = struct {
     id: []u8,
+    kind: ModelKind,
     model: []u8,
+    base_url: []u8,
+    api_key_env: ?[]u8,
     loader: LoaderConfig,
     generation: GenerationConfig,
     reasoning: ReasoningConfig,
@@ -165,6 +166,8 @@ pub const ModelConfig = struct {
     pub fn deinit(self: ModelConfig, allocator: Allocator) void {
         allocator.free(self.id);
         allocator.free(self.model);
+        allocator.free(self.base_url);
+        if (self.api_key_env) |value| allocator.free(value);
         self.loader.deinit(allocator);
         self.reasoning.deinit(allocator);
         if (self.reasoning_request) |v| v.deinit(allocator);
@@ -269,12 +272,12 @@ const Config = struct {
     }
 };
 
-pub fn loadRuntimeProfile(allocator: Allocator, io: std.Io, home: []const u8, model_override: ?[]const u8) !RuntimeProfile {
-    var cfg = try loadConfig(allocator, io, home);
+pub fn loadRuntimeProfile(allocator: Allocator, io: std.Io, layout_ctx: layout.Context, model_override: ?[]const u8) !RuntimeProfile {
+    var cfg = try loadConfig(allocator, io, layout_ctx);
     defer cfg.deinit(allocator);
     const default_model = if (model_override) |id| try allocator.dupe(u8, id) else try cfg.string(allocator, &.{"default_model"}, default_model_id);
     errdefer allocator.free(default_model);
-    const paths = try runtimePaths(allocator, home, cfg);
+    const paths = try runtimePaths(allocator, layout_ctx, cfg);
     errdefer paths.deinit(allocator);
     const runtime = RuntimeSettings{
         .scope = try parseScope(cfg.value(&.{"scope"})),
@@ -298,47 +301,43 @@ pub fn loadRuntimeProfile(allocator: Allocator, io: std.Io, home: []const u8, mo
         .input_file_max_bytes = try cfg.usizeValue(&.{ "runtime", "input_file_max_bytes" }, 32 * 1024 * 1024),
         .graph_runs = try cfg.string(allocator, &.{ "tools", "graph_runs" }, "ask"),
     };
-    var provider = try loadProvider(allocator, cfg, default_model);
-    errdefer provider.deinit(allocator);
     var model = try loadModel(allocator, cfg, default_model);
     errdefer model.deinit(allocator);
-    if (provider.model.len != 0) {
-        allocator.free(model.model);
-        model.model = try allocator.dupe(u8, provider.model);
-    }
+    var provider = try loadProvider(allocator, model);
+    errdefer provider.deinit(allocator);
     return .{ .paths = paths, .runtime = runtime, .default_model = default_model, .provider = provider, .model = model };
 }
 
-pub fn loadRuntimePaths(allocator: Allocator, io: std.Io, home: []const u8) !RuntimePaths {
-    var cfg = try loadConfig(allocator, io, home);
+pub fn loadRuntimePaths(allocator: Allocator, io: std.Io, layout_ctx: layout.Context) !RuntimePaths {
+    var cfg = try loadConfig(allocator, io, layout_ctx);
     defer cfg.deinit(allocator);
-    return runtimePaths(allocator, home, cfg);
+    return runtimePaths(allocator, layout_ctx, cfg);
 }
 
-pub fn resolveConfiguredModelId(allocator: Allocator, io: std.Io, home: []const u8) ![]u8 {
-    var cfg = try loadConfig(allocator, io, home);
+pub fn resolveConfiguredModelId(allocator: Allocator, io: std.Io, layout_ctx: layout.Context) ![]u8 {
+    var cfg = try loadConfig(allocator, io, layout_ctx);
     defer cfg.deinit(allocator);
     return cfg.string(allocator, &.{"default_model"}, default_model_id);
 }
 
-pub fn resolveGraphModelId(allocator: Allocator, io: std.Io, loaded_graph: graph.Graph, selected_export: ?[]const u8, home: []const u8) ![]u8 {
+pub fn resolveGraphModelId(allocator: Allocator, io: std.Io, loaded_graph: graph.Graph, selected_export: ?[]const u8, layout_ctx: layout.Context) ![]u8 {
     if (try graph.graphModel(allocator, loaded_graph, selected_export)) |model| return model;
-    return resolveConfiguredModelId(allocator, io, home);
+    return resolveConfiguredModelId(allocator, io, layout_ctx);
 }
 
-pub fn readPromptPack(allocator: Allocator, io: std.Io, home: []const u8, name: []const u8) ![]u8 {
+pub fn readPromptPack(allocator: Allocator, io: std.Io, layout_ctx: layout.Context, name: []const u8) ![]u8 {
     const local = try promptPath(allocator, ".zinc/prompts", name);
     defer allocator.free(local);
     if (files.readLimited(allocator, local, 128 * 1024)) |text| return text else |_| {}
 
-    if (packages.resolvePrompt(allocator, io, home, name)) |path| {
+    if (packages.resolvePrompt(allocator, io, layout_ctx, name)) |path| {
         defer allocator.free(path);
         return files.readLimited(allocator, path, 128 * 1024);
     } else |_| {}
 
     const share_prompt = try promptPath(allocator, "prompts", name);
     defer allocator.free(share_prompt);
-    const installed = try layout.sharePath(allocator, home, share_prompt);
+    const installed = try layout.sharePath(allocator, layout_ctx, share_prompt);
     defer allocator.free(installed);
     return files.readLimited(allocator, installed, 128 * 1024);
 }
@@ -348,8 +347,8 @@ fn promptPath(allocator: Allocator, dir: []const u8, name: []const u8) ![]u8 {
     return std.fmt.allocPrint(allocator, "{s}/{s}.md", .{ dir, name });
 }
 
-pub fn configGet(allocator: Allocator, io: std.Io, home: []const u8, path: []const []const u8) ![]u8 {
-    var cfg = try loadConfig(allocator, io, home);
+pub fn configGet(allocator: Allocator, io: std.Io, layout_ctx: layout.Context, path: []const []const u8) ![]u8 {
+    var cfg = try loadConfig(allocator, io, layout_ctx);
     defer cfg.deinit(allocator);
     const value = cfg.value(path) orelse return error.ConfigKeyNotFound;
     return allocator.dupe(u8, scalarText(value) orelse return error.ConfigKeyNotFound);
@@ -371,79 +370,31 @@ fn parseBashMode(value: ?*const circuitry.value.Value) !BashMode {
     return error.InvalidConfigValue;
 }
 
-fn loadProvider(allocator: Allocator, cfg: Config, model_id: []const u8) !ProviderConfig {
-    const provider_id = try selectedProviderId(allocator, cfg, model_id);
-    errdefer allocator.free(provider_id);
-    const kind_text = try providerFieldString(allocator, cfg, provider_id, "kind", if (std.mem.eql(u8, provider_id, "openai")) "openai" else default_provider_kind);
-    defer allocator.free(kind_text);
-    const kind = try parseProviderKind(kind_text);
-    const raw_model = if (try cfg.optionalString(allocator, &.{ "model_bindings", model_id, "model" })) |binding_model| binding_model else try providerFieldString(allocator, cfg, provider_id, "model", "");
-    errdefer allocator.free(raw_model);
-    const raw_base = switch (kind) {
-        .openai => try providerFieldString(allocator, cfg, provider_id, "base_url", openai_base_url),
-        .local => try providerFieldString(allocator, cfg, provider_id, "base_url", default_base_url),
-        .openai_compatible => try requiredProviderFieldString(allocator, cfg, provider_id, "base_url"),
-    };
-    defer allocator.free(raw_base);
-    const base_url = try normalizeBaseUrl(allocator, raw_base);
-    errdefer allocator.free(base_url);
-    const api_key_env = try optionalProviderFieldString(allocator, cfg, provider_id, "api_key_env");
+fn loadProvider(allocator: Allocator, model: ModelConfig) !ProviderConfig {
+    const api_key_env = if (model.api_key_env) |value| try allocator.dupe(u8, value) else null;
     errdefer if (api_key_env) |value| allocator.free(value);
-    const authorization = try providerAuthorization(allocator, cfg, provider_id, kind, api_key_env);
+    const authorization = try providerAuthorization(allocator, model.kind, api_key_env);
     errdefer if (authorization) |value| allocator.free(value);
-    return .{ .id = provider_id, .kind = kind, .model = raw_model, .base_url = base_url, .api_key_env = api_key_env, .authorization = authorization };
+    return .{
+        .id = try allocator.dupe(u8, model.id),
+        .kind = model.kind,
+        .model = try allocator.dupe(u8, model.model),
+        .base_url = try allocator.dupe(u8, model.base_url),
+        .api_key_env = api_key_env,
+        .authorization = authorization,
+    };
 }
 
-fn selectedProviderId(allocator: Allocator, cfg: Config, model_id: []const u8) ![]u8 {
-    if (try cfg.optionalString(allocator, &.{ "model_bindings", model_id, "provider" })) |provider| return provider;
-    if (try cfg.optionalString(allocator, &.{ "providers", "default" })) |provider| return provider;
-    if (cfg.value(&.{"providers"}) != null) return allocator.dupe(u8, default_provider_id);
-    return allocator.dupe(u8, default_provider_id);
-}
-
-fn providerFieldString(allocator: Allocator, cfg: Config, provider_id: []const u8, field: []const u8, default: []const u8) ![]u8 {
-    if (try cfg.optionalString(allocator, &.{ "providers", provider_id, field })) |value| return value;
-    if (try cfg.optionalString(allocator, &.{ "provider", field })) |value| return value;
-    return allocator.dupe(u8, default);
-}
-
-fn requiredProviderFieldString(allocator: Allocator, cfg: Config, provider_id: []const u8, field: []const u8) ![]u8 {
-    if (try optionalProviderFieldString(allocator, cfg, provider_id, field)) |value| return value;
-    std.debug.print("Provider {s} is kind openai_compatible but has no {s}.\n", .{ provider_id, field });
-    return error.InvalidConfigValue;
-}
-
-fn optionalProviderFieldString(allocator: Allocator, cfg: Config, provider_id: []const u8, field: []const u8) !?[]u8 {
-    if (try cfg.optionalString(allocator, &.{ "providers", provider_id, field })) |value| return value;
-    if (try cfg.optionalString(allocator, &.{ "provider", field })) |value| return value;
-    return null;
-}
-
-fn providerAuthorization(allocator: Allocator, cfg: Config, provider_id: []const u8, kind: ProviderKind, api_key_env: ?[]const u8) !?[]u8 {
+fn providerAuthorization(allocator: Allocator, kind: ModelKind, api_key_env: ?[]const u8) !?[]u8 {
     if (api_key_env) |env_name| {
         const secret = envValue(allocator, env_name) catch |err| switch (err) {
-            error.EnvironmentVariableMissing => {
-                if (kind == .openai) {
-                    std.debug.print("Provider {s} is missing API key.\n\nExpected environment variable:\n  {s}\n\nFix:\n  export {s}=...\n", .{ provider_id, env_name, env_name });
-                    return error.MissingProviderApiKey;
-                }
-                return null;
-            },
+            error.EnvironmentVariableMissing => return null,
             else => return err,
         };
         defer allocator.free(secret);
-        const authorization = try std.fmt.allocPrint(allocator, "Bearer {s}", .{secret});
-        return authorization;
+        return try std.fmt.allocPrint(allocator, "Bearer {s}", .{secret});
     }
-    if (kind == .openai) {
-        std.debug.print("Provider {s} is missing API key.\n\nExpected environment variable:\n  OPENAI_API_KEY\n\nFix:\n  export OPENAI_API_KEY=...\n", .{provider_id});
-        return error.MissingProviderApiKey;
-    }
-    if (try cfg.optionalString(allocator, &.{ "provider", "authorization" })) |legacy| return legacy;
-    if (kind == .local) {
-        const authorization = try allocator.dupe(u8, default_authorization);
-        return authorization;
-    }
+    if (kind == .local) return try allocator.dupe(u8, default_authorization);
     return null;
 }
 
@@ -453,10 +404,9 @@ fn envValue(allocator: Allocator, name: []const u8) ![]u8 {
     return allocator.dupe(u8, value);
 }
 
-fn parseProviderKind(text: []const u8) !ProviderKind {
+fn parseModelKind(text: []const u8) !ModelKind {
     if (std.mem.eql(u8, text, "local")) return .local;
     if (std.mem.eql(u8, text, "openai")) return .openai;
-    if (std.mem.eql(u8, text, "openai_compatible")) return .openai_compatible;
     return error.InvalidConfigValue;
 }
 
@@ -467,23 +417,41 @@ fn normalizeBaseUrl(allocator: Allocator, raw: []const u8) ![]u8 {
 }
 
 fn loadModel(allocator: Allocator, cfg: Config, id: []const u8) !ModelConfig {
+    const kind_text = try cfg.string(allocator, &.{ "models", id, "kind" }, "local");
+    defer allocator.free(kind_text);
+    const kind = try parseModelKind(kind_text);
+    const model_name = try cfg.string(allocator, &.{ "models", id, "model" }, default_served_model);
+    errdefer allocator.free(model_name);
+    const raw_base_url = switch (kind) {
+        .local => try cfg.string(allocator, &.{ "models", id, "base_url" }, default_base_url),
+        .openai => try requiredModelFieldString(allocator, cfg, id, "base_url"),
+    };
+    defer allocator.free(raw_base_url);
+    const base_url = try normalizeBaseUrl(allocator, raw_base_url);
+    errdefer allocator.free(base_url);
+    const api_key_env = try cfg.optionalString(allocator, &.{ "models", id, "api_key_env" });
+    errdefer if (api_key_env) |value| allocator.free(value);
+    if (kind == .local) try requireLocalModel(cfg, id);
     return .{
         .id = try allocator.dupe(u8, id),
-        .model = try cfg.string(allocator, &.{ "models", id, "model" }, default_served_model),
+        .kind = kind,
+        .model = model_name,
+        .base_url = base_url,
+        .api_key_env = api_key_env,
         .loader = .{
-            .engine = try cfg.string(allocator, &.{ "models", id, "loader", "engine" }, "llama.cpp"),
-            .repo = try cfg.string(allocator, &.{ "models", id, "loader", "repo" }, "https://github.com/ggml-org/llama.cpp.git"),
-            .ref = try cfg.string(allocator, &.{ "models", id, "loader", "ref" }, "master"),
-            .hf_repo = try cfg.string(allocator, &.{ "models", id, "loader", "hf_repo" }, ""),
-            .hf_file = try cfg.string(allocator, &.{ "models", id, "loader", "hf_file" }, ""),
-            .mmproj_file = try cfg.string(allocator, &.{ "models", id, "loader", "mmproj_file" }, ""),
-            .cache_type_k = try cfg.string(allocator, &.{ "models", id, "loader", "cache_type_k" }, "q4_0"),
-            .cache_type_v = try cfg.string(allocator, &.{ "models", id, "loader", "cache_type_v" }, "q4_0"),
-            .fit_ctx = try cfg.usizeValue(&.{ "models", id, "loader", "fit_ctx" }, 16384),
-            .gpu_layers = try cfg.string(allocator, &.{ "models", id, "loader", "gpu_layers" }, "all"),
-            .draft_tokens = try cfg.usizeValue(&.{ "models", id, "loader", "draft_tokens" }, 2),
-            .reasoning_format = try cfg.string(allocator, &.{ "models", id, "loader", "reasoning_format" }, "deepseek"),
-            .mtp = try cfg.boolValue(&.{ "models", id, "loader", "mtp" }, true),
+            .engine = try cfg.string(allocator, &.{ "models", id, "llama_cpp", "engine" }, "llama.cpp"),
+            .repo = try cfg.string(allocator, &.{ "models", id, "llama_cpp", "repo" }, "https://github.com/ggml-org/llama.cpp.git"),
+            .ref = try cfg.string(allocator, &.{ "models", id, "llama_cpp", "ref" }, "master"),
+            .hf_repo = try cfg.string(allocator, &.{ "models", id, "hf", "repo" }, ""),
+            .hf_file = try cfg.string(allocator, &.{ "models", id, "hf", "file" }, ""),
+            .mmproj_file = try cfg.string(allocator, &.{ "models", id, "hf", "mmproj" }, ""),
+            .cache_type_k = try cfg.string(allocator, &.{ "models", id, "llama_cpp", "cache_type_k" }, "q4_0"),
+            .cache_type_v = try cfg.string(allocator, &.{ "models", id, "llama_cpp", "cache_type_v" }, "q4_0"),
+            .fit_ctx = try cfg.usizeValue(&.{ "models", id, "llama_cpp", "fit_ctx" }, 16384),
+            .gpu_layers = try cfg.string(allocator, &.{ "models", id, "llama_cpp", "gpu_layers" }, "all"),
+            .draft_tokens = try cfg.usizeValue(&.{ "models", id, "llama_cpp", "draft_tokens" }, 2),
+            .reasoning_format = try cfg.string(allocator, &.{ "models", id, "llama_cpp", "reasoning_format" }, "deepseek"),
+            .mtp = try cfg.boolValue(&.{ "models", id, "llama_cpp", "mtp" }, true),
         },
         .generation = .{ .temperature = try cfg.f64Value(&.{ "models", id, "generation", "temperature" }, 0.6), .max_tokens = try cfg.usizeValue(&.{ "models", id, "generation", "max_tokens" }, 1024) },
         .reasoning = .{
@@ -502,26 +470,41 @@ fn loadModel(allocator: Allocator, cfg: Config, id: []const u8) !ModelConfig {
     };
 }
 
-fn runtimePaths(allocator: Allocator, home: []const u8, cfg: Config) !RuntimePaths {
+fn requiredModelFieldString(allocator: Allocator, cfg: Config, id: []const u8, field: []const u8) ![]u8 {
+    if (try cfg.optionalString(allocator, &.{ "models", id, field })) |value| return value;
+    std.debug.print("Model {s} is kind openai but has no {s}.\n", .{ id, field });
+    return error.InvalidConfigValue;
+}
+
+fn requireLocalModel(cfg: Config, id: []const u8) !void {
+    const engine = scalarText(cfg.value(&.{ "models", id, "llama_cpp", "engine" })) orelse "llama.cpp";
+    const hf_repo = scalarText(cfg.value(&.{ "models", id, "hf", "repo" })) orelse @as([]const u8, "");
+    const hf_file = scalarText(cfg.value(&.{ "models", id, "hf", "file" })) orelse @as([]const u8, "");
+    if (!std.mem.eql(u8, engine, "llama.cpp")) return error.InvalidConfigValue;
+    if (hf_repo.len == 0) return error.InvalidConfigValue;
+    if (hf_file.len == 0) return error.InvalidConfigValue;
+}
+
+fn runtimePaths(allocator: Allocator, layout_ctx: layout.Context, cfg: Config) !RuntimePaths {
     var paths = RuntimePaths{
-        .graph = try layout.sharePath(allocator, home, "graphs/zinc-loop.circuitry.yaml"),
-        .context_graph = try layout.sharePath(allocator, home, "graphs/zinc-context-recovery.circuitry.yaml"),
-        .compaction_graph = try layout.sharePath(allocator, home, "graphs/zinc-compaction.circuitry.yaml"),
+        .graph = try layout.sharePath(allocator, layout_ctx, "graphs/zinc-loop.circuitry.yaml"),
+        .context_graph = try layout.sharePath(allocator, layout_ctx, "graphs/zinc-context-recovery.circuitry.yaml"),
+        .compaction_graph = try layout.sharePath(allocator, layout_ctx, "graphs/zinc-compaction.circuitry.yaml"),
     };
     errdefer paths.deinit(allocator);
     if (try cfg.optionalString(allocator, &.{ "paths", "graph" })) |v| {
         allocator.free(paths.graph);
-        paths.graph = try expandHome(allocator, home, v);
+        paths.graph = try expandHome(allocator, layout_ctx, v);
         allocator.free(v);
     }
     if (try cfg.optionalString(allocator, &.{ "paths", "context_graph" })) |v| {
         allocator.free(paths.context_graph);
-        paths.context_graph = try expandHome(allocator, home, v);
+        paths.context_graph = try expandHome(allocator, layout_ctx, v);
         allocator.free(v);
     }
     if (try cfg.optionalString(allocator, &.{ "paths", "compaction_graph" })) |v| {
         allocator.free(paths.compaction_graph);
-        paths.compaction_graph = try expandHome(allocator, home, v);
+        paths.compaction_graph = try expandHome(allocator, layout_ctx, v);
         allocator.free(v);
     }
     return paths;
@@ -539,14 +522,14 @@ fn reasoningMarkers(allocator: Allocator, cfg: Config, id: []const u8) !?Reasoni
     return .{ .starts = try cfg.stringList(allocator, &.{ "models", id, "protocol", "reasoning", "content_markers", "starts" }, &.{}), .end = end };
 }
 
-fn loadConfig(allocator: Allocator, io: std.Io, home: []const u8) !Config {
+fn loadConfig(allocator: Allocator, io: std.Io, layout_ctx: layout.Context) !Config {
     var documents: std.ArrayList(circuitry.Graph) = .empty;
     errdefer {
         for (documents.items) |*document| document.deinit();
         documents.deinit(allocator);
     }
 
-    const global = try layout.configPath(allocator, home);
+    const global = try layout.configPath(allocator, layout_ctx);
     defer allocator.free(global);
     try loadConfigValue(allocator, io, global, &documents);
     try loadConfigValue(allocator, io, ".zinc/config.yaml", &documents);
@@ -586,7 +569,19 @@ fn dupeList(allocator: Allocator, defaults: []const []const u8) ![][]u8 {
     return out;
 }
 
-fn expandHome(allocator: Allocator, home: []const u8, value: []const u8) ![]u8 {
-    if (std.mem.startsWith(u8, value, "~/")) return std.fmt.allocPrint(allocator, "{s}/{s}", .{ home, value[2..] });
+fn expandHome(allocator: Allocator, layout_ctx: layout.Context, value: []const u8) ![]u8 {
+    if (std.mem.startsWith(u8, value, "~/")) return platform.path.joinDisplay(allocator, layout_ctx.os, &.{ layout_ctx.dirs.home, value[2..] });
     return allocator.dupe(u8, value);
+}
+
+test "model runtime kinds are local or openai only" {
+    try std.testing.expectEqual(ModelKind.local, try parseModelKind("local"));
+    try std.testing.expectEqual(ModelKind.openai, try parseModelKind("openai"));
+    try std.testing.expectError(error.InvalidConfigValue, parseModelKind("openai_compatible"));
+}
+
+test "model endpoint base URLs are normalized" {
+    const got = try normalizeBaseUrl(std.testing.allocator, "https://example.com/v1///");
+    defer std.testing.allocator.free(got);
+    try std.testing.expectEqualStrings("https://example.com/v1", got);
 }

@@ -47,10 +47,10 @@ pub fn usage() void {
     , .{});
 }
 
-pub fn validate(allocator: Allocator, io: std.Io, home: []const u8, path_arg: ?[]const u8) !void {
-    const runtime_paths = try config.loadRuntimePaths(allocator, io, home);
+pub fn validate(allocator: Allocator, io: std.Io, layout_ctx: layout.Context, path_arg: ?[]const u8) !void {
+    const runtime_paths = try config.loadRuntimePaths(allocator, io, layout_ctx);
     defer runtime_paths.deinit(allocator);
-    const path = if (path_arg) |spec| packages.resolveGraph(allocator, io, home, spec) catch |err| switch (err) {
+    const path = if (path_arg) |spec| packages.resolveGraph(allocator, io, layout_ctx, spec) catch |err| switch (err) {
         error.GraphNotFound => return fail("graph not found: {s}", .{spec}),
         else => return err,
     } else try allocator.dupe(u8, runtime_paths.graph);
@@ -59,15 +59,15 @@ pub fn validate(allocator: Allocator, io: std.Io, home: []const u8, path_arg: ?[
     std.debug.print("ok: {s}\n", .{path});
 }
 
-pub fn runFromArgs(allocator: Allocator, io: std.Io, home: []const u8, args: []const []const u8) !void {
+pub fn runFromArgs(allocator: Allocator, io: std.Io, layout_ctx: layout.Context, args: []const []const u8) !void {
     var parsed_args = try parseRunArgs(allocator, args);
     defer parsed_args.deinit(allocator);
     if (parsed_args.prompt_parts.items.len == 0 and parsed_args.inputs.items.len == 0 and parsed_args.graph_path == null) return usage();
 
-    const runtime_paths = try config.loadRuntimePaths(allocator, io, home);
+    const runtime_paths = try config.loadRuntimePaths(allocator, io, layout_ctx);
     defer runtime_paths.deinit(allocator);
     if (parsed_args.graph_path == null and parsed_args.prompt_parts.items.len != 0) {
-        if (packages.resolveGraph(allocator, io, home, parsed_args.prompt_parts.items[0])) |path| {
+        if (packages.resolveGraph(allocator, io, layout_ctx, parsed_args.prompt_parts.items[0])) |path| {
             allocator.free(path);
             parsed_args.graph_path = parsed_args.prompt_parts.orderedRemove(0);
         } else |err| switch (err) {
@@ -75,14 +75,14 @@ pub fn runFromArgs(allocator: Allocator, io: std.Io, home: []const u8, args: []c
             else => return err,
         }
     }
-    const resolved_graph = if (parsed_args.graph_path) |spec| packages.resolveGraph(allocator, io, home, spec) catch |err| switch (err) {
+    const resolved_graph = if (parsed_args.graph_path) |spec| packages.resolveGraph(allocator, io, layout_ctx, spec) catch |err| switch (err) {
         error.GraphNotFound => return fail("graph not found: {s}", .{spec}),
         else => return err,
     } else try allocator.dupe(u8, runtime_paths.graph);
     defer allocator.free(resolved_graph);
     const prompt = try std.mem.join(allocator, " ", parsed_args.prompt_parts.items);
     defer allocator.free(prompt);
-    try engine.runGraph(allocator, io, home, resolved_graph, parsed_args.selected_export, prompt, parsed_args.resume_id, parsed_args.continue_last, parsed_args.inputs.items);
+    try engine.runGraph(allocator, io, layout_ctx, resolved_graph, parsed_args.selected_export, prompt, parsed_args.resume_id, parsed_args.continue_last, parsed_args.inputs.items);
 }
 
 const RunArgs = struct {
@@ -180,11 +180,11 @@ fn looksLikeGraphPath(arg: []const u8) bool {
     return true;
 }
 
-pub fn compactFromArgs(allocator: Allocator, io: std.Io, home: []const u8, args: []const []const u8) !void {
+pub fn compactFromArgs(allocator: Allocator, io: std.Io, layout_ctx: layout.Context, args: []const []const u8) !void {
     var resume_id: ?[]const u8 = null;
     var continue_last = true;
     var dry_run = false;
-    const runtime_paths = try config.loadRuntimePaths(allocator, io, home);
+    const runtime_paths = try config.loadRuntimePaths(allocator, io, layout_ctx);
     defer runtime_paths.deinit(allocator);
     var graph_path: []const u8 = runtime_paths.compaction_graph;
     var i: usize = 0;
@@ -214,21 +214,21 @@ pub fn compactFromArgs(allocator: Allocator, io: std.Io, home: []const u8, args:
         std.debug.print("ok: compaction graph {s}\n", .{graph_path});
         return;
     }
-    try engine.compactSession(allocator, io, home, graph_path, resume_id, continue_last);
+    try engine.compactSession(allocator, io, layout_ctx, graph_path, resume_id, continue_last);
 }
 
 pub fn printSessionDir(_: Allocator) !void {
     try files.mkdirP(".zinc/sessions");
     std.debug.print(".zinc/sessions\n", .{});
 }
-pub fn graphList(allocator: Allocator, io: std.Io, home: []const u8) !void {
-    const text = try packages.listGraphs(allocator, io, home);
+pub fn graphList(allocator: Allocator, io: std.Io, layout_ctx: layout.Context) !void {
+    const text = try packages.listGraphs(allocator, io, layout_ctx);
     defer allocator.free(text);
     if (text.len == 0) std.debug.print("no graphs found\n", .{}) else std.debug.print("{s}", .{text});
 }
 
-pub fn graphShow(allocator: Allocator, io: std.Io, home: []const u8, spec: []const u8) !void {
-    const path = packages.resolveGraph(allocator, io, home, spec) catch |err| switch (err) {
+pub fn graphShow(allocator: Allocator, io: std.Io, layout_ctx: layout.Context, spec: []const u8) !void {
+    const path = packages.resolveGraph(allocator, io, layout_ctx, spec) catch |err| switch (err) {
         error.GraphNotFound => return fail("graph not found: {s}", .{spec}),
         else => return err,
     };
@@ -237,95 +237,95 @@ pub fn graphShow(allocator: Allocator, io: std.Io, home: []const u8, spec: []con
     defer loaded_graph.deinit(allocator);
     try printGraph(allocator, spec, path, loaded_graph);
 }
-pub fn packageList(allocator: Allocator, io: std.Io, home: []const u8) !void {
-    const text = try packages.listPackages(allocator, io, home);
+pub fn packageList(allocator: Allocator, io: std.Io, layout_ctx: layout.Context) !void {
+    const text = try packages.listPackages(allocator, io, layout_ctx);
     defer allocator.free(text);
     if (text.len == 0) std.debug.print("no packages found\n", .{}) else std.debug.print("{s}", .{text});
 }
-pub fn packageAdd(allocator: Allocator, io: std.Io, home: []const u8, args: []const []const u8) !void {
+pub fn packageAdd(allocator: Allocator, io: std.Io, layout_ctx: layout.Context, args: []const []const u8) !void {
     const parsed = try parsePackageArgs(args, true);
     const source = parsed.value orelse return error.MissingPackageSource;
     const options = packages.InstallOptions{ .scope = parsed.scope orelse .local, .replace = parsed.replace };
-    const plan = try packages.previewAdd(allocator, io, home, source, options);
+    const plan = try packages.previewAdd(allocator, io, layout_ctx, source, options);
     defer plan.deinit(allocator, io);
     std.debug.print("Install Zinc package\n\n{s}\n", .{plan.text});
     if (!parsed.yes) try confirmOrFail("Install?");
-    var package = try packages.installPreviewed(allocator, io, home, plan, source, options);
+    var package = try packages.installPreviewed(allocator, io, layout_ctx, plan, source, options);
     defer package.deinit(allocator);
     std.debug.print("added {s}: {s}\n", .{ scopeName(package.scope), package.path });
 }
-pub fn packageRemove(allocator: Allocator, io: std.Io, home: []const u8, args: []const []const u8) !void {
+pub fn packageRemove(allocator: Allocator, io: std.Io, layout_ctx: layout.Context, args: []const []const u8) !void {
     const parsed = try parsePackageArgs(args, false);
     const name = parsed.value orelse return error.MissingPackageName;
-    const text = try packages.show(allocator, io, home, name, parsed.scope);
+    const text = try packages.show(allocator, io, layout_ctx, name, parsed.scope);
     defer allocator.free(text);
     std.debug.print("Remove Zinc package\n\n{s}\n", .{text});
     if (!parsed.yes) try confirmOrFail("Remove?");
-    var package = try packages.remove(allocator, io, home, name, parsed.scope);
+    var package = try packages.remove(allocator, io, layout_ctx, name, parsed.scope);
     defer package.deinit(allocator);
     std.debug.print("removed {s}: {s}\n", .{ scopeName(package.scope), package.name });
 }
-pub fn packageUpdate(allocator: Allocator, io: std.Io, home: []const u8, args: []const []const u8) !void {
+pub fn packageUpdate(allocator: Allocator, io: std.Io, layout_ctx: layout.Context, args: []const []const u8) !void {
     const parsed = try parsePackageArgs(args, false);
     const name = parsed.value orelse return error.MissingPackageName;
     if (std.mem.eql(u8, name, "--all")) {
-        const text = try packages.listPackages(allocator, io, home);
+        const text = try packages.listPackages(allocator, io, layout_ctx);
         defer allocator.free(text);
         std.debug.print("Update all Zinc packages\n\n{s}\n", .{if (text.len == 0) "no packages found\n" else text});
         if (!parsed.yes) try confirmOrFail("Update all?");
-        const updated = try packages.updateAll(allocator, io, home);
+        const updated = try packages.updateAll(allocator, io, layout_ctx);
         defer allocator.free(updated);
         std.debug.print("{s}", .{updated});
         return;
     }
-    const plan = try packages.previewUpdate(allocator, io, home, name, parsed.scope);
+    const plan = try packages.previewUpdate(allocator, io, layout_ctx, name, parsed.scope);
     defer plan.deinit(allocator, io);
     std.debug.print("Update Zinc package\n\n{s}\n", .{plan.text});
     if (!parsed.yes) try confirmOrFail("Update?");
-    var package = try packages.update(allocator, io, home, name, parsed.scope);
+    var package = try packages.update(allocator, io, layout_ctx, name, parsed.scope);
     defer package.deinit(allocator);
     std.debug.print("updated {s}: {s}\n", .{ scopeName(package.scope), package.path });
 }
-pub fn packageShow(allocator: Allocator, io: std.Io, home: []const u8, args: []const []const u8) !void {
+pub fn packageShow(allocator: Allocator, io: std.Io, layout_ctx: layout.Context, args: []const []const u8) !void {
     const parsed = try parsePackageArgs(args, false);
     const name = parsed.value orelse return error.MissingPackageName;
-    const text = try packages.show(allocator, io, home, name, parsed.scope);
+    const text = try packages.show(allocator, io, layout_ctx, name, parsed.scope);
     defer allocator.free(text);
     std.debug.print("{s}", .{text});
 }
 
-pub fn packageExec(allocator: Allocator, io: std.Io, home: []const u8, args: []const []const u8) !void {
+pub fn packageExec(allocator: Allocator, io: std.Io, layout_ctx: layout.Context, args: []const []const u8) !void {
     if (args.len < 2) return error.MissingPackageScript;
-    const out = try packages.execScript(allocator, io, home, args[0], args[1]);
+    const out = try packages.execScript(allocator, io, layout_ctx, args[0], args[1]);
     defer allocator.free(out);
     std.debug.print("{s}", .{out});
 }
 
-pub fn packageAttach(allocator: Allocator, io: std.Io, home: []const u8, args: []const []const u8) !void {
+pub fn packageAttach(allocator: Allocator, io: std.Io, layout_ctx: layout.Context, args: []const []const u8) !void {
     if (args.len != 1) return error.MissingPackageName;
-    const out = try packages.attach(allocator, io, home, args[0]);
+    const out = try packages.attach(allocator, io, layout_ctx, args[0]);
     defer allocator.free(out);
     std.debug.print("{s}", .{out});
 }
 
-pub fn packageDetach(allocator: Allocator, io: std.Io, home: []const u8, args: []const []const u8) !void {
+pub fn packageDetach(allocator: Allocator, io: std.Io, layout_ctx: layout.Context, args: []const []const u8) !void {
     if (args.len != 1) return error.MissingPackageName;
-    const out = try packages.detach(allocator, io, home, args[0]);
+    const out = try packages.detach(allocator, io, layout_ctx, args[0]);
     defer allocator.free(out);
     std.debug.print("{s}", .{out});
 }
 
-pub fn packageAttachments(allocator: Allocator, io: std.Io, home: []const u8, args: []const []const u8) !void {
-    _ = home;
+pub fn packageAttachments(allocator: Allocator, io: std.Io, layout_ctx: layout.Context, args: []const []const u8) !void {
+    _ = layout_ctx;
     if (args.len != 0) return error.TooManyArguments;
     const out = try packages.attachments(allocator, io);
     defer allocator.free(out);
     std.debug.print("{s}", .{out});
 }
 
-pub fn packageCall(allocator: Allocator, io: std.Io, home: []const u8, args: []const []const u8) !void {
+pub fn packageCall(allocator: Allocator, io: std.Io, layout_ctx: layout.Context, args: []const []const u8) !void {
     if (args.len != 2) return error.InvalidToolArguments;
-    const result = try resource.callPackageTool(allocator, io, home, args[0], args[1]);
+    const result = try resource.callPackageTool(allocator, io, layout_ctx, args[0], args[1]);
     defer result.deinit(allocator);
     try files.writeAllOut(result.content);
     try files.writeAllOut("\n");
@@ -334,7 +334,7 @@ pub fn packageCall(allocator: Allocator, io: std.Io, home: []const u8, args: []c
 
 const zinc_repo_url = "https://github.com/darkhorseprojects/zinc.git";
 
-pub fn updateFromArgs(allocator: Allocator, io: std.Io, home: []const u8, args: []const []const u8) !void {
+pub fn updateFromArgs(allocator: Allocator, io: std.Io, layout_ctx: layout.Context, args: []const []const u8) !void {
     var ref: ?[]const u8 = null;
     var i: usize = 0;
     while (i < args.len) : (i += 1) {
@@ -348,7 +348,7 @@ pub fn updateFromArgs(allocator: Allocator, io: std.Io, home: []const u8, args: 
     }
 
     const target = ref orelse "main";
-    const source_dir = try layout.sharePath(allocator, home, "source/zinc");
+    const source_dir = try layout.sharePath(allocator, layout_ctx, "source/zinc");
     defer allocator.free(source_dir);
     const git_dir = try std.fs.path.join(allocator, &.{ source_dir, ".git" });
     defer allocator.free(git_dir);
@@ -473,12 +473,12 @@ fn valueAt(value: std.json.Value, path: []const []const u8) ?std.json.Value {
     return current;
 }
 
-pub fn configGet(allocator: Allocator, io: std.Io, home: []const u8, dotted_path: []const u8) !void {
+pub fn configGet(allocator: Allocator, io: std.Io, layout_ctx: layout.Context, dotted_path: []const u8) !void {
     var parts: std.ArrayList([]const u8) = .empty;
     defer parts.deinit(allocator);
     var split = std.mem.splitScalar(u8, dotted_path, '.');
     while (split.next()) |part| try parts.append(allocator, part);
-    const value = try config.configGet(allocator, io, home, parts.items);
+    const value = try config.configGet(allocator, io, layout_ctx, parts.items);
     defer allocator.free(value);
     std.debug.print("{s}\n", .{value});
 }
@@ -489,7 +489,7 @@ fn validateGraphFile(allocator: Allocator, io: std.Io, path: []const u8) !void {
     try graph.validate(loaded_graph);
 }
 
-pub fn clean(allocator: Allocator, io: std.Io, home: []const u8, scope: packages.Scope, target_str: []const u8, yes: bool) !void {
+pub fn clean(allocator: Allocator, io: std.Io, layout_ctx: layout.Context, scope: packages.Scope, target_str: []const u8, yes: bool) !void {
     const Target = enum { sessions, logs, packages, state, all };
     const target = std.meta.stringToEnum(Target, target_str) orelse return error.InvalidCleanTarget;
     std.debug.print("Clean Zinc artifacts\n\nscope: {s}\ntarget: {s}\n", .{ @tagName(scope), @tagName(target) });
@@ -503,12 +503,12 @@ pub fn clean(allocator: Allocator, io: std.Io, home: []const u8, scope: packages
         },
         .global => {
             if (target == .packages or target == .all) {
-                const global_pkgs = try layout.sharePath(allocator, home, "packages");
+                const global_pkgs = try layout.sharePath(allocator, layout_ctx, "packages");
                 defer allocator.free(global_pkgs);
                 dir.deleteTree(io, global_pkgs) catch |err| if (err != error.FileNotFound) return err;
             }
             if (target == .state or target == .all) {
-                const global_state = try layout.statePath(allocator, home, "");
+                const global_state = try layout.statePath(allocator, layout_ctx, "");
                 defer allocator.free(global_state);
                 dir.deleteTree(io, global_state) catch |err| if (err != error.FileNotFound) return err;
             }

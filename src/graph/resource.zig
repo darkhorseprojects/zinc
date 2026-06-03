@@ -3,6 +3,7 @@ const model = @import("../model/mod.zig");
 const approval = @import("../tools/approval.zig");
 const ctxmod = @import("context.zig");
 const files = @import("../io/fs.zig");
+const layout = @import("../io/layout.zig");
 const config = @import("../config/mod.zig");
 const graph = @import("mod.zig");
 const packages = @import("../packages/mod.zig");
@@ -54,7 +55,7 @@ pub fn runChildGraph(ctx: *RunContext, graph_path: []const u8, selected_export: 
     defer child_graph.deinit(ctx.allocator);
     try graph.validate(child_graph);
     const target = graph.exportTargetResourceId(child_graph, selected_export) orelse return error.InvalidCircuitryGraph;
-    var child_ctx = RunContext{ .allocator = ctx.allocator, .io = ctx.io, .home = ctx.home, .profile = ctx.profile, .graph_path = graph_path, .graph = &child_graph, .session = ctx.session, .log = ctx.log, .inputs = inputs, .frame = ctx.frame.child(target), .bash_allowances = ctx.bash_allowances };
+    var child_ctx = RunContext{ .allocator = ctx.allocator, .io = ctx.io, .layout_ctx = ctx.layout_ctx, .home = ctx.home, .profile = ctx.profile, .graph_path = graph_path, .graph = &child_graph, .session = ctx.session, .log = ctx.log, .inputs = inputs, .frame = ctx.frame.child(target), .bash_allowances = ctx.bash_allowances };
     return resolve(&child_ctx, target);
 }
 
@@ -110,7 +111,7 @@ fn resolveModel(ctx: *RunContext, id: []const u8, res: graph.Resource) !Resolved
     defer graph.freeStringList(ctx.allocator, tool_names);
     for (tool_names) |tool| {
         if (runtime_tools.contains(tool)) continue;
-        if (try packages.findTool(ctx.allocator, ctx.io, ctx.home, tool)) |package_tool| {
+        if (try packages.findTool(ctx.allocator, ctx.io, ctx.layout_ctx, tool)) |package_tool| {
             package_tool.deinit(ctx.allocator);
             continue;
         }
@@ -187,10 +188,10 @@ fn executeTool(ctx: *RunContext, read_ctx: uri.Context, spec: model.Spec, call: 
     };
 }
 
-pub fn callPackageTool(allocator: Allocator, io: std.Io, home: []const u8, name: []const u8, arguments: []const u8) !runtime_tools.ToolResult {
-    const model_id = try config.resolveConfiguredModelId(allocator, io, home);
+pub fn callPackageTool(allocator: Allocator, io: std.Io, layout_ctx: layout.Context, name: []const u8, arguments: []const u8) !runtime_tools.ToolResult {
+    const model_id = try config.resolveConfiguredModelId(allocator, io, layout_ctx);
     defer allocator.free(model_id);
-    const profile = try config.loadRuntimeProfile(allocator, io, home, model_id);
+    const profile = try config.loadRuntimeProfile(allocator, io, layout_ctx, model_id);
     defer profile.deinit(allocator);
     const loaded_graph = try graph.load(allocator, io, profile.paths.graph);
     defer loaded_graph.deinit(allocator);
@@ -200,12 +201,12 @@ pub fn callPackageTool(allocator: Allocator, io: std.Io, home: []const u8, name:
     defer log.deinit(allocator);
     var bash_allowances: ctxmod.BashAllowances = .empty;
     defer bash_allowances.deinit(allocator);
-    var ctx = RunContext{ .allocator = allocator, .io = io, .home = home, .profile = &profile, .graph_path = profile.paths.graph, .graph = &loaded_graph, .session = session, .log = &log, .inputs = &.{}, .frame = .maintenance(name), .bash_allowances = &bash_allowances };
+    var ctx = RunContext{ .allocator = allocator, .io = io, .layout_ctx = layout_ctx, .home = layout_ctx.dirs.home, .profile = &profile, .graph_path = profile.paths.graph, .graph = &loaded_graph, .session = session, .log = &log, .inputs = &.{}, .frame = .maintenance(name), .bash_allowances = &bash_allowances };
     return executePackageTool(&ctx, .{ .id = "pkg-call", .name = name, .arguments = arguments });
 }
 
 fn executePackageTool(ctx: *RunContext, call: provider.ToolCall) !runtime_tools.ToolResult {
-    var tool = (try packages.findTool(ctx.allocator, ctx.io, ctx.home, call.name)) orelse return error.UnknownTool;
+    var tool = (try packages.findTool(ctx.allocator, ctx.io, ctx.layout_ctx, call.name)) orelse return error.UnknownTool;
     defer tool.deinit(ctx.allocator);
     try runtime_tools.validatePackageArguments(ctx.allocator, tool, call.arguments);
     return switch (tool.handler) {
@@ -218,7 +219,7 @@ fn executePackageTool(ctx: *RunContext, call: provider.ToolCall) !runtime_tools.
 
 fn executeGraphTool(ctx: *RunContext, tool: packages.Tool, graph_spec: []const u8, selected_export: []const u8, call: provider.ToolCall) !runtime_tools.ToolResult {
     const graph_path = if (std.mem.startsWith(u8, graph_spec, "graph:"))
-        try packages.resolveGraph(ctx.allocator, ctx.io, ctx.home, graph_spec["graph:".len..])
+        try packages.resolveGraph(ctx.allocator, ctx.io, ctx.layout_ctx, graph_spec["graph:".len..])
     else if (std.fs.path.isAbsolute(graph_spec))
         try ctx.allocator.dupe(u8, graph_spec)
     else
@@ -331,7 +332,7 @@ fn executeRunGraph(ctx: *RunContext, call: provider.ToolCall) !runtime_tools.Too
     defer parsed.deinit();
     const args = parsed.value.object;
     const graph_spec = try runtime_tools.requireStringArg(args, "graph");
-    const graph_path = try packages.resolveGraph(ctx.allocator, ctx.io, ctx.home, graph_spec);
+    const graph_path = try packages.resolveGraph(ctx.allocator, ctx.io, ctx.layout_ctx, graph_spec);
     defer ctx.allocator.free(graph_path);
     const selected_export = try runtime_tools.optionalStringArg(args, "export");
     const child_graph = try graph.load(ctx.allocator, ctx.io, graph_path);
@@ -438,7 +439,7 @@ fn runtimeReadContext(ctx: *RunContext) !ctxmod.RuntimeReadContext {
     const inputs = try ctx.allocator.alloc(uri.Input, ctx.inputs.len);
     for (ctx.inputs, 0..) |input, i| inputs[i] = .{ .id = input.id, .value = input.value };
     return .{
-        .context = .{ .home = ctx.home, .session_id = ctx.session.id, .session_path = ctx.session.path, .session_dir = std.fs.path.dirname(ctx.session.path) orelse ".zinc/sessions", .session_log = ctx.log.raw, .session_head_messages = ctx.profile.runtime.session_head_messages, .session_tail_messages = ctx.profile.runtime.session_tail_messages, .replay_truncate_chars = ctx.profile.runtime.replay_truncate_chars, .inputs = inputs },
+        .context = .{ .layout_ctx = ctx.layout_ctx, .session_id = ctx.session.id, .session_path = ctx.session.path, .session_dir = std.fs.path.dirname(ctx.session.path) orelse ".zinc/sessions", .session_log = ctx.log.raw, .session_head_messages = ctx.profile.runtime.session_head_messages, .session_tail_messages = ctx.profile.runtime.session_tail_messages, .replay_truncate_chars = ctx.profile.runtime.replay_truncate_chars, .inputs = inputs },
         .inputs = inputs,
     };
 }
@@ -481,7 +482,7 @@ fn providerToolsJson(ctx: *RunContext, tool_names: []const []const u8) ![]u8 {
             const one = try runtime_tools.providerToolsJson(ctx.allocator, &.{tool});
             defer ctx.allocator.free(one);
             try out.appendSlice(ctx.allocator, one[1 .. one.len - 1]);
-        } else if (try packages.findTool(ctx.allocator, ctx.io, ctx.home, tool)) |package_tool| {
+        } else if (try packages.findTool(ctx.allocator, ctx.io, ctx.layout_ctx, tool)) |package_tool| {
             defer package_tool.deinit(ctx.allocator);
             try runtime_tools.appendPackageProviderTool(ctx.allocator, &out, package_tool);
         } else return error.UnknownTool;
@@ -495,7 +496,7 @@ fn appendToolPromptSections(ctx: *RunContext, prompt: *std.ArrayList(u8), tool_n
     try prompt.appendSlice(ctx.allocator, "\n\nTools");
     for (tool_names) |tool| {
         const snippet = if (runtime_tools.contains(tool)) runtime_tools.promptSnippet(tool) catch "available tool" else blk: {
-            if (try packages.findTool(ctx.allocator, ctx.io, ctx.home, tool)) |package_tool| {
+            if (try packages.findTool(ctx.allocator, ctx.io, ctx.layout_ctx, tool)) |package_tool| {
                 defer package_tool.deinit(ctx.allocator);
                 break :blk package_tool.prompt;
             }

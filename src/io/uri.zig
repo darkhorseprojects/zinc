@@ -1,5 +1,6 @@
 const std = @import("std");
 const config = @import("../config/mod.zig");
+const layout = @import("layout.zig");
 const files = @import("../io/fs.zig");
 const sessions = @import("../session/mod.zig");
 
@@ -7,7 +8,7 @@ const Allocator = std.mem.Allocator;
 const sessions_index_limit: usize = 64;
 
 pub const Context = struct {
-    home: []const u8,
+    layout_ctx: layout.Context,
     session_id: []const u8,
     session_path: []const u8,
     session_dir: []const u8,
@@ -33,7 +34,7 @@ pub fn resolve(allocator: Allocator, io: std.Io, ctx: Context, raw: []const u8) 
 
 fn resolveWithoutRange(allocator: Allocator, io: std.Io, ctx: Context, raw: []const u8) !?[]u8 {
     if (std.mem.startsWith(u8, raw, "prompt:")) {
-        const prompt = try config.readPromptPack(allocator, io, ctx.home, raw["prompt:".len..]);
+        const prompt = try config.readPromptPack(allocator, io, ctx.layout_ctx, raw["prompt:".len..]);
         return prompt;
     }
     if (std.mem.startsWith(u8, raw, "input:")) {

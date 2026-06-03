@@ -1,5 +1,6 @@
 const std = @import("std");
 const config = @import("../config/mod.zig");
+const layout = @import("../io/layout.zig");
 const graph = @import("mod.zig");
 const sessions = @import("../session/mod.zig");
 const uri = @import("../io/uri.zig");
@@ -73,6 +74,7 @@ pub const BashAllowances = std.ArrayList(BashAllowance);
 pub const RunContext = struct {
     allocator: Allocator,
     io: std.Io,
+    layout_ctx: layout.Context,
     home: []const u8,
     profile: *const config.RuntimeProfile,
     graph_path: []const u8,

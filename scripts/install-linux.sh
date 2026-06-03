@@ -88,20 +88,16 @@ runtime:
   input_text_file_max_bytes: 8388608
   input_file_max_bytes: 33554432
 
-provider:
-  base_url: http://127.0.0.1:30000/v1
-  authorization: Bearer zinc
 
 models:
   qwen-heretic-mtp:
+    kind: local
     model: qwen3.6-27b-heretic-mtp-q3_k_s
-    loader:
+    base_url: http://127.0.0.1:30000/v1
+    llama_cpp:
       engine: llama.cpp
       repo: https://github.com/ggml-org/llama.cpp.git
       ref: master
-      hf_repo: mradermacher/Qwen3.6-27B-uncensored-heretic-v2-Native-MTP-Preserved-GGUF
-      hf_file: Qwen3.6-27B-uncensored-heretic-v2-Native-MTP-Preserved.Q3_K_S.gguf
-      mmproj_file: Qwen3.6-27B-uncensored-heretic-v2-Native-MTP-Preserved.mmproj-Q8_0.gguf
       cache_type_k: q4_0
       cache_type_v: q4_0
       fit_ctx: 16384
@@ -109,6 +105,10 @@ models:
       draft_tokens: 2
       reasoning_format: deepseek
       mtp: true
+    hf:
+      repo: mradermacher/Qwen3.6-27B-uncensored-heretic-v2-Native-MTP-Preserved-GGUF
+      file: Qwen3.6-27B-uncensored-heretic-v2-Native-MTP-Preserved.Q3_K_S.gguf
+      mmproj: Qwen3.6-27B-uncensored-heretic-v2-Native-MTP-Preserved.mmproj-Q8_0.gguf
     generation:
       temperature: 0.6
       max_tokens: 1024

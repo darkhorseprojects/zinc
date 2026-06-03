@@ -18,13 +18,18 @@ zn "inspect this repo"
 ./scripts/install-linux.sh
 ```
 
-Installs:
+The current installer targets Linux. The runtime itself keeps platform paths behind Zinc's layout layer:
 
 ```text
-~/.local/bin/zn
-~/.local/share/zinc/graphs/*.circuitry.yaml
-~/.local/share/zinc/prompts/*.md
-~/.config/zinc/config.yaml
+Linux config:   $XDG_CONFIG_HOME/zinc/config.yaml or ~/.config/zinc/config.yaml
+Linux data:     $XDG_DATA_HOME/zinc or ~/.local/share/zinc
+Linux state:    ~/.local/state/zinc
+macOS config:   ~/Library/Application Support/zinc/config.yaml
+macOS data:     ~/Library/Application Support/zinc
+macOS state:    ~/Library/Application Support/zinc/State
+Windows config: %APPDATA%\zinc\config.yaml
+Windows data:   %APPDATA%\zinc
+Windows state:  %LOCALAPPDATA%\zinc\State
 ```
 
 ## CLI
@@ -127,44 +132,46 @@ Byte ranges:
 <readable-uri>:bytes=<start>-<end>
 ```
 
-## Providers
+## Models
 
-Provider configuration is Zinc runtime config. Circuitry graphs do not contain provider settings.
+Model configuration is Zinc runtime config. Circuitry graphs do not contain provider settings.
+
+Zinc supports two runtime model kinds:
+
+- `local`: Zinc-managed `llama.cpp`, with weights downloaded from Hugging Face.
+- `openai`: an external OpenAI-compatible endpoint.
 
 ```yaml
-providers:
-  default: local
+default_model: qwen-heretic-mtp
 
-  local:
+models:
+  qwen-heretic-mtp:
     kind: local
-    model: qwen2.5-coder:7b
-    base_url: http://127.0.0.1:11434/v1
+    model: qwen3.6-27b-heretic-mtp-q3_k_s
+    base_url: http://127.0.0.1:30000/v1
+    llama_cpp:
+      engine: llama.cpp
+      repo: https://github.com/ggml-org/llama.cpp.git
+      ref: master
+    hf:
+      repo: owner/model-repo
+      file: model.gguf
 
-  openai:
+  openrouter-gpt:
     kind: openai
-    model: gpt-4.1-mini
-    api_key_env: OPENAI_API_KEY
-
-  openrouter:
-    kind: openai_compatible
     model: openai/gpt-4.1-mini
     base_url: https://openrouter.ai/api/v1
     api_key_env: OPENROUTER_API_KEY
 
-  vllm:
-    kind: openai_compatible
+  vllm-coder:
+    kind: openai
     model: Qwen/Qwen2.5-Coder-7B-Instruct
     base_url: http://127.0.0.1:8000/v1
-
-model_bindings:
-  Researcher:
-    provider: openrouter
-    model: openai/gpt-4.1-mini
 ```
 
-`kind: openai` defaults to `https://api.openai.com/v1` and requires an API key environment variable. `kind: openai_compatible` requires `base_url` and may omit `api_key_env` for self-hosted endpoints. Zinc normalizes trailing slashes so `/v1/chat/completions` is not doubled. `model.identity` is a portable label that Zinc may bind to a provider/model; the binding stays outside the graph.
+`kind: local` is only for Zinc-managed `llama.cpp` served from Hugging Face model files. `kind: openai` is only for non-local OpenAI-compatible HTTP endpoints. Zinc normalizes trailing slashes so `/v1/chat/completions` is not doubled.
 
-`zn doctor` reports the selected provider id, kind, base URL, model name, `api_key_env` name, and whether the env var is present. It never prints secret values and does not make paid API calls.
+`zn doctor` reports the selected model id, kind, base URL, served model name, `api_key_env` name, and whether the env var is present. It never prints secret values and does not make paid API calls.
 
 ## Tools
 

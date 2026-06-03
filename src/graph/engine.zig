@@ -2,6 +2,7 @@ const std = @import("std");
 const config = @import("../config/mod.zig");
 const ctxmod = @import("context.zig");
 const files = @import("../io/fs.zig");
+const layout = @import("../io/layout.zig");
 const graph = @import("mod.zig");
 const provider = @import("../model/provider.zig");
 const resource = @import("resource.zig");
@@ -16,24 +17,24 @@ fn fail(comptime fmt: []const u8, args: anytype) error{UserError}!void {
     return error.UserError;
 }
 
-pub fn run(allocator: Allocator, io: std.Io, home: []const u8, user_prompt: []const u8, resume_id: ?[]const u8, continue_last: bool, graph_path_override: ?[]const u8, runtime_inputs: []const graph.RuntimeInput) !void {
-    const runtime_paths = try config.loadRuntimePaths(allocator, io, home);
+pub fn run(allocator: Allocator, io: std.Io, layout_ctx: layout.Context, user_prompt: []const u8, resume_id: ?[]const u8, continue_last: bool, graph_path_override: ?[]const u8, runtime_inputs: []const graph.RuntimeInput) !void {
+    const runtime_paths = try config.loadRuntimePaths(allocator, io, layout_ctx);
     defer runtime_paths.deinit(allocator);
-    return runGraph(allocator, io, home, graph_path_override orelse runtime_paths.graph, null, user_prompt, resume_id, continue_last, runtime_inputs);
+    return runGraph(allocator, io, layout_ctx, graph_path_override orelse runtime_paths.graph, null, user_prompt, resume_id, continue_last, runtime_inputs);
 }
 
-pub fn compactSession(allocator: Allocator, io: std.Io, home: []const u8, graph_path: []const u8, resume_id: ?[]const u8, continue_last: bool) !void {
-    const model_id = try config.resolveConfiguredModelId(allocator, io, home);
+pub fn compactSession(allocator: Allocator, io: std.Io, layout_ctx: layout.Context, graph_path: []const u8, resume_id: ?[]const u8, continue_last: bool) !void {
+    const model_id = try config.resolveConfiguredModelId(allocator, io, layout_ctx);
     defer allocator.free(model_id);
-    const profile = try config.loadRuntimeProfile(allocator, io, home, model_id);
+    const profile = try config.loadRuntimeProfile(allocator, io, layout_ctx, model_id);
     defer profile.deinit(allocator);
     const session = try sessions.open(allocator, resume_id, continue_last);
     defer session.deinit(allocator);
-    try runCompaction(allocator, io, home, &profile, session, graph_path);
+    try runCompaction(allocator, io, layout_ctx, &profile, session, graph_path);
     try sessions.rememberLast(session);
 }
 
-pub fn runGraph(allocator: Allocator, io: std.Io, home: []const u8, graph_path: []const u8, selected_export: ?[]const u8, user_prompt: []const u8, resume_id: ?[]const u8, continue_last: bool, runtime_inputs: []const graph.RuntimeInput) !void {
+pub fn runGraph(allocator: Allocator, io: std.Io, layout_ctx: layout.Context, graph_path: []const u8, selected_export: ?[]const u8, user_prompt: []const u8, resume_id: ?[]const u8, continue_last: bool, runtime_inputs: []const graph.RuntimeInput) !void {
     const span = trace.span("engine_run");
     defer span.end("engine", "graph={s} prompt_chars={d}", .{ graph_path, user_prompt.len });
 
@@ -43,9 +44,9 @@ pub fn runGraph(allocator: Allocator, io: std.Io, home: []const u8, graph_path: 
     const target = graph.exportTargetResourceId(loaded_graph, selected_export) orelse return fail("graph has no default export; add `exports.main` or pass `--export`", .{});
     if (graph.resource(loaded_graph, target) == null) return fail("export target not found: {s}", .{target});
 
-    const model_id = try config.resolveGraphModelId(allocator, io, loaded_graph, selected_export, home);
+    const model_id = try config.resolveGraphModelId(allocator, io, loaded_graph, selected_export, layout_ctx);
     defer allocator.free(model_id);
-    const profile = try config.loadRuntimeProfile(allocator, io, home, model_id);
+    const profile = try config.loadRuntimeProfile(allocator, io, layout_ctx, model_id);
     defer profile.deinit(allocator);
 
     const session = try sessions.open(allocator, resume_id, continue_last);
@@ -54,12 +55,12 @@ pub fn runGraph(allocator: Allocator, io: std.Io, home: []const u8, graph_path: 
     var log = try sessions.readParsed(allocator, session.path);
     defer log.deinit(allocator);
     if (try shouldCompactLog(allocator, log, &profile)) {
-        try runCompaction(allocator, io, home, &profile, session, profile.paths.compaction_graph);
+        try runCompaction(allocator, io, layout_ctx, &profile, session, profile.paths.compaction_graph);
         log.deinit(allocator);
         log = try sessions.readParsed(allocator, session.path);
     }
 
-    const recovered_context = if (try graph.hasInputForExport(allocator, loaded_graph, selected_export, "recovered_context")) try runContextRecovery(allocator, io, home, &profile, session, log, profile.paths.context_graph) else null;
+    const recovered_context = if (try graph.hasInputForExport(allocator, loaded_graph, selected_export, "recovered_context")) try runContextRecovery(allocator, io, layout_ctx, &profile, session, log, profile.paths.context_graph) else null;
     defer if (recovered_context) |text| allocator.free(text);
     const graph_inputs = try runtimeInputsForLoop(allocator, loaded_graph, selected_export, runtime_inputs, recovered_context);
     defer freeRuntimeInputList(allocator, graph_inputs, runtime_inputs.len);
@@ -71,7 +72,7 @@ pub fn runGraph(allocator: Allocator, io: std.Io, home: []const u8, graph_path: 
         for (bash_allowances.items) |item| item.deinit(allocator);
         bash_allowances.deinit(allocator);
     }
-    var ctx = ctxmod.RunContext{ .allocator = allocator, .io = io, .home = home, .profile = &profile, .graph_path = graph_path, .graph = &loaded_graph, .session = session, .log = &log, .inputs = bound_inputs, .frame = .interactive(target), .bash_allowances = &bash_allowances };
+    var ctx = ctxmod.RunContext{ .allocator = allocator, .io = io, .layout_ctx = layout_ctx, .home = layout_ctx.dirs.home, .profile = &profile, .graph_path = graph_path, .graph = &loaded_graph, .session = session, .log = &log, .inputs = bound_inputs, .frame = .interactive(target), .bash_allowances = &bash_allowances };
     const result = resource.resolve(&ctx, target) catch |err| switch (err) {
         error.GraphRunDeniedByUser => {
             try files.writeAllOut("graph run denied\n");
@@ -87,10 +88,10 @@ pub fn runGraph(allocator: Allocator, io: std.Io, home: []const u8, graph_path: 
 
     log.deinit(allocator);
     log = try sessions.readParsed(allocator, session.path);
-    if (try shouldCompactLog(allocator, log, &profile)) try runCompaction(allocator, io, home, &profile, session, profile.paths.compaction_graph);
+    if (try shouldCompactLog(allocator, log, &profile)) try runCompaction(allocator, io, layout_ctx, &profile, session, profile.paths.compaction_graph);
 }
 
-fn runCompaction(allocator: Allocator, io: std.Io, home: []const u8, profile: *const config.RuntimeProfile, session: sessions.Session, graph_path: []const u8) !void {
+fn runCompaction(allocator: Allocator, io: std.Io, layout_ctx: layout.Context, profile: *const config.RuntimeProfile, session: sessions.Session, graph_path: []const u8) !void {
     const log = try sessions.readParsed(allocator, session.path);
     defer log.deinit(allocator);
     if (log.messageCount() == 0) return;
@@ -109,7 +110,7 @@ fn runCompaction(allocator: Allocator, io: std.Io, home: []const u8, profile: *c
         for (bash_allowances.items) |item| item.deinit(allocator);
         bash_allowances.deinit(allocator);
     }
-    var ctx = ctxmod.RunContext{ .allocator = allocator, .io = io, .home = home, .profile = profile, .graph_path = graph_path, .graph = &loaded_graph, .session = session, .log = &log_mut, .inputs = bound, .frame = .maintenance(target), .bash_allowances = &bash_allowances };
+    var ctx = ctxmod.RunContext{ .allocator = allocator, .io = io, .layout_ctx = layout_ctx, .home = layout_ctx.dirs.home, .profile = profile, .graph_path = graph_path, .graph = &loaded_graph, .session = session, .log = &log_mut, .inputs = bound, .frame = .maintenance(target), .bash_allowances = &bash_allowances };
     const result = try resource.resolve(&ctx, target);
     defer result.deinit(allocator);
     const summary = try parseStringField(allocator, result.text, "summary");
@@ -117,7 +118,7 @@ fn runCompaction(allocator: Allocator, io: std.Io, home: []const u8, profile: *c
     try sessions.appendCompaction(allocator, session.path, log.messageCount(), summary);
 }
 
-fn runContextRecovery(allocator: Allocator, io: std.Io, home: []const u8, profile: *const config.RuntimeProfile, session: sessions.Session, log: sessions.Log, graph_path: []const u8) ![]u8 {
+fn runContextRecovery(allocator: Allocator, io: std.Io, layout_ctx: layout.Context, profile: *const config.RuntimeProfile, session: sessions.Session, log: sessions.Log, graph_path: []const u8) ![]u8 {
     if (log.messageCount() == 0) return allocator.dupe(u8, "");
     const loaded_graph = try graph.load(allocator, io, graph_path);
     defer loaded_graph.deinit(allocator);
@@ -140,7 +141,7 @@ fn runContextRecovery(allocator: Allocator, io: std.Io, home: []const u8, profil
         for (bash_allowances.items) |item| item.deinit(allocator);
         bash_allowances.deinit(allocator);
     }
-    var ctx = ctxmod.RunContext{ .allocator = allocator, .io = io, .home = home, .profile = profile, .graph_path = graph_path, .graph = &loaded_graph, .session = session, .log = &log_mut, .inputs = bound, .frame = .maintenance(target), .bash_allowances = &bash_allowances };
+    var ctx = ctxmod.RunContext{ .allocator = allocator, .io = io, .layout_ctx = layout_ctx, .home = layout_ctx.dirs.home, .profile = profile, .graph_path = graph_path, .graph = &loaded_graph, .session = session, .log = &log_mut, .inputs = bound, .frame = .maintenance(target), .bash_allowances = &bash_allowances };
     const result = try resource.resolve(&ctx, target);
     defer result.deinit(allocator);
     return parseStringField(allocator, result.text, "context");

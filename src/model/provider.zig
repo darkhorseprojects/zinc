@@ -61,7 +61,7 @@ pub fn call(allocator: Allocator, io: std.Io, request: Request) !AssistantTurn {
     }) catch |err| switch (err) {
         error.ConnectionRefused => {
             std.debug.print("error: model endpoint refused connection: {s}\n", .{request.profile.provider.base_url});
-            std.debug.print("run `zn serve` to start the Zinc-managed server, or update provider.base_url in ~/.config/zinc/config.yaml\n", .{});
+            std.debug.print("run `zn serve` for a local model, or set the selected model to an OpenAI-compatible endpoint in ~/.config/zinc/config.yaml\n", .{});
             return error.UserError;
         },
         else => return err,
@@ -70,7 +70,7 @@ pub fn call(allocator: Allocator, io: std.Io, request: Request) !AssistantTurn {
         const response_body = response.written();
         if (result.status == .service_unavailable and std.mem.indexOf(u8, response_body, "Loading model") != null) return error.ProviderLoadingModel;
         const preview = response_body[0..@min(response_body.len, error_preview_chars)];
-        std.debug.print("OpenAI-compatible provider {s} request failed.\n\nBase URL:\n  {s}\n\nEndpoint:\n  /chat/completions\n\nStatus:\n  {d}\n\nHint:\n  check that the server exposes an OpenAI-compatible /v1/chat/completions endpoint.\n\n{s}\n", .{ request.profile.provider.id, request.profile.provider.base_url, @intFromEnum(result.status), preview });
+        std.debug.print("OpenAI-compatible model endpoint {s} request failed.\n\nBase URL:\n  {s}\n\nEndpoint:\n  /chat/completions\n\nStatus:\n  {d}\n\nHint:\n  check that the server exposes an OpenAI-compatible /v1/chat/completions endpoint.\n\n{s}\n", .{ request.profile.provider.id, request.profile.provider.base_url, @intFromEnum(result.status), preview });
         return error.ProviderRequestFailed;
     }
     return parseAssistantTurn(allocator, response.written(), request.profile);

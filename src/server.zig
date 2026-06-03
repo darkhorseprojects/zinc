@@ -6,31 +6,30 @@ const layout = @import("io/layout.zig");
 const graph = @import("graph/mod.zig");
 
 const Allocator = std.mem.Allocator;
-const root = ".local/share/zinc";
 
-pub fn start(allocator: Allocator, io: std.Io, home: []const u8, model_arg: ?[]const u8) !void {
+pub fn start(allocator: Allocator, io: std.Io, layout_ctx: layout.Context, model_arg: ?[]const u8) !void {
     if (builtin.os.tag != .linux) {
-        std.debug.print("error: zn serve is only available on Linux. Use an external OpenAI-compatible provider and set provider.base_url.\n", .{});
+        std.debug.print("error: zn serve is only available on Linux. Use a model with kind: openai for an external OpenAI-compatible endpoint.\n", .{});
         return error.UnsupportedPlatform;
     }
-    const pid_path = try layout.statePath(allocator, home, "server.pid");
+    const pid_path = try layout.statePath(allocator, layout_ctx, "server.pid");
     defer allocator.free(pid_path);
-    const model_id = if (model_arg) |m| try allocator.dupe(u8, m) else try config.resolveConfiguredModelId(allocator, io, home);
+    const model_id = if (model_arg) |m| try allocator.dupe(u8, m) else try config.resolveConfiguredModelId(allocator, io, layout_ctx);
     defer allocator.free(model_id);
     try safeModelId(model_id);
-    const profile = try config.loadRuntimeProfile(allocator, io, home, model_id);
+    const profile = try config.loadRuntimeProfile(allocator, io, layout_ctx, model_id);
     defer profile.deinit(allocator);
     if (try livePid(allocator, pid_path)) |pid| {
         try waitReady(allocator, io, profile.provider.base_url, pid);
         return std.debug.print("Zinc server ready: pid {d}, model {s}\n", .{ pid, model_id });
     }
-    const server = try ensureEngine(allocator, io, home, &profile);
+    const server = try ensureEngine(allocator, io, layout_ctx, &profile);
     defer allocator.free(server);
-    const model = try ensureModel(allocator, io, home, &profile);
+    const model = try ensureModel(allocator, io, layout_ctx, &profile);
     defer allocator.free(model);
-    const mmproj = try ensureMmproj(allocator, io, home, &profile);
+    const mmproj = try ensureMmproj(allocator, io, layout_ctx, &profile);
     defer if (mmproj) |path| allocator.free(path);
-    const log = try layout.statePath(allocator, home, "server.log");
+    const log = try layout.statePath(allocator, layout_ctx, "server.log");
     defer allocator.free(log);
     if (std.fs.path.dirname(log)) |dir| try files.mkdirP(dir);
 
@@ -49,20 +48,20 @@ pub fn start(allocator: Allocator, io: std.Io, home: []const u8, model_arg: ?[]c
     const pid_text = try std.fmt.allocPrint(allocator, "{d}\n", .{pid});
     defer allocator.free(pid_text);
     try files.write(pid_path, pid_text);
-    try writeServerInfo(allocator, home, model_id, &profile, log, mmproj);
+    try writeServerInfo(allocator, layout_ctx, model_id, &profile, log, mmproj);
     std.debug.print("Zinc server serving {s}: pid {d}, log {s}\n", .{ model_id, pid, log });
 }
 
-pub fn stop(allocator: Allocator, io: std.Io, home: []const u8) !void {
+pub fn stop(allocator: Allocator, io: std.Io, layout_ctx: layout.Context) !void {
     if (builtin.os.tag != .linux) {
         std.debug.print("error: zn stop is only available on Linux because Zinc-managed server processes are Linux-only.\n", .{});
         return error.UnsupportedPlatform;
     }
-    const pid_path = try layout.statePath(allocator, home, "server.pid");
+    const pid_path = try layout.statePath(allocator, layout_ctx, "server.pid");
     defer allocator.free(pid_path);
     const pid = try storedPid(allocator, pid_path) orelse return std.debug.print("Zinc server is not running\n", .{});
     defer remove(pid_path);
-    defer removeServerInfo(allocator, home);
+    defer removeServerInfo(allocator, layout_ctx);
     if (!alive(allocator, pid)) return std.debug.print("Zinc server was not running\n", .{});
     if (!ours(allocator, pid)) return error.PidIsNotZincServer;
     try std.posix.kill(pid, .TERM);
@@ -71,36 +70,36 @@ pub fn stop(allocator: Allocator, io: std.Io, home: []const u8) !void {
     std.debug.print("Zinc server stopped\n", .{});
 }
 
-pub fn doctor(allocator: Allocator, io: std.Io, home: []const u8) !void {
+pub fn doctor(allocator: Allocator, io: std.Io, layout_ctx: layout.Context) !void {
     std.debug.print("Zinc doctor\n\n", .{});
 
     std.debug.print("Zinc\n", .{});
     std.debug.print("  ✓ zn binary\n", .{});
-    std.debug.print("  version: 0.4.2\n", .{});
+    std.debug.print("  version: 0.4.3\n", .{});
 
-    const config_path = try layout.configPath(allocator, home);
+    const config_path = try layout.configPath(allocator, layout_ctx);
     defer allocator.free(config_path);
     const has_config = files.existsPath(config_path);
     std.debug.print("\nConfig\n", .{});
     std.debug.print("  {s} config file: {s}\n", .{ mark(has_config), config_path });
 
-    const model_id = config.resolveConfiguredModelId(allocator, io, home) catch null;
+    const model_id = config.resolveConfiguredModelId(allocator, io, layout_ctx) catch null;
     defer if (model_id) |id| allocator.free(id);
-    const profile = if (model_id) |id| config.loadRuntimeProfile(allocator, io, home, id) catch null else null;
+    const profile = if (model_id) |id| config.loadRuntimeProfile(allocator, io, layout_ctx, id) catch null else null;
     std.debug.print("  {s} config parses\n", .{mark(profile != null)});
 
     std.debug.print("\nCircuitry\n", .{});
     std.debug.print("  ✓ native circuitry-zig runtime linked\n", .{});
 
     std.debug.print("\nFiles\n", .{});
-    const global_pkg = try layout.sharePath(allocator, home, "packages");
+    const global_pkg = try layout.sharePath(allocator, layout_ctx, "packages");
     defer allocator.free(global_pkg);
     std.debug.print("  {s} global package dir writable: {s}\n", .{ mark(writableDir(global_pkg)), global_pkg });
     std.debug.print("  {s} project package dir writable: .zinc/packages\n", .{mark(writableDir(".zinc/packages"))});
     std.debug.print("  {s} sessions dir writable: .zinc/sessions\n", .{mark(writableDir(".zinc/sessions"))});
-    const prompt_a = try layout.sharePath(allocator, home, "prompts/bash-guide.md");
+    const prompt_a = try layout.sharePath(allocator, layout_ctx, "prompts/bash-guide.md");
     defer allocator.free(prompt_a);
-    const prompt_b = try layout.sharePath(allocator, home, "prompts/circuitry-author.md");
+    const prompt_b = try layout.sharePath(allocator, layout_ctx, "prompts/circuitry-author.md");
     defer allocator.free(prompt_b);
     std.debug.print("  {s} stock prompt: bash-guide\n", .{mark(files.existsPath(prompt_a))});
     std.debug.print("  {s} stock prompt: circuitry-author\n", .{mark(files.existsPath(prompt_b))});
@@ -118,37 +117,38 @@ pub fn doctor(allocator: Allocator, io: std.Io, home: []const u8) !void {
         std.debug.print("  {s} circuitry check: zinc-context-recovery\n", .{mark(context_ok and graphValid(allocator, io, p.paths.context_graph))});
         std.debug.print("  {s} circuitry check: zinc-compaction\n", .{mark(compact_ok and graphValid(allocator, io, p.paths.compaction_graph))});
 
-        std.debug.print("\nProvider and model\n", .{});
-        std.debug.print("  ✓ default provider: {s}\n", .{p.provider.id});
-        std.debug.print("  ✓ provider kind: {s}\n", .{providerKindName(p.provider.kind)});
+        std.debug.print("\nModel runtime\n", .{});
+        std.debug.print("  ✓ model id: {s}\n", .{p.model.id});
+        std.debug.print("  ✓ kind: {s}\n", .{modelKindName(p.provider.kind)});
         std.debug.print("  ✓ base URL: {s}\n", .{p.provider.base_url});
-        std.debug.print("  ✓ model name: {s}\n", .{p.model.model});
+        std.debug.print("  ✓ served model: {s}\n", .{p.model.model});
         if (p.provider.api_key_env) |env_name| {
             std.debug.print("  {s} api_key_env {s} present\n", .{ mark(envPresent(allocator, env_name)), env_name });
         } else std.debug.print("  - api_key_env: none\n", .{});
-        std.debug.print("  ✓ model id: {s}\n", .{p.model.id});
-        std.debug.print("  {s} llama.cpp loader configured\n", .{mark(std.mem.eql(u8, p.model.loader.engine, "llama.cpp"))});
-        std.debug.print("  {s} HF model configured: {s}/{s}\n", .{ mark(p.model.loader.hf_repo.len != 0 and p.model.loader.hf_file.len != 0), p.model.loader.hf_repo, p.model.loader.hf_file });
-        std.debug.print("  {s} required command: git\n", .{mark(commandOk(allocator, io, &.{ "git", "--version" }))});
-        std.debug.print("  {s} required command: cmake\n", .{mark(commandOk(allocator, io, &.{ "cmake", "--version" }))});
-        std.debug.print("  {s} required command: hf\n", .{mark(commandOk(allocator, io, &.{ "hf", "--version" }))});
-        const reachable = if (p.provider.kind == .local or p.provider.kind == .openai_compatible) probe(allocator, io, p.provider.base_url) != 0 else false;
-        std.debug.print("  {s} local/OpenAI-compatible endpoint reachable\n", .{mark(reachable)});
+        if (p.provider.kind == .local) {
+            std.debug.print("  {s} llama.cpp configured\n", .{mark(std.mem.eql(u8, p.model.loader.engine, "llama.cpp"))});
+            std.debug.print("  {s} HF model configured: {s}/{s}\n", .{ mark(p.model.loader.hf_repo.len != 0 and p.model.loader.hf_file.len != 0), p.model.loader.hf_repo, p.model.loader.hf_file });
+            std.debug.print("  {s} required command: git\n", .{mark(commandOk(allocator, io, &.{ "git", "--version" }))});
+            std.debug.print("  {s} required command: cmake\n", .{mark(commandOk(allocator, io, &.{ "cmake", "--version" }))});
+            std.debug.print("  {s} required command: hf\n", .{mark(commandOk(allocator, io, &.{ "hf", "--version" }))});
+        }
+        const reachable = probe(allocator, io, p.provider.base_url) != 0;
+        std.debug.print("  {s} model endpoint reachable\n", .{mark(reachable)});
         if (!reachable and p.provider.kind == .local) std.debug.print("\nFix: run `zn serve` to build/download and start the configured local model server.\n", .{});
     } else {
         std.debug.print("\nFix: create a valid config at {s}. If Zinc is installed, rerun scripts/install-linux.sh.\n", .{config_path});
     }
 
-    const pid_path = try layout.statePath(allocator, home, "server.pid");
+    const pid_path = try layout.statePath(allocator, layout_ctx, "server.pid");
     defer allocator.free(pid_path);
     if (builtin.os.tag != .linux) {
-        std.debug.print("\nServer\n  ✗ Zinc-managed llama-server is Linux-only\n  Fix: configure provider.base_url for an external OpenAI-compatible server.\n", .{});
+        std.debug.print("\nServer\n  ✗ Zinc-managed llama-server is Linux-only\n  Fix: select a model with kind: openai for an external OpenAI-compatible endpoint.\n", .{});
     } else if (try livePid(allocator, pid_path)) |pid| std.debug.print("\nServer\n  ✓ Zinc-managed llama-server: pid {d}\n", .{pid}) else std.debug.print("\nServer\n  - Zinc-managed llama-server is not running\n", .{});
 }
 
-fn ensureEngine(allocator: Allocator, io: std.Io, home: []const u8, profile: *const config.RuntimeProfile) ![]u8 {
+fn ensureEngine(allocator: Allocator, io: std.Io, layout_ctx: layout.Context, profile: *const config.RuntimeProfile) ![]u8 {
     if (!std.mem.eql(u8, profile.model.loader.engine, "llama.cpp")) return error.UnsupportedEngine;
-    const dir = try std.fmt.allocPrint(allocator, "{s}/{s}/llama.cpp", .{ home, root });
+    const dir = try layout.sharePath(allocator, layout_ctx, "llama.cpp");
     defer allocator.free(dir);
     if (files.exists(dir)) |_| {} else |_| try run(allocator, io, &.{ "git", "clone", profile.model.loader.repo, dir });
     try run(allocator, io, &.{ "git", "-C", dir, "fetch", "origin", profile.model.loader.ref });
@@ -164,20 +164,22 @@ fn ensureEngine(allocator: Allocator, io: std.Io, home: []const u8, profile: *co
     return server;
 }
 
-fn ensureModel(allocator: Allocator, io: std.Io, home: []const u8, profile: *const config.RuntimeProfile) ![]u8 {
-    return ensureHfFile(allocator, io, home, profile.model.loader.hf_repo, profile.model.loader.hf_file);
+fn ensureModel(allocator: Allocator, io: std.Io, layout_ctx: layout.Context, profile: *const config.RuntimeProfile) ![]u8 {
+    return ensureHfFile(allocator, io, layout_ctx, profile.model.loader.hf_repo, profile.model.loader.hf_file);
 }
 
-fn ensureMmproj(allocator: Allocator, io: std.Io, home: []const u8, profile: *const config.RuntimeProfile) !?[]u8 {
+fn ensureMmproj(allocator: Allocator, io: std.Io, layout_ctx: layout.Context, profile: *const config.RuntimeProfile) !?[]u8 {
     if (profile.model.loader.mmproj_file.len == 0) return null;
-    return try ensureHfFile(allocator, io, home, profile.model.loader.hf_repo, profile.model.loader.mmproj_file);
+    return try ensureHfFile(allocator, io, layout_ctx, profile.model.loader.hf_repo, profile.model.loader.mmproj_file);
 }
 
-fn ensureHfFile(allocator: Allocator, io: std.Io, home: []const u8, repo: []const u8, filename: []const u8) ![]u8 {
+fn ensureHfFile(allocator: Allocator, io: std.Io, layout_ctx: layout.Context, repo: []const u8, filename: []const u8) ![]u8 {
     if (repo.len == 0 or filename.len == 0) return error.InvalidConfigValue;
     const safe = try safeRepo(allocator, repo);
     defer allocator.free(safe);
-    const dir = try std.fmt.allocPrint(allocator, "{s}/{s}/models/{s}", .{ home, root, safe });
+    const rel = try std.fmt.allocPrint(allocator, "models/{s}", .{safe});
+    defer allocator.free(rel);
+    const dir = try layout.sharePath(allocator, layout_ctx, rel);
     defer allocator.free(dir);
     const path = try std.fmt.allocPrint(allocator, "{s}/{s}", .{ dir, filename });
     if (files.exists(path)) |_| return path else |_| {}
@@ -195,8 +197,8 @@ fn serverArgs(allocator: Allocator, argv: *std.ArrayList([]const u8), server: []
     if (l.mtp) try argv.appendSlice(allocator, &.{ "--spec-type", "draft-mtp", "--spec-draft-n-max", draft_text });
 }
 
-fn writeServerInfo(allocator: Allocator, home: []const u8, model_id: []const u8, profile: *const config.RuntimeProfile, log: []const u8, mmproj: ?[]const u8) !void {
-    const path = try layout.statePath(allocator, home, "server.info");
+fn writeServerInfo(allocator: Allocator, layout_ctx: layout.Context, model_id: []const u8, profile: *const config.RuntimeProfile, log: []const u8, mmproj: ?[]const u8) !void {
+    const path = try layout.statePath(allocator, layout_ctx, "server.info");
     defer allocator.free(path);
     var out: std.ArrayList(u8) = .empty;
     defer out.deinit(allocator);
@@ -205,14 +207,14 @@ fn writeServerInfo(allocator: Allocator, home: []const u8, model_id: []const u8,
     try files.write(path, out.items);
 }
 
-fn readServerInfo(allocator: Allocator, home: []const u8) ![]u8 {
-    const path = try layout.statePath(allocator, home, "server.info");
+fn readServerInfo(allocator: Allocator, layout_ctx: layout.Context) ![]u8 {
+    const path = try layout.statePath(allocator, layout_ctx, "server.info");
     defer allocator.free(path);
     return files.readLimited(allocator, path, 4096);
 }
 
-fn removeServerInfo(allocator: Allocator, home: []const u8) void {
-    const path = layout.statePath(allocator, home, "server.info") catch return;
+fn removeServerInfo(allocator: Allocator, layout_ctx: layout.Context) void {
+    const path = layout.statePath(allocator, layout_ctx, "server.info") catch return;
     defer allocator.free(path);
     remove(path);
 }
@@ -253,11 +255,10 @@ fn mark(ok: bool) []const u8 {
     return if (ok) "✓" else "✗";
 }
 
-fn providerKindName(kind: config.ProviderKind) []const u8 {
+fn modelKindName(kind: config.ModelKind) []const u8 {
     return switch (kind) {
         .local => "local",
         .openai => "openai",
-        .openai_compatible => "openai_compatible",
     };
 }
 

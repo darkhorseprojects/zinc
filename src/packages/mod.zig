@@ -172,16 +172,16 @@ const Manifest = struct {
     }
 };
 
-pub fn add(allocator: Allocator, io: std.Io, home: []const u8, source_text: []const u8, options: InstallOptions) !PackageRef {
+pub fn add(allocator: Allocator, io: std.Io, layout_ctx: layout.Context, source_text: []const u8, options: InstallOptions) !PackageRef {
     var source = try parseSource(allocator, source_text);
     defer source.deinit(allocator);
     const staging = try stageSource(allocator, io, source);
     defer cleanupPath(io, staging);
     defer allocator.free(staging);
-    return installStaged(allocator, io, home, source, staging, source_text, options);
+    return installStaged(allocator, io, layout_ctx, source, staging, source_text, options);
 }
 
-pub fn previewAdd(allocator: Allocator, io: std.Io, home: []const u8, source_text: []const u8, options: InstallOptions) !PackagePlan {
+pub fn previewAdd(allocator: Allocator, io: std.Io, layout_ctx: layout.Context, source_text: []const u8, options: InstallOptions) !PackagePlan {
     var source = try parseSource(allocator, source_text);
     defer source.deinit(allocator);
     const staging = try stageSource(allocator, io, source);
@@ -189,18 +189,18 @@ pub fn previewAdd(allocator: Allocator, io: std.Io, home: []const u8, source_tex
         cleanupPath(io, staging);
         allocator.free(staging);
     }
-    const text = try packagePlanText(allocator, io, home, source, staging, source_text, options, null);
+    const text = try packagePlanText(allocator, io, layout_ctx, source, staging, source_text, options, null);
     return .{ .text = text, .staging = staging };
 }
 
-pub fn installPreviewed(allocator: Allocator, io: std.Io, home: []const u8, plan: PackagePlan, source_text: []const u8, options: InstallOptions) !PackageRef {
+pub fn installPreviewed(allocator: Allocator, io: std.Io, layout_ctx: layout.Context, plan: PackagePlan, source_text: []const u8, options: InstallOptions) !PackageRef {
     var source = try parseSource(allocator, source_text);
     defer source.deinit(allocator);
-    return installStaged(allocator, io, home, source, plan.staging, source_text, options);
+    return installStaged(allocator, io, layout_ctx, source, plan.staging, source_text, options);
 }
 
-pub fn previewUpdate(allocator: Allocator, io: std.Io, home: []const u8, name: []const u8, scope: ?Scope) !PackagePlan {
-    var found = try findInstalled(allocator, home, name, scope);
+pub fn previewUpdate(allocator: Allocator, io: std.Io, layout_ctx: layout.Context, name: []const u8, scope: ?Scope) !PackagePlan {
+    var found = try findInstalled(allocator, layout_ctx, name, scope);
     defer found.deinit(allocator);
     const source_text = try readMetadataSource(allocator, found.path);
     defer allocator.free(source_text);
@@ -211,17 +211,17 @@ pub fn previewUpdate(allocator: Allocator, io: std.Io, home: []const u8, name: [
         cleanupPath(io, staging);
         allocator.free(staging);
     }
-    const text = try packagePlanText(allocator, io, home, source, staging, source_text, .{ .scope = found.scope, .replace = true }, found.path);
+    const text = try packagePlanText(allocator, io, layout_ctx, source, staging, source_text, .{ .scope = found.scope, .replace = true }, found.path);
     return .{ .text = text, .staging = staging };
 }
 
-fn installStaged(allocator: Allocator, io: std.Io, home: []const u8, source: Source, staging: []const u8, source_text: []const u8, options: InstallOptions) !PackageRef {
+fn installStaged(allocator: Allocator, io: std.Io, layout_ctx: layout.Context, source: Source, staging: []const u8, source_text: []const u8, options: InstallOptions) !PackageRef {
     const package_dir = try sourcePackageDir(allocator, staging, source.subdir);
     defer allocator.free(package_dir);
     const manifest = try loadManifest(allocator, io, package_dir);
     defer manifest.deinit(allocator);
 
-    const root = try scopeRoot(allocator, home, options.scope);
+    const root = try scopeRoot(allocator, layout_ctx, options.scope);
     defer allocator.free(root);
     const destination = try std.fs.path.join(allocator, &.{ root, manifest.name });
     errdefer allocator.free(destination);
@@ -236,33 +236,33 @@ fn installStaged(allocator: Allocator, io: std.Io, home: []const u8, source: Sou
     return .{ .name = try allocator.dupe(u8, manifest.name), .scope = options.scope, .path = destination };
 }
 
-pub fn remove(allocator: Allocator, io: std.Io, home: []const u8, name: []const u8, scope: ?Scope) !PackageRef {
-    const found = try findInstalled(allocator, home, name, scope);
+pub fn remove(allocator: Allocator, io: std.Io, layout_ctx: layout.Context, name: []const u8, scope: ?Scope) !PackageRef {
+    const found = try findInstalled(allocator, layout_ctx, name, scope);
     errdefer found.deinit(allocator);
     try removePath(io, found.path);
     return found;
 }
 
-pub fn update(allocator: Allocator, io: std.Io, home: []const u8, name: []const u8, scope: ?Scope) !PackageRef {
-    var found = try findInstalled(allocator, home, name, scope);
+pub fn update(allocator: Allocator, io: std.Io, layout_ctx: layout.Context, name: []const u8, scope: ?Scope) !PackageRef {
+    var found = try findInstalled(allocator, layout_ctx, name, scope);
     defer found.deinit(allocator);
     const source = try readMetadataSource(allocator, found.path);
     defer allocator.free(source);
-    return add(allocator, io, home, source, .{ .scope = found.scope, .replace = true });
+    return add(allocator, io, layout_ctx, source, .{ .scope = found.scope, .replace = true });
 }
 
-pub fn updateAll(allocator: Allocator, io: std.Io, home: []const u8) ![]u8 {
+pub fn updateAll(allocator: Allocator, io: std.Io, layout_ctx: layout.Context) ![]u8 {
     var out: std.ArrayList(u8) = .empty;
     errdefer out.deinit(allocator);
-    try updatePackagesInRoot(allocator, io, home, &out, .local, ".zinc/packages");
-    const global = try scopeRoot(allocator, home, .global);
+    try updatePackagesInRoot(allocator, io, layout_ctx, &out, .local, ".zinc/packages");
+    const global = try scopeRoot(allocator, layout_ctx, .global);
     defer allocator.free(global);
-    try updatePackagesInRoot(allocator, io, home, &out, .global, global);
+    try updatePackagesInRoot(allocator, io, layout_ctx, &out, .global, global);
     return out.toOwnedSlice(allocator);
 }
 
-pub fn show(allocator: Allocator, io: std.Io, home: []const u8, name: []const u8, scope: ?Scope) ![]u8 {
-    const found = try findInstalled(allocator, home, name, scope);
+pub fn show(allocator: Allocator, io: std.Io, layout_ctx: layout.Context, name: []const u8, scope: ?Scope) ![]u8 {
+    const found = try findInstalled(allocator, layout_ctx, name, scope);
     defer found.deinit(allocator);
     const manifest = try loadManifest(allocator, io, found.path);
     defer manifest.deinit(allocator);
@@ -281,12 +281,12 @@ pub fn show(allocator: Allocator, io: std.Io, home: []const u8, name: []const u8
     return out.toOwnedSlice(allocator);
 }
 
-fn packagePlanText(allocator: Allocator, io: std.Io, home: []const u8, source: Source, staging: []const u8, source_text: []const u8, options: InstallOptions, current_path: ?[]const u8) ![]u8 {
+fn packagePlanText(allocator: Allocator, io: std.Io, layout_ctx: layout.Context, source: Source, staging: []const u8, source_text: []const u8, options: InstallOptions, current_path: ?[]const u8) ![]u8 {
     const package_dir = try sourcePackageDir(allocator, staging, source.subdir);
     defer allocator.free(package_dir);
     const manifest = try loadManifest(allocator, io, package_dir);
     defer manifest.deinit(allocator);
-    const root = try scopeRoot(allocator, home, options.scope);
+    const root = try scopeRoot(allocator, layout_ctx, options.scope);
     defer allocator.free(root);
     const destination = try std.fs.path.join(allocator, &.{ root, manifest.name });
     defer allocator.free(destination);
@@ -306,74 +306,74 @@ fn packagePlanText(allocator: Allocator, io: std.Io, home: []const u8, source: S
     return out.toOwnedSlice(allocator);
 }
 
-pub fn listPackages(allocator: Allocator, io: std.Io, home: []const u8) ![]u8 {
+pub fn listPackages(allocator: Allocator, io: std.Io, layout_ctx: layout.Context) ![]u8 {
     var out: std.ArrayList(u8) = .empty;
     errdefer out.deinit(allocator);
     try appendPackageNames(allocator, io, &out, .local, ".zinc/packages");
-    const global = try scopeRoot(allocator, home, .global);
+    const global = try scopeRoot(allocator, layout_ctx, .global);
     defer allocator.free(global);
     try appendPackageNames(allocator, io, &out, .global, global);
     return out.toOwnedSlice(allocator);
 }
 
-pub fn listGraphs(allocator: Allocator, io: std.Io, home: []const u8) ![]u8 {
+pub fn listGraphs(allocator: Allocator, io: std.Io, layout_ctx: layout.Context) ![]u8 {
     var out: std.ArrayList(u8) = .empty;
     errdefer out.deinit(allocator);
     try appendGraphDir(allocator, io, &out, "project", "graphs");
     try appendPackageGraphAssets(allocator, io, &out, .local, ".zinc/packages");
-    const global = try scopeRoot(allocator, home, .global);
+    const global = try scopeRoot(allocator, layout_ctx, .global);
     defer allocator.free(global);
     try appendPackageGraphAssets(allocator, io, &out, .global, global);
-    const shared = try layout.sharePath(allocator, home, "graphs");
+    const shared = try layout.sharePath(allocator, layout_ctx, "graphs");
     defer allocator.free(shared);
     try appendGraphDir(allocator, io, &out, "stock", shared);
     return out.toOwnedSlice(allocator);
 }
 
-pub fn resolveGraph(allocator: Allocator, io: std.Io, home: []const u8, spec: []const u8) ![]u8 {
+pub fn resolveGraph(allocator: Allocator, io: std.Io, layout_ctx: layout.Context, spec: []const u8) ![]u8 {
     if (std.fs.path.isAbsolute(spec)) return allocator.dupe(u8, spec);
     if (files.existsPath(spec)) return allocator.dupe(u8, spec);
     if (try graphInDir(allocator, "graphs", spec)) |path| return path;
     if (try graphAssetInRoot(allocator, io, ".zinc/packages", spec)) |path| return path;
-    const global = try scopeRoot(allocator, home, .global);
+    const global = try scopeRoot(allocator, layout_ctx, .global);
     defer allocator.free(global);
     if (try graphAssetInRoot(allocator, io, global, spec)) |path| return path;
-    const shared_graphs = try layout.sharePath(allocator, home, "graphs");
+    const shared_graphs = try layout.sharePath(allocator, layout_ctx, "graphs");
     defer allocator.free(shared_graphs);
     if (try graphInDir(allocator, shared_graphs, spec)) |path| return path;
     return error.GraphNotFound;
 }
 
-pub fn resolvePrompt(allocator: Allocator, io: std.Io, home: []const u8, spec: []const u8) ![]u8 {
+pub fn resolvePrompt(allocator: Allocator, io: std.Io, layout_ctx: layout.Context, spec: []const u8) ![]u8 {
     if (try assetInRoot(allocator, io, ".zinc/packages", spec, .prompts)) |path| return path;
-    const global = try scopeRoot(allocator, home, .global);
+    const global = try scopeRoot(allocator, layout_ctx, .global);
     defer allocator.free(global);
     if (try assetInRoot(allocator, io, global, spec, .prompts)) |path| return path;
     return error.PromptNotFound;
 }
 
-pub fn resolveAsset(allocator: Allocator, io: std.Io, home: []const u8, spec: []const u8) ![]u8 {
+pub fn resolveAsset(allocator: Allocator, io: std.Io, layout_ctx: layout.Context, spec: []const u8) ![]u8 {
     if (try assetInRoot(allocator, io, ".zinc/packages", spec, .files)) |path| return path;
-    const global = try scopeRoot(allocator, home, .global);
+    const global = try scopeRoot(allocator, layout_ctx, .global);
     defer allocator.free(global);
     if (try assetInRoot(allocator, io, global, spec, .files)) |path| return path;
     return error.AssetNotFound;
 }
 
-pub fn findTool(allocator: Allocator, io: std.Io, home: []const u8, name: []const u8) !?Tool {
+pub fn findTool(allocator: Allocator, io: std.Io, layout_ctx: layout.Context, name: []const u8) !?Tool {
     if (try toolInRoot(allocator, io, ".zinc/packages", name)) |tool| return tool;
-    const global = try scopeRoot(allocator, home, .global);
+    const global = try scopeRoot(allocator, layout_ctx, .global);
     defer allocator.free(global);
     return toolInRoot(allocator, io, global, name);
 }
 
-pub fn attach(allocator: Allocator, io: std.Io, home: []const u8, package_name: []const u8) ![]u8 {
-    var found = try findInstalled(allocator, home, package_name, null);
+pub fn attach(allocator: Allocator, io: std.Io, layout_ctx: layout.Context, package_name: []const u8) ![]u8 {
+    var found = try findInstalled(allocator, layout_ctx, package_name, null);
     defer found.deinit(allocator);
     const manifest = try loadManifest(allocator, io, found.path);
     defer manifest.deinit(allocator);
     const spec = manifest.attach orelse return error.PackageHasNoAttach;
-    const loop_path = try layout.sharePath(allocator, home, "graphs/zinc-loop.circuitry.yaml");
+    const loop_path = try layout.sharePath(allocator, layout_ctx, "graphs/zinc-loop.circuitry.yaml");
     defer allocator.free(loop_path);
     const model = try selectAttachTarget(allocator, io, loop_path, spec.target_kind);
     defer allocator.free(model);
@@ -396,13 +396,13 @@ pub fn attach(allocator: Allocator, io: std.Io, home: []const u8, package_name: 
     for (spec.tools) |tool| try preview.print(allocator, "  - {s}\n", .{tool});
     try confirmApply(preview.items);
 
-    try regenerateAttachments(allocator, io, home, names, model);
+    try regenerateAttachments(allocator, io, layout_ctx, names, model);
     try wireLoopGraph(allocator, io, loop_path, model, spec);
     return std.fmt.allocPrint(allocator, "attached {s}\n.zinc/graphs/zinc-extensions.circuitry.yaml\n.zinc/generated/extensions.md\n", .{found.name});
 }
 
-pub fn detach(allocator: Allocator, io: std.Io, home: []const u8, package_name: []const u8) ![]u8 {
-    const loop_path = try layout.sharePath(allocator, home, "graphs/zinc-loop.circuitry.yaml");
+pub fn detach(allocator: Allocator, io: std.Io, layout_ctx: layout.Context, package_name: []const u8) ![]u8 {
+    const loop_path = try layout.sharePath(allocator, layout_ctx, "graphs/zinc-loop.circuitry.yaml");
     defer allocator.free(loop_path);
     const metadata = try extensionMetadata(allocator, io, package_name);
     defer metadata.deinit(allocator);
@@ -424,7 +424,7 @@ pub fn detach(allocator: Allocator, io: std.Io, home: []const u8, package_name: 
     if (next.len == 0) {
         std.Io.Dir.cwd().deleteFile(std.Options.debug_io, ".zinc/graphs/zinc-extensions.circuitry.yaml") catch {};
         std.Io.Dir.cwd().deleteFile(std.Options.debug_io, ".zinc/generated/extensions.md") catch {};
-    } else try regenerateAttachments(allocator, io, home, next, metadata.model);
+    } else try regenerateAttachments(allocator, io, layout_ctx, next, metadata.model);
     return std.fmt.allocPrint(allocator, "detached {s}\n", .{package_name});
 }
 
@@ -438,8 +438,8 @@ pub fn attachments(allocator: Allocator, io: std.Io) ![]u8 {
     return out.toOwnedSlice(allocator);
 }
 
-pub fn execScript(allocator: Allocator, io: std.Io, home: []const u8, package_name: []const u8, script_name: []const u8) ![]u8 {
-    var found = try findInstalled(allocator, home, package_name, null);
+pub fn execScript(allocator: Allocator, io: std.Io, layout_ctx: layout.Context, package_name: []const u8, script_name: []const u8) ![]u8 {
+    var found = try findInstalled(allocator, layout_ctx, package_name, null);
     defer found.deinit(allocator);
     const manifest = try loadManifest(allocator, io, found.path);
     defer manifest.deinit(allocator);
@@ -649,7 +649,7 @@ fn graphAttachmentNames(allocator: Allocator, io: std.Io) ![][]u8 {
     return out.toOwnedSlice(allocator);
 }
 
-fn regenerateAttachments(allocator: Allocator, io: std.Io, home: []const u8, names: []const []u8, model: []const u8) !void {
+fn regenerateAttachments(allocator: Allocator, io: std.Io, layout_ctx: layout.Context, names: []const []u8, model: []const u8) !void {
     try files.mkdirP(".zinc/graphs");
     try files.mkdirP(".zinc/generated");
     var graph_text: std.ArrayList(u8) = .empty;
@@ -669,7 +669,7 @@ fn regenerateAttachments(allocator: Allocator, io: std.Io, home: []const u8, nam
     );
     try md.appendSlice(allocator, "# Zinc package extensions\n\n");
     for (names) |name| {
-        var found = try findInstalled(allocator, home, name, null);
+        var found = try findInstalled(allocator, layout_ctx, name, null);
         defer found.deinit(allocator);
         const manifest = try loadManifest(allocator, io, found.path);
         defer manifest.deinit(allocator);
@@ -963,13 +963,13 @@ fn platformCommand(value: *const circuitry.value.Value) ?[]const u8 {
     return scalarAt(value, &.{@tagName(platform.currentOS())});
 }
 
-fn findInstalled(allocator: Allocator, home: []const u8, name: []const u8, scope: ?Scope) !PackageRef {
+fn findInstalled(allocator: Allocator, layout_ctx: layout.Context, name: []const u8, scope: ?Scope) !PackageRef {
     if (scope) |s| {
-        if (try installedAt(allocator, home, name, s)) |ref| return ref;
+        if (try installedAt(allocator, layout_ctx, name, s)) |ref| return ref;
         return error.PackageNotFound;
     }
-    const local = try installedAt(allocator, home, name, .local);
-    const global = try installedAt(allocator, home, name, .global);
+    const local = try installedAt(allocator, layout_ctx, name, .local);
+    const global = try installedAt(allocator, layout_ctx, name, .global);
     if (local != null and global != null) {
         if (local) |l| l.deinit(allocator);
         if (global) |g| g.deinit(allocator);
@@ -980,8 +980,8 @@ fn findInstalled(allocator: Allocator, home: []const u8, name: []const u8, scope
     return error.PackageNotFound;
 }
 
-fn installedAt(allocator: Allocator, home: []const u8, name: []const u8, scope: Scope) !?PackageRef {
-    const root = try scopeRoot(allocator, home, scope);
+fn installedAt(allocator: Allocator, layout_ctx: layout.Context, name: []const u8, scope: Scope) !?PackageRef {
+    const root = try scopeRoot(allocator, layout_ctx, scope);
     defer allocator.free(root);
     const path = try std.fs.path.join(allocator, &.{ root, name });
     if (!files.existsPath(path)) {
@@ -991,10 +991,10 @@ fn installedAt(allocator: Allocator, home: []const u8, name: []const u8, scope: 
     return .{ .name = try allocator.dupe(u8, name), .scope = scope, .path = path };
 }
 
-fn scopeRoot(allocator: Allocator, home: []const u8, scope: Scope) ![]u8 {
+fn scopeRoot(allocator: Allocator, layout_ctx: layout.Context, scope: Scope) ![]u8 {
     return switch (scope) {
         .local => allocator.dupe(u8, ".zinc/packages"),
-        .global => layout.sharePath(allocator, home, "packages"),
+        .global => layout.sharePath(allocator, layout_ctx, "packages"),
     };
 }
 
@@ -1129,7 +1129,7 @@ fn appendPackageGraphAssets(allocator: Allocator, io: std.Io, out: *std.ArrayLis
     }
 }
 
-fn updatePackagesInRoot(allocator: Allocator, io: std.Io, home: []const u8, out: *std.ArrayList(u8), scope: Scope, root_path: []const u8) !void {
+fn updatePackagesInRoot(allocator: Allocator, io: std.Io, layout_ctx: layout.Context, out: *std.ArrayList(u8), scope: Scope, root_path: []const u8) !void {
     var root = std.Io.Dir.cwd().openDir(io, root_path, .{ .iterate = true }) catch return;
     defer root.close(io);
     var names: std.ArrayList([]u8) = .empty;
@@ -1142,7 +1142,7 @@ fn updatePackagesInRoot(allocator: Allocator, io: std.Io, home: []const u8, out:
         if (entry.kind == .directory) try names.append(allocator, try allocator.dupe(u8, entry.name));
     }
     for (names.items) |name| {
-        var package = try update(allocator, io, home, name, scope);
+        var package = try update(allocator, io, layout_ctx, name, scope);
         defer package.deinit(allocator);
         try out.print(allocator, "updated {s}: {s}\n", .{ scopeName(package.scope), package.name });
     }

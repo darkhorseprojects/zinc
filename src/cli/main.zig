@@ -3,7 +3,7 @@ const commands = @import("commands.zig");
 const config = @import("../config/mod.zig");
 const server = @import("../server.zig");
 const packages = @import("../packages/mod.zig");
-const platform = @import("../platform.zig");
+const layout = @import("../io/layout.zig");
 const Scope = packages.Scope;
 
 pub fn run(init: std.process.Init) !void {
@@ -16,9 +16,8 @@ pub fn run(init: std.process.Init) !void {
 fn runInner(init: std.process.Init) !void {
     const allocator = init.gpa;
     config.setEnvironmentMap(init.environ_map);
-    const platform_dirs = try platform.dirs.fromProcess(allocator, init.environ_map);
-    defer platform_dirs.deinit(allocator);
-    const home = platform_dirs.home;
+    const layout_ctx = try layout.Context.fromProcess(allocator, init.environ_map);
+    defer layout_ctx.deinit(allocator);
 
     var args = try std.process.Args.Iterator.initAllocator(init.minimal.args, allocator);
     defer args.deinit();
@@ -26,76 +25,76 @@ fn runInner(init: std.process.Init) !void {
 
     const cmd = args.next() orelse return commands.usage();
     if (std.mem.eql(u8, cmd, "help") or std.mem.eql(u8, cmd, "--help") or std.mem.eql(u8, cmd, "-h")) return commands.usage();
-    if (std.mem.eql(u8, cmd, "check")) return commands.validate(allocator, init.io, home, args.next());
-    if (std.mem.eql(u8, cmd, "clean")) return cleanCommandArgs(allocator, init.io, home, &args);
-    if (std.mem.eql(u8, cmd, "run")) return runCommandArgs(allocator, init.io, home, &args);
-    if (std.mem.eql(u8, cmd, "serve")) return server.start(allocator, init.io, home, args.next());
-    if (std.mem.eql(u8, cmd, "stop")) return server.stop(allocator, init.io, home);
-    if (std.mem.eql(u8, cmd, "doctor")) return server.doctor(allocator, init.io, home);
-    if (std.mem.eql(u8, cmd, "config")) return configCommandArgs(allocator, init.io, home, &args);
-    if (std.mem.eql(u8, cmd, "graph")) return graphCommandArgs(allocator, init.io, home, &args);
-    if (std.mem.eql(u8, cmd, "pkg")) return packageCommandArgs(allocator, init.io, home, &args);
-    if (std.mem.eql(u8, cmd, "compact")) return compactCommandArgs(allocator, init.io, home, &args);
-    if (std.mem.eql(u8, cmd, "update")) return updateCommandArgs(allocator, init.io, home, &args);
+    if (std.mem.eql(u8, cmd, "check")) return commands.validate(allocator, init.io, layout_ctx, args.next());
+    if (std.mem.eql(u8, cmd, "clean")) return cleanCommandArgs(allocator, init.io, layout_ctx, &args);
+    if (std.mem.eql(u8, cmd, "run")) return runCommandArgs(allocator, init.io, layout_ctx, &args);
+    if (std.mem.eql(u8, cmd, "serve")) return server.start(allocator, init.io, layout_ctx, args.next());
+    if (std.mem.eql(u8, cmd, "stop")) return server.stop(allocator, init.io, layout_ctx);
+    if (std.mem.eql(u8, cmd, "doctor")) return server.doctor(allocator, init.io, layout_ctx);
+    if (std.mem.eql(u8, cmd, "config")) return configCommandArgs(allocator, init.io, layout_ctx, &args);
+    if (std.mem.eql(u8, cmd, "graph")) return graphCommandArgs(allocator, init.io, layout_ctx, &args);
+    if (std.mem.eql(u8, cmd, "pkg")) return packageCommandArgs(allocator, init.io, layout_ctx, &args);
+    if (std.mem.eql(u8, cmd, "compact")) return compactCommandArgs(allocator, init.io, layout_ctx, &args);
+    if (std.mem.eql(u8, cmd, "update")) return updateCommandArgs(allocator, init.io, layout_ctx, &args);
     if (std.mem.eql(u8, cmd, "session-dir")) return commands.printSessionDir(allocator);
 
     var parts: std.ArrayList([]const u8) = .empty;
     defer parts.deinit(allocator);
     try parts.append(allocator, cmd);
     while (args.next()) |part| try parts.append(allocator, part);
-    return commands.runFromArgs(allocator, init.io, home, parts.items);
+    return commands.runFromArgs(allocator, init.io, layout_ctx, parts.items);
 }
 
-fn runCommandArgs(allocator: std.mem.Allocator, io: std.Io, home: []const u8, args: *std.process.Args.Iterator) !void {
+fn runCommandArgs(allocator: std.mem.Allocator, io: std.Io, layout_ctx: layout.Context, args: *std.process.Args.Iterator) !void {
     const parts = try collectArgs(allocator, args);
     defer allocator.free(parts);
-    return commands.runFromArgs(allocator, io, home, parts);
+    return commands.runFromArgs(allocator, io, layout_ctx, parts);
 }
 
-fn configCommandArgs(allocator: std.mem.Allocator, io: std.Io, home: []const u8, args: *std.process.Args.Iterator) !void {
+fn configCommandArgs(allocator: std.mem.Allocator, io: std.Io, layout_ctx: layout.Context, args: *std.process.Args.Iterator) !void {
     const sub = args.next() orelse return commands.usage();
     if (!std.mem.eql(u8, sub, "get")) return commands.usage();
     const path = args.next() orelse return error.MissingConfigPath;
-    return commands.configGet(allocator, io, home, path);
+    return commands.configGet(allocator, io, layout_ctx, path);
 }
 
-fn graphCommandArgs(allocator: std.mem.Allocator, io: std.Io, home: []const u8, args: *std.process.Args.Iterator) !void {
+fn graphCommandArgs(allocator: std.mem.Allocator, io: std.Io, layout_ctx: layout.Context, args: *std.process.Args.Iterator) !void {
     const sub = args.next() orelse return commands.usage();
-    if (std.mem.eql(u8, sub, "list")) return commands.graphList(allocator, io, home);
-    if (std.mem.eql(u8, sub, "show")) return commands.graphShow(allocator, io, home, args.next() orelse return error.MissingGraphPath);
+    if (std.mem.eql(u8, sub, "list")) return commands.graphList(allocator, io, layout_ctx);
+    if (std.mem.eql(u8, sub, "show")) return commands.graphShow(allocator, io, layout_ctx, args.next() orelse return error.MissingGraphPath);
     return commands.usage();
 }
 
-fn packageCommandArgs(allocator: std.mem.Allocator, io: std.Io, home: []const u8, args: *std.process.Args.Iterator) !void {
+fn packageCommandArgs(allocator: std.mem.Allocator, io: std.Io, layout_ctx: layout.Context, args: *std.process.Args.Iterator) !void {
     const sub = args.next() orelse return commands.usage();
-    if (std.mem.eql(u8, sub, "list")) return commands.packageList(allocator, io, home);
+    if (std.mem.eql(u8, sub, "list")) return commands.packageList(allocator, io, layout_ctx);
     const parts = try collectArgs(allocator, args);
     defer allocator.free(parts);
-    if (std.mem.eql(u8, sub, "add")) return commands.packageAdd(allocator, io, home, parts);
-    if (std.mem.eql(u8, sub, "remove")) return commands.packageRemove(allocator, io, home, parts);
-    if (std.mem.eql(u8, sub, "update")) return commands.packageUpdate(allocator, io, home, parts);
-    if (std.mem.eql(u8, sub, "show")) return commands.packageShow(allocator, io, home, parts);
-    if (std.mem.eql(u8, sub, "exec")) return commands.packageExec(allocator, io, home, parts);
-    if (std.mem.eql(u8, sub, "attach")) return commands.packageAttach(allocator, io, home, parts);
-    if (std.mem.eql(u8, sub, "detach")) return commands.packageDetach(allocator, io, home, parts);
-    if (std.mem.eql(u8, sub, "attachments")) return commands.packageAttachments(allocator, io, home, parts);
-    if (std.mem.eql(u8, sub, "call")) return commands.packageCall(allocator, io, home, parts);
+    if (std.mem.eql(u8, sub, "add")) return commands.packageAdd(allocator, io, layout_ctx, parts);
+    if (std.mem.eql(u8, sub, "remove")) return commands.packageRemove(allocator, io, layout_ctx, parts);
+    if (std.mem.eql(u8, sub, "update")) return commands.packageUpdate(allocator, io, layout_ctx, parts);
+    if (std.mem.eql(u8, sub, "show")) return commands.packageShow(allocator, io, layout_ctx, parts);
+    if (std.mem.eql(u8, sub, "exec")) return commands.packageExec(allocator, io, layout_ctx, parts);
+    if (std.mem.eql(u8, sub, "attach")) return commands.packageAttach(allocator, io, layout_ctx, parts);
+    if (std.mem.eql(u8, sub, "detach")) return commands.packageDetach(allocator, io, layout_ctx, parts);
+    if (std.mem.eql(u8, sub, "attachments")) return commands.packageAttachments(allocator, io, layout_ctx, parts);
+    if (std.mem.eql(u8, sub, "call")) return commands.packageCall(allocator, io, layout_ctx, parts);
     return commands.usage();
 }
 
-fn compactCommandArgs(allocator: std.mem.Allocator, io: std.Io, home: []const u8, args: *std.process.Args.Iterator) !void {
+fn compactCommandArgs(allocator: std.mem.Allocator, io: std.Io, layout_ctx: layout.Context, args: *std.process.Args.Iterator) !void {
     const parts = try collectArgs(allocator, args);
     defer allocator.free(parts);
-    return commands.compactFromArgs(allocator, io, home, parts);
+    return commands.compactFromArgs(allocator, io, layout_ctx, parts);
 }
 
-fn updateCommandArgs(allocator: std.mem.Allocator, io: std.Io, home: []const u8, args: *std.process.Args.Iterator) !void {
+fn updateCommandArgs(allocator: std.mem.Allocator, io: std.Io, layout_ctx: layout.Context, args: *std.process.Args.Iterator) !void {
     const parts = try collectArgs(allocator, args);
     defer allocator.free(parts);
-    return commands.updateFromArgs(allocator, io, home, parts);
+    return commands.updateFromArgs(allocator, io, layout_ctx, parts);
 }
 
-fn cleanCommandArgs(allocator: std.mem.Allocator, io: std.Io, home: []const u8, args: *std.process.Args.Iterator) !void {
+fn cleanCommandArgs(allocator: std.mem.Allocator, io: std.Io, layout_ctx: layout.Context, args: *std.process.Args.Iterator) !void {
     var scope: ?Scope = null;
     var target: ?[]const u8 = null;
     var yes = false;
@@ -115,7 +114,7 @@ fn cleanCommandArgs(allocator: std.mem.Allocator, io: std.Io, home: []const u8, 
         }
     }
 
-    return commands.clean(allocator, io, home, scope orelse .local, target orelse "all", yes);
+    return commands.clean(allocator, io, layout_ctx, scope orelse .local, target orelse "all", yes);
 }
 
 fn collectArgs(allocator: std.mem.Allocator, args: *std.process.Args.Iterator) ![][]const u8 {

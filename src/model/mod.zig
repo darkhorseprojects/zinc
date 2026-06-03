@@ -139,7 +139,7 @@ fn runtimeReadContext(ctx: *ctxmod.RunContext) !ctxmod.RuntimeReadContext {
     const inputs = try ctx.allocator.alloc(uri.Input, ctx.inputs.len);
     for (ctx.inputs, 0..) |input, i| inputs[i] = .{ .id = input.id, .value = input.value };
     return .{
-        .context = .{ .home = ctx.home, .session_id = ctx.session.id, .session_path = ctx.session.path, .session_dir = std.fs.path.dirname(ctx.session.path) orelse ".zinc/sessions", .session_log = ctx.log.raw, .session_head_messages = ctx.profile.runtime.session_head_messages, .session_tail_messages = ctx.profile.runtime.session_tail_messages, .replay_truncate_chars = ctx.profile.runtime.replay_truncate_chars, .inputs = inputs },
+        .context = .{ .layout_ctx = ctx.layout_ctx, .session_id = ctx.session.id, .session_path = ctx.session.path, .session_dir = std.fs.path.dirname(ctx.session.path) orelse ".zinc/sessions", .session_log = ctx.log.raw, .session_head_messages = ctx.profile.runtime.session_head_messages, .session_tail_messages = ctx.profile.runtime.session_tail_messages, .replay_truncate_chars = ctx.profile.runtime.replay_truncate_chars, .inputs = inputs },
         .inputs = inputs,
     };
 }
