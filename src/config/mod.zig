@@ -279,28 +279,58 @@ pub fn loadRuntimeProfile(allocator: Allocator, io: std.Io, layout_ctx: layout.C
     errdefer allocator.free(default_model);
     const paths = try runtimePaths(allocator, layout_ctx, cfg);
     errdefer paths.deinit(allocator);
-    const runtime = RuntimeSettings{
-        .scope = try parseScope(cfg.value(&.{"scope"})),
-        .bash_mode = try parseBashMode(cfg.value(&.{ "tools", "bash" })),
-        .confirm_commands = try cfg.stringList(allocator, &.{"confirm_commands"}, default_confirm_commands),
-        .provider_max_retries = try cfg.usizeValue(&.{ "runtime", "provider_max_retries" }, 5),
-        .tool_max_turns = try cfg.usizeValue(&.{ "runtime", "tool_max_turns" }, 12),
-        .compaction_threshold_percent = try cfg.usizeValue(&.{ "runtime", "compaction_threshold_percent" }, 70),
-        .compaction_max_tokens = try cfg.usizeValue(&.{ "runtime", "compaction_max_tokens" }, 4096),
-        .session_head_messages = try cfg.usizeValue(&.{ "runtime", "session_head_messages" }, 6),
-        .session_tail_messages = try cfg.usizeValue(&.{ "runtime", "session_tail_messages" }, 12),
-        .replay_truncate_chars = try cfg.usizeValue(&.{ "runtime", "replay_truncate_chars" }, 2048),
-        .bash_output_max_bytes = try cfg.usizeValue(&.{ "runtime", "bash_output_max_bytes" }, 50 * 1024),
-        .bash_output_max_lines = try cfg.usizeValue(&.{ "runtime", "bash_output_max_lines" }, 2000),
-        .bash_capture_max_bytes = try cfg.usizeValue(&.{ "runtime", "bash_capture_max_bytes" }, 64 * 1024 * 1024),
-        .file_read_max_bytes = try cfg.usizeValue(&.{ "runtime", "file_read_max_bytes" }, 1024 * 1024),
-        .file_range_read_max_bytes = try cfg.usizeValue(&.{ "runtime", "file_range_read_max_bytes" }, 8 * 1024 * 1024),
-        .file_edit_max_bytes = try cfg.usizeValue(&.{ "runtime", "file_edit_max_bytes" }, 8 * 1024 * 1024),
-        .resource_read_max_bytes = try cfg.usizeValue(&.{ "runtime", "resource_read_max_bytes" }, 32 * 1024 * 1024),
-        .input_text_file_max_bytes = try cfg.usizeValue(&.{ "runtime", "input_text_file_max_bytes" }, 8 * 1024 * 1024),
-        .input_file_max_bytes = try cfg.usizeValue(&.{ "runtime", "input_file_max_bytes" }, 32 * 1024 * 1024),
-        .graph_runs = try cfg.string(allocator, &.{ "tools", "graph_runs" }, "ask"),
+    const runtime_scope = try parseScope(cfg.value(&.{"scope"}));
+    const bash_mode = try parseBashMode(cfg.value(&.{ "tools", "bash" }));
+    const provider_max_retries = try cfg.usizeValue(&.{ "runtime", "provider_max_retries" }, 5);
+    const tool_max_turns = try cfg.usizeValue(&.{ "runtime", "tool_max_turns" }, 12);
+    const compaction_threshold_percent = try cfg.usizeValue(&.{ "runtime", "compaction_threshold_percent" }, 70);
+    const compaction_max_tokens = try cfg.usizeValue(&.{ "runtime", "compaction_max_tokens" }, 4096);
+    const session_head_messages = try cfg.usizeValue(&.{ "runtime", "session_head_messages" }, 6);
+    const session_tail_messages = try cfg.usizeValue(&.{ "runtime", "session_tail_messages" }, 12);
+    const replay_truncate_chars = try cfg.usizeValue(&.{ "runtime", "replay_truncate_chars" }, 2048);
+    const bash_output_max_bytes = try cfg.usizeValue(&.{ "runtime", "bash_output_max_bytes" }, 50 * 1024);
+    const bash_output_max_lines = try cfg.usizeValue(&.{ "runtime", "bash_output_max_lines" }, 2000);
+    const bash_capture_max_bytes = try cfg.usizeValue(&.{ "runtime", "bash_capture_max_bytes" }, 64 * 1024 * 1024);
+    const file_read_max_bytes = try cfg.usizeValue(&.{ "runtime", "file_read_max_bytes" }, 1024 * 1024);
+    const file_range_read_max_bytes = try cfg.usizeValue(&.{ "runtime", "file_range_read_max_bytes" }, 8 * 1024 * 1024);
+    const file_edit_max_bytes = try cfg.usizeValue(&.{ "runtime", "file_edit_max_bytes" }, 8 * 1024 * 1024);
+    const resource_read_max_bytes = try cfg.usizeValue(&.{ "runtime", "resource_read_max_bytes" }, 32 * 1024 * 1024);
+    const input_text_file_max_bytes = try cfg.usizeValue(&.{ "runtime", "input_text_file_max_bytes" }, 8 * 1024 * 1024);
+    const input_file_max_bytes = try cfg.usizeValue(&.{ "runtime", "input_file_max_bytes" }, 32 * 1024 * 1024);
+    const confirm_commands = try cfg.stringList(allocator, &.{"confirm_commands"}, default_confirm_commands);
+    var confirm_commands_owned = true;
+    errdefer if (confirm_commands_owned) {
+        for (confirm_commands) |command| allocator.free(command);
+        allocator.free(confirm_commands);
     };
+    const graph_runs = try cfg.string(allocator, &.{ "tools", "graph_runs" }, "ask");
+    var graph_runs_owned = true;
+    errdefer if (graph_runs_owned) allocator.free(graph_runs);
+    const runtime = RuntimeSettings{
+        .scope = runtime_scope,
+        .bash_mode = bash_mode,
+        .confirm_commands = confirm_commands,
+        .provider_max_retries = provider_max_retries,
+        .tool_max_turns = tool_max_turns,
+        .compaction_threshold_percent = compaction_threshold_percent,
+        .compaction_max_tokens = compaction_max_tokens,
+        .session_head_messages = session_head_messages,
+        .session_tail_messages = session_tail_messages,
+        .replay_truncate_chars = replay_truncate_chars,
+        .bash_output_max_bytes = bash_output_max_bytes,
+        .bash_output_max_lines = bash_output_max_lines,
+        .bash_capture_max_bytes = bash_capture_max_bytes,
+        .file_read_max_bytes = file_read_max_bytes,
+        .file_range_read_max_bytes = file_range_read_max_bytes,
+        .file_edit_max_bytes = file_edit_max_bytes,
+        .resource_read_max_bytes = resource_read_max_bytes,
+        .input_text_file_max_bytes = input_text_file_max_bytes,
+        .input_file_max_bytes = input_file_max_bytes,
+        .graph_runs = graph_runs,
+    };
+    confirm_commands_owned = false;
+    graph_runs_owned = false;
+    errdefer runtime.deinit(allocator);
     var model = try loadModel(allocator, cfg, default_model);
     errdefer model.deinit(allocator);
     var provider = try loadProvider(allocator, model);
