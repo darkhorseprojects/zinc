@@ -228,11 +228,11 @@ tools:
           windows: tools/hello-process.cmd
 ```
 
-Handlers are `graph`, `process`, `http`, or `mcp`. Package scripts are operator commands run with `zn pkg exec`; they are not exposed to the model.
+Handlers are `process`, `http`, or `mcp`. Use the built-in `run_graph` tool for graph execution. Package scripts are operator commands run with `zn pkg exec`; they are not exposed to the model.
 
 ## Safety
 
-Zinc is a local runtime. When the active graph declares tools, Zinc can read files, write files, edit files, run shell commands, and run other graphs. Only run graphs and packages you trust.
+Zinc is a local runtime. When the active graph declares tools, Zinc can read files, write files, edit files, run shell commands, call package handlers, and run graphs through `run_graph`. Only run graphs and packages you trust.
 
 ## Sessions and compaction
 

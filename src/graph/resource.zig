@@ -126,7 +126,7 @@ fn resolveModelWithProfile(ctx: *RunContext, id: []const u8, res: graph.Resource
             package_tool.deinit(ctx.allocator);
             continue;
         }
-        std.debug.print("error: unsupported Zinc tool declared by graph: {s}\n", .{tool});
+        std.debug.print("error: unknown Zinc tool declared by active model: {s}\n", .{tool});
         return error.UserError;
     }
     const tools_json = try providerToolsJson(ctx, tool_names);
@@ -214,31 +214,10 @@ fn executePackageTool(ctx: *RunContext, call: provider.ToolCall) !runtime_tools.
     defer tool.deinit(ctx.allocator);
     try runtime_tools.validatePackageArguments(ctx.allocator, tool, call.arguments);
     return switch (tool.handler) {
-        .graph => |h| executeGraphTool(ctx, tool, h.graph, h.export_name, call),
         .process => |h| executeProcessTool(ctx, tool, h.command, call.arguments),
         .http => |h| executeHttpTool(ctx, h.url, h.method, call.arguments),
         .mcp => |h| executeMcpTool(ctx, tool, h.command, h.tool, call.arguments),
     };
-}
-
-fn executeGraphTool(ctx: *RunContext, tool: packages.Tool, graph_spec: []const u8, selected_export: []const u8, call: provider.ToolCall) !runtime_tools.ToolResult {
-    const graph_path = if (std.mem.startsWith(u8, graph_spec, "graph:"))
-        try packages.resolveGraph(ctx.allocator, ctx.io, ctx.layout_ctx, graph_spec["graph:".len..])
-    else if (std.fs.path.isAbsolute(graph_spec))
-        try ctx.allocator.dupe(u8, graph_spec)
-    else
-        try std.fs.path.join(ctx.allocator, &.{ tool.package_dir, graph_spec });
-    defer ctx.allocator.free(graph_path);
-    const child_graph = try graph.load(ctx.allocator, ctx.io, graph_path);
-    defer child_graph.deinit(ctx.allocator);
-    try graph.validate(child_graph);
-    var parsed = try std.json.parseFromSlice(std.json.Value, ctx.allocator, call.arguments, .{});
-    defer parsed.deinit();
-    const child_inputs = try inputsFromToolObject(ctx.allocator, child_graph, selected_export, parsed.value);
-    defer freeBoundInputs(ctx.allocator, child_inputs);
-    const result = try runChildGraph(ctx, graph_path, selected_export, child_inputs);
-    defer result.deinit(ctx.allocator);
-    return .{ .content = try ctx.allocator.dupe(u8, result.text), .is_error = false };
 }
 
 fn executeProcessTool(ctx: *RunContext, tool: packages.Tool, command: []const u8, arguments: []const u8) !runtime_tools.ToolResult {

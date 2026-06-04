@@ -1,5 +1,5 @@
 circuitry: "0.5"
-title: Hello package graph tool
+title: Hello package graph
 exports:
   main:
     run: greeting
@@ -7,4 +7,4 @@ exports:
       name: string
 resources:
   greeting:
-    text: Hello from the package graph tool.
+    text: Hello from the package graph.

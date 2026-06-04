@@ -270,7 +270,10 @@ pub fn packageAdd(allocator: Allocator, io: std.Io, layout_ctx: layout.Context, 
     const parsed = try parsePackageArgs(args, true);
     const source = parsed.value orelse return error.MissingPackageSource;
     const options = packages.InstallOptions{ .scope = parsed.scope orelse .local, .replace = parsed.replace };
-    const plan = try packages.previewAdd(allocator, io, layout_ctx, source, options);
+    const plan = packages.previewAdd(allocator, io, layout_ctx, source, options) catch |err| switch (err) {
+        error.InvalidPackageManifest => return fail("invalid package manifest", .{}),
+        else => return err,
+    };
     defer plan.deinit(allocator, io);
     std.debug.print("Install Zinc package\n\n{s}\n", .{plan.text});
     if (!parsed.yes) try confirmOrFail("Install?");

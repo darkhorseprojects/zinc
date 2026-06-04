@@ -4,7 +4,7 @@ description: Tiny Zinc package example.
 assets:
   graphs:
     hello: graphs/hello.circuitry.yaml
-    hello_tool: graphs/hello-tool.circuitry.yaml
+    hello_run: graphs/hello-run.circuitry.yaml
   prompts:
     hello_prompt: prompts/hello-style.md
   files:
@@ -24,16 +24,6 @@ attach:
   tools:
     - hello_process
 tools:
-  hello_graph:
-    label: Hello graph
-    description: Run the packaged hello graph.
-    prompt: run the packaged hello graph
-    input: {}
-    docs: {}
-    handler:
-      graph:
-        graph: graphs/hello-tool.circuitry.yaml
-        export: main
   hello_process:
     label: Hello process
     description: Run the packaged hello process tool.

@@ -53,7 +53,7 @@ const Source = struct {
 
 const AssetKind = enum { graphs, prompts, files };
 
-pub const HandlerKind = enum { graph, process, http, mcp };
+pub const HandlerKind = enum { process, http, mcp };
 
 pub const Param = struct {
     name: []u8,
@@ -90,17 +90,12 @@ pub const Tool = struct {
 };
 
 pub const Handler = union(HandlerKind) {
-    graph: struct { graph: []u8, export_name: []u8 },
     process: struct { command: []u8 },
     http: struct { url: []u8, method: []u8 },
     mcp: struct { command: []u8, tool: []u8 },
 
     pub fn deinit(self: Handler, allocator: Allocator) void {
         switch (self) {
-            .graph => |h| {
-                allocator.free(h.graph);
-                allocator.free(h.export_name);
-            },
             .process => |h| allocator.free(h.command),
             .http => |h| {
                 allocator.free(h.url);
@@ -546,17 +541,25 @@ fn loadManifest(allocator: Allocator, io: std.Io, package_dir: []const u8) !Mani
 
     const name = scalarAt(root, &.{"name"}) orelse return error.InvalidPackageManifest;
     if (!portableAtom(name)) return error.InvalidPackageManifest;
-    return .{
-        .name = try allocator.dupe(u8, name),
-        .version = try allocator.dupe(u8, scalarAt(root, &.{"version"}) orelse ""),
-        .description = try allocator.dupe(u8, scalarAt(root, &.{"description"}) orelse ""),
-        .graphs = try readAssets(allocator, root, &.{ "assets", "graphs" }),
-        .prompts = try readAssets(allocator, root, &.{ "assets", "prompts" }),
-        .files = try readAssets(allocator, root, &.{ "assets", "files" }),
-        .tools = try readTools(allocator, root, package_dir),
-        .scripts = try readScripts(allocator, root),
-        .attach = try readAttach(allocator, root),
-    };
+    const manifest_name = try allocator.dupe(u8, name);
+    errdefer allocator.free(manifest_name);
+    const version = try allocator.dupe(u8, scalarAt(root, &.{"version"}) orelse "");
+    errdefer allocator.free(version);
+    const description = try allocator.dupe(u8, scalarAt(root, &.{"description"}) orelse "");
+    errdefer allocator.free(description);
+    const graphs = try readAssets(allocator, root, &.{ "assets", "graphs" });
+    errdefer freeAssets(allocator, graphs);
+    const prompts = try readAssets(allocator, root, &.{ "assets", "prompts" });
+    errdefer freeAssets(allocator, prompts);
+    const file_assets = try readAssets(allocator, root, &.{ "assets", "files" });
+    errdefer freeAssets(allocator, file_assets);
+    const tools = try readTools(allocator, root, package_dir);
+    errdefer freeTools(allocator, tools);
+    const scripts = try readScripts(allocator, root);
+    errdefer freeScripts(allocator, scripts);
+    const attach_spec = try readAttach(allocator, root);
+    errdefer if (attach_spec) |a| a.deinit(allocator);
+    return .{ .name = manifest_name, .version = version, .description = description, .graphs = graphs, .prompts = prompts, .files = file_assets, .tools = tools, .scripts = scripts, .attach = attach_spec };
 }
 
 fn readAssets(allocator: Allocator, root: *const circuitry.value.Value, path: []const []const u8) ![]Asset {
@@ -896,15 +899,22 @@ fn readTools(allocator: Allocator, root: *const circuitry.value.Value, package_d
         if (!portableAtom(entry.key_ptr.*) or entry.value_ptr.* != .mapping) return error.InvalidPackageManifest;
         const tool = entry.value_ptr;
         const handler_value = valueAt(tool, &.{"handler"}) orelse return error.InvalidPackageManifest;
-        try out.append(allocator, .{
-            .name = try allocator.dupe(u8, entry.key_ptr.*),
-            .label = try allocator.dupe(u8, scalarAt(tool, &.{"label"}) orelse entry.key_ptr.*),
-            .description = try allocator.dupe(u8, scalarAt(tool, &.{"description"}) orelse ""),
-            .prompt = try allocator.dupe(u8, scalarAt(tool, &.{"prompt"}) orelse scalarAt(tool, &.{"description"}) orelse "package tool"),
-            .params = try readParams(allocator, tool),
-            .handler = try readHandler(allocator, handler_value),
-            .package_dir = try allocator.dupe(u8, package_dir),
-        });
+        const name = try allocator.dupe(u8, entry.key_ptr.*);
+        errdefer allocator.free(name);
+        const label = try allocator.dupe(u8, scalarAt(tool, &.{"label"}) orelse entry.key_ptr.*);
+        errdefer allocator.free(label);
+        const description = try allocator.dupe(u8, scalarAt(tool, &.{"description"}) orelse "");
+        errdefer allocator.free(description);
+        const prompt = try allocator.dupe(u8, scalarAt(tool, &.{"prompt"}) orelse scalarAt(tool, &.{"description"}) orelse "package tool");
+        errdefer allocator.free(prompt);
+        const params = try readParams(allocator, tool);
+        errdefer for (params) |param| param.deinit(allocator);
+        errdefer allocator.free(params);
+        const handler = try readHandler(allocator, handler_value);
+        errdefer handler.deinit(allocator);
+        const package_dir_copy = try allocator.dupe(u8, package_dir);
+        errdefer allocator.free(package_dir_copy);
+        try out.append(allocator, .{ .name = name, .label = label, .description = description, .prompt = prompt, .params = params, .handler = handler, .package_dir = package_dir_copy });
     }
     return out.toOwnedSlice(allocator);
 }
@@ -948,7 +958,6 @@ fn readHandler(allocator: Allocator, value: *const circuitry.value.Value) !Handl
     const kind = entry.key_ptr.*;
     const body = entry.value_ptr;
     if (body.* != .mapping) return error.InvalidPackageManifest;
-    if (std.mem.eql(u8, kind, "graph")) return .{ .graph = .{ .graph = try allocator.dupe(u8, scalarAt(body, &.{"graph"}) orelse return error.InvalidPackageManifest), .export_name = try allocator.dupe(u8, scalarAt(body, &.{"export"}) orelse "main") } };
     if (std.mem.eql(u8, kind, "process")) return .{ .process = .{ .command = try allocator.dupe(u8, platformCommand(body) orelse return error.InvalidPackageManifest) } };
     if (std.mem.eql(u8, kind, "http")) return .{ .http = .{ .url = try allocator.dupe(u8, scalarAt(body, &.{"url"}) orelse return error.InvalidPackageManifest), .method = try allocator.dupe(u8, scalarAt(body, &.{"method"}) orelse "POST") } };
     if (std.mem.eql(u8, kind, "mcp")) return .{ .mcp = .{ .command = try allocator.dupe(u8, platformCommand(body) orelse return error.InvalidPackageManifest), .tool = try allocator.dupe(u8, scalarAt(body, &.{"tool"}) orelse return error.InvalidPackageManifest) } };
@@ -1107,7 +1116,6 @@ fn cloneTool(allocator: Allocator, tool: Tool) !Tool {
 
 fn cloneHandler(allocator: Allocator, handler: Handler) !Handler {
     return switch (handler) {
-        .graph => |h| .{ .graph = .{ .graph = try allocator.dupe(u8, h.graph), .export_name = try allocator.dupe(u8, h.export_name) } },
         .process => |h| .{ .process = .{ .command = try allocator.dupe(u8, h.command) } },
         .http => |h| .{ .http = .{ .url = try allocator.dupe(u8, h.url), .method = try allocator.dupe(u8, h.method) } },
         .mcp => |h| .{ .mcp = .{ .command = try allocator.dupe(u8, h.command), .tool = try allocator.dupe(u8, h.tool) } },
