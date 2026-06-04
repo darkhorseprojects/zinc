@@ -177,6 +177,7 @@ fn resolveModelWithProfile(ctx: *RunContext, id: []const u8, res: graph.Resource
 }
 
 fn executeTool(ctx: *RunContext, read_ctx: uri.Context, spec: model.Spec, call: provider.ToolCall) !runtime_tools.ToolResult {
+    if (!hasTool(spec.tools, call.name)) return tool_exec.toolError(ctx.allocator, call, "UnknownTool", "no such tool is available");
     if (std.mem.eql(u8, call.name, "run_graph")) return executeRunGraph(ctx, call) catch |err| switch (err) {
         error.OutOfMemory, error.GraphRunDeniedByUser => err,
         else => tool_exec.toolError(ctx.allocator, call, @errorName(err), "graph run request failed"),
@@ -186,7 +187,7 @@ fn executeTool(ctx: *RunContext, read_ctx: uri.Context, spec: model.Spec, call: 
         else => tool_exec.toolError(ctx.allocator, call, @errorName(err), "package tool execution failed"),
     };
     return tool_exec.execute(ctx, read_ctx, spec, call) catch |err| switch (err) {
-        error.ToolNotHandled => tool_exec.toolError(ctx.allocator, call, "ToolNotExecutable", "tool has no runtime execution path"),
+        error.ToolNotHandled => tool_exec.toolError(ctx.allocator, call, "UnknownTool", "no such tool is available"),
         error.OutOfMemory => err,
         else => tool_exec.toolError(ctx.allocator, call, @errorName(err), "tool execution failed"),
     };
@@ -526,7 +527,7 @@ fn appendToolPromptSections(ctx: *RunContext, prompt: *std.ArrayList(u8), tool_n
         try prompt.print(ctx.allocator, "\n\n- {s}: {s}", .{ tool, snippet });
     }
 }
-fn hasTool(tool_names: []const []u8, name: []const u8) bool {
+fn hasTool(tool_names: []const []const u8, name: []const u8) bool {
     for (tool_names) |tool| if (std.mem.eql(u8, tool, name)) return true;
     return false;
 }

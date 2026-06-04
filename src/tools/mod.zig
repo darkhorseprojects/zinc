@@ -12,11 +12,7 @@ const model = @import("../model/mod.zig");
 
 const Allocator = std.mem.Allocator;
 pub fn execute(ctx: *ctxmod.RunContext, read_ctx: uri.Context, spec: model.Spec, call: provider.ToolCall) !runtime_tools.ToolResult {
-    if (!hasTool(spec.tools, call.name)) {
-        const message = try std.fmt.allocPrint(ctx.allocator, "tool `{s}` was requested but not declared by the active graph resource", .{call.name});
-        defer ctx.allocator.free(message);
-        return toolError(ctx.allocator, call, "ToolNotDeclared", message);
-    }
+    if (!hasTool(spec.tools, call.name)) return toolError(ctx.allocator, call, "UnknownTool", "no such tool is available");
     runtime_tools.validateArguments(ctx.allocator, call.name, call.arguments) catch |err| return switch (err) {
         error.OutOfMemory => err,
         else => toolError(ctx.allocator, call, @errorName(err), "tool arguments did not match the required JSON schema"),
