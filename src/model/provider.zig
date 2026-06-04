@@ -8,8 +8,7 @@ const error_preview_chars: usize = 1200;
 
 pub const Request = struct {
     profile: *const config.RuntimeProfile,
-    max_tokens: ?usize,
-    reasoning_max_tokens: ?isize,
+    reasoning_effort: ?[]const u8,
     json_response: bool = false,
     tools_json: []const u8,
     messages: []const Message,
@@ -18,6 +17,8 @@ pub const Request = struct {
 pub const Message = struct {
     role: []const u8,
     content: []const u8,
+    model: ?[]const u8 = null,
+    reasoning: ?[]const u8 = null,
     name: ?[]const u8 = null,
     tool_call_id: ?[]const u8 = null,
     tool_calls: []const ToolCall = &.{},
@@ -32,6 +33,8 @@ pub const ToolCall = struct {
 
 pub const AssistantTurn = struct {
     text: []const u8,
+    reasoning: ?[]const u8 = null,
+    prompt_tokens: ?usize = null,
     tool_calls: []ToolCall,
 };
 
@@ -61,7 +64,7 @@ pub fn call(allocator: Allocator, io: std.Io, request: Request) !AssistantTurn {
     }) catch |err| switch (err) {
         error.ConnectionRefused => {
             std.debug.print("error: model endpoint refused connection: {s}\n", .{request.profile.provider.base_url});
-            std.debug.print("run `zn serve` for a local model, or set the selected model to an OpenAI-compatible endpoint in ~/.config/zinc/config.yaml\n", .{});
+            std.debug.print("start an OpenAI-compatible endpoint, or set the selected model endpoint in your Zinc config.\n", .{});
             return error.UserError;
         },
         else => return err,
@@ -71,6 +74,7 @@ pub fn call(allocator: Allocator, io: std.Io, request: Request) !AssistantTurn {
         if (result.status == .service_unavailable and std.mem.indexOf(u8, response_body, "Loading model") != null) return error.ProviderLoadingModel;
         const preview = response_body[0..@min(response_body.len, error_preview_chars)];
         std.debug.print("OpenAI-compatible model endpoint {s} request failed.\n\nBase URL:\n  {s}\n\nEndpoint:\n  /chat/completions\n\nStatus:\n  {d}\n\nHint:\n  check that the server exposes an OpenAI-compatible /v1/chat/completions endpoint.\n\n{s}\n", .{ request.profile.provider.id, request.profile.provider.base_url, @intFromEnum(result.status), preview });
+        if (@intFromEnum(result.status) >= 400 and @intFromEnum(result.status) < 500 and result.status != .too_many_requests) return error.ProviderInvalidRequest;
         return error.ProviderRequestFailed;
     }
     return parseAssistantTurn(allocator, response.written(), request.profile);
@@ -81,6 +85,10 @@ pub fn appendMessage(allocator: Allocator, messages: *std.ArrayList(Message), me
     errdefer allocator.free(role);
     const content = try allocator.dupe(u8, message.content);
     errdefer allocator.free(content);
+    const model = if (message.model) |v| try allocator.dupe(u8, v) else null;
+    errdefer if (model) |v| allocator.free(v);
+    const reasoning = if (message.reasoning) |v| try allocator.dupe(u8, v) else null;
+    errdefer if (reasoning) |v| allocator.free(v);
     const name = if (message.name) |v| try allocator.dupe(u8, v) else null;
     errdefer if (name) |v| allocator.free(v);
     const tool_call_id = if (message.tool_call_id) |v| try allocator.dupe(u8, v) else null;
@@ -95,7 +103,7 @@ pub fn appendMessage(allocator: Allocator, messages: *std.ArrayList(Message), me
         for (parts) |part| part.deinit(allocator);
         if (parts.len != 0) allocator.free(parts);
     }
-    try messages.append(allocator, .{ .role = role, .content = content, .name = name, .tool_call_id = tool_call_id, .tool_calls = tool_calls, .parts = parts });
+    try messages.append(allocator, .{ .role = role, .content = content, .model = model, .reasoning = reasoning, .name = name, .tool_call_id = tool_call_id, .tool_calls = tool_calls, .parts = parts });
 }
 
 pub fn freeMessages(allocator: Allocator, messages: []Message) void {
@@ -104,19 +112,14 @@ pub fn freeMessages(allocator: Allocator, messages: []Message) void {
 
 pub fn freeTurn(allocator: Allocator, turn: AssistantTurn) void {
     allocator.free(turn.text);
+    if (turn.reasoning) |value| allocator.free(value);
     for (turn.tool_calls) |tool_call| freeCall(allocator, tool_call);
     allocator.free(turn.tool_calls);
 }
 
 pub fn cleanText(allocator: Allocator, raw: []const u8, profile: *const config.RuntimeProfile) ![]u8 {
+    _ = profile;
     var text = std.mem.trim(u8, raw, " \t\r\n");
-    if (profile.model.reasoning_markers) |markers| {
-        if (std.mem.lastIndexOf(u8, text, markers.end)) |last_marker| {
-            text = std.mem.trim(u8, text[last_marker + markers.end.len ..], " \t\r\n");
-        } else if (startsConfiguredReasoning(text, markers.starts)) {
-            text = "";
-        }
-    }
     if (std.mem.startsWith(u8, text, "```")) {
         const after_open = std.mem.indexOfScalar(u8, text, '\n') orelse return allocator.dupe(u8, text);
         text = std.mem.trim(u8, text[after_open + 1 ..], " \t\r\n");
@@ -129,12 +132,8 @@ fn writeChatRequest(allocator: Allocator, out: *std.ArrayList(u8), request: Requ
     const profile = request.profile;
     try out.appendSlice(allocator, "{\"model\":");
     try files.appendJsonString(allocator, out, profile.model.model);
-    try out.print(allocator, ",\"temperature\":{d},\"stream\":false", .{profile.model.generation.temperature});
-    if (request.max_tokens) |max_tokens| {
-        try out.print(allocator, ",\"max_tokens\":{d}", .{max_tokens});
-    }
-    if (request.reasoning_max_tokens) |max| try out.print(allocator, ",\"thinking_budget_tokens\":{d}", .{max});
-    try writeConfiguredReasoningRequest(allocator, out, profile, profile.model.reasoning.enabled);
+    try out.print(allocator, ",\"temperature\":{d},\"stream\":false", .{profile.model.temperature});
+    try writeReasoningRequest(allocator, out, request.reasoning_effort);
     if (request.json_response) try out.appendSlice(allocator, ",\"response_format\":{\"type\":\"json_object\"}");
     try out.appendSlice(allocator, ",\"messages\":[");
     for (request.messages, 0..) |msg, i| {
@@ -173,20 +172,10 @@ fn writeChatRequest(allocator: Allocator, out: *std.ArrayList(u8), request: Requ
     try out.append(allocator, '}');
 }
 
-fn writeConfiguredReasoningRequest(allocator: Allocator, out: *std.ArrayList(u8), profile: *const config.RuntimeProfile, enabled: bool) !void {
-    const req = profile.model.reasoning_request orelse return;
-    if (std.mem.eql(u8, req.kind, "chat_template_kwargs_bool")) {
-        try out.appendSlice(allocator, ",\"chat_template_kwargs\":{");
-        try files.appendJsonString(allocator, out, req.path);
-        try out.appendSlice(allocator, if (enabled) ":true}" else ":false}");
-        return;
-    }
-    if (std.mem.eql(u8, req.kind, "top_level_bool")) {
-        try out.append(allocator, ',');
-        try files.appendJsonString(allocator, out, req.path);
-        try out.appendSlice(allocator, if (enabled) ":true" else ":false");
-        return;
-    }
+fn writeReasoningRequest(allocator: Allocator, out: *std.ArrayList(u8), reasoning_effort: ?[]const u8) !void {
+    const effort = reasoning_effort orelse return;
+    try out.appendSlice(allocator, ",\"reasoning_effort\":");
+    try files.appendJsonString(allocator, out, effort);
 }
 
 fn parseAssistantTurn(allocator: Allocator, text: []const u8, profile: *const config.RuntimeProfile) !AssistantTurn {
@@ -202,6 +191,8 @@ fn parseAssistantTurn(allocator: Allocator, text: []const u8, profile: *const co
     if (message != .object) return error.BadProviderResponse;
 
     const content = try readMessageContent(message);
+    const reasoning = try readReasoningContent(message);
+    const prompt_tokens = readPromptTokens(parsed.value);
     var calls = try readToolCalls(allocator, message);
     errdefer {
         for (calls.items) |c| freeCall(allocator, c);
@@ -209,6 +200,8 @@ fn parseAssistantTurn(allocator: Allocator, text: []const u8, profile: *const co
     }
     return .{
         .text = if (calls.items.len == 0) try cleanText(allocator, content, profile) else try allocator.dupe(u8, ""),
+        .reasoning = if (reasoning.len == 0) null else try allocator.dupe(u8, reasoning),
+        .prompt_tokens = prompt_tokens,
         .tool_calls = try calls.toOwnedSlice(allocator),
     };
 }
@@ -217,13 +210,30 @@ fn readMessageContent(message: std.json.Value) ![]const u8 {
     return readOptionalStringField(message, "content");
 }
 
-fn startsConfiguredReasoning(text: []const u8, starts: []const []const u8) bool {
-    return configuredReasoningPrefix(text, starts) != null;
+fn readPromptTokens(root: std.json.Value) ?usize {
+    const usage = objectField(root, "usage") orelse return null;
+    return integerField(usage, "prompt_tokens") orelse integerField(usage, "input_tokens");
 }
 
-fn configuredReasoningPrefix(text: []const u8, starts: []const []const u8) ?[]const u8 {
-    for (starts) |prefix| if (std.mem.startsWith(u8, text, prefix)) return prefix;
-    return null;
+fn objectField(value: std.json.Value, field: []const u8) ?std.json.Value {
+    if (value != .object) return null;
+    return value.object.get(field);
+}
+
+fn integerField(value: std.json.Value, field: []const u8) ?usize {
+    const field_value = objectField(value, field) orelse return null;
+    return switch (field_value) {
+        .integer => |v| if (v >= 0) @intCast(v) else null,
+        .float => |v| if (v >= 0) @intFromFloat(v) else null,
+        .string => |v| std.fmt.parseInt(usize, v, 10) catch null,
+        else => null,
+    };
+}
+
+fn readReasoningContent(message: std.json.Value) ![]const u8 {
+    const content = try readOptionalStringField(message, "reasoning_content");
+    if (content.len != 0) return content;
+    return readOptionalStringField(message, "reasoning");
 }
 
 fn readOptionalStringField(object: std.json.Value, field: []const u8) ![]const u8 {
@@ -333,6 +343,8 @@ fn cloneToolCall(allocator: Allocator, tool_call: ToolCall) !ToolCall {
 fn freeMessage(allocator: Allocator, message: Message) void {
     allocator.free(message.role);
     allocator.free(message.content);
+    if (message.model) |v| allocator.free(v);
+    if (message.reasoning) |v| allocator.free(v);
     if (message.name) |v| allocator.free(v);
     if (message.tool_call_id) |v| allocator.free(v);
     for (message.tool_calls) |tool_call| freeCall(allocator, tool_call);

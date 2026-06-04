@@ -373,7 +373,7 @@ pub fn attach(allocator: Allocator, io: std.Io, layout_ctx: layout.Context, pack
     const manifest = try loadManifest(allocator, io, found.path);
     defer manifest.deinit(allocator);
     const spec = manifest.attach orelse return error.PackageHasNoAttach;
-    const loop_path = try layout.sharePath(allocator, layout_ctx, "graphs/zinc-loop.circuitry.yaml");
+    const loop_path = try ensureProjectLoopGraph(allocator, layout_ctx);
     defer allocator.free(loop_path);
     const model = try selectAttachTarget(allocator, io, loop_path, spec.target_kind);
     defer allocator.free(model);
@@ -402,7 +402,7 @@ pub fn attach(allocator: Allocator, io: std.Io, layout_ctx: layout.Context, pack
 }
 
 pub fn detach(allocator: Allocator, io: std.Io, layout_ctx: layout.Context, package_name: []const u8) ![]u8 {
-    const loop_path = try layout.sharePath(allocator, layout_ctx, "graphs/zinc-loop.circuitry.yaml");
+    const loop_path = try allocator.dupe(u8, project_loop_graph_path);
     defer allocator.free(loop_path);
     const metadata = try extensionMetadata(allocator, io, package_name);
     defer metadata.deinit(allocator);
@@ -422,10 +422,25 @@ pub fn detach(allocator: Allocator, io: std.Io, layout_ctx: layout.Context, pack
     defer freeStringList(allocator, next);
     try unwireLoopGraph(allocator, io, loop_path, metadata);
     if (next.len == 0) {
+        std.Io.Dir.cwd().deleteFile(std.Options.debug_io, ".zinc/graphs/zinc-loop.circuitry.yaml") catch {};
         std.Io.Dir.cwd().deleteFile(std.Options.debug_io, ".zinc/graphs/zinc-extensions.circuitry.yaml") catch {};
         std.Io.Dir.cwd().deleteFile(std.Options.debug_io, ".zinc/generated/extensions.md") catch {};
     } else try regenerateAttachments(allocator, io, layout_ctx, next, metadata.model);
     return std.fmt.allocPrint(allocator, "detached {s}\n", .{package_name});
+}
+
+const project_loop_graph_path = ".zinc/graphs/zinc-loop.circuitry.yaml";
+
+fn ensureProjectLoopGraph(allocator: Allocator, layout_ctx: layout.Context) ![]u8 {
+    const project = try allocator.dupe(u8, project_loop_graph_path);
+    errdefer allocator.free(project);
+    if (files.existsPath(project)) return project;
+    const stock = try layout.sharePath(allocator, layout_ctx, "graphs/zinc-loop.circuitry.yaml");
+    defer allocator.free(stock);
+    const text = try files.readLimited(allocator, stock, 1024 * 1024);
+    defer allocator.free(text);
+    try files.write(project, text);
+    return project;
 }
 
 pub fn attachments(allocator: Allocator, io: std.Io) ![]u8 {

@@ -22,7 +22,17 @@ pub const Spec = struct {
 
 pub const ExecuteTool = *const fn (*ctxmod.RunContext, uri.Context, Spec, provider.ToolCall) anyerror!runtime_tools.ToolResult;
 
-pub fn run(ctx: *ctxmod.RunContext, messages: *std.ArrayList(provider.Message), spec: Spec, max_tokens: ?usize, reasoning_max: ?isize, execute_tool: ExecuteTool) ![]u8 {
+pub const Result = struct {
+    text: []u8,
+    reasoning: ?[]u8 = null,
+
+    pub fn deinit(self: Result, allocator: Allocator) void {
+        allocator.free(self.text);
+        if (self.reasoning) |value| allocator.free(value);
+    }
+};
+
+pub fn run(ctx: *ctxmod.RunContext, messages: *std.ArrayList(provider.Message), spec: Spec, reasoning_effort: ?[]const u8, execute_tool: ExecuteTool) !Result {
     var retries: usize = 0;
     var last_parsed_size: usize = ctx.log.raw.len;
     while (true) {
@@ -37,7 +47,7 @@ pub fn run(ctx: *ctxmod.RunContext, messages: *std.ArrayList(provider.Message), 
             } else |_| {}
         }
         const session_path = if (ctx.frame.isInteractiveTarget(spec.label)) ctx.session.path else null;
-        const turn = try callProvider(ctx.allocator, ctx.io, session_path, ctx.profile.runtime.provider_max_retries, spec.label, .{ .profile = ctx.profile, .max_tokens = max_tokens, .reasoning_max_tokens = reasoning_max, .json_response = spec.json, .tools_json = spec.tools_json, .messages = messages.items });
+        const turn = try callProvider(ctx.allocator, ctx.io, session_path, ctx.profile.runtime.provider_max_retries, spec.label, .{ .profile = ctx.profile, .reasoning_effort = reasoning_effort, .json_response = spec.json, .tools_json = spec.tools_json, .messages = messages.items });
         defer provider.freeTurn(ctx.allocator, turn);
         if (turn.tool_calls.len == 0) {
             const clean = try provider.cleanText(ctx.allocator, turn.text, ctx.profile);
@@ -45,28 +55,28 @@ pub fn run(ctx: *ctxmod.RunContext, messages: *std.ArrayList(provider.Message), 
             if (std.mem.trim(u8, clean, " \t\r\n").len == 0 and retries < ctx.profile.runtime.tool_max_turns) {
                 ctx.allocator.free(clean);
                 retries += 1;
-                try provider.appendMessage(ctx.allocator, messages, .{ .role = "assistant", .content = turn.text });
+                try provider.appendMessage(ctx.allocator, messages, .{ .role = "assistant", .content = turn.text, .reasoning = turn.reasoning });
                 try provider.appendMessage(ctx.allocator, messages, .{ .role = "user", .content = "Return a non-empty final response for this turn." });
                 continue;
             }
             if (spec.schema) |schema| if (!isValidSchemaJson(ctx.allocator, schema, clean) and retries < ctx.profile.runtime.tool_max_turns) {
                 ctx.allocator.free(clean);
                 retries += 1;
-                try provider.appendMessage(ctx.allocator, messages, .{ .role = "assistant", .content = turn.text });
+                try provider.appendMessage(ctx.allocator, messages, .{ .role = "assistant", .content = turn.text, .reasoning = turn.reasoning });
                 try provider.appendMessage(ctx.allocator, messages, .{ .role = "user", .content = "Return only valid JSON matching the requested Circuitry schema. Do not include markdown or prose." });
                 continue;
             };
             if (spec.json and !isValidJson(ctx.allocator, clean) and retries < ctx.profile.runtime.tool_max_turns) {
                 ctx.allocator.free(clean);
                 retries += 1;
-                try provider.appendMessage(ctx.allocator, messages, .{ .role = "assistant", .content = turn.text });
+                try provider.appendMessage(ctx.allocator, messages, .{ .role = "assistant", .content = turn.text, .reasoning = turn.reasoning });
                 try provider.appendMessage(ctx.allocator, messages, .{ .role = "user", .content = "Return only valid JSON matching the requested schema. Do not include markdown or prose." });
                 continue;
             }
-            return clean;
+            return .{ .text = clean, .reasoning = if (turn.reasoning) |value| try ctx.allocator.dupe(u8, value) else null };
         }
-        try provider.appendMessage(ctx.allocator, messages, .{ .role = "assistant", .content = turn.text, .tool_calls = turn.tool_calls });
-        if (ctx.frame.isInteractiveTarget(spec.label)) try sessions.appendAssistantToolCalls(ctx.allocator, ctx.session.path, turn.text, turn.tool_calls);
+        try provider.appendMessage(ctx.allocator, messages, .{ .role = "assistant", .content = turn.text, .reasoning = turn.reasoning, .tool_calls = turn.tool_calls });
+        if (ctx.frame.isInteractiveTarget(spec.label)) try sessions.appendAssistantToolCalls(ctx.allocator, ctx.session.path, ctx.profile.model.id, turn.text, turn.reasoning, turn.tool_calls);
         const read_ctx = try runtimeReadContext(ctx);
         defer read_ctx.deinit(ctx.allocator);
         for (turn.tool_calls) |call| {
@@ -74,7 +84,7 @@ pub fn run(ctx: *ctxmod.RunContext, messages: *std.ArrayList(provider.Message), 
             defer result.deinit(ctx.allocator);
             if (ctx.frame.isInteractiveTarget(spec.label)) try sessions.appendToolResult(ctx.allocator, ctx.session.path, call, result);
             if (result.is_error) {
-                if (retries >= ctx.profile.runtime.tool_max_turns) return finalToolFailure(ctx, messages, spec, result.content, max_tokens, reasoning_max);
+                if (retries >= ctx.profile.runtime.tool_max_turns) return finalToolFailure(ctx, messages, spec, result.content, reasoning_effort);
                 retries += 1;
             } else retries = 0;
             const max_preview = ctx.profile.runtime.replay_truncate_chars;
@@ -96,21 +106,22 @@ pub fn validateJsonSchema(allocator: Allocator, schema: *const circuitry.value.V
     if (!isValidSchemaJson(allocator, schema, text)) return error.InvalidModelJson;
 }
 
-fn finalToolFailure(ctx: *ctxmod.RunContext, messages: *std.ArrayList(provider.Message), spec: Spec, last_failure: []const u8, max_tokens: ?usize, reasoning_max: ?isize) ![]u8 {
+fn finalToolFailure(ctx: *ctxmod.RunContext, messages: *std.ArrayList(provider.Message), spec: Spec, last_failure: []const u8, reasoning_effort: ?[]const u8) !Result {
+    const fallback = "I couldn't complete the tool workflow.\n\nLast failing tool result:\n{s}";
     const instruction = try std.fmt.allocPrint(ctx.allocator, "Tool attempts reached runtime.tool_max_turns={d}. Stop calling tools. Explain what failed, what was learned, and what the user can try next. Include the relevant command/result details from the failed tool results. Last failure:\n{s}", .{ ctx.profile.runtime.tool_max_turns, last_failure });
     defer ctx.allocator.free(instruction);
     try provider.appendMessage(ctx.allocator, messages, .{ .role = "user", .content = instruction });
-    const turn = callProvider(ctx.allocator, ctx.io, null, ctx.profile.runtime.provider_max_retries, spec.label, .{ .profile = ctx.profile, .max_tokens = max_tokens, .reasoning_max_tokens = reasoning_max, .json_response = false, .tools_json = "[]", .messages = messages.items }) catch {
-        return std.fmt.allocPrint(ctx.allocator, "I couldn't complete the tool workflow.\n\nLast failing tool result:\n{s}", .{last_failure});
+    const turn = callProvider(ctx.allocator, ctx.io, null, ctx.profile.runtime.provider_max_retries, spec.label, .{ .profile = ctx.profile, .reasoning_effort = reasoning_effort, .json_response = false, .tools_json = "[]", .messages = messages.items }) catch {
+        return .{ .text = try std.fmt.allocPrint(ctx.allocator, fallback, .{last_failure}) };
     };
     defer provider.freeTurn(ctx.allocator, turn);
-    if (turn.tool_calls.len != 0) return std.fmt.allocPrint(ctx.allocator, "I couldn't complete the tool workflow.\n\nLast failing tool result:\n{s}", .{last_failure});
-    const clean = provider.cleanText(ctx.allocator, turn.text, ctx.profile) catch return std.fmt.allocPrint(ctx.allocator, "I couldn't complete the tool workflow.\n\nLast failing tool result:\n{s}", .{last_failure});
+    if (turn.tool_calls.len != 0) return .{ .text = try std.fmt.allocPrint(ctx.allocator, fallback, .{last_failure}) };
+    const clean = provider.cleanText(ctx.allocator, turn.text, ctx.profile) catch return .{ .text = try std.fmt.allocPrint(ctx.allocator, fallback, .{last_failure}) };
     if (std.mem.trim(u8, clean, " \t\r\n").len == 0) {
         ctx.allocator.free(clean);
-        return std.fmt.allocPrint(ctx.allocator, "I couldn't complete the tool workflow.\n\nLast failing tool result:\n{s}", .{last_failure});
+        return .{ .text = try std.fmt.allocPrint(ctx.allocator, fallback, .{last_failure}) };
     }
-    return clean;
+    return .{ .text = clean, .reasoning = if (turn.reasoning) |value| try ctx.allocator.dupe(u8, value) else null };
 }
 
 fn callProvider(allocator: Allocator, io: std.Io, session_path: ?[]const u8, provider_max_retries: usize, label: []const u8, request: provider.Request) !provider.AssistantTurn {
@@ -130,6 +141,7 @@ fn callProvider(allocator: Allocator, io: std.Io, session_path: ?[]const u8, pro
             if (session_path) |path| try sessions.appendProviderError(allocator, path, "provider retry");
             continue;
         };
+        if (session_path) |path| if (turn.prompt_tokens) |tokens| try sessions.appendProviderUsage(allocator, path, request.profile.model.id, tokens);
         span.end("llm", "label={s} attempt={d} text_chars={d} tool_calls={d}", .{ label, attempts + 1, turn.text.len, turn.tool_calls.len });
         return turn;
     }

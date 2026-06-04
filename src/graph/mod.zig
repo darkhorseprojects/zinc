@@ -254,9 +254,9 @@ pub fn readPromptPacks(allocator: Allocator, graph: Graph) ![]PromptPack {
 pub fn graphModel(allocator: Allocator, graph: Graph, selected_export: ?[]const u8) !?[]u8 {
     const id = exportTargetResourceId(graph, selected_export) orelse return null;
     const res = resource(graph, id) orelse return null;
-    const model = resourceField(res, "model") orelse return null;
-    if (std.mem.eql(u8, model, "inherit")) return null;
-    return try allocator.dupe(u8, model);
+    const model_id = resourceField(res, "using") orelse return null;
+    if (std.mem.eql(u8, model_id, "inherit")) return null;
+    return try allocator.dupe(u8, model_id);
 }
 
 pub fn freeInputSpecs(allocator: Allocator, inputs: []const InputSpec) void {

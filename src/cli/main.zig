@@ -1,7 +1,7 @@
 const std = @import("std");
 const commands = @import("commands.zig");
 const config = @import("../config/mod.zig");
-const server = @import("../server.zig");
+const doctor = @import("../doctor.zig");
 const packages = @import("../packages/mod.zig");
 const layout = @import("../io/layout.zig");
 const Scope = packages.Scope;
@@ -9,6 +9,14 @@ const Scope = packages.Scope;
 pub fn run(init: std.process.Init) !void {
     runInner(init) catch |err| switch (err) {
         error.UserError => return,
+        error.ModelNotConfigured => {
+            std.debug.print("error: model endpoint not configured; add default_model and models.<id> to your Zinc config\n", .{});
+            return;
+        },
+        error.UnknownModel => {
+            std.debug.print("error: unknown model id; add it under models in your Zinc config\n", .{});
+            return;
+        },
         else => return err,
     };
 }
@@ -28,9 +36,7 @@ fn runInner(init: std.process.Init) !void {
     if (std.mem.eql(u8, cmd, "check")) return commands.validate(allocator, init.io, layout_ctx, args.next());
     if (std.mem.eql(u8, cmd, "clean")) return cleanCommandArgs(allocator, init.io, layout_ctx, &args);
     if (std.mem.eql(u8, cmd, "run")) return runCommandArgs(allocator, init.io, layout_ctx, &args);
-    if (std.mem.eql(u8, cmd, "serve")) return server.start(allocator, init.io, layout_ctx, args.next());
-    if (std.mem.eql(u8, cmd, "stop")) return server.stop(allocator, init.io, layout_ctx);
-    if (std.mem.eql(u8, cmd, "doctor")) return server.doctor(allocator, init.io, layout_ctx);
+    if (std.mem.eql(u8, cmd, "doctor")) return doctor.run(allocator, init.io, layout_ctx);
     if (std.mem.eql(u8, cmd, "config")) return configCommandArgs(allocator, init.io, layout_ctx, &args);
     if (std.mem.eql(u8, cmd, "graph")) return graphCommandArgs(allocator, init.io, layout_ctx, &args);
     if (std.mem.eql(u8, cmd, "pkg")) return packageCommandArgs(allocator, init.io, layout_ctx, &args);

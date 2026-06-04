@@ -23,14 +23,12 @@ pub fn usage() void {
         \\usage:
         \\  zn check [graph]
         \\  zn clean [--local|--global] [--yes] [sessions | logs | packages | state | all]
-        \\  zn serve [model-id]
-        \\  zn stop
         \\  zn doctor
         \\  zn config get <path>
         \\  zn compact [--dry-run] [--session id|--continue] [graph]
         \\  zn update [--ref version]
-        \\  zn [--session id|--continue] <prompt>
-        \\  zn run [graph|--graph id|path] [--export id] [--input name=value] [--text name=value|@file] [--file name=path] [--image name=path] [--session id|--continue] <prompt>
+        \\  zn [--default] [--model id] [--session id|--continue] <prompt>
+        \\  zn run [--default] [--model id] [graph|--graph id|path] [--export id] [--input name=value] [--text name=value|@file] [--file name=path] [--image name=path] [--session id|--continue] <prompt>
         \\  zn graph list
         \\  zn graph show <graph>
         \\  zn pkg list
@@ -67,7 +65,7 @@ pub fn runFromArgs(allocator: Allocator, io: std.Io, layout_ctx: layout.Context,
 
     const runtime_paths = try config.loadRuntimePaths(allocator, io, layout_ctx);
     defer runtime_paths.deinit(allocator);
-    if (parsed_args.graph_path == null and parsed_args.prompt_parts.items.len != 0) {
+    if (parsed_args.graph_path == null and !parsed_args.use_default and parsed_args.prompt_parts.items.len != 0) {
         if (packages.resolveGraph(allocator, io, layout_ctx, parsed_args.prompt_parts.items[0])) |path| {
             allocator.free(path);
             parsed_args.graph_path = parsed_args.prompt_parts.orderedRemove(0);
@@ -79,11 +77,11 @@ pub fn runFromArgs(allocator: Allocator, io: std.Io, layout_ctx: layout.Context,
     const resolved_graph = if (parsed_args.graph_path) |spec| packages.resolveGraph(allocator, io, layout_ctx, spec) catch |err| switch (err) {
         error.GraphNotFound => return fail("graph not found: {s}", .{spec}),
         else => return err,
-    } else try allocator.dupe(u8, runtime_paths.graph);
+    } else if (parsed_args.use_default) try allocator.dupe(u8, runtime_paths.graph) else try defaultGraphPath(allocator, runtime_paths.graph);
     defer allocator.free(resolved_graph);
     const prompt = try std.mem.join(allocator, " ", parsed_args.prompt_parts.items);
     defer allocator.free(prompt);
-    try engine.runGraph(allocator, io, layout_ctx, resolved_graph, parsed_args.selected_export, prompt, parsed_args.resume_id, parsed_args.continue_last, parsed_args.inputs.items);
+    try engine.runGraph(allocator, io, layout_ctx, resolved_graph, parsed_args.selected_export, parsed_args.model_id, prompt, parsed_args.resume_id, parsed_args.continue_last, parsed_args.inputs.items);
 }
 
 const RunArgs = struct {
@@ -91,8 +89,10 @@ const RunArgs = struct {
     inputs: std.ArrayList(graph.RuntimeInput),
     graph_path: ?[]const u8 = null,
     selected_export: ?[]const u8 = null,
+    model_id: ?[]const u8 = null,
     resume_id: ?[]const u8 = null,
     continue_last: bool = false,
+    use_default: bool = false,
 
     fn deinit(self: *RunArgs, allocator: Allocator) void {
         self.prompt_parts.deinit(allocator);
@@ -107,6 +107,17 @@ fn parseRunArgs(allocator: Allocator, args: []const []const u8) !RunArgs {
     var i: usize = 0;
     while (i < args.len) : (i += 1) {
         const arg = args[i];
+        if (std.mem.eql(u8, arg, "--default")) {
+            if (parsed.graph_path != null) return error.ConflictingGraphFlags;
+            parsed.use_default = true;
+            continue;
+        }
+        if (std.mem.eql(u8, arg, "--model")) {
+            i += 1;
+            if (i >= args.len) return error.MissingModelId;
+            parsed.model_id = args[i];
+            continue;
+        }
         if (std.mem.eql(u8, arg, "--continue")) {
             if (parsed.resume_id != null) return error.ConflictingSessionFlags;
             parsed.continue_last = true;
@@ -122,6 +133,7 @@ fn parseRunArgs(allocator: Allocator, args: []const []const u8) !RunArgs {
         if (std.mem.eql(u8, arg, "--graph")) {
             i += 1;
             if (i >= args.len) return error.MissingGraphPath;
+            if (parsed.use_default) return error.ConflictingGraphFlags;
             parsed.graph_path = args[i];
             continue;
         }
@@ -138,7 +150,12 @@ fn parseRunArgs(allocator: Allocator, args: []const []const u8) !RunArgs {
             try appendInputArg(allocator, &parsed.inputs, kind, args[i]);
             continue;
         }
+        if (std.mem.startsWith(u8, arg, "--model=")) {
+            parsed.model_id = arg["--model=".len..];
+            continue;
+        }
         if (std.mem.startsWith(u8, arg, "--graph=")) {
+            if (parsed.use_default) return error.ConflictingGraphFlags;
             parsed.graph_path = arg["--graph=".len..];
             continue;
         }
@@ -151,13 +168,19 @@ fn parseRunArgs(allocator: Allocator, args: []const []const u8) !RunArgs {
             try appendInputArg(allocator, &parsed.inputs, inputFlagKind(arg[0..eq]), arg[eq + 1 ..]);
             continue;
         }
-        if (parsed.graph_path == null and looksLikeGraphPath(arg)) {
+        if (parsed.graph_path == null and !parsed.use_default and looksLikeGraphPath(arg)) {
             parsed.graph_path = arg;
             continue;
         }
         try parsed.prompt_parts.append(allocator, arg);
     }
     return parsed;
+}
+
+fn defaultGraphPath(allocator: Allocator, stock_graph: []const u8) ![]u8 {
+    const project_graph = ".zinc/graphs/zinc-loop.circuitry.yaml";
+    if (files.existsPath(project_graph)) return allocator.dupe(u8, project_graph);
+    return allocator.dupe(u8, stock_graph);
 }
 
 fn inputFlagKind(flag: []const u8) graph.InputKind {

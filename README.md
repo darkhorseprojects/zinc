@@ -4,9 +4,9 @@
 [![build](https://img.shields.io/github/actions/workflow/status/darkhorseprojects/zinc/release.yml?label=build&style=flat-square)](https://github.com/darkhorseprojects/zinc/actions)
 [![license](https://img.shields.io/github/license/darkhorseprojects/zinc?color=333333&style=flat-square)](https://github.com/darkhorseprojects/zinc/blob/main/LICENSE)
 
-Zinc is a small local runtime for Circuitry 0.5 graphs.
+Zinc is a small runtime for Circuitry 0.5 graphs over OpenAI-compatible chat completion endpoints.
 
-Circuitry defines YAML-native graph topology. Zinc supplies local effects: model calls, tools, sessions, runtime URIs, packages, permissions, and model serving.
+Circuitry defines YAML-native graph topology. Zinc supplies runtime effects: endpoint model calls, tools, sessions, runtime URIs, packages, and permissions.
 
 ```bash
 zn "inspect this repo"
@@ -43,7 +43,8 @@ Manual install:
 3. Put `zn` or `zn.exe` on `PATH`.
 4. Copy `stock/graphs` and `stock/prompts` into the platform data directory below.
 5. Copy `stock/config.yaml` into the platform config path if no config exists yet.
-6. Run `zn doctor`.
+6. Add a model endpoint to your config.
+7. Run `zn doctor`.
 
 Zinc keeps platform paths behind its layout layer:
 
@@ -62,8 +63,8 @@ Windows state:  %LOCALAPPDATA%\zinc\State
 ## CLI
 
 ```bash
-zn "prompt"
-zn run [graph|--graph id|path] [--export name] [--input name=value] [--text name=value|@file] [--file name=path] [--image name=path] [--session id|--continue] "prompt"
+zn [--default] [--model id] "prompt"
+zn run [--default] [--model id] [graph|--graph id|path] [--export name] [--input name=value] [--text name=value|@file] [--file name=path] [--image name=path] [--session id|--continue] "prompt"
 zn check [graph]
 zn compact [--dry-run] [--session id|--continue] [graph]
 zn graph list
@@ -78,40 +79,19 @@ zn pkg exec <package> <script>
 zn pkg attach <package>
 zn pkg detach <package>
 zn pkg attachments
-zn serve [model]
 zn doctor
-zn stop
 ```
 
 ## Stock loop
 
-The default `zinc-loop` graph is a lean chat loop with session memory. It does not attach tool schemas to ordinary turns.
+`zinc-loop` is the normal assistant graph. It includes Zinc's built-in tools and can be extended by attached packages.
 
-```yaml
-circuitry: "0.5"
-title: Zinc loop
-
-exports:
-  main:
-    run: assistant
-    input:
-      user_turn: string
-      recovered_context: string
-
-resources:
-  assistant:
-    model:
-      identity: Zinc
-      input:
-        - $user_turn
-        - $recovered_context
-```
-
-Use `zinc-agent` for explicit file, shell, package, or graph tool work:
+Use `--default` to run the stock graph without package extensions:
 
 ```bash
-zn run zinc-agent "inspect this repo"
+zn --default "answer without package extensions"
 ```
+
 
 ## Runtime boundary
 
@@ -160,54 +140,57 @@ Byte ranges:
 
 Model configuration is Zinc runtime config. Circuitry graphs do not contain provider settings.
 
-Zinc supports two runtime model kinds:
-
-- `local`: Zinc-managed `llama.cpp`, with weights downloaded from Hugging Face.
-- `openai`: an external OpenAI-compatible endpoint.
+Zinc speaks OpenAI-compatible Chat Completions. Run any local or remote endpoint that exposes `/v1/chat/completions`, then point Zinc at it.
 
 ```yaml
-default_model: qwen-heretic-mtp
+default_model: local
 
 models:
-  qwen-heretic-mtp:
-    kind: local
-    model: qwen3.6-27b-heretic-mtp-q3_k_s
+  local:
+    model: model-name-served-by-your-endpoint
     base_url: http://127.0.0.1:30000/v1
-    llama_cpp:
-      engine: llama.cpp
-      repo: https://github.com/ggml-org/llama.cpp.git
-      ref: master
-    hf:
-      repo: owner/model-repo
-      file: model.gguf
+    api_key_env:
+    context_window: 8192
+    chars_per_token: 4
+    temperature: 0.7
+    reasoning:
+      enabled: false
+      effort: low
 
-  openrouter-gpt:
-    kind: openai
-    model: openai/gpt-4.1-mini
-    base_url: https://openrouter.ai/api/v1
-    api_key_env: OPENROUTER_API_KEY
-
-  vllm-coder:
-    kind: openai
-    model: Qwen/Qwen2.5-Coder-7B-Instruct
-    base_url: http://127.0.0.1:8000/v1
+  hosted:
+    model: provider/model-name
+    base_url: https://example.com/v1
+    api_key_env: PROVIDER_API_KEY
+    context_window: 128000
+    chars_per_token: 4
+    temperature: 0.3
+    reasoning:
+      enabled: false
+      effort: low
 ```
 
-`kind: local` is only for Zinc-managed `llama.cpp` served from Hugging Face model files. `kind: openai` is only for non-local OpenAI-compatible HTTP endpoints. Zinc normalizes trailing slashes so `/v1/chat/completions` is not doubled.
+`context_window` is a model fact supplied by the user. Zinc uses it with `runtime.compaction_threshold_percent` to decide when to compact. If the endpoint does not return prompt usage, Zinc estimates prompt tokens with `chars_per_token`; the default `4` matches the usual English-text rule of thumb.
 
-`zn doctor` reports the selected model id, kind, base URL, served model name, `api_key_env` name, and whether the env var is present. It never prints secret values and does not make paid API calls.
+Select the normal model with `default_model`, override one run with `--model <id>`, or attach a configured model to a specific Zinc `model` resource with `using:`:
+
+```yaml
+resources:
+  assistant:
+    model:
+      using: local
+      identity: Zinc
+      input:
+        - $user_turn
+      instructions: Answer directly.
+```
+
+The stock config does not include a model. For local GGUF/Hugging Face models, run `llama-server`, vLLM, LM Studio, Ollama's OpenAI-compatible endpoint, or another compatible endpoint yourself, then add that endpoint to your Zinc config. Zinc does not download model files, build inference engines, or manage server processes.
+
+Zinc normalizes trailing slashes so `/v1/chat/completions` is not doubled. `zn doctor` reports the selected model id, base URL, model name, context window, `api_key_env` name, whether the env var is present, and whether the endpoint is reachable. If no model is configured, it reports that instead of assuming one. It never prints secret values.
 
 ## Tools
 
-The default `zinc-loop` graph is lean chat + session memory. It does not attach tools to every turn, so ordinary prompts stay fast.
-
-Use `zinc-agent` when you explicitly want file, shell, package, or graph tools:
-
-```bash
-zn run zinc-agent "inspect this repo"
-```
-
-Zinc only exposes tools declared by the active `model` resource.
+Zinc only exposes tools declared by the active `model` resource. Attached packages can extend `zinc-loop`; `--default` bypasses those package extensions and runs the stock graph.
 
 ```yaml
 resources:
@@ -253,7 +236,7 @@ Zinc is a local runtime. When the active graph declares tools, Zinc can read fil
 
 ## Sessions and compaction
 
-Zinc stores sessions as JSONL under `.zinc/sessions`; that is an internal storage detail, not a user-authored format. Compaction runs through the configured stock compaction graph when the replay context crosses the configured threshold.
+Zinc stores sessions as JSONL under `.zinc/sessions`; that is an internal storage detail, not a user-authored format. Compaction runs through the configured stock compaction graph when the replay context crosses `runtime.compaction_threshold_percent` of the active model's configured `context_window`.
 
 ## Packages
 

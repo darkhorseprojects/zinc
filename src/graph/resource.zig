@@ -103,6 +103,17 @@ fn resolveRun(ctx: *RunContext, res: graph.Resource) !ResolvedValue {
 }
 
 fn resolveModel(ctx: *RunContext, id: []const u8, res: graph.Resource) !ResolvedValue {
+    if (graph.resourceField(res, "using")) |model_id| if (!std.mem.eql(u8, model_id, ctx.profile.model.id)) {
+        var profile = try config.loadRuntimeProfile(ctx.allocator, ctx.io, ctx.layout_ctx, model_id);
+        defer profile.deinit(ctx.allocator);
+        var model_ctx = ctx.*;
+        model_ctx.profile = &profile;
+        return resolveModelWithProfile(&model_ctx, id, res);
+    };
+    return resolveModelWithProfile(ctx, id, res);
+}
+
+fn resolveModelWithProfile(ctx: *RunContext, id: []const u8, res: graph.Resource) !ResolvedValue {
     const identity = try graph.resourceIdentity(ctx.allocator, ctx.graph.*, id);
     defer ctx.allocator.free(identity);
     const instructions = try graph.extractResourceInstructions(ctx.allocator, ctx.graph.*, id);
@@ -133,17 +144,8 @@ fn resolveModel(ctx: *RunContext, id: []const u8, res: graph.Resource) !Resolved
 
     const inputs = try graph.resourceInputsList(ctx.allocator, res);
     defer graph.freeStringList(ctx.allocator, inputs);
-    var input_texts: std.ArrayList([]u8) = .empty;
-    defer {
-        for (input_texts.items) |text| ctx.allocator.free(text);
-        input_texts.deinit(ctx.allocator);
-    }
-    for (inputs) |input_id| {
-        const scoped_id = try graph.qualifyDependency(ctx.allocator, res, input_id);
-        defer ctx.allocator.free(scoped_id);
-        const value = try resolve(ctx, scoped_id);
-        try input_texts.append(ctx.allocator, value.text);
-    }
+    var model_inputs = try collectModelInputs(ctx, res, inputs);
+    defer model_inputs.deinit(ctx.allocator);
 
     var messages: std.ArrayList(provider.Message) = .empty;
     defer messages.deinit(ctx.allocator);
@@ -153,25 +155,25 @@ fn resolveModel(ctx: *RunContext, id: []const u8, res: graph.Resource) !Resolved
     const is_root = ctx.frame.isInteractiveTarget(id);
     if (is_root) try ctx.log.appendReplayMessages(ctx.allocator, &messages, "", ctx.profile.runtime.session_head_messages, ctx.profile.runtime.session_tail_messages, ctx.profile.runtime.replay_truncate_chars);
 
-    const user_content = try modelUserContent(ctx.allocator, inputs, input_texts.items);
+    const user_content = try modelUserContent(ctx.allocator, model_inputs.items.items);
     defer ctx.allocator.free(user_content);
-    try provider.appendMessage(ctx.allocator, &messages, .{ .role = "user", .content = user_content });
+    try provider.appendMessage(ctx.allocator, &messages, .{ .role = "user", .content = user_content, .parts = model_inputs.parts.items });
     if (is_root) {
         const session_content = sessionUserContent(ctx, user_content);
         try sessions.appendUserMessage(ctx.allocator, ctx.session.path, session_content);
         try sessions.rememberLast(ctx.session);
     }
 
-    const max_tokens = maxTokens(ctx.*);
-    const reasoning_max = try ctx.profile.reasoningMaxTokens();
+    const reasoning_effort = ctx.profile.reasoningEffort();
     const schema_value = graph.resourceSchemaValue(res);
     const wants_json = schema_value != null;
     const spec = model.Spec{ .label = id, .system = system.items, .tools = tool_names, .tools_json = tools_json, .json = wants_json, .schema = schema_value, .runtime_reads = true };
-    const text = try model.run(ctx, &messages, spec, max_tokens, reasoning_max, executeTool);
-    errdefer ctx.allocator.free(text);
-    if (schema_value) |schema| try model.validateJsonSchema(ctx.allocator, schema, text) else if (wants_json) try model.validateJson(ctx.allocator, text);
-    if (is_root) try sessions.appendAssistantText(ctx.allocator, ctx.session.path, std.mem.trim(u8, text, " \t\r\n"));
-    return .{ .text = text };
+    const result = try model.run(ctx, &messages, spec, reasoning_effort, executeTool);
+    errdefer result.deinit(ctx.allocator);
+    if (schema_value) |schema| try model.validateJsonSchema(ctx.allocator, schema, result.text) else if (wants_json) try model.validateJson(ctx.allocator, result.text);
+    if (is_root) try sessions.appendAssistantText(ctx.allocator, ctx.session.path, ctx.profile.model.id, std.mem.trim(u8, result.text, " \t\r\n"), result.reasoning);
+    if (result.reasoning) |value| ctx.allocator.free(value);
+    return .{ .text = result.text };
 }
 
 fn executeTool(ctx: *RunContext, read_ctx: uri.Context, spec: model.Spec, call: provider.ToolCall) !runtime_tools.ToolResult {
@@ -419,7 +421,7 @@ fn kindMatches(spec: []const u8, kind: graph.InputKind) bool {
     return switch (kind) {
         .text => std.mem.eql(u8, spec, "text") or std.mem.eql(u8, spec, "string"),
         .file => std.mem.eql(u8, spec, "file"),
-        .image => std.mem.eql(u8, spec, "image"),
+        .image => std.mem.eql(u8, spec, "image") or std.mem.eql(u8, spec, "text") or std.mem.eql(u8, spec, "string"),
     };
 }
 fn hasBoundInput(inputs: []const BoundInput, id: []const u8) bool {
@@ -451,21 +453,65 @@ fn sessionUserContent(ctx: *RunContext, fallback: []const u8) []const u8 {
     return fallback;
 }
 
-fn modelUserContent(allocator: Allocator, input_ids: []const []u8, input_texts: []const []u8) ![]u8 {
-    var out: std.ArrayList(u8) = .empty;
-    errdefer out.deinit(allocator);
-    for (input_texts, 0..) |text, i| {
-        if (out.items.len != 0) try out.appendSlice(allocator, "\n\n");
-        try out.print(allocator, "input {s}:\n{s}", .{ input_ids[i], text });
+const ModelInputText = struct {
+    id: []u8,
+    text: []u8,
+
+    fn deinit(self: ModelInputText, allocator: Allocator) void {
+        allocator.free(self.id);
+        allocator.free(self.text);
     }
-    return out.toOwnedSlice(allocator);
+};
+
+const ModelInputs = struct {
+    items: std.ArrayList(ModelInputText) = .empty,
+    parts: std.ArrayList(ModelPart) = .empty,
+
+    fn deinit(self: *ModelInputs, allocator: Allocator) void {
+        for (self.items.items) |item| item.deinit(allocator);
+        self.items.deinit(allocator);
+        for (self.parts.items) |part| part.deinit(allocator);
+        self.parts.deinit(allocator);
+    }
+};
+
+fn collectModelInputs(ctx: *RunContext, res: graph.Resource, inputs: []const []u8) !ModelInputs {
+    var out = ModelInputs{};
+    errdefer out.deinit(ctx.allocator);
+    for (inputs) |input_id| {
+        if (runtimeInputName(input_id)) |name| if (findBoundInput(ctx.inputs, name)) |input| {
+            if (input.kind == .image) {
+                try out.items.append(ctx.allocator, .{ .id = try ctx.allocator.dupe(u8, input_id), .text = try std.fmt.allocPrint(ctx.allocator, "[image attached: {s}]", .{input.value}) });
+                try out.parts.append(ctx.allocator, .{ .image_url = try imageDataUrl(ctx, input) });
+                continue;
+            }
+        };
+        const scoped_id = try graph.qualifyDependency(ctx.allocator, res, input_id);
+        defer ctx.allocator.free(scoped_id);
+        const value = try resolve(ctx, scoped_id);
+        try out.items.append(ctx.allocator, .{ .id = try ctx.allocator.dupe(u8, input_id), .text = value.text });
+    }
+    return out;
 }
 
-fn maxTokens(ctx: RunContext) ?usize {
-    return switch (ctx.frame.kind) {
-        .maintenance => ctx.profile.runtime.compaction_max_tokens,
-        .interactive, .graph_run => ctx.profile.model.generation.max_tokens,
-    };
+fn imageDataUrl(ctx: *RunContext, input: BoundInput) ![]u8 {
+    if (std.mem.startsWith(u8, input.value, "data:") or std.mem.startsWith(u8, input.value, "http://") or std.mem.startsWith(u8, input.value, "https://")) return ctx.allocator.dupe(u8, input.value);
+    const bytes = try files.readLimited(ctx.allocator, input.value, ctx.profile.runtime.input_file_max_bytes);
+    defer ctx.allocator.free(bytes);
+    const encoded = try ctx.allocator.alloc(u8, std.base64.standard.Encoder.calcSize(bytes.len));
+    defer ctx.allocator.free(encoded);
+    _ = std.base64.standard.Encoder.encode(encoded, bytes);
+    return std.fmt.allocPrint(ctx.allocator, "data:{s};base64,{s}", .{ input.content_type, encoded });
+}
+
+fn modelUserContent(allocator: Allocator, inputs: []const ModelInputText) ![]u8 {
+    var out: std.ArrayList(u8) = .empty;
+    errdefer out.deinit(allocator);
+    for (inputs) |input| {
+        if (out.items.len != 0) try out.appendSlice(allocator, "\n\n");
+        try out.print(allocator, "input {s}:\n{s}", .{ input.id, input.text });
+    }
+    return out.toOwnedSlice(allocator);
 }
 
 fn providerToolsJson(ctx: *RunContext, tool_names: []const []const u8) ![]u8 {

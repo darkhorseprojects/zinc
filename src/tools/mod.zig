@@ -221,18 +221,38 @@ fn staleWriteError(ctx: *ctxmod.RunContext, call: provider.ToolCall) !?runtime_t
     var parsed = try std.json.parseFromSlice(std.json.Value, ctx.allocator, call.arguments, .{});
     defer parsed.deinit();
     const path = try runtime_tools.requireStringArg(parsed.value.object, "path");
-    const read_content = latestReadContentForPath(ctx.allocator, ctx.log.messages, path) orelse return .{ .content = try std.fmt.allocPrint(ctx.allocator, "{s} rejected: read the current file before editing path={s}", .{ call.name, path }), .is_error = true };
-    defer ctx.allocator.free(read_content);
     const current = files.readLimited(ctx.allocator, path, ctx.profile.runtime.file_read_max_bytes) catch |err| switch (err) {
-        error.FileNotFound => try ctx.allocator.dupe(u8, ""),
+        error.FileNotFound => null,
         else => return err,
     };
-    defer ctx.allocator.free(current);
-    if (!std.mem.eql(u8, read_content, current)) return .{ .content = try std.fmt.allocPrint(ctx.allocator, "file changed since Zinc last read it; read it again before editing: {s}", .{path}), .is_error = true };
+    defer if (current) |content| ctx.allocator.free(content);
+
+    const read_snapshot = try latestReadSnapshotForPath(ctx.allocator, ctx.log.messages, path);
+    defer read_snapshot.deinit(ctx.allocator);
+
+    if (read_snapshot == .none) {
+        if (std.mem.eql(u8, call.name, "write") and current == null) return null;
+        return .{ .content = try std.fmt.allocPrint(ctx.allocator, "{s} rejected: read the current file before editing path={s}", .{ call.name, path }), .is_error = true };
+    }
+    if (read_snapshot == .missing) {
+        if (std.mem.eql(u8, call.name, "write") and current == null) return null;
+        return .{ .content = try std.fmt.allocPrint(ctx.allocator, "file changed since Zinc last read it; read it again before editing: {s}", .{path}), .is_error = true };
+    }
+    if (current == null or !std.mem.eql(u8, read_snapshot.content, current.?)) return .{ .content = try std.fmt.allocPrint(ctx.allocator, "file changed since Zinc last read it; read it again before editing: {s}", .{path}), .is_error = true };
     return null;
 }
 
-fn latestReadContentForPath(allocator: Allocator, messages: []const sessions.Message, path: []const u8) ?[]u8 {
+const ReadSnapshot = union(enum) {
+    none,
+    missing,
+    content: []u8,
+
+    fn deinit(self: ReadSnapshot, allocator: Allocator) void {
+        if (self == .content) allocator.free(self.content);
+    }
+};
+
+fn latestReadSnapshotForPath(allocator: Allocator, messages: []const sessions.Message, path: []const u8) !ReadSnapshot {
     var latest_id: ?[]const u8 = null;
     for (messages) |message| {
         if (!std.mem.eql(u8, message.role, "assistant")) continue;
@@ -247,16 +267,29 @@ fn latestReadContentForPath(allocator: Allocator, messages: []const sessions.Mes
             latest_id = call.id;
         }
     }
-    const id = latest_id orelse return null;
+    const id = latest_id orelse return .none;
     var i = messages.len;
     while (i > 0) {
         i -= 1;
         const message = messages[i];
         if (!std.mem.eql(u8, message.role, "tool")) continue;
         if (message.name == null or !std.mem.eql(u8, message.name.?, "read")) continue;
-        if (message.tool_call_id) |call_id| if (std.mem.eql(u8, call_id, id)) return allocator.dupe(u8, message.content) catch null;
+        if (message.tool_call_id) |call_id| if (std.mem.eql(u8, call_id, id)) {
+            if (try readToolFailure(allocator, message.content, "FileNotFound")) return .missing;
+            return .{ .content = try allocator.dupe(u8, message.content) };
+        };
     }
-    return null;
+    return .none;
+}
+
+fn readToolFailure(allocator: Allocator, content: []const u8, expected: []const u8) !bool {
+    var parsed = std.json.parseFromSlice(std.json.Value, allocator, content, .{}) catch return false;
+    defer parsed.deinit();
+    if (parsed.value != .object) return false;
+    const ok = parsed.value.object.get("ok") orelse return false;
+    if (ok != .bool or ok.bool) return false;
+    const err = parsed.value.object.get("error") orelse return false;
+    return err == .string and std.mem.eql(u8, err.string, expected);
 }
 
 fn hasTool(available: []const []const u8, name: []const u8) bool {

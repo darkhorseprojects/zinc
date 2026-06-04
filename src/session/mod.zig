@@ -17,12 +17,16 @@ pub const Session = struct {
 pub const Message = struct {
     role: []u8,
     content: []u8,
+    model: ?[]u8 = null,
+    reasoning: ?[]u8 = null,
     name: ?[]u8 = null,
     tool_call_id: ?[]u8 = null,
     tool_calls: []provider.ToolCall = &.{},
     fn deinit(self: Message, allocator: Allocator) void {
         allocator.free(self.role);
         allocator.free(self.content);
+        if (self.model) |v| allocator.free(v);
+        if (self.reasoning) |v| allocator.free(v);
         if (self.name) |v| allocator.free(v);
         if (self.tool_call_id) |v| allocator.free(v);
         for (self.tool_calls) |call| freeCall(allocator, call);
@@ -38,19 +42,44 @@ pub const Compaction = struct {
     }
 };
 
+pub const Recovery = struct {
+    message_count: usize,
+    compaction_message_count: usize,
+    context: []u8,
+    fn deinit(self: Recovery, allocator: Allocator) void {
+        allocator.free(self.context);
+    }
+};
+
+pub const ProviderUsage = struct {
+    model: []u8,
+    prompt_tokens: usize,
+    fn deinit(self: ProviderUsage, allocator: Allocator) void {
+        allocator.free(self.model);
+    }
+};
+
 pub const Log = struct {
     raw: []u8,
     messages: []Message,
     compaction: ?Compaction,
+    recovery: ?Recovery,
+    provider_usage: ?ProviderUsage,
 
     pub fn deinit(self: Log, allocator: Allocator) void {
         allocator.free(self.raw);
         for (self.messages) |message| message.deinit(allocator);
         allocator.free(self.messages);
         if (self.compaction) |c| c.deinit(allocator);
+        if (self.recovery) |r| r.deinit(allocator);
+        if (self.provider_usage) |usage| usage.deinit(allocator);
     }
     pub fn messageCount(self: Log) usize {
         return self.messages.len;
+    }
+
+    pub fn latestPromptTokens(self: Log, model_id: []const u8) ?usize {
+        return if (self.provider_usage) |usage| if (usage.model.len == 0 or std.mem.eql(u8, usage.model, model_id)) usage.prompt_tokens else null else null;
     }
 
     pub fn transcript(self: Log, allocator: Allocator, head_messages: usize, tail_messages: usize, truncate_chars: usize) ![]u8 {
@@ -120,14 +149,24 @@ pub fn parseRaw(allocator: Allocator, raw: []const u8) !Log {
 pub fn appendUserMessage(allocator: Allocator, path: []const u8, content: []const u8) !void {
     try appendMessage(allocator, path, .{ .role = "user", .content = content });
 }
-pub fn appendAssistantText(allocator: Allocator, path: []const u8, content: []const u8) !void {
-    try appendMessage(allocator, path, .{ .role = "assistant", .content = content });
+pub fn appendAssistantText(allocator: Allocator, path: []const u8, model_id: []const u8, content: []const u8, reasoning: ?[]const u8) !void {
+    try appendMessage(allocator, path, .{ .role = "assistant", .content = content, .model = model_id, .reasoning = reasoning });
 }
-pub fn appendAssistantToolCalls(allocator: Allocator, path: []const u8, content: []const u8, calls: []const provider.ToolCall) !void {
-    try appendMessage(allocator, path, .{ .role = "assistant", .content = content, .tool_calls = calls });
+pub fn appendAssistantToolCalls(allocator: Allocator, path: []const u8, model_id: []const u8, content: []const u8, reasoning: ?[]const u8, calls: []const provider.ToolCall) !void {
+    try appendMessage(allocator, path, .{ .role = "assistant", .content = content, .model = model_id, .reasoning = reasoning, .tool_calls = calls });
 }
 pub fn appendProviderError(allocator: Allocator, path: []const u8, message: []const u8) !void {
     try appendError(allocator, path, "provider_error", message);
+}
+
+pub fn appendProviderUsage(allocator: Allocator, path: []const u8, model_id: []const u8, prompt_tokens: usize) !void {
+    var line: std.ArrayList(u8) = .empty;
+    defer line.deinit(allocator);
+    try beginRow(allocator, &line, "provider_usage");
+    try line.appendSlice(allocator, ",\"model\":");
+    try files.appendJsonString(allocator, &line, model_id);
+    try line.print(allocator, ",\"prompt_tokens\":{d}}}\n", .{prompt_tokens});
+    try appendLine(path, line.items);
 }
 pub fn appendToolResult(allocator: Allocator, path: []const u8, call: provider.ToolCall, result: tools.ToolResult) !void {
     var line: std.ArrayList(u8) = .empty;
@@ -159,12 +198,26 @@ pub fn appendCompaction(allocator: Allocator, path: []const u8, message_count: u
     try appendLine(path, line.items);
 }
 
+pub fn appendRecovery(allocator: Allocator, path: []const u8, message_count: usize, compaction_message_count: usize, context: []const u8) !void {
+    var line: std.ArrayList(u8) = .empty;
+    defer line.deinit(allocator);
+    try beginRow(allocator, &line, "recovery");
+    try line.print(allocator, ",\"message_count\":{d},\"compaction_message_count\":{d},\"context\":", .{ message_count, compaction_message_count });
+    try files.appendJsonString(allocator, &line, context);
+    try line.appendSlice(allocator, "}\n");
+    try appendLine(path, line.items);
+}
+
 fn parseOwnedRaw(allocator: Allocator, raw: []u8) !Log {
     errdefer allocator.free(raw);
     var messages: std.ArrayList(Message) = .empty;
     errdefer freeMessages(allocator, messages.items);
     var compaction: ?Compaction = null;
     errdefer if (compaction) |c| c.deinit(allocator);
+    var recovery: ?Recovery = null;
+    errdefer if (recovery) |r| r.deinit(allocator);
+    var provider_usage: ?ProviderUsage = null;
+    errdefer if (provider_usage) |usage| usage.deinit(allocator);
     var lines = std.mem.splitScalar(u8, raw, '\n');
     while (lines.next()) |line| {
         if (std.mem.trim(u8, line, " \t\r").len == 0) continue;
@@ -179,9 +232,22 @@ fn parseOwnedRaw(allocator: Allocator, raw: []u8) !Log {
             if (count != .integer or count.integer < 0) continue;
             if (compaction) |old| old.deinit(allocator);
             compaction = .{ .message_count = @intCast(count.integer), .summary = try allocator.dupe(u8, summary) };
+        } else if (std.mem.eql(u8, typ, "recovery")) {
+            const message_count = row.get("message_count") orelse continue;
+            const compaction_message_count = row.get("compaction_message_count") orelse continue;
+            const context = stringField(row, "context") orelse continue;
+            if (message_count != .integer or message_count.integer < 0) continue;
+            if (compaction_message_count != .integer or compaction_message_count.integer < 0) continue;
+            if (recovery) |old| old.deinit(allocator);
+            recovery = .{ .message_count = @intCast(message_count.integer), .compaction_message_count = @intCast(compaction_message_count.integer), .context = try allocator.dupe(u8, context) };
+        } else if (std.mem.eql(u8, typ, "provider_usage")) {
+            const prompt_tokens = row.get("prompt_tokens") orelse continue;
+            if (prompt_tokens != .integer or prompt_tokens.integer < 0) continue;
+            if (provider_usage) |old| old.deinit(allocator);
+            provider_usage = .{ .model = try allocator.dupe(u8, stringField(row, "model") orelse ""), .prompt_tokens = @intCast(prompt_tokens.integer) };
         }
     }
-    return .{ .raw = raw, .messages = try messages.toOwnedSlice(allocator), .compaction = compaction };
+    return .{ .raw = raw, .messages = try messages.toOwnedSlice(allocator), .compaction = compaction, .recovery = recovery, .provider_usage = provider_usage };
 }
 
 fn writeSessionStart(allocator: Allocator, path: []const u8, id: []const u8) !void {
@@ -202,6 +268,14 @@ fn appendMessage(allocator: Allocator, path: []const u8, message: provider.Messa
     try files.appendJsonString(allocator, &line, message.role);
     try line.appendSlice(allocator, ",\"content\":");
     try files.appendJsonString(allocator, &line, message.content);
+    if (message.model) |model_id| if (model_id.len != 0) {
+        try line.appendSlice(allocator, ",\"model\":");
+        try files.appendJsonString(allocator, &line, model_id);
+    };
+    if (message.reasoning) |reasoning| if (reasoning.len != 0) {
+        try line.appendSlice(allocator, ",\"reasoning\":");
+        try files.appendJsonString(allocator, &line, reasoning);
+    };
     if (message.name) |name| {
         try line.appendSlice(allocator, ",\"name\":");
         try files.appendJsonString(allocator, &line, name);
@@ -252,7 +326,7 @@ fn timestamp(allocator: Allocator) ![]u8 {
 }
 
 fn readMessage(allocator: Allocator, row: std.json.ObjectMap) !Message {
-    return .{ .role = try dupeField(allocator, row, "role"), .content = try allocator.dupe(u8, stringField(row, "content") orelse ""), .name = try optionalField(allocator, row, "name"), .tool_call_id = try optionalField(allocator, row, "tool_call_id"), .tool_calls = try readToolCalls(allocator, row) };
+    return .{ .role = try dupeField(allocator, row, "role"), .content = try allocator.dupe(u8, stringField(row, "content") orelse ""), .model = try optionalField(allocator, row, "model"), .reasoning = try optionalField(allocator, row, "reasoning"), .name = try optionalField(allocator, row, "name"), .tool_call_id = try optionalField(allocator, row, "tool_call_id"), .tool_calls = try readToolCalls(allocator, row) };
 }
 fn readToolMessage(allocator: Allocator, row: std.json.ObjectMap) !Message {
     return .{ .role = try allocator.dupe(u8, "tool"), .content = try allocator.dupe(u8, stringField(row, "content") orelse ""), .name = try optionalField(allocator, row, "name"), .tool_call_id = try optionalField(allocator, row, "tool_call_id") };
@@ -433,6 +507,7 @@ fn renderMessageSmart(allocator: Allocator, out: *std.ArrayList(u8), message: Me
     }
     const content = try truncateMessageContent(allocator, message, index, truncate_chars);
     defer allocator.free(content);
+    if (message.reasoning) |reasoning| if (reasoning.len != 0) try out.print(allocator, "{s} reasoning: {s}\n", .{ message.role, reasoning });
     try out.print(allocator, "{s}: {s}\n", .{ message.role, content });
 }
 

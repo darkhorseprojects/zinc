@@ -4,7 +4,6 @@ const ctxmod = @import("context.zig");
 const files = @import("../io/fs.zig");
 const layout = @import("../io/layout.zig");
 const graph = @import("mod.zig");
-const provider = @import("../model/provider.zig");
 const resource = @import("resource.zig");
 const sessions = @import("../session/mod.zig");
 const trace = @import("../io/trace.zig");
@@ -20,7 +19,7 @@ fn fail(comptime fmt: []const u8, args: anytype) error{UserError}!void {
 pub fn run(allocator: Allocator, io: std.Io, layout_ctx: layout.Context, user_prompt: []const u8, resume_id: ?[]const u8, continue_last: bool, graph_path_override: ?[]const u8, runtime_inputs: []const graph.RuntimeInput) !void {
     const runtime_paths = try config.loadRuntimePaths(allocator, io, layout_ctx);
     defer runtime_paths.deinit(allocator);
-    return runGraph(allocator, io, layout_ctx, graph_path_override orelse runtime_paths.graph, null, user_prompt, resume_id, continue_last, runtime_inputs);
+    return runGraph(allocator, io, layout_ctx, graph_path_override orelse runtime_paths.graph, null, null, user_prompt, resume_id, continue_last, runtime_inputs);
 }
 
 pub fn compactSession(allocator: Allocator, io: std.Io, layout_ctx: layout.Context, graph_path: []const u8, resume_id: ?[]const u8, continue_last: bool) !void {
@@ -34,7 +33,7 @@ pub fn compactSession(allocator: Allocator, io: std.Io, layout_ctx: layout.Conte
     try sessions.rememberLast(session);
 }
 
-pub fn runGraph(allocator: Allocator, io: std.Io, layout_ctx: layout.Context, graph_path: []const u8, selected_export: ?[]const u8, user_prompt: []const u8, resume_id: ?[]const u8, continue_last: bool, runtime_inputs: []const graph.RuntimeInput) !void {
+pub fn runGraph(allocator: Allocator, io: std.Io, layout_ctx: layout.Context, graph_path: []const u8, selected_export: ?[]const u8, model_override: ?[]const u8, user_prompt: []const u8, resume_id: ?[]const u8, continue_last: bool, runtime_inputs: []const graph.RuntimeInput) !void {
     const span = trace.span("engine_run");
     defer span.end("engine", "graph={s} prompt_chars={d}", .{ graph_path, user_prompt.len });
 
@@ -44,7 +43,7 @@ pub fn runGraph(allocator: Allocator, io: std.Io, layout_ctx: layout.Context, gr
     const target = graph.exportTargetResourceId(loaded_graph, selected_export) orelse return fail("graph has no default export; add `exports.main` or pass `--export`", .{});
     if (graph.resource(loaded_graph, target) == null) return fail("export target not found: {s}", .{target});
 
-    const model_id = try config.resolveGraphModelId(allocator, io, loaded_graph, selected_export, layout_ctx);
+    const model_id = if (model_override) |id| try allocator.dupe(u8, id) else try config.resolveGraphModelId(allocator, io, loaded_graph, selected_export, layout_ctx);
     defer allocator.free(model_id);
     const profile = try config.loadRuntimeProfile(allocator, io, layout_ctx, model_id);
     defer profile.deinit(allocator);
@@ -54,13 +53,13 @@ pub fn runGraph(allocator: Allocator, io: std.Io, layout_ctx: layout.Context, gr
 
     var log = try sessions.readParsed(allocator, session.path);
     defer log.deinit(allocator);
-    if (try shouldCompactLog(allocator, log, &profile)) {
+    if (try shouldCompactLog(allocator, io, log, &profile)) {
         try runCompaction(allocator, io, layout_ctx, &profile, session, profile.paths.compaction_graph);
         log.deinit(allocator);
         log = try sessions.readParsed(allocator, session.path);
     }
 
-    const recovered_context = if (try shouldRecoverContext(allocator, loaded_graph, selected_export, log, &profile)) try runContextRecovery(allocator, io, layout_ctx, &profile, session, log, profile.paths.context_graph) else null;
+    const recovered_context = try recoveredContextForRun(allocator, io, layout_ctx, loaded_graph, selected_export, &profile, session, log);
     defer if (recovered_context) |text| allocator.free(text);
     const graph_inputs = try runtimeInputsForLoop(allocator, loaded_graph, selected_export, runtime_inputs, recovered_context);
     defer freeRuntimeInputList(allocator, graph_inputs, runtime_inputs.len);
@@ -88,13 +87,21 @@ pub fn runGraph(allocator: Allocator, io: std.Io, layout_ctx: layout.Context, gr
 
     log.deinit(allocator);
     log = try sessions.readParsed(allocator, session.path);
-    if (try shouldCompactLog(allocator, log, &profile)) try runCompaction(allocator, io, layout_ctx, &profile, session, profile.paths.compaction_graph);
+    if (try shouldCompactLog(allocator, io, log, &profile)) try runCompaction(allocator, io, layout_ctx, &profile, session, profile.paths.compaction_graph);
 }
 
-fn shouldRecoverContext(allocator: Allocator, loaded_graph: graph.Graph, selected_export: ?[]const u8, log: sessions.Log, profile: *const config.RuntimeProfile) !bool {
-    if (!try graph.hasInputForExport(allocator, loaded_graph, selected_export, "recovered_context")) return false;
-    if (log.compaction != null) return true;
-    return log.messageCount() > profile.runtime.session_head_messages + profile.runtime.session_tail_messages;
+fn recoveredContextForRun(allocator: Allocator, io: std.Io, layout_ctx: layout.Context, loaded_graph: graph.Graph, selected_export: ?[]const u8, profile: *const config.RuntimeProfile, session: sessions.Session, log: sessions.Log) !?[]u8 {
+    if (!try graph.hasInputForExport(allocator, loaded_graph, selected_export, "recovered_context")) return null;
+    const boundary = compactionBoundary(log);
+    if (log.recovery) |recovery| if (recovery.compaction_message_count == boundary) return try allocator.dupe(u8, recovery.context);
+    const context = try runContextRecovery(allocator, io, layout_ctx, profile, session, log, profile.paths.context_graph);
+    errdefer allocator.free(context);
+    if (log.messageCount() != 0) try sessions.appendRecovery(allocator, session.path, log.messageCount(), boundary, context);
+    return context;
+}
+
+fn compactionBoundary(log: sessions.Log) usize {
+    return if (log.compaction) |c| c.message_count else 0;
 }
 
 fn runCompaction(allocator: Allocator, io: std.Io, layout_ctx: layout.Context, profile: *const config.RuntimeProfile, session: sessions.Session, graph_path: []const u8) !void {
@@ -234,32 +241,19 @@ fn appendMessageLine(allocator: Allocator, out: *std.ArrayList(u8), index: usize
     try out.append(allocator, '\n');
 }
 
-fn shouldCompactLog(allocator: Allocator, log: sessions.Log, profile: *const config.RuntimeProfile) !bool {
+fn shouldCompactLog(allocator: Allocator, io: std.Io, log: sessions.Log, profile: *const config.RuntimeProfile) !bool {
+    _ = io;
     if (profile.runtime.compaction_threshold_percent == 0 or log.messageCount() == 0) return false;
     if (log.compaction) |c| if (c.message_count >= log.messageCount()) return false;
-    var messages: std.ArrayList(provider.Message) = .empty;
-    defer messages.deinit(allocator);
-    defer provider.freeMessages(allocator, messages.items);
-    try log.appendReplayMessages(allocator, &messages, "", profile.runtime.session_head_messages, profile.runtime.session_tail_messages, profile.runtime.replay_truncate_chars);
-    return shouldCompactMessages(messages.items, profile);
+    const prompt_tokens = try promptTokensForCompaction(allocator, log, profile);
+    return prompt_tokens >= profile.model.context_window * profile.runtime.compaction_threshold_percent / 100;
 }
 
-fn shouldCompactMessages(messages: []const provider.Message, profile: *const config.RuntimeProfile) bool {
-    const context_tokens = profile.model.loader.fit_ctx;
-    if (context_tokens == 0) return false;
-    return messageChars(messages) / context_chars_per_token >= context_tokens * profile.runtime.compaction_threshold_percent / 100;
-}
-
-fn messageChars(messages: []const provider.Message) usize {
-    var n: usize = 0;
-    for (messages) |m| {
-        n += m.role.len + m.content.len;
-        for (m.parts) |part| switch (part) {
-            .text => |text| n += text.len,
-            .image_url => |url| n += url.len,
-        };
-    }
-    return n;
+fn promptTokensForCompaction(allocator: Allocator, log: sessions.Log, profile: *const config.RuntimeProfile) !usize {
+    if (log.latestPromptTokens(profile.model.id)) |tokens| return tokens;
+    const transcript = try log.transcript(allocator, profile.runtime.session_head_messages, profile.runtime.session_tail_messages, profile.runtime.replay_truncate_chars);
+    defer allocator.free(transcript);
+    return (transcript.len + profile.model.chars_per_token - 1) / profile.model.chars_per_token;
 }
 
 fn parseStringField(allocator: Allocator, text: []const u8, field: []const u8) ![]u8 {
