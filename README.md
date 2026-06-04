@@ -71,25 +71,22 @@ zn graph list
 zn graph show <graph>
 zn config get <path>
 zn pkg list
-zn pkg add [--local|--global] [--replace] [--yes] <source>
-zn pkg remove [--local|--global] [--yes] <name>
+zn pkg add [--local|--global] [--replace] [--yes] [--model id] <source>
+zn pkg remove [--local|--global] [--yes] [--model id] <name>
 zn pkg update [--local|--global] [--yes] <name|--all>
 zn pkg show [--local|--global] <name>
 zn pkg exec <package> <script>
-zn pkg attach <package>
-zn pkg detach <package>
-zn pkg attachments
 zn doctor
 ```
 
 ## Stock loop
 
-`zinc-loop` is the normal assistant graph. It includes Zinc's built-in tools and can be extended by attached packages.
+`zinc-loop` is the normal assistant graph. It includes Zinc's built-in tools and can be extended by local packages.
 
-Use `--default` to run the stock graph without package extensions:
+Use `--default` to run the stock graph without local package changes:
 
 ```bash
-zn --default "answer without package extensions"
+zn --default "answer without package changes"
 ```
 
 
@@ -190,7 +187,7 @@ Zinc normalizes trailing slashes so `/v1/chat/completions` is not doubled. `zn d
 
 ## Tools
 
-Zinc only exposes tools declared by the active `model` resource. Attached packages can extend `zinc-loop`; `--default` bypasses those package extensions and runs the stock graph.
+Zinc only exposes tools declared by the active `model` resource. Local packages can extend `zinc-loop`; `--default` runs the stock graph.
 
 ```yaml
 resources:
@@ -240,7 +237,17 @@ Zinc stores sessions as JSONL under `.zinc/sessions`; that is an internal storag
 
 ## Packages
 
-A Zinc package is a runtime/ecosystem convention, not Circuitry core. Packages are YAML-native and can provide graphs, prompts, files, tools, scripts, and attach options while their graphs remain Circuitry source files. Package attach state is graph-native in `.zinc/graphs/zinc-extensions.circuitry.yaml`.
+A Zinc package can provide graphs, prompts, files, tools, scripts, and an optional `install.model` patch. Local package install patches extend `.zinc/graphs/zinc-loop.circuitry.yaml` and write package context resources to `.zinc/graphs/zinc-packages.circuitry.yaml`.
+
+```yaml
+install:
+  model:
+    input:
+      - prompt:hello_prompt
+      - file:hello_asset
+    tools:
+      - hello_process
+```
 
 ## License
 

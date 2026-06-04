@@ -32,14 +32,11 @@ pub fn usage() void {
         \\  zn graph list
         \\  zn graph show <graph>
         \\  zn pkg list
-        \\  zn pkg add [--local|--global] [--replace] [--yes] <source>
-        \\  zn pkg remove [--local|--global] [--yes] <name>
+        \\  zn pkg add [--local|--global] [--replace] [--yes] [--model id] <source>
+        \\  zn pkg remove [--local|--global] [--yes] [--model id] <name>
         \\  zn pkg update [--local|--global] [--yes] <name|--all>
         \\  zn pkg show [--local|--global] <name>
         \\  zn pkg exec <package> <script>
-        \\  zn pkg attach <package>
-        \\  zn pkg detach <package>
-        \\  zn pkg attachments
         \\  zn pkg call <tool> <json-arguments>
         \\  zn session-dir
         \\
@@ -269,15 +266,21 @@ pub fn packageList(allocator: Allocator, io: std.Io, layout_ctx: layout.Context)
 pub fn packageAdd(allocator: Allocator, io: std.Io, layout_ctx: layout.Context, args: []const []const u8) !void {
     const parsed = try parsePackageArgs(args, true);
     const source = parsed.value orelse return error.MissingPackageSource;
-    const options = packages.InstallOptions{ .scope = parsed.scope orelse .local, .replace = parsed.replace };
+    const options = packages.InstallOptions{ .scope = parsed.scope orelse .local, .replace = parsed.replace, .model = parsed.model };
     const plan = packages.previewAdd(allocator, io, layout_ctx, source, options) catch |err| switch (err) {
         error.InvalidPackageManifest => return fail("invalid package manifest", .{}),
+        error.PackageInstallTargetRequired => return fail("package install target required; pass --model <id>", .{}),
+        error.PackageInstallTargetNotFound => return fail("package install target not found", .{}),
         else => return err,
     };
     defer plan.deinit(allocator, io);
     std.debug.print("Install Zinc package\n\n{s}\n", .{plan.text});
     if (!parsed.yes) try confirmOrFail("Install?");
-    var package = try packages.installPreviewed(allocator, io, layout_ctx, plan, source, options);
+    var package = packages.installPreviewed(allocator, io, layout_ctx, plan, source, options) catch |err| switch (err) {
+        error.PackageInstallTargetRequired => return fail("package install target required; pass --model <id>", .{}),
+        error.PackageInstallTargetNotFound => return fail("package install target not found", .{}),
+        else => return err,
+    };
     defer package.deinit(allocator);
     std.debug.print("added {s}: {s}\n", .{ scopeName(package.scope), package.path });
 }
@@ -288,7 +291,11 @@ pub fn packageRemove(allocator: Allocator, io: std.Io, layout_ctx: layout.Contex
     defer allocator.free(text);
     std.debug.print("Remove Zinc package\n\n{s}\n", .{text});
     if (!parsed.yes) try confirmOrFail("Remove?");
-    var package = try packages.remove(allocator, io, layout_ctx, name, parsed.scope);
+    var package = packages.remove(allocator, io, layout_ctx, name, parsed.scope, parsed.model) catch |err| switch (err) {
+        error.PackageInstallTargetRequired => return fail("package install target required; pass --model <id>", .{}),
+        error.PackageInstallTargetNotFound => return fail("package install target not found", .{}),
+        else => return err,
+    };
     defer package.deinit(allocator);
     std.debug.print("removed {s}: {s}\n", .{ scopeName(package.scope), package.name });
 }
@@ -324,28 +331,6 @@ pub fn packageShow(allocator: Allocator, io: std.Io, layout_ctx: layout.Context,
 pub fn packageExec(allocator: Allocator, io: std.Io, layout_ctx: layout.Context, args: []const []const u8) !void {
     if (args.len < 2) return error.MissingPackageScript;
     const out = try packages.execScript(allocator, io, layout_ctx, args[0], args[1]);
-    defer allocator.free(out);
-    std.debug.print("{s}", .{out});
-}
-
-pub fn packageAttach(allocator: Allocator, io: std.Io, layout_ctx: layout.Context, args: []const []const u8) !void {
-    if (args.len != 1) return error.MissingPackageName;
-    const out = try packages.attach(allocator, io, layout_ctx, args[0]);
-    defer allocator.free(out);
-    std.debug.print("{s}", .{out});
-}
-
-pub fn packageDetach(allocator: Allocator, io: std.Io, layout_ctx: layout.Context, args: []const []const u8) !void {
-    if (args.len != 1) return error.MissingPackageName;
-    const out = try packages.detach(allocator, io, layout_ctx, args[0]);
-    defer allocator.free(out);
-    std.debug.print("{s}", .{out});
-}
-
-pub fn packageAttachments(allocator: Allocator, io: std.Io, layout_ctx: layout.Context, args: []const []const u8) !void {
-    _ = layout_ctx;
-    if (args.len != 0) return error.TooManyArguments;
-    const out = try packages.attachments(allocator, io);
     defer allocator.free(out);
     std.debug.print("{s}", .{out});
 }
@@ -418,16 +403,22 @@ fn runCommand(allocator: Allocator, io: std.Io, argv: []const []const u8, contex
     return error.UserError;
 }
 
-const PackageArgs = struct { scope: ?packages.Scope = null, replace: bool = false, yes: bool = false, value: ?[]const u8 = null };
+const PackageArgs = struct { scope: ?packages.Scope = null, replace: bool = false, yes: bool = false, model: ?[]const u8 = null, value: ?[]const u8 = null };
 fn parsePackageArgs(args: []const []const u8, allow_replace: bool) !PackageArgs {
     var parsed = PackageArgs{};
-    for (args) |arg| {
+    var i: usize = 0;
+    while (i < args.len) : (i += 1) {
+        const arg = args[i];
         if (std.mem.eql(u8, arg, "--local")) {
             if (parsed.scope != null) return error.ConflictingScopeFlags;
             parsed.scope = .local;
         } else if (std.mem.eql(u8, arg, "--global")) {
             if (parsed.scope != null) return error.ConflictingScopeFlags;
             parsed.scope = .global;
+        } else if (std.mem.eql(u8, arg, "--model")) {
+            i += 1;
+            if (i >= args.len) return error.MissingModelId;
+            parsed.model = args[i];
         } else if (std.mem.eql(u8, arg, "--replace") and allow_replace) parsed.replace = true else if (std.mem.eql(u8, arg, "--yes")) parsed.yes = true else if (parsed.value == null) parsed.value = arg else return error.TooManyArguments;
     }
     return parsed;

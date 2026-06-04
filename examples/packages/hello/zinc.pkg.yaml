@@ -14,15 +14,12 @@ scripts:
     linux: scripts/check
     macos: scripts/check
     windows: scripts/check.cmd
-attach:
-  target:
-    kind: model
-  resources:
-    - hello_prompt
-  input:
-    - hello_prompt
-  tools:
-    - hello_process
+install:
+  model:
+    input:
+      - prompt:hello_prompt
+    tools:
+      - hello_process
 tools:
   hello_process:
     label: Hello process

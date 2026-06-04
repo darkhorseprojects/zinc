@@ -81,9 +81,6 @@ fn packageCommandArgs(allocator: std.mem.Allocator, io: std.Io, layout_ctx: layo
     if (std.mem.eql(u8, sub, "update")) return commands.packageUpdate(allocator, io, layout_ctx, parts);
     if (std.mem.eql(u8, sub, "show")) return commands.packageShow(allocator, io, layout_ctx, parts);
     if (std.mem.eql(u8, sub, "exec")) return commands.packageExec(allocator, io, layout_ctx, parts);
-    if (std.mem.eql(u8, sub, "attach")) return commands.packageAttach(allocator, io, layout_ctx, parts);
-    if (std.mem.eql(u8, sub, "detach")) return commands.packageDetach(allocator, io, layout_ctx, parts);
-    if (std.mem.eql(u8, sub, "attachments")) return commands.packageAttachments(allocator, io, layout_ctx, parts);
     if (std.mem.eql(u8, sub, "call")) return commands.packageCall(allocator, io, layout_ctx, parts);
     return commands.usage();
 }
