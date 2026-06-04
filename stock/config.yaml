@@ -67,20 +67,15 @@ models:
       mmproj: Qwen3.6-27B-uncensored-heretic-v2-Native-MTP-Preserved.mmproj-Q8_0.gguf
     generation:
       temperature: 0.6
-      max_tokens: 1024
+      max_tokens: 128
     reasoning:
       enabled: true
-      effort: low
-      budgets:
+      max: low
+      max_tokens:
         off: 0
-        low: 256
-        medium: 1024
-        high: 4096
-        extra_high: -1
+        low: 32
+        medium: 512
+        high: 1024
+        unlimited: -1
     protocol:
       reasoning:
-        content_markers:
-          starts:
-            - "<think>\n"
-            - "<think>"
-          end: "</think>"

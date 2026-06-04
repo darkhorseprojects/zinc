@@ -85,27 +85,27 @@ pub const ProviderConfig = struct {
     }
 };
 pub const GenerationConfig = struct { temperature: f64, max_tokens: usize };
-pub const ReasoningBudgets = struct {
+pub const ReasoningMaxima = struct {
     off: isize,
     low: isize,
     medium: isize,
     high: isize,
-    extra_high: isize,
-    pub fn get(self: ReasoningBudgets, name: []const u8) !isize {
+    unlimited: isize,
+    pub fn get(self: ReasoningMaxima, name: []const u8) !isize {
         if (std.mem.eql(u8, name, "off")) return self.off;
         if (std.mem.eql(u8, name, "low")) return self.low;
         if (std.mem.eql(u8, name, "medium")) return self.medium;
         if (std.mem.eql(u8, name, "high")) return self.high;
-        if (std.mem.eql(u8, name, "extra_high") or std.mem.eql(u8, name, "extra-high")) return self.extra_high;
+        if (std.mem.eql(u8, name, "unlimited")) return self.unlimited;
         return error.InvalidConfigValue;
     }
 };
 pub const ReasoningConfig = struct {
     enabled: bool,
-    effort: []u8,
-    budgets: ReasoningBudgets,
+    max: []u8,
+    maxima: ReasoningMaxima,
     pub fn deinit(self: ReasoningConfig, allocator: Allocator) void {
-        allocator.free(self.effort);
+        allocator.free(self.max);
     }
 };
 pub const LoaderConfig = struct {
@@ -187,13 +187,11 @@ pub const RuntimeProfile = struct {
         self.provider.deinit(allocator);
         self.model.deinit(allocator);
     }
-    pub fn reasoningTokens(self: RuntimeProfile, allow_with_tools: bool) !isize {
-        if (!self.model.reasoning.enabled or !allow_with_tools) return 0;
-        return self.model.reasoning.budgets.get(self.model.reasoning.effort);
-    }
-    pub fn requestTokenLimit(self: RuntimeProfile, reasoning_tokens: isize) ?usize {
-        if (reasoning_tokens < 0) return null;
-        return self.model.generation.max_tokens + @as(usize, @intCast(reasoning_tokens));
+
+    pub fn reasoningMaxTokens(self: RuntimeProfile) !?isize {
+        if (!self.model.reasoning.enabled) return 0;
+        const max = try self.model.reasoning.maxima.get(self.model.reasoning.max);
+        return max;
     }
 };
 
@@ -486,13 +484,13 @@ fn loadModel(allocator: Allocator, cfg: Config, id: []const u8) !ModelConfig {
         .generation = .{ .temperature = try cfg.f64Value(&.{ "models", id, "generation", "temperature" }, 0.6), .max_tokens = try cfg.usizeValue(&.{ "models", id, "generation", "max_tokens" }, 1024) },
         .reasoning = .{
             .enabled = try cfg.boolValue(&.{ "models", id, "reasoning", "enabled" }, true),
-            .effort = try cfg.string(allocator, &.{ "models", id, "reasoning", "effort" }, "low"),
-            .budgets = .{
-                .off = try cfg.isizeValue(&.{ "models", id, "reasoning", "budgets", "off" }, 0),
-                .low = try cfg.isizeValue(&.{ "models", id, "reasoning", "budgets", "low" }, 256),
-                .medium = try cfg.isizeValue(&.{ "models", id, "reasoning", "budgets", "medium" }, 1024),
-                .high = try cfg.isizeValue(&.{ "models", id, "reasoning", "budgets", "high" }, 4096),
-                .extra_high = try cfg.isizeValue(&.{ "models", id, "reasoning", "budgets", "extra_high" }, -1),
+            .max = try cfg.string(allocator, &.{ "models", id, "reasoning", "max" }, "low"),
+            .maxima = .{
+                .off = try cfg.isizeValue(&.{ "models", id, "reasoning", "max_tokens", "off" }, 0),
+                .low = try cfg.isizeValue(&.{ "models", id, "reasoning", "max_tokens", "low" }, 128),
+                .medium = try cfg.isizeValue(&.{ "models", id, "reasoning", "max_tokens", "medium" }, 512),
+                .high = try cfg.isizeValue(&.{ "models", id, "reasoning", "max_tokens", "high" }, 1024),
+                .unlimited = try cfg.isizeValue(&.{ "models", id, "reasoning", "max_tokens", "unlimited" }, -1),
             },
         },
         .reasoning_request = try reasoningRequest(allocator, cfg, id),

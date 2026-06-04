@@ -175,6 +175,14 @@ models:
 
 ## Tools
 
+The default `zinc-loop` graph is lean chat + session memory. It does not attach tools to every turn, so ordinary prompts stay fast.
+
+Use `zinc-agent` when you explicitly want file, shell, package, or graph tools:
+
+```bash
+zn run zinc-agent "inspect this repo"
+```
+
 Zinc only exposes tools declared by the active `model` resource.
 
 ```yaml

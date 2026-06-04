@@ -35,6 +35,7 @@ zig build -Doptimize=ReleaseFast
 mkdir -p "$bin_dir" "$share_dir/graphs" "$share_dir/prompts" "$config_dir"
 install -m 0755 "$root/zig-out/bin/zn" "$bin_dir/zn"
 install -m 0644 "$root/stock/graphs/zinc-loop.circuitry.yaml" "$share_dir/graphs/zinc-loop.circuitry.yaml"
+install -m 0644 "$root/stock/graphs/zinc-agent.circuitry.yaml" "$share_dir/graphs/zinc-agent.circuitry.yaml"
 install -m 0644 "$root/stock/graphs/zinc-context-recovery.circuitry.yaml" "$share_dir/graphs/zinc-context-recovery.circuitry.yaml"
 install -m 0644 "$root/stock/graphs/zinc-compaction.circuitry.yaml" "$share_dir/graphs/zinc-compaction.circuitry.yaml"
 install -m 0644 "$root/stock/prompts/circuitry-author.md" "$share_dir/prompts/circuitry-author.md"
@@ -111,24 +112,18 @@ models:
       mmproj: Qwen3.6-27B-uncensored-heretic-v2-Native-MTP-Preserved.mmproj-Q8_0.gguf
     generation:
       temperature: 0.6
-      max_tokens: 1024
+      max_tokens: 128
     reasoning:
       enabled: true
-      effort: low
-      budgets:
+      max: low
+      max_tokens:
         off: 0
-        low: 256
-        medium: 1024
-        high: 4096
-        extra_high: -1
+        low: 32
+        medium: 512
+        high: 1024
+        unlimited: -1
     protocol:
       reasoning:
-        content_markers:
-          starts:
-            - "<think>\n"
-            - "<think>"
-          end: "</think>"
-
 EOF_CONFIG
 fi
 chmod 600 "$config_file"

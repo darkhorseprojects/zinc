@@ -9,7 +9,7 @@ const error_preview_chars: usize = 1200;
 pub const Request = struct {
     profile: *const config.RuntimeProfile,
     max_tokens: ?usize,
-    reasoning_budget_tokens: ?usize,
+    reasoning_max_tokens: ?isize,
     json_response: bool = false,
     tools_json: []const u8,
     messages: []const Message,
@@ -133,8 +133,8 @@ fn writeChatRequest(allocator: Allocator, out: *std.ArrayList(u8), request: Requ
     if (request.max_tokens) |max_tokens| {
         try out.print(allocator, ",\"max_tokens\":{d}", .{max_tokens});
     }
-    if (request.reasoning_budget_tokens) |budget| try out.print(allocator, ",\"thinking_budget_tokens\":{d}", .{budget});
-    try writeConfiguredReasoningRequest(allocator, out, profile, request.reasoning_budget_tokens != null);
+    if (request.reasoning_max_tokens) |max| try out.print(allocator, ",\"thinking_budget_tokens\":{d}", .{max});
+    try writeConfiguredReasoningRequest(allocator, out, profile, profile.model.reasoning.enabled);
     if (request.json_response) try out.appendSlice(allocator, ",\"response_format\":{\"type\":\"json_object\"}");
     try out.appendSlice(allocator, ",\"messages\":[");
     for (request.messages, 0..) |msg, i| {

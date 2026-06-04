@@ -60,7 +60,7 @@ pub fn runGraph(allocator: Allocator, io: std.Io, layout_ctx: layout.Context, gr
         log = try sessions.readParsed(allocator, session.path);
     }
 
-    const recovered_context = if (try graph.hasInputForExport(allocator, loaded_graph, selected_export, "recovered_context")) try runContextRecovery(allocator, io, layout_ctx, &profile, session, log, profile.paths.context_graph) else null;
+    const recovered_context = if (try shouldRecoverContext(allocator, loaded_graph, selected_export, log, &profile)) try runContextRecovery(allocator, io, layout_ctx, &profile, session, log, profile.paths.context_graph) else null;
     defer if (recovered_context) |text| allocator.free(text);
     const graph_inputs = try runtimeInputsForLoop(allocator, loaded_graph, selected_export, runtime_inputs, recovered_context);
     defer freeRuntimeInputList(allocator, graph_inputs, runtime_inputs.len);
@@ -89,6 +89,12 @@ pub fn runGraph(allocator: Allocator, io: std.Io, layout_ctx: layout.Context, gr
     log.deinit(allocator);
     log = try sessions.readParsed(allocator, session.path);
     if (try shouldCompactLog(allocator, log, &profile)) try runCompaction(allocator, io, layout_ctx, &profile, session, profile.paths.compaction_graph);
+}
+
+fn shouldRecoverContext(allocator: Allocator, loaded_graph: graph.Graph, selected_export: ?[]const u8, log: sessions.Log, profile: *const config.RuntimeProfile) !bool {
+    if (!try graph.hasInputForExport(allocator, loaded_graph, selected_export, "recovered_context")) return false;
+    if (log.compaction != null) return true;
+    return log.messageCount() > profile.runtime.session_head_messages + profile.runtime.session_tail_messages;
 }
 
 fn runCompaction(allocator: Allocator, io: std.Io, layout_ctx: layout.Context, profile: *const config.RuntimeProfile, session: sessions.Session, graph_path: []const u8) !void {

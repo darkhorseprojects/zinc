@@ -1,0 +1,41 @@
+circuitry: "0.5"
+title: Zinc tool agent
+description: Tool-enabled Zinc assistant for explicit file, shell, package, and graph work.
+
+exports:
+  main:
+    run: assistant
+    input:
+      user_turn: string
+      recovered_context: string
+
+resources:
+  bash_guide:
+    text:
+      uri: prompt:bash-guide
+
+  circuitry_author:
+    text:
+      uri: prompt:circuitry-author
+
+  assistant:
+    model:
+      identity: Zinc
+      input:
+        - $user_turn
+        - $recovered_context
+        - bash_guide
+        - circuitry_author
+      tools:
+        - read
+        - write
+        - edit
+        - bash
+        - run_graph
+      instructions: |
+        You are Zinc, a small local coding model runtime.
+        Be direct, accurate, and natural.
+        Use tools for explicit file, shell, package, or graph work.
+        Treat recovered_context as bounded session memory with URI hints for exact reads.
+        Read prompt resources when relevant.
+        You may write Circuitry graphs and request graph runs with run_graph.

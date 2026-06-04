@@ -125,9 +125,11 @@ fn resolveModel(ctx: *RunContext, id: []const u8, res: graph.Resource) !Resolved
     defer system.deinit(ctx.allocator);
     try system.print(ctx.allocator, "Identity: {s}\n\n{s}", .{ identity, instructions });
     try appendToolPromptSections(ctx, &system, tool_names);
-    const catalog = try runtimeUriCatalog(ctx.allocator);
-    defer ctx.allocator.free(catalog);
-    try system.print(ctx.allocator, "\n\n{s}", .{catalog});
+    if (hasTool(tool_names, "read")) {
+        const catalog = try runtimeUriCatalog(ctx.allocator);
+        defer ctx.allocator.free(catalog);
+        try system.print(ctx.allocator, "\n\n{s}", .{catalog});
+    }
 
     const inputs = try graph.resourceInputsList(ctx.allocator, res);
     defer graph.freeStringList(ctx.allocator, inputs);
@@ -160,12 +162,12 @@ fn resolveModel(ctx: *RunContext, id: []const u8, res: graph.Resource) !Resolved
         try sessions.rememberLast(ctx.session);
     }
 
-    const reasoning = try reasoningTokens(ctx.*);
-    const max_tokens = maxTokens(ctx.*, reasoning);
+    const max_tokens = maxTokens(ctx.*);
+    const reasoning_max = try ctx.profile.reasoningMaxTokens();
     const schema_value = graph.resourceSchemaValue(res);
     const wants_json = schema_value != null;
     const spec = model.Spec{ .label = id, .system = system.items, .tools = tool_names, .tools_json = tools_json, .json = wants_json, .schema = schema_value, .runtime_reads = true };
-    const text = try model.run(ctx, &messages, spec, max_tokens, reasoningBudget(reasoning), executeTool);
+    const text = try model.run(ctx, &messages, spec, max_tokens, reasoning_max, executeTool);
     errdefer ctx.allocator.free(text);
     if (schema_value) |schema| try model.validateJsonSchema(ctx.allocator, schema, text) else if (wants_json) try model.validateJson(ctx.allocator, text);
     if (is_root) try sessions.appendAssistantText(ctx.allocator, ctx.session.path, std.mem.trim(u8, text, " \t\r\n"));
@@ -459,16 +461,10 @@ fn modelUserContent(allocator: Allocator, input_ids: []const []u8, input_texts: 
     return out.toOwnedSlice(allocator);
 }
 
-fn reasoningTokens(ctx: RunContext) !isize {
-    return switch (ctx.frame.kind) {
-        .maintenance, .interactive, .graph_run => ctx.profile.reasoningTokens(true),
-    };
-}
-
-fn maxTokens(ctx: RunContext, reasoning: isize) ?usize {
+fn maxTokens(ctx: RunContext) ?usize {
     return switch (ctx.frame.kind) {
         .maintenance => ctx.profile.runtime.compaction_max_tokens,
-        .interactive, .graph_run => ctx.profile.requestTokenLimit(reasoning),
+        .interactive, .graph_run => ctx.profile.model.generation.max_tokens,
     };
 }
 
@@ -505,9 +501,11 @@ fn appendToolPromptSections(ctx: *RunContext, prompt: *std.ArrayList(u8), tool_n
         try prompt.print(ctx.allocator, "\n\n- {s}: {s}", .{ tool, snippet });
     }
 }
+fn hasTool(tool_names: []const []u8, name: []const u8) bool {
+    for (tool_names) |tool| if (std.mem.eql(u8, tool, name)) return true;
+    return false;
+}
+
 fn runtimeUriCatalog(allocator: Allocator) ![]u8 {
     return allocator.dupe(u8, "Runtime reads\n\n- session:current: current session transcript with tool calls and tool results\n- session:last: current session id and path\n- sessions:index: session file index with latest user turns\n- sessions:dir: session directory\n- input:<id>: content for bound graph inputs");
-}
-fn reasoningBudget(tokens: isize) ?usize {
-    return if (tokens < 0) null else @intCast(tokens);
 }

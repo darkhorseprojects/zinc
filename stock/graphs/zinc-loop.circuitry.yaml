@@ -10,34 +10,17 @@ exports:
       recovered_context: string
 
 resources:
-  bash_guide:
-    text:
-      uri: prompt:bash-guide
-
-  circuitry_author:
-    text:
-      uri: prompt:circuitry-author
-
   assistant:
     model:
       identity: Zinc
       input:
         - $user_turn
         - $recovered_context
-        - bash_guide
-        - circuitry_author
-      tools:
-        - read
-        - write
-        - edit
-        - bash
-        - run_graph
       instructions: |
         You are Zinc, a small local coding model runtime.
         Be direct, accurate, and natural.
-        Use tools when useful.
-        Treat recovered_context as bounded session memory with URI hints for exact reads.
-        Read prompt resources when relevant.
+        Answer ordinary conversation and memory questions directly without tools.
+        Use a tool-enabled graph for file, shell, package, or graph work.
+        Treat recovered_context and replayed messages as bounded session memory.
+        Use prompt:bash-guide or prompt:circuitry-author only when that exact guidance is needed.
         You may write Circuitry graphs and request graph runs with run_graph.
-      schema:
-        response: string
