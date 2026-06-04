@@ -14,11 +14,38 @@ zn "inspect this repo"
 
 ## Install
 
+Install from the latest release. The installers copy `zn`, stock graphs, stock prompts, and the default config for the platform.
+
+| Platform | Release asset | Installer |
+| --- | --- | --- |
+| Linux x86_64 | `zinc-linux-x86_64.tar.gz` | `scripts/install-unix.sh` |
+| macOS Apple Silicon | `zinc-macos-aarch64.tar.gz` | `scripts/install-unix.sh` |
+| macOS Intel | `zinc-macos-x86_64.tar.gz` | `scripts/install-unix.sh` |
+| Windows x86_64 | `zinc-windows-x86_64.zip` | `scripts/install-windows.ps1` |
+
+Linux and macOS:
+
 ```bash
-./scripts/install-linux.sh
+curl -fsSL https://raw.githubusercontent.com/darkhorseprojects/zinc/main/scripts/install-unix.sh | sh
 ```
 
-The current installer targets Linux. The runtime itself keeps platform paths behind Zinc's layout layer:
+Windows PowerShell:
+
+```powershell
+iwr https://raw.githubusercontent.com/darkhorseprojects/zinc/main/scripts/install-windows.ps1 -OutFile install-zinc.ps1
+.\install-zinc.ps1
+```
+
+Manual install:
+
+1. Download the asset for your platform from <https://github.com/darkhorseprojects/zinc/releases/latest>.
+2. Extract it.
+3. Put `zn` or `zn.exe` on `PATH`.
+4. Copy `stock/graphs` and `stock/prompts` into the platform data directory below.
+5. Copy `stock/config.yaml` into the platform config path if no config exists yet.
+6. Run `zn doctor`.
+
+Zinc keeps platform paths behind its layout layer:
 
 ```text
 Linux config:   $XDG_CONFIG_HOME/zinc/config.yaml or ~/.config/zinc/config.yaml
@@ -58,6 +85,8 @@ zn stop
 
 ## Stock loop
 
+The default `zinc-loop` graph is a lean chat loop with session memory. It does not attach tool schemas to ordinary turns.
+
 ```yaml
 circuitry: "0.5"
 title: Zinc loop
@@ -67,26 +96,21 @@ exports:
     run: assistant
     input:
       user_turn: string
+      recovered_context: string
 
 resources:
-  bash_guide:
-    text:
-      uri: prompt:bash-guide
-
   assistant:
     model:
       identity: Zinc
       input:
         - $user_turn
-        - bash_guide
-      tools:
-        - read
-        - write
-        - edit
-        - bash
-        - run_graph
-      schema:
-        response: string
+        - $recovered_context
+```
+
+Use `zinc-agent` for explicit file, shell, package, or graph tool work:
+
+```bash
+zn run zinc-agent "inspect this repo"
 ```
 
 ## Runtime boundary

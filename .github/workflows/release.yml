@@ -36,10 +36,17 @@ jobs:
       - run: zig build -Doptimize=ReleaseFast -Dtarget=${{ matrix.target }}
       - name: Package archive
         run: |
+          package_dir="package"
+          rm -rf "$package_dir"
+          mkdir -p "$package_dir"
+          cp "zig-out/bin/${{ matrix.binary }}" "$package_dir/"
+          cp -R stock "$package_dir/stock"
+          cp README.md LICENSE "$package_dir/"
+          cp scripts/install-unix.sh scripts/install-windows.ps1 "$package_dir/"
           if [[ "${{ matrix.archive }}" == *.zip ]]; then
-            (cd zig-out/bin && zip "../../${{ matrix.archive }}" "${{ matrix.binary }}")
+            (cd "$package_dir" && zip -r "../${{ matrix.archive }}" .)
           else
-            tar -czf "${{ matrix.archive }}" -C zig-out/bin "${{ matrix.binary }}"
+            tar -czf "${{ matrix.archive }}" -C "$package_dir" .
           fi
           sha256sum "${{ matrix.archive }}" > "${{ matrix.archive }}.sha256"
       - uses: actions/upload-artifact@v4

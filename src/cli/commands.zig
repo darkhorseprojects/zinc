@@ -1,4 +1,5 @@
 const std = @import("std");
+const builtin = @import("builtin");
 const config = @import("../config/mod.zig");
 const engine = @import("../graph/engine.zig");
 const files = @import("../io/fs.zig");
@@ -27,7 +28,7 @@ pub fn usage() void {
         \\  zn doctor
         \\  zn config get <path>
         \\  zn compact [--dry-run] [--session id|--continue] [graph]
-        \\  zn update [--ref tag-or-commit] [--skip-packages] [--skip-zinc]
+        \\  zn update [--ref version]
         \\  zn [--session id|--continue] <prompt>
         \\  zn run [graph|--graph id|path] [--export id] [--input name=value] [--text name=value|@file] [--file name=path] [--image name=path] [--session id|--continue] <prompt>
         \\  zn graph list
@@ -332,9 +333,11 @@ pub fn packageCall(allocator: Allocator, io: std.Io, layout_ctx: layout.Context,
     if (result.is_error) return error.UserError;
 }
 
-const zinc_repo_url = "https://github.com/darkhorseprojects/zinc.git";
+const unix_installer_url = "https://raw.githubusercontent.com/darkhorseprojects/zinc/main/scripts/install-unix.sh";
+const windows_installer_url = "https://raw.githubusercontent.com/darkhorseprojects/zinc/main/scripts/install-windows.ps1";
 
 pub fn updateFromArgs(allocator: Allocator, io: std.Io, layout_ctx: layout.Context, args: []const []const u8) !void {
+    _ = layout_ctx;
     var ref: ?[]const u8 = null;
     var i: usize = 0;
     while (i < args.len) : (i += 1) {
@@ -347,30 +350,28 @@ pub fn updateFromArgs(allocator: Allocator, io: std.Io, layout_ctx: layout.Conte
         return fail("unknown update argument: {s}", .{args[i]});
     }
 
-    const target = ref orelse "main";
-    const source_dir = try layout.sharePath(allocator, layout_ctx, "source/zinc");
-    defer allocator.free(source_dir);
-    const git_dir = try std.fs.path.join(allocator, &.{ source_dir, ".git" });
-    defer allocator.free(git_dir);
-
-    if (!files.existsPath(git_dir)) {
-        if (std.fs.path.dirname(source_dir)) |parent| try files.mkdirP(parent);
-        try runCommand(allocator, io, &.{ "git", "clone", zinc_repo_url, source_dir }, "failed to download Zinc from git");
+    const target = ref orelse "latest";
+    switch (builtin.os.tag) {
+        .linux, .macos => try runCommand(allocator, io, &.{
+            "sh",
+            "-c",
+            "curl -fsSL \"$0\" | sh -s -- --version \"$1\"",
+            unix_installer_url,
+            target,
+        }, "failed to install Zinc update"),
+        .windows => try runCommand(allocator, io, &.{
+            "powershell",
+            "-NoProfile",
+            "-ExecutionPolicy",
+            "Bypass",
+            "-Command",
+            "$script = Join-Path $env:TEMP 'install-zinc.ps1'; Invoke-WebRequest -Uri $args[0] -OutFile $script; & $script -Version $args[1]",
+            windows_installer_url,
+            target,
+        }, "failed to install Zinc update"),
+        else => return fail("unsupported update platform: {s}", .{@tagName(builtin.os.tag)}),
     }
-
-    try runCommand(allocator, io, &.{ "git", "-C", source_dir, "fetch", "--tags", "origin" }, "failed to fetch Zinc updates");
-    if (std.mem.eql(u8, target, "main") or std.mem.eql(u8, target, "master")) {
-        try runCommand(allocator, io, &.{ "git", "-C", source_dir, "checkout", target }, "failed to checkout Zinc update branch");
-        try runCommand(allocator, io, &.{ "git", "-C", source_dir, "pull", "--ff-only", "origin", target }, "failed to update Zinc checkout");
-    } else {
-        try runCommand(allocator, io, &.{ "git", "-C", source_dir, "fetch", "origin", target }, "failed to fetch requested Zinc ref");
-        try runCommand(allocator, io, &.{ "git", "-C", source_dir, "checkout", "--detach", "FETCH_HEAD" }, "failed to checkout requested Zinc ref");
-    }
-
-    const installer = try std.fs.path.join(allocator, &.{ source_dir, "scripts", "install-linux.sh" });
-    defer allocator.free(installer);
-    try runCommand(allocator, io, &.{installer}, "failed to install Zinc update");
-    std.debug.print("updated Zinc from {s} ({s})\n", .{ zinc_repo_url, target });
+    std.debug.print("updated Zinc release ({s})\n", .{target});
 }
 
 fn runCommand(allocator: Allocator, io: std.Io, argv: []const []const u8, context: []const u8) !void {
@@ -386,9 +387,6 @@ fn runCommand(allocator: Allocator, io: std.Io, argv: []const []const u8, contex
         return;
     }
     std.debug.print("error: {s}\n", .{context});
-    if (std.mem.indexOf(u8, result.stderr, "Authentication failed") != null or std.mem.indexOf(u8, result.stderr, "Repository not found") != null) {
-        std.debug.print("Could not fetch Zinc repository. Check your internet connection, git installation, or repository URL: {s}\n", .{zinc_repo_url});
-    }
     if (result.stdout.len != 0) std.debug.print("{s}", .{result.stdout});
     if (result.stderr.len != 0) std.debug.print("{s}", .{result.stderr});
     return error.UserError;

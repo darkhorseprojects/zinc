@@ -21,11 +21,6 @@ confirm_commands:
   - shutdown
   - reboot
 
-paths:
-  graph: stock/graphs/zinc-loop.circuitry.yaml
-  context_graph: stock/graphs/zinc-context-recovery.circuitry.yaml
-  compaction_graph: stock/graphs/zinc-compaction.circuitry.yaml
-
 runtime:
   provider_max_retries: 5
   tool_max_turns: 12

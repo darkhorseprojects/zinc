@@ -75,7 +75,7 @@ pub fn doctor(allocator: Allocator, io: std.Io, layout_ctx: layout.Context) !voi
 
     std.debug.print("Zinc\n", .{});
     std.debug.print("  ✓ zn binary\n", .{});
-    std.debug.print("  version: 0.4.4\n", .{});
+    std.debug.print("  version: 0.4.5\n", .{});
 
     const config_path = try layout.configPath(allocator, layout_ctx);
     defer allocator.free(config_path);
@@ -136,7 +136,7 @@ pub fn doctor(allocator: Allocator, io: std.Io, layout_ctx: layout.Context) !voi
         std.debug.print("  {s} model endpoint reachable\n", .{mark(reachable)});
         if (!reachable and p.provider.kind == .local) std.debug.print("\nFix: run `zn serve` to build/download and start the configured local model server.\n", .{});
     } else {
-        std.debug.print("\nFix: create a valid config at {s}. If Zinc is installed, rerun scripts/install-linux.sh.\n", .{config_path});
+        std.debug.print("\nFix: create a valid config at {s}, or reinstall Zinc from the latest release.\n", .{config_path});
     }
 
     const pid_path = try layout.statePath(allocator, layout_ctx, "server.pid");
