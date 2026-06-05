@@ -8,6 +8,10 @@ pub fn exists(path: []const u8) !void {
 }
 
 pub fn existsPath(path: []const u8) bool {
+    if (path.len == 0 or path.len > std.fs.max_path_bytes) return false;
+    if (std.mem.indexOfAny(u8, path, "\n\r") != null) return false;
+    var parts = std.mem.tokenizeAny(u8, path, "/\\");
+    while (parts.next()) |part| if (part.len > 255) return false;
     exists(path) catch return false;
     return true;
 }

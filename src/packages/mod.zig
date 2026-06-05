@@ -414,7 +414,10 @@ fn removePackagePatch(allocator: Allocator, io: std.Io, layout_ctx: layout.Conte
     _ = layout_ctx;
     const spec = manifest.install orelse return;
     if (options.scope != .local or !files.existsPath(project_loop_graph_path)) return;
-    const model = try selectPatchedModelTarget(allocator, io, project_loop_graph_path, options.model, spec);
+    const model = selectPatchedModelTarget(allocator, io, project_loop_graph_path, options.model, spec) catch |err| switch (err) {
+        error.PackageInstallTargetNotFound => return,
+        else => return err,
+    };
     defer allocator.free(model);
     try unwireLoopGraph(allocator, io, project_loop_graph_path, model, spec);
 }
@@ -638,11 +641,11 @@ fn appendInstalledPackageResources(allocator: Allocator, io: std.Io, layout_ctx:
         defer allocator.free(package_dir);
         const manifest = loadManifest(allocator, io, package_dir) catch continue;
         defer manifest.deinit(allocator);
-        if (manifest.install) |spec| for (spec.input) |ref| try appendPackageInputResource(allocator, out, manifest, package_dir, ref);
+        if (manifest.install) |spec| for (spec.input) |ref| try appendPackageInputResource(allocator, io, out, manifest, package_dir, ref);
     }
 }
 
-fn appendPackageInputResource(allocator: Allocator, out: *std.ArrayList(u8), manifest: Manifest, package_dir: []const u8, ref: []const u8) !void {
+fn appendPackageInputResource(allocator: Allocator, io: std.Io, out: *std.ArrayList(u8), manifest: Manifest, package_dir: []const u8, ref: []const u8) !void {
     const parsed = try parseInstallRef(ref);
     switch (parsed.kind) {
         .prompt => {
@@ -656,7 +659,9 @@ fn appendPackageInputResource(allocator: Allocator, out: *std.ArrayList(u8), man
         },
         .file => {
             const asset = findAsset(manifest.files, parsed.id) orelse return error.InvalidPackageManifest;
-            const path = try std.fs.path.join(allocator, &.{ package_dir, asset.path });
+            const cwd = try currentWorkingDirectory(allocator, io);
+            defer allocator.free(cwd);
+            const path = try std.fs.path.join(allocator, &.{ cwd, package_dir, asset.path });
             defer allocator.free(path);
             try out.print(allocator,
                 \\  {s}:

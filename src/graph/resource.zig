@@ -517,12 +517,13 @@ fn appendToolPromptSections(ctx: *RunContext, prompt: *std.ArrayList(u8), tool_n
     if (tool_names.len == 0) return;
     try prompt.appendSlice(ctx.allocator, "\n\nTools");
     for (tool_names) |tool| {
-        const snippet = if (runtime_tools.contains(tool)) runtime_tools.promptSnippet(tool) catch "available tool" else blk: {
-            if (try packages.findTool(ctx.allocator, ctx.io, ctx.layout_ctx, tool)) |package_tool| {
-                defer package_tool.deinit(ctx.allocator);
-                break :blk package_tool.prompt;
-            }
-            break :blk "package tool";
+        var package_tool: ?packages.Tool = null;
+        defer if (package_tool) |owned| owned.deinit(ctx.allocator);
+        const snippet = if (runtime_tools.contains(tool))
+            runtime_tools.promptSnippet(tool) catch "available tool"
+        else blk: {
+            package_tool = try packages.findTool(ctx.allocator, ctx.io, ctx.layout_ctx, tool);
+            break :blk if (package_tool) |owned| owned.prompt else "package tool";
         };
         try prompt.print(ctx.allocator, "\n\n- {s}: {s}", .{ tool, snippet });
     }
