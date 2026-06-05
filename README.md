@@ -187,24 +187,9 @@ Zinc normalizes trailing slashes so `/v1/chat/completions` is not doubled. `zn d
 
 ## Tools
 
-Zinc only exposes tools declared by the active `model` resource. Local packages can extend `zinc-loop`; `--default` runs the stock graph.
+Zinc only exposes tools declared by the active `model` resource. Builtins are `read`, `write`, `edit`, `bash`, and `run_graph`.
 
-```yaml
-resources:
-  assistant:
-    model:
-      tools: [read, write, edit, bash, run_graph, hello_process]
-```
-
-Builtin Zinc tools:
-
-- `read`
-- `write`
-- `edit`
-- `bash`
-- `run_graph`
-
-Package tools use YAML-native input schemas and primary-key handlers:
+Package tools use `process`, `http`, or `mcp` handlers. Process and MCP commands may be platform-specific:
 
 ```yaml
 tools:
@@ -212,11 +197,6 @@ tools:
     description: Run the packaged hello process tool.
     input:
       name: string
-      loud:
-        optional: boolean
-    docs:
-      name: Name to greet
-      loud: Whether to shout
     handler:
       process:
         command:
@@ -225,7 +205,7 @@ tools:
           windows: tools/hello-process.cmd
 ```
 
-Handlers are `process`, `http`, or `mcp`. Use the built-in `run_graph` tool for graph execution. Package scripts are operator commands run with `zn pkg exec`; they are not exposed to the model.
+Use `run_graph` for graph assets. Package scripts run with `zn pkg exec`; they are not model tools.
 
 ## Safety
 
@@ -237,7 +217,7 @@ Zinc stores sessions as JSONL under `.zinc/sessions`; that is an internal storag
 
 ## Packages
 
-A Zinc package can provide graphs, prompts, files, tools, scripts, and an optional `install.model` patch. Local package install patches extend `.zinc/graphs/zinc-loop.circuitry.yaml` and write package context resources to `.zinc/graphs/zinc-packages.circuitry.yaml`.
+A package can provide graphs, prompts, files, tools, scripts, and an optional `install.model` patch. Local package installs patch `.zinc/graphs/zinc-loop.circuitry.yaml` and write package resources to `.zinc/graphs/zinc-packages.circuitry.yaml`.
 
 ```yaml
 install:
@@ -248,6 +228,8 @@ install:
     tools:
       - hello_process
 ```
+
+Prompts and tools are explicit: a prompt must be in model input, and a tool must be in model tools. Packages that vendor third-party work should include attribution.
 
 ## License
 

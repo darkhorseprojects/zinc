@@ -18,6 +18,26 @@ resources:
     text:
       uri: prompt:circuitry-author
 
+  zinc_packages:
+    text:
+      uri: prompt:zinc-packages
+
+  zinc_browser:
+    text:
+      uri: prompt:zinc-browser
+
+  zinc_computer:
+    text:
+      uri: prompt:zinc-computer
+
+  zinc_graphs:
+    text:
+      uri: prompt:zinc-graphs
+
+  zinc_when_to_package:
+    text:
+      uri: prompt:zinc-when-to-package
+
   assistant:
     model:
       identity: Zinc
@@ -26,6 +46,11 @@ resources:
         - $recovered_context
         - bash_guide
         - circuitry_author
+        - zinc_packages
+        - zinc_browser
+        - zinc_computer
+        - zinc_graphs
+        - zinc_when_to_package
       tools:
         - read
         - write
