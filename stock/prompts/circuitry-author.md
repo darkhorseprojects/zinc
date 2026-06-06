@@ -6,9 +6,11 @@ description: Use when writing or refactoring Circuitry 0.5 graphs for Zinc.
 
 # Circuitry Author
 
-Circuitry 0.5 is Zinc's YAML-native graph source format. Circuitry owns topology and reusable graph semantics. Zinc owns runtime effects: models, tools, sessions, permissions, packages, and URI materialization.
+Circuitry `0.5` is Zinc's YAML-native graph format. Circuitry owns graph semantics. Zinc owns runtime effects.
 
-Core shape:
+Write graphs as small, inspectable runtime programs. Be explicit about inputs, tools, schemas, and child graph calls.
+
+## Minimal model graph
 
 ```yaml
 circuitry: "0.5"
@@ -21,38 +23,31 @@ exports:
       user_turn: string
 
 resources:
-  bash_guide:
-    text:
-      uri: prompt:bash-guide
-
   assistant:
     model:
       identity: Assistant
       input:
         - $user_turn
-        - bash_guide
       tools:
         - read
-        - write
-        - edit
         - bash
-        - run_graph
       instructions: |
-        Answer the user.
-      schema:
-        response: string
+        Answer the user directly.
 ```
 
-Mental model:
+## Mental model
 
-- `exports` are callable graph functions.
+- `exports` are callable graph entry points.
 - export `input` declares runtime inputs; reachable resources reference them as `$name`.
 - `text`, `data`, and `file` resources are materialized by Zinc.
 - `model` resources call the configured model provider.
-- `run` resources declaratively run another graph export.
+- `run` resources call another graph export declaratively.
 - tools are plain Zinc runtime capability names.
+- endpoint/provider config belongs in Zinc config, not graph source.
 
-Use source objects for runtime-addressed content:
+## Runtime text sources
+
+Prompt resource:
 
 ```yaml
 resources:
@@ -61,7 +56,28 @@ resources:
       uri: prompt:bash-guide
 ```
 
-Use `run` for child graphs:
+File resource:
+
+```yaml
+resources:
+  notes:
+    text:
+      path: ./NOTES.md
+```
+
+Runtime input:
+
+```yaml
+resources:
+  assistant:
+    model:
+      input:
+        - $user_turn
+```
+
+## Child graph calls
+
+Use `run` when the graph call is known ahead of time:
 
 ```yaml
 resources:
@@ -75,13 +91,33 @@ resources:
         result: string
 ```
 
-Use `run_graph` when the model dynamically needs another graph run at runtime. Prefer `export`, not `entry`.
+Use the `run_graph` tool only when the model needs to choose a graph dynamically at runtime. Prefer `export`, not `entry`.
 
-Authoring rules:
+## Packages and imports
 
-- keep graphs small and inspectable
-- put request-specific values in runtime inputs, not permanent source
-- use imports for reusable modules
-- expose callable behavior through `exports`
-- use `schema` only on `model` and `run`
-- validate before running
+Local package installs may add:
+
+```yaml
+imports:
+  packages: "/path/to/project/.zinc/generated/packages.circuitry.yaml"
+```
+
+Then package resources appear under the imported namespace:
+
+```yaml
+input:
+  - packages.example_prompt
+```
+
+Do not hand-author generated package files.
+
+## Authoring rules
+
+- Keep graphs small and inspectable.
+- Put request-specific values in export inputs, not permanent source.
+- Declare exactly the model context needed in `input`.
+- Declare exactly the tools needed in `tools`.
+- Use imports for reusable modules.
+- Use `schema` on `model` and `run` when output shape matters.
+- Validate with `zn check` before relying on a graph.
+- Do not put secrets, endpoint URLs, or provider details into graph files.
