@@ -4,24 +4,15 @@
 [![build](https://img.shields.io/github/actions/workflow/status/darkhorseprojects/zinc/release.yml?label=build&style=flat-square)](https://github.com/darkhorseprojects/zinc/actions)
 [![license](https://img.shields.io/github/license/darkhorseprojects/zinc?color=333333&style=flat-square)](https://github.com/darkhorseprojects/zinc/blob/main/LICENSE)
 
-Zinc is a small runtime for Circuitry 0.5 graphs over OpenAI-compatible chat completion endpoints.
+Zinc is a small runtime for Circuitry graphs over OpenAI-compatible chat completion endpoints.
 
-Circuitry defines YAML-native graph topology. Zinc supplies runtime effects: endpoint model calls, tools, sessions, runtime URIs, packages, and permissions.
+Circuitry describes graph topology. Zinc supplies runtime effects: model endpoint calls, tools, packages, sessions, runtime URIs, config, permissions, and local project layout.
 
 ```bash
 zn "inspect this repo"
 ```
 
 ## Install
-
-Install from the latest release. The installers copy `zn`, stock graphs, stock prompts, and the default config for the platform.
-
-| Platform | Release asset | Installer |
-| --- | --- | --- |
-| Linux x86_64 | `zinc-linux-x86_64.tar.gz` | `scripts/install-unix.sh` |
-| macOS Apple Silicon | `zinc-macos-aarch64.tar.gz` | `scripts/install-unix.sh` |
-| macOS Intel | `zinc-macos-x86_64.tar.gz` | `scripts/install-unix.sh` |
-| Windows x86_64 | `zinc-windows-x86_64.zip` | `scripts/install-windows.ps1` |
 
 Linux and macOS:
 
@@ -41,103 +32,16 @@ Manual install:
 1. Download the asset for your platform from <https://github.com/darkhorseprojects/zinc/releases/latest>.
 2. Extract it.
 3. Put `zn` or `zn.exe` on `PATH`.
-4. Copy `stock/graphs` and `stock/prompts` into the platform data directory below.
+4. Copy `stock/graphs` and `stock/prompts` into the platform data directory.
 5. Copy `stock/config.yaml` into the platform config path if no config exists yet.
 6. Add a model endpoint to your config.
 7. Run `zn doctor`.
 
-Zinc keeps platform paths behind its layout layer:
+## Configure a model
 
-```text
-Linux config:   $XDG_CONFIG_HOME/zinc/config.yaml or ~/.config/zinc/config.yaml
-Linux data:     $XDG_DATA_HOME/zinc or ~/.local/share/zinc
-Linux state:    ~/.local/state/zinc
-macOS config:   ~/Library/Application Support/zinc/config.yaml
-macOS data:     ~/Library/Application Support/zinc
-macOS state:    ~/Library/Application Support/zinc/State
-Windows config: %APPDATA%\zinc\config.yaml
-Windows data:   %APPDATA%\zinc
-Windows state:  %LOCALAPPDATA%\zinc\State
-```
+Zinc is endpoint-only. It does not bundle a model, download model files, build inference engines, or start a default server.
 
-## CLI
-
-```bash
-zn [--default] [--model id] "prompt"
-zn run [--default] [--model id] [graph|--graph id|path] [--export name] [--input name=value] [--text name=value|@file] [--file name=path] [--image name=path] [--session id|--continue] "prompt"
-zn check [graph]
-zn compact [--dry-run] [--session id|--continue] [graph]
-zn graph list
-zn graph show <graph>
-zn config get <path>
-zn pkg list
-zn pkg add [--local|--global] [--replace] [--yes] [--model id] <source>
-zn pkg remove [--local|--global] [--yes] [--model id] <name>
-zn pkg update [--local|--global] [--yes] <name|--all>
-zn pkg show [--local|--global] <name>
-zn pkg exec <package> <script>
-zn doctor
-```
-
-## Stock loop
-
-`zinc-loop` is the normal assistant graph. It includes Zinc's built-in tools and can be extended by local packages.
-
-Use `--default` to run the stock graph without local package changes:
-
-```bash
-zn --default "answer without package changes"
-```
-
-
-## Runtime boundary
-
-Zinc materializes these Circuitry resource kinds:
-
-- `text`
-- `data`
-- `file`
-- `run`
-- `model`
-
-Circuitry owns validation, imports, exports, addresses, reachable input discovery, dependency planning, and schemas. Zinc executes effects only.
-
-## Runtime URI schemes
-
-Prompts:
-
-```text
-prompt:<id>
-```
-
-Inputs:
-
-```text
-input:<id>
-```
-
-Sessions:
-
-```text
-session:current
-session:compaction
-sessions:index
-sessions:dir
-session:current:messages:<index>
-session:current:tools:<tool-call-id>
-```
-
-Byte ranges:
-
-```text
-<readable-uri>:bytes=<start>-<end>
-```
-
-## Models
-
-Model configuration is Zinc runtime config. Circuitry graphs do not contain provider settings.
-
-Zinc speaks OpenAI-compatible Chat Completions. Run any local or remote endpoint that exposes `/v1/chat/completions`, then point Zinc at it.
+Add an OpenAI-compatible endpoint to Zinc config:
 
 ```yaml
 default_model: local
@@ -153,83 +57,86 @@ models:
     reasoning:
       enabled: false
       effort: low
-
-  hosted:
-    model: provider/model-name
-    base_url: https://example.com/v1
-    api_key_env: PROVIDER_API_KEY
-    context_window: 128000
-    chars_per_token: 4
-    temperature: 0.3
-    reasoning:
-      enabled: false
-      effort: low
 ```
 
-`context_window` is a model fact supplied by the user. Zinc uses it with `runtime.compaction_threshold_percent` to decide when to compact. If the endpoint does not return prompt usage, Zinc estimates prompt tokens with `chars_per_token`; the default `4` matches the usual English-text rule of thumb.
+Config paths:
 
-Select the normal model with `default_model`, override one run with `--model <id>`, or attach a configured model to a specific Zinc `model` resource with `using:`:
+| Platform | Config |
+| --- | --- |
+| Linux | `$XDG_CONFIG_HOME/zinc/config.yaml` or `~/.config/zinc/config.yaml` |
+| macOS | `~/Library/Application Support/zinc/config.yaml` |
+| Windows | `%APPDATA%\zinc\config.yaml` |
 
-```yaml
-resources:
-  assistant:
-    model:
-      using: local
-      identity: Zinc
-      input:
-        - $user_turn
-      instructions: Answer directly.
+## CLI
+
+```bash
+zn [--default] [--model id] "prompt"
+zn run [--default] [--model id] [graph|--graph id|path] [--export name] [--input name=value] [--text name=value|@file] [--file name=path] [--image name=path] [--session id|--continue] "prompt"
+zn check [graph]
+zn compact [--dry-run] [--session id|--continue] [graph]
+zn graph list
+zn graph show <graph>
+zn config get <path>
+zn clean [--local|--global] [--yes] [sessions | logs | packages | generated | config | runtime | all]
+zn pkg list
+zn pkg add [--local|--global] [--replace] [--yes] [--model id] <source>
+zn pkg remove [--local|--global] [--yes] [--model id] <name>
+zn pkg update [--local|--global] [--yes] <name|--all>
+zn pkg show [--local|--global] <name>
+zn pkg exec <package> <script>
+zn pkg call <tool> <json-arguments>
+zn doctor
 ```
 
-The stock config does not include a model. For local GGUF/Hugging Face models, run `llama-server`, vLLM, LM Studio, Ollama's OpenAI-compatible endpoint, or another compatible endpoint yourself, then add that endpoint to your Zinc config. Zinc does not download model files, build inference engines, or manage server processes.
+## Local project layout
 
-Zinc normalizes trailing slashes so `/v1/chat/completions` is not doubled. `zn doctor` reports the selected model id, base URL, model name, context window, `api_key_env` name, whether the env var is present, and whether the endpoint is reachable. If no model is configured, it reports that instead of assuming one. It never prints secret values.
+A project may have a local `.zinc/` workspace:
 
-## Tools
-
-Zinc only exposes tools declared by the active `model` resource. Builtins are `read`, `write`, `edit`, `bash`, and `run_graph`.
-
-Package tools use `process`, `http`, or `mcp` handlers. Process and MCP commands may be platform-specific:
-
-```yaml
-tools:
-  hello_process:
-    description: Run the packaged hello process tool.
-    input:
-      name: string
-    handler:
-      process:
-        command:
-          linux: tools/hello-process
-          macos: tools/hello-process
-          windows: tools/hello-process.cmd
+```text
+.zinc/graphs/                         project graphs
+.zinc/generated/                      Zinc-written wiring
+.zinc/packages/<name>/                installed package code and assets
+.zinc/config/packages/<name>.yaml     user/project package config
+.zinc/runtime/packages/<name>/        package working runtime
+.zinc/sessions/                       conversation transcripts
+.zinc/logs/                           runtime logs
+.zinc/tmp/                            short-lived temporary files
 ```
 
-Use `run_graph` for graph assets. Package scripts run with `zn pkg exec`; they are not model tools.
-
-## Safety
-
-Zinc is a local runtime. When the active graph declares tools, Zinc can read files, write files, edit files, run shell commands, call package handlers, and run graphs through `run_graph`. Only run graphs and packages you trust.
-
-## Sessions and compaction
-
-Zinc stores sessions as JSONL under `.zinc/sessions`; that is an internal storage detail, not a user-authored format. Compaction runs through the configured stock compaction graph when the replay context crosses `runtime.compaction_threshold_percent` of the active model's configured `context_window`.
+The important split is simple: package code goes in `packages`, user choices go in `config`, package working files go in `runtime`, and generated wiring goes in `generated`.
 
 ## Packages
 
-A package can provide graphs, prompts, files, tools, scripts, and an optional `install.model` patch. Local package installs patch `.zinc/graphs/zinc-loop.circuitry.yaml` and write generated package resources to `.zinc/generated/packages.circuitry.yaml`.
+Install a package from a GitHub subdirectory:
 
-```yaml
-install:
-  model:
-    input:
-      - prompt:hello_prompt
-      - file:hello_asset
-    tools:
-      - hello_process
+```bash
+zn pkg add --local github:darkhorseprojects/zinc-packages/packages/browser#v0.1.3
 ```
 
-Prompts and tools are explicit: a prompt must be in model input, and a tool must be in model tools. Packages that vendor third-party work should include attribution.
+A package can provide prompts, files, graphs, scripts, and external tools. Local package installs patch `.zinc/graphs/zinc-loop.circuitry.yaml` and write generated package resources to `.zinc/generated/packages.circuitry.yaml`.
+
+Package tools use external handlers: `process`, `http`, or `mcp`. Graph execution stays built into Zinc through `run_graph`.
+
+## Wiki
+
+The project wiki is the canonical long-form reference:
+
+- [Home](https://github.com/darkhorseprojects/zinc/wiki)
+- [Architecture](https://github.com/darkhorseprojects/zinc/wiki/Architecture)
+- [Project Layout](https://github.com/darkhorseprojects/zinc/wiki/Project-Layout)
+- [Configuration](https://github.com/darkhorseprojects/zinc/wiki/Configuration)
+- [Graphs](https://github.com/darkhorseprojects/zinc/wiki/Graphs)
+- [Runtime](https://github.com/darkhorseprojects/zinc/wiki/Runtime)
+- [Tools](https://github.com/darkhorseprojects/zinc/wiki/Tools)
+- [Packages](https://github.com/darkhorseprojects/zinc/wiki/Packages)
+- [Browser Package](https://github.com/darkhorseprojects/zinc/wiki/Browser-Package)
+- [Sessions](https://github.com/darkhorseprojects/zinc/wiki/Sessions)
+
+## Safety
+
+Zinc is a local runtime. When the active graph declares tools, Zinc can read files, write files, edit files, run shell commands, call package handlers, and run graphs through `run_graph`.
+
+Only run graphs and packages you trust.
 
 ## License
 
