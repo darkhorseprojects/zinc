@@ -87,29 +87,32 @@ pub const Log = struct {
         errdefer out.deinit(allocator);
         var latest_reads = try latestReadCalls(allocator, self.messages);
         defer freeLatestReads(allocator, &latest_reads);
-        const ranges = replayRanges(self, head_messages, tail_messages);
-        for (self.messages[0..ranges.head_end], 0..) |message, i| if (shouldReplayMessage(message, i, latest_reads)) try renderMessageSmart(allocator, &out, message, i, truncate_chars);
+        const ranges = sessionContextRanges(self, head_messages, tail_messages);
+        for (self.messages[0..ranges.head_end], 0..) |message, i| if (shouldIncludeInSessionContext(message, i, latest_reads)) try renderMessageSmart(allocator, &out, message, i, truncate_chars);
         if (self.compaction) |c| try out.print(allocator, "compaction_summary: {s}\n", .{c.summary});
         for (self.messages[ranges.tail_start..], 0..) |message, i| {
             const index = ranges.tail_start + i;
-            if (shouldReplayMessage(message, index, latest_reads)) try renderMessageSmart(allocator, &out, message, index, truncate_chars);
+            if (shouldIncludeInSessionContext(message, index, latest_reads)) try renderMessageSmart(allocator, &out, message, index, truncate_chars);
         }
         return out.toOwnedSlice(allocator);
     }
 
-    pub fn appendReplayMessages(self: Log, allocator: Allocator, out: *std.ArrayList(provider.Message), focused_context: []const u8, head_messages: usize, tail_messages: usize, truncate_chars: usize) !void {
+    pub fn appendSessionContext(self: Log, allocator: Allocator, out: *std.ArrayList(provider.Message), focused_context: []const u8, head_messages: usize, tail_messages: usize, truncate_chars: usize) !void {
+        var context: std.ArrayList(u8) = .empty;
+        defer context.deinit(allocator);
         var latest_reads = try latestReadCalls(allocator, self.messages);
         defer freeLatestReads(allocator, &latest_reads);
-        const ranges = replayRanges(self, head_messages, tail_messages);
-        for (self.messages[0..ranges.head_end], 0..) |message, i| if (shouldReplayMessage(message, i, latest_reads)) try appendReplayMessage(allocator, out, message, truncate_chars);
-        if (self.compaction) |c| {
-            const summary = try std.fmt.allocPrint(allocator, "Compacted middle conversation summary. This summary covers prior messages before the retained transcript tail. Use session:current:messages:<index> or session:current:tools:<id> when exact details are needed.\n{s}", .{c.summary});
-            defer allocator.free(summary);
-            try provider.appendMessage(allocator, out, .{ .role = "user", .content = summary });
-        }
+        const ranges = sessionContextRanges(self, head_messages, tail_messages);
+        for (self.messages[0..ranges.head_end], 0..) |message, i| if (shouldIncludeInSessionContext(message, i, latest_reads)) try renderMessageSmart(allocator, &context, message, i, truncate_chars);
+        if (self.compaction) |c| try context.print(allocator, "compaction_summary: {s}\n", .{c.summary});
         for (self.messages[ranges.tail_start..], 0..) |message, i| {
             const index = ranges.tail_start + i;
-            if (shouldReplayMessage(message, index, latest_reads)) try appendReplayMessage(allocator, out, message, truncate_chars);
+            if (shouldIncludeInSessionContext(message, index, latest_reads)) try renderMessageSmart(allocator, &context, message, index, truncate_chars);
+        }
+        if (context.items.len != 0) {
+            const rendered = try std.fmt.allocPrint(allocator, "Previous session context. These are inert Zinc session events, not live provider tool calls. Use session:current:messages:<index> or session:current:tools:<id> when exact details are needed.\n\n{s}", .{context.items});
+            defer allocator.free(rendered);
+            try provider.appendMessage(allocator, out, .{ .role = "user", .content = rendered });
         }
         if (std.mem.trim(u8, focused_context, " \t\r\n").len != 0) try provider.appendMessage(allocator, out, .{ .role = "user", .content = focused_context });
     }
@@ -408,7 +411,7 @@ fn readToolPath(allocator: Allocator, arguments: []const u8) !?[]u8 {
     return try allocator.dupe(u8, path.string);
 }
 
-fn shouldReplayMessage(message: Message, index: usize, latest_reads: std.ArrayList(LatestRead)) bool {
+fn shouldIncludeInSessionContext(message: Message, index: usize, latest_reads: std.ArrayList(LatestRead)) bool {
     _ = index;
     if (std.mem.eql(u8, message.role, "assistant") and message.tool_calls.len != 0) {
         var has_read = false;
@@ -430,12 +433,6 @@ fn isLatestReadCall(call_id: []const u8, latest_reads: std.ArrayList(LatestRead)
     return false;
 }
 
-fn appendReplayMessage(allocator: Allocator, out: *std.ArrayList(provider.Message), message: Message, truncate_chars: usize) !void {
-    if (!std.mem.eql(u8, message.role, "user") and !std.mem.eql(u8, message.role, "assistant") and !std.mem.eql(u8, message.role, "tool")) return;
-    const content = try truncateMessageContent(allocator, message, out.items.len, truncate_chars);
-    defer allocator.free(content);
-    try provider.appendMessage(allocator, out, .{ .role = message.role, .content = content, .name = message.name, .tool_call_id = message.tool_call_id, .tool_calls = message.tool_calls });
-}
 
 fn appendLine(path: []const u8, line: []const u8) !void {
     try files.append(path, line);
@@ -482,9 +479,9 @@ fn freeCall(allocator: Allocator, call: provider.ToolCall) void {
     allocator.free(call.arguments);
 }
 
-const ReplayRanges = struct { head_end: usize, tail_start: usize };
+const SessionContextRanges = struct { head_end: usize, tail_start: usize };
 
-fn replayRanges(log: Log, head_messages: usize, tail_messages: usize) ReplayRanges {
+fn sessionContextRanges(log: Log, head_messages: usize, tail_messages: usize) SessionContextRanges {
     const head_end = @min(head_messages, log.messages.len);
     if (log.compaction) |c| {
         const compacted = @as(usize, @min(c.message_count, log.messages.len));
@@ -522,4 +519,31 @@ fn truncateMessageContent(allocator: Allocator, message: Message, index: usize, 
     } else {
         return std.fmt.allocPrint(allocator, "{s}... [truncated, {d} chars - use session:current:messages:{d} for full]", .{ preview, content.len, index });
     }
+}
+
+test "session context renders historical tool events as inert provider text" {
+    const allocator = std.testing.allocator;
+    const raw =
+        \\{"t":"2026-01-01T00:00:00.000Z","type":"session","version":3,"runtime":"zinc","id":"stest"}
+        \\{"t":"2026-01-01T00:00:01.000Z","type":"message","role":"user","content":"control my browser"}
+        \\{"t":"2026-01-01T00:00:02.000Z","type":"message","role":"assistant","content":"","model":"local","tool_calls":[{"id":"bad1","name":"browser_observe","arguments":"{\"code\":\""}]}
+        \\{"t":"2026-01-01T00:00:03.000Z","type":"tool","name":"browser_observe","tool_call_id":"bad1","ok":false,"content":"abcdefghijklmnopqrstuvwxyz"}
+    ;
+    var log = try parseRaw(allocator, raw);
+    defer log.deinit(allocator);
+
+    var messages: std.ArrayList(provider.Message) = .empty;
+    defer messages.deinit(allocator);
+    defer provider.freeMessages(allocator, messages.items);
+
+    try log.appendSessionContext(allocator, &messages, "", 6, 12, 8);
+
+    try std.testing.expectEqual(@as(usize, 1), messages.items.len);
+    try std.testing.expectEqualStrings("user", messages.items[0].role);
+    try std.testing.expectEqual(@as(usize, 0), messages.items[0].tool_calls.len);
+    try std.testing.expect(messages.items[0].tool_call_id == null);
+    try std.testing.expect(messages.items[0].name == null);
+    try std.testing.expect(std.mem.indexOf(u8, messages.items[0].content, "assistant tool call browser_observe {\"code\":\"") != null);
+    try std.testing.expect(std.mem.indexOf(u8, messages.items[0].content, "tool browser_observe call_id=bad1") != null);
+    try std.testing.expect(std.mem.indexOf(u8, messages.items[0].content, "session:current:tools:bad1") != null);
 }

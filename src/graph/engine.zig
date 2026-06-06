@@ -202,7 +202,7 @@ fn renderSessionHead(allocator: Allocator, log: sessions.Log, profile: *const co
     var out: std.ArrayList(u8) = .empty;
     errdefer out.deinit(allocator);
     const head_end = @min(profile.runtime.session_head_messages, log.messages.len);
-    for (log.messages[0..head_end], 0..) |message, i| try appendMessageLine(allocator, &out, i, message, profile.runtime.replay_truncate_chars);
+    for (log.messages[0..head_end], 0..) |message, i| try appendMessageLine(allocator, &out, i, message, profile.runtime.session_context_truncate_chars);
     return out.toOwnedSlice(allocator);
 }
 
@@ -218,7 +218,7 @@ fn renderMessagesToCompact(allocator: Allocator, log: sessions.Log, profile: *co
     const tail_start = if (log.messages.len > profile.runtime.session_tail_messages) log.messages.len - profile.runtime.session_tail_messages else head_end;
     const compact_start = if (log.compaction) |c| @max(head_end, @as(usize, @min(c.message_count, log.messages.len))) else head_end;
     const compact_end = @max(compact_start, tail_start);
-    for (log.messages[compact_start..compact_end], compact_start..) |message, i| try appendMessageLine(allocator, &out, i, message, profile.runtime.replay_truncate_chars);
+    for (log.messages[compact_start..compact_end], compact_start..) |message, i| try appendMessageLine(allocator, &out, i, message, profile.runtime.session_context_truncate_chars);
     return out.toOwnedSlice(allocator);
 }
 
@@ -227,7 +227,7 @@ fn renderRetainedTail(allocator: Allocator, log: sessions.Log, profile: *const c
     errdefer out.deinit(allocator);
     const head_end = @min(profile.runtime.session_head_messages, log.messages.len);
     const tail_start = if (log.messages.len > profile.runtime.session_tail_messages) log.messages.len - profile.runtime.session_tail_messages else head_end;
-    for (log.messages[tail_start..], tail_start..) |message, i| try appendMessageLine(allocator, &out, i, message, profile.runtime.replay_truncate_chars);
+    for (log.messages[tail_start..], tail_start..) |message, i| try appendMessageLine(allocator, &out, i, message, profile.runtime.session_context_truncate_chars);
     return out.toOwnedSlice(allocator);
 }
 
@@ -251,7 +251,7 @@ fn shouldCompactLog(allocator: Allocator, io: std.Io, log: sessions.Log, profile
 
 fn promptTokensForCompaction(allocator: Allocator, log: sessions.Log, profile: *const config.RuntimeProfile) !usize {
     if (log.latestPromptTokens(profile.model.id)) |tokens| return tokens;
-    const transcript = try log.transcript(allocator, profile.runtime.session_head_messages, profile.runtime.session_tail_messages, profile.runtime.replay_truncate_chars);
+    const transcript = try log.transcript(allocator, profile.runtime.session_head_messages, profile.runtime.session_tail_messages, profile.runtime.session_context_truncate_chars);
     defer allocator.free(transcript);
     return (transcript.len + profile.model.chars_per_token - 1) / profile.model.chars_per_token;
 }

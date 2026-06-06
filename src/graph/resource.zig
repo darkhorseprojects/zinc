@@ -153,7 +153,7 @@ fn resolveModelWithProfile(ctx: *RunContext, id: []const u8, res: graph.Resource
     try provider.appendMessage(ctx.allocator, &messages, .{ .role = "system", .content = system.items });
 
     const is_root = ctx.frame.isInteractiveTarget(id);
-    if (is_root) try ctx.log.appendReplayMessages(ctx.allocator, &messages, "", ctx.profile.runtime.session_head_messages, ctx.profile.runtime.session_tail_messages, ctx.profile.runtime.replay_truncate_chars);
+    if (is_root) try ctx.log.appendSessionContext(ctx.allocator, &messages, "", ctx.profile.runtime.session_head_messages, ctx.profile.runtime.session_tail_messages, ctx.profile.runtime.session_context_truncate_chars);
 
     const user_content = try modelUserContent(ctx.allocator, model_inputs.items.items);
     defer ctx.allocator.free(user_content);
@@ -423,7 +423,7 @@ fn runtimeReadContext(ctx: *RunContext) !ctxmod.RuntimeReadContext {
     const inputs = try ctx.allocator.alloc(uri.Input, ctx.inputs.len);
     for (ctx.inputs, 0..) |input, i| inputs[i] = .{ .id = input.id, .value = input.value };
     return .{
-        .context = .{ .layout_ctx = ctx.layout_ctx, .session_id = ctx.session.id, .session_path = ctx.session.path, .session_dir = std.fs.path.dirname(ctx.session.path) orelse ".zinc/sessions", .session_log = ctx.log.raw, .session_head_messages = ctx.profile.runtime.session_head_messages, .session_tail_messages = ctx.profile.runtime.session_tail_messages, .replay_truncate_chars = ctx.profile.runtime.replay_truncate_chars, .inputs = inputs },
+        .context = .{ .layout_ctx = ctx.layout_ctx, .session_id = ctx.session.id, .session_path = ctx.session.path, .session_dir = std.fs.path.dirname(ctx.session.path) orelse ".zinc/sessions", .session_log = ctx.log.raw, .session_head_messages = ctx.profile.runtime.session_head_messages, .session_tail_messages = ctx.profile.runtime.session_tail_messages, .session_context_truncate_chars = ctx.profile.runtime.session_context_truncate_chars, .inputs = inputs },
         .inputs = inputs,
     };
 }

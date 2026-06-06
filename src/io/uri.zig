@@ -15,7 +15,7 @@ pub const Context = struct {
     session_log: []const u8,
     session_head_messages: usize,
     session_tail_messages: usize,
-    replay_truncate_chars: usize,
+    session_context_truncate_chars: usize,
     inputs: []const Input,
 };
 
@@ -48,7 +48,7 @@ fn resolveWithoutRange(allocator: Allocator, io: std.Io, ctx: Context, raw: []co
     if (std.mem.eql(u8, raw, "session:current")) {
         const log = try sessions.parseRaw(allocator, ctx.session_log);
         defer log.deinit(allocator);
-        const transcript = try log.transcript(allocator, ctx.session_head_messages, ctx.session_tail_messages, ctx.replay_truncate_chars);
+        const transcript = try log.transcript(allocator, ctx.session_head_messages, ctx.session_tail_messages, ctx.session_context_truncate_chars);
         return transcript;
     }
     if (std.mem.eql(u8, raw, "session:compaction")) return try sessionCompaction(allocator, ctx);

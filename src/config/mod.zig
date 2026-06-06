@@ -45,7 +45,7 @@ pub const RuntimeSettings = struct {
     compaction_threshold_percent: usize,
     session_head_messages: usize,
     session_tail_messages: usize,
-    replay_truncate_chars: usize,
+    session_context_truncate_chars: usize,
     bash_output_max_bytes: usize,
     bash_output_max_lines: usize,
     bash_capture_max_bytes: usize,
@@ -214,7 +214,7 @@ pub fn loadRuntimeProfile(allocator: Allocator, io: std.Io, layout_ctx: layout.C
     const compaction_threshold_percent = try cfg.usizeValue(&.{ "runtime", "compaction_threshold_percent" }, 70);
     const session_head_messages = try cfg.usizeValue(&.{ "runtime", "session_head_messages" }, 6);
     const session_tail_messages = try cfg.usizeValue(&.{ "runtime", "session_tail_messages" }, 12);
-    const replay_truncate_chars = try cfg.usizeValue(&.{ "runtime", "replay_truncate_chars" }, 2048);
+    const session_context_truncate_chars = try cfg.usizeValue(&.{ "runtime", "session_context_truncate_chars" }, 2048);
     const bash_output_max_bytes = try cfg.usizeValue(&.{ "runtime", "bash_output_max_bytes" }, 50 * 1024);
     const bash_output_max_lines = try cfg.usizeValue(&.{ "runtime", "bash_output_max_lines" }, 2000);
     const bash_capture_max_bytes = try cfg.usizeValue(&.{ "runtime", "bash_capture_max_bytes" }, 64 * 1024 * 1024);
@@ -242,7 +242,7 @@ pub fn loadRuntimeProfile(allocator: Allocator, io: std.Io, layout_ctx: layout.C
         .compaction_threshold_percent = compaction_threshold_percent,
         .session_head_messages = session_head_messages,
         .session_tail_messages = session_tail_messages,
-        .replay_truncate_chars = replay_truncate_chars,
+        .session_context_truncate_chars = session_context_truncate_chars,
         .bash_output_max_bytes = bash_output_max_bytes,
         .bash_output_max_lines = bash_output_max_lines,
         .bash_capture_max_bytes = bash_capture_max_bytes,
