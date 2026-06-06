@@ -110,10 +110,12 @@ The important split is simple: package code goes in `packages`, user choices go 
 Install a package from a GitHub subdirectory:
 
 ```bash
-zn pkg add --local github:darkhorseprojects/zinc-packages/packages/browser#v0.1.3
+zn pkg add --local github:owner/repo/packages/example#v1.0.0
 ```
 
 A package can provide prompts, files, graphs, scripts, and external tools. Local package installs patch `.zinc/graphs/zinc-loop.circuitry.yaml` and write generated package resources to `.zinc/generated/packages.circuitry.yaml`.
+
+Official optional packages live in [`darkhorseprojects/zinc-packages`](https://github.com/darkhorseprojects/zinc-packages). They are not installed by default.
 
 Package tools use external handlers: `process`, `http`, or `mcp`. Graph execution stays built into Zinc through `run_graph`.
 
@@ -129,7 +131,6 @@ The project wiki is the canonical long-form reference:
 - [Runtime](https://github.com/darkhorseprojects/zinc/wiki/Runtime)
 - [Tools](https://github.com/darkhorseprojects/zinc/wiki/Tools)
 - [Packages](https://github.com/darkhorseprojects/zinc/wiki/Packages)
-- [Browser Package](https://github.com/darkhorseprojects/zinc/wiki/Browser-Package)
 - [Sessions](https://github.com/darkhorseprojects/zinc/wiki/Sessions)
 
 ## Safety
