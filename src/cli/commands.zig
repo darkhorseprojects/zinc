@@ -22,7 +22,7 @@ pub fn usage() void {
         \\
         \\usage:
         \\  zn check [graph]
-        \\  zn clean [--local|--global] [--yes] [sessions | logs | packages | state | all]
+        \\  zn clean [--local|--global] [--yes] [sessions | logs | packages | generated | config | runtime | all]
         \\  zn doctor
         \\  zn config get <path>
         \\  zn compact [--dry-run] [--session id|--continue] [graph]
@@ -505,7 +505,7 @@ fn validateGraphFile(allocator: Allocator, io: std.Io, path: []const u8) !void {
 }
 
 pub fn clean(allocator: Allocator, io: std.Io, layout_ctx: layout.Context, scope: packages.Scope, target_str: []const u8, yes: bool) !void {
-    const Target = enum { sessions, logs, packages, state, all };
+    const Target = enum { sessions, logs, packages, generated, config, runtime, all };
     const target = std.meta.stringToEnum(Target, target_str) orelse return error.InvalidCleanTarget;
     std.debug.print("Clean Zinc artifacts\n\nscope: {s}\ntarget: {s}\n", .{ @tagName(scope), @tagName(target) });
     if (!yes) try confirmOrFail("Continue?");
@@ -515,6 +515,9 @@ pub fn clean(allocator: Allocator, io: std.Io, layout_ctx: layout.Context, scope
             if (target == .sessions or target == .all) dir.deleteTree(io, ".zinc/sessions") catch |err| if (err != error.FileNotFound) return err;
             if (target == .logs or target == .all) dir.deleteTree(io, ".zinc/logs") catch |err| if (err != error.FileNotFound) return err;
             if (target == .packages or target == .all) dir.deleteTree(io, ".zinc/packages") catch |err| if (err != error.FileNotFound) return err;
+            if (target == .generated or target == .all) dir.deleteTree(io, ".zinc/generated") catch |err| if (err != error.FileNotFound) return err;
+            if (target == .config or target == .all) dir.deleteTree(io, ".zinc/config") catch |err| if (err != error.FileNotFound) return err;
+            if (target == .runtime or target == .all) dir.deleteTree(io, ".zinc/runtime") catch |err| if (err != error.FileNotFound) return err;
         },
         .global => {
             if (target == .packages or target == .all) {
@@ -522,11 +525,7 @@ pub fn clean(allocator: Allocator, io: std.Io, layout_ctx: layout.Context, scope
                 defer allocator.free(global_pkgs);
                 dir.deleteTree(io, global_pkgs) catch |err| if (err != error.FileNotFound) return err;
             }
-            if (target == .state or target == .all) {
-                const global_state = try layout.statePath(allocator, layout_ctx, "");
-                defer allocator.free(global_state);
-                dir.deleteTree(io, global_state) catch |err| if (err != error.FileNotFound) return err;
-            }
+
         },
     }
     std.debug.print("cleaned {s} {s} artifacts\n", .{ @tagName(scope), @tagName(target) });

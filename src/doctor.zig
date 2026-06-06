@@ -5,7 +5,7 @@ const layout = @import("io/layout.zig");
 const Allocator = std.mem.Allocator;
 
 pub fn run(allocator: Allocator, io: std.Io, layout_ctx: layout.Context) !void {
-    std.debug.print("Zinc\n  version: 0.4.11\n\n", .{});
+    std.debug.print("Zinc\n  version: 0.4.12\n\n", .{});
 
     const model_id = config.resolveConfiguredModelId(allocator, io, layout_ctx) catch |err| switch (err) {
         error.ModelNotConfigured => return printUnconfigured(),

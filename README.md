@@ -217,7 +217,7 @@ Zinc stores sessions as JSONL under `.zinc/sessions`; that is an internal storag
 
 ## Packages
 
-A package can provide graphs, prompts, files, tools, scripts, and an optional `install.model` patch. Local package installs patch `.zinc/graphs/zinc-loop.circuitry.yaml` and write package resources to `.zinc/graphs/zinc-packages.circuitry.yaml`.
+A package can provide graphs, prompts, files, tools, scripts, and an optional `install.model` patch. Local package installs patch `.zinc/graphs/zinc-loop.circuitry.yaml` and write generated package resources to `.zinc/generated/packages.circuitry.yaml`.
 
 ```yaml
 install:

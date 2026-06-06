@@ -380,7 +380,7 @@ pub fn findTool(allocator: Allocator, io: std.Io, layout_ctx: layout.Context, na
 }
 
 const project_loop_graph_path = ".zinc/graphs/zinc-loop.circuitry.yaml";
-const package_graph_path = ".zinc/graphs/zinc-packages.circuitry.yaml";
+const package_graph_path = ".zinc/generated/packages.circuitry.yaml";
 
 fn ensureProjectLoopGraph(allocator: Allocator, layout_ctx: layout.Context) ![]u8 {
     const project = try allocator.dupe(u8, project_loop_graph_path);
@@ -603,7 +603,7 @@ fn modelHasInstallSpec(allocator: Allocator, text: []const u8, model: []const u8
 }
 
 fn regeneratePackageGraph(allocator: Allocator, io: std.Io, layout_ctx: layout.Context) !void {
-    try files.mkdirP(".zinc/graphs");
+    try files.mkdirP(".zinc/generated");
     var out: std.ArrayList(u8) = .empty;
     errdefer out.deinit(allocator);
     try out.appendSlice(allocator,
