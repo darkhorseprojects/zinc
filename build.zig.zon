@@ -1,6 +1,6 @@
 .{
     .name = .zinc,
-    .version = "0.5.0",
+    .version = "0.5.1",
     .fingerprint = 0x4d05198031a1f081,
     .minimum_zig_version = "0.16.0",
     .dependencies = .{

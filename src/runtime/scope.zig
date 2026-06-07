@@ -12,14 +12,8 @@ pub fn default() Scope {
 
 pub fn dbPath(allocator: Allocator, layout_ctx: layout.Context, scope: Scope) ![]u8 {
     return switch (scope) {
-        .local => allocator.dupe(u8, ".zinc/runtime/zinc.db"),
-        .global => layout.sharePath(allocator, layout_ctx, "runtime/zinc.db"),
+        .local => allocator.dupe(u8, ".zinc/state/zinc.db"),
+        .global => layout.sharePath(allocator, layout_ctx, "state/zinc.db"),
     };
 }
 
-pub fn artifactsPath(allocator: Allocator, layout_ctx: layout.Context, scope: Scope) ![]u8 {
-    return switch (scope) {
-        .local => allocator.dupe(u8, ".zinc/runtime/artifacts"),
-        .global => layout.sharePath(allocator, layout_ctx, "runtime/artifacts"),
-    };
-}

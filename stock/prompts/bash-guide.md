@@ -42,11 +42,10 @@ When working in a Zinc project, know the local layout:
 .zinc/config/packages/<name>.yaml     user/project package config
 .zinc/runtime/packages/<name>/        package working runtime
 .zinc/runtime/zinc.db                 sessions, events, logs, branches
-.zinc/runtime/artifacts/              large runtime artifacts
-.zinc/tmp/                            short-lived temporary files
+.zinc/tmp/                            short-lived temporary captures
 ```
 
-Do not casually edit generated files. Change package installs or source manifests and let Zinc regenerate wiring.
+Do not casually edit generated files. Change package installs or source manifests and let Zinc regenerate wiring. The SQLite database is the canonical runtime; `.zinc/tmp` is only for short-lived captures such as oversized shell output.
 
 ## Processes and system
 
@@ -67,7 +66,7 @@ du -h -d 1 ~/.cache | sort -h | tail
 du -h -d 1 . | sort -h | tail
 ```
 
-Delete only obvious temporary/runtime artifacts unless the user approves broader cleanup.
+Delete only obvious temporary files unless the user approves broader cleanup.
 
 ## HTTP and web
 

@@ -13,7 +13,7 @@ cd "$WORK"
 mkdir .zinc
 
 path=$($ZN db path 2>&1)
-[ "$path" = ".zinc/runtime/zinc.db" ]
+[ "$path" = ".zinc/state/zinc.db" ]
 
 tables=$($ZN db tables 2>&1)
 printf '%s' "$tables" | grep -q $'sessions\ttable'
@@ -28,4 +28,4 @@ query=$($ZN db query 'select count(*) as n from sessions' 2>&1)
 printf '%s' "$query" | grep -q $'n\n0'
 
 $ZN clean --local --yes runtime >/dev/null
-[ ! -e .zinc/runtime ]
+[ ! -e .zinc/state ]

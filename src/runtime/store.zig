@@ -17,6 +17,27 @@ pub const Store = struct {
     pub fn open(allocator: Allocator, layout_ctx: layout.Context, scope: scopes.Scope) !Store {
         const path = try scopes.dbPath(allocator, layout_ctx, scope);
         errdefer allocator.free(path);
+
+        const old_path = try oldDbPath(allocator, layout_ctx, scope);
+        defer allocator.free(old_path);
+        if (files.existsPath(old_path) and !files.existsPath(path)) {
+            if (std.fs.path.dirname(path)) |dir| try files.mkdirP(dir);
+            const io = std.Options.debug_io;
+            std.Io.Dir.cwd().rename(old_path, std.Io.Dir.cwd(), path, io) catch {};
+            
+            const old_wal = try std.fmt.allocPrint(allocator, "{s}-wal", .{old_path});
+            defer allocator.free(old_wal);
+            const wal = try std.fmt.allocPrint(allocator, "{s}-wal", .{path});
+            defer allocator.free(wal);
+            std.Io.Dir.cwd().rename(old_wal, std.Io.Dir.cwd(), wal, io) catch {};
+
+            const old_shm = try std.fmt.allocPrint(allocator, "{s}-shm", .{old_path});
+            defer allocator.free(old_shm);
+            const shm = try std.fmt.allocPrint(allocator, "{s}-shm", .{path});
+            defer allocator.free(shm);
+            std.Io.Dir.cwd().rename(old_shm, std.Io.Dir.cwd(), shm, io) catch {};
+        }
+
         if (std.fs.path.dirname(path)) |dir| try files.mkdirP(dir);
         const path_z = try allocator.dupeZ(u8, path);
         errdefer allocator.free(path_z);
@@ -26,6 +47,13 @@ pub const Store = struct {
         try schema.configure(store.db);
         try schema.migrate(store.db);
         return store;
+    }
+
+    fn oldDbPath(allocator: Allocator, layout_ctx: layout.Context, scope: scopes.Scope) ![]u8 {
+        return switch (scope) {
+            .local => allocator.dupe(u8, ".zinc/runtime/zinc.db"),
+            .global => layout.sharePath(allocator, layout_ctx, "runtime/zinc.db"),
+        };
     }
 
     pub fn close(self: *Store) void {
@@ -118,6 +146,60 @@ pub const Store = struct {
             .message = sqlite.text(args.message),
             .fields_json = sqlite.text(args.fields_json orelse "{}"),
         });
+    }
+
+    pub fn startRun(self: Store, session_id: []const u8, command: []const u8, metadata_json: []const u8) ![]u8 {
+        const id = try ids.new(self.allocator, "r");
+        errdefer self.allocator.free(id);
+        const now = try ids.timestamp(self.allocator);
+        defer self.allocator.free(now);
+        try self.db.exec("insert into runs(id, session_id, started_at, status, command, metadata_json) values (:id, :session_id, :started_at, 'running', :command, :metadata_json)", .{ .id = sqlite.text(id), .session_id = sqlite.text(session_id), .started_at = sqlite.text(now), .command = sqlite.text(command), .metadata_json = sqlite.text(metadata_json) });
+        return id;
+    }
+
+    pub fn finishRun(self: Store, id: []const u8, status: []const u8, metadata_json: ?[]const u8) !void {
+        const now = try ids.timestamp(self.allocator);
+        defer self.allocator.free(now);
+        if (metadata_json) |meta| try self.db.exec("update runs set finished_at = :finished_at, status = :status, metadata_json = :metadata_json where id = :id", .{ .finished_at = sqlite.text(now), .status = sqlite.text(status), .metadata_json = sqlite.text(meta), .id = sqlite.text(id) }) else try self.db.exec("update runs set finished_at = :finished_at, status = :status where id = :id", .{ .finished_at = sqlite.text(now), .status = sqlite.text(status), .id = sqlite.text(id) });
+    }
+
+    pub fn currentBranch(self: Store, allocator: Allocator, session_id: []const u8) ![]u8 {
+        const value = try self.currentBranchTemp(session_id);
+        if (allocator.ptr == self.allocator.ptr) return value;
+        defer self.allocator.free(value);
+        return allocator.dupe(u8, value);
+    }
+
+    pub fn branchExists(self: Store, session_id: []const u8, branch: []const u8) !bool {
+        const Row = struct { count: usize };
+        const stmt = try self.db.prepare(struct { session_id: sqlite.Text, branch: sqlite.Text }, Row, "select count(*) as count from branch_heads where session_id = :session_id and branch = :branch");
+        defer stmt.finalize();
+        try stmt.bind(.{ .session_id = sqlite.text(session_id), .branch = sqlite.text(branch) });
+        defer stmt.reset();
+        const row = try stmt.step() orelse return false;
+        return row.count != 0;
+    }
+
+    pub fn eventSession(self: Store, allocator: Allocator, event_id: []const u8) ![]u8 {
+        const Row = struct { session_id: sqlite.Text };
+        const stmt = try self.db.prepare(struct { id: sqlite.Text }, Row, "select session_id from events where id = :id");
+        defer stmt.finalize();
+        try stmt.bind(.{ .id = sqlite.text(event_id) });
+        defer stmt.reset();
+        const row = try stmt.step() orelse return error.EventNotFound;
+        return allocator.dupe(u8, row.session_id.data);
+    }
+
+    pub fn createBranch(self: Store, at_event_id: []const u8, name: []const u8) ![]u8 {
+        const session_id = try self.eventSession(self.allocator, at_event_id);
+        defer self.allocator.free(session_id);
+        return self.appendEvent(.{ .session_id = session_id, .parent_id = at_event_id, .branch = name, .type = @import("events.zig").session_branch_created, .summary = name, .payload_json = "{}" });
+    }
+
+    pub fn checkoutBranch(self: Store, session_id: []const u8, name: []const u8) ![]u8 {
+        if (!try self.branchExists(session_id, name)) return error.BranchNotFound;
+        try self.db.exec("update sessions set current_branch = :branch where id = :session_id", .{ .branch = sqlite.text(name), .session_id = sqlite.text(session_id) });
+        return self.appendEvent(.{ .session_id = session_id, .branch = name, .type = @import("events.zig").session_branch_checked_out, .summary = name, .payload_json = "{}" });
     }
 
     fn currentBranchTemp(self: Store, session_id: []const u8) ![]u8 {

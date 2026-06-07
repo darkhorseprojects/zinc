@@ -128,7 +128,7 @@ fn tempPath(allocator: Allocator) ![]u8 {
     try files.mkdirP(".zinc/tmp");
     var bytes: [8]u8 = undefined;
     randomBytes(&bytes);
-    return std.fmt.allocPrint(allocator, ".zinc/tmp/zinc-shell-{x:0>2}{x:0>2}{x:0>2}{x:0>2}{x:0>2}{x:0>2}{x:0>2}{x:0>2}.out", .{ bytes[0], bytes[1], bytes[2], bytes[3], bytes[4], bytes[5], bytes[6], bytes[7] });
+    return std.fmt.allocPrint(allocator, ".zinc/tmp/{x:0>2}{x:0>2}{x:0>2}{x:0>2}{x:0>2}{x:0>2}{x:0>2}{x:0>2}.log", .{ bytes[0], bytes[1], bytes[2], bytes[3], bytes[4], bytes[5], bytes[6], bytes[7] });
 }
 
 fn randomBytes(bytes: []u8) void {

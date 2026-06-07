@@ -106,11 +106,16 @@ A project may have a local `.zinc/` workspace:
 .zinc/config/packages/<name>.yaml     user/project package config
 .zinc/runtime/packages/<name>/        package working runtime
 .zinc/runtime/zinc.db                 sessions, events, logs, branches
-.zinc/runtime/artifacts/              large runtime artifacts
-.zinc/tmp/                            short-lived temporary files
+.zinc/tmp/                            short-lived temporary captures
 ```
 
 The important split is simple: package code goes in `packages`, user choices go in `config`, package working files go in `runtime`, and generated wiring goes in `generated`.
+
+## Runtime
+
+Zinc's canonical runtime is SQLite. A local project writes `.zinc/runtime/zinc.db`; outside a project Zinc writes `~/.local/share/zinc/runtime/zinc.db`. There is no legacy line-store, export/import stack, or separate output registry. Filesystem paths are normal references; large transient command captures go under `.zinc/tmp`.
+
+Runtime URIs are read-only navigation surfaces. CLI commands and tools mutate runtime state. Recovery and compaction graphs receive a stable runtime context contract from core: scope, cwd, session id, branch, current message, reach/budget, read-only runtime URIs, session head, retained tail, existing compaction, and messages selected for compaction. Graphs decide how to interpret those facts.
 
 ## Packages
 

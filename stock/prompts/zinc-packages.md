@@ -96,6 +96,8 @@ Graph execution stays built into Zinc through `run_graph`.
 
 Package scripts run with `zn pkg exec`; they are setup/check/maintenance commands, not model tools.
 
+Package hooks are event hooks. Hook scripts may return declared package events, but Zinc owns validation and appending into the core runtime event log. Hooks should not pretend to mutate sessions directly.
+
 ## Author rules
 
 - Keep the manifest small and readable.

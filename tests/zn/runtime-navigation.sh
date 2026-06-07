@@ -14,7 +14,7 @@ mkdir .zinc
 $ZN db tables >/dev/null 2>&1
 python - <<'PY'
 import sqlite3
-con=sqlite3.connect('.zinc/runtime/zinc.db')
+con=sqlite3.connect('.zinc/state/zinc.db')
 con.execute("insert into sessions(id,cwd,created_at,updated_at,current_branch,status) values ('stest','.','2026-01-01T00:00:00.000Z','2026-01-01T00:00:01.000Z','main','active')")
 con.execute("insert into events(id,session_id,parent_id,branch,type,source_kind,source_name,time,summary,payload_json) values ('e1','stest',null,'main','session.message.user','core','zinc','2026-01-01T00:00:01.000Z','hello','{}')")
 con.execute("insert into branch_heads(session_id,branch,head_event_id,updated_at) values ('stest','main','e1','2026-01-01T00:00:01.000Z')")

@@ -54,3 +54,5 @@ Important rules:
 - Validate before running with `zn check`.
 
 Local package installs may patch `.zinc/graphs/zinc-loop.circuitry.yaml` and import `.zinc/generated/packages.circuitry.yaml`. Generated package imports should remain visible and reviewable in graph source.
+
+Recovery and compaction graphs are ordinary graphs over Zinc's stable runtime context contract. Core may provide fields such as `session_head`, `retained_tail`, `existing_compaction`, `messages_to_compact`, `runtime_uri`, `session_uri`, `branch_uri`, and `logs_uri`; graphs own interpretation and strategy. Runtime URIs are read-only navigation, not mutation APIs.

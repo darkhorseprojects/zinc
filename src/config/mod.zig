@@ -1,7 +1,7 @@
 const std = @import("std");
 const files = @import("../io/fs.zig");
 const graph = @import("../graph/mod.zig");
-const packages = @import("../packages/mod.zig");
+const packages = @import("../pkg/mod.zig");
 const layout = @import("../io/layout.zig");
 const platform = @import("../platform.zig");
 const circuitry = @import("circuitry");
@@ -22,13 +22,16 @@ pub fn envPresent(name: []const u8) bool {
     return env.get(name) != null;
 }
 
+pub fn getEnv(name: []const u8) ?[]const u8 {
+    const env = process_env orelse return null;
+    return env.get(name);
+}
+
 pub const RuntimePaths = struct {
     graph: []u8,
-    context_graph: []u8,
     compaction_graph: []u8,
     pub fn deinit(self: RuntimePaths, allocator: Allocator) void {
         allocator.free(self.graph);
-        allocator.free(self.context_graph);
         allocator.free(self.compaction_graph);
     }
 };
@@ -238,12 +241,16 @@ pub fn loadRuntimeProfile(allocator: Allocator, io: std.Io, layout_ctx: layout.C
     const input_text_file_max_bytes = try cfg.usizeValue(&.{ "runtime", "input_text_file_max_bytes" }, 8 * 1024 * 1024);
     const input_file_max_bytes = try cfg.usizeValue(&.{ "runtime", "input_file_max_bytes" }, 32 * 1024 * 1024);
     const recovery_graph = try recoveryGraphPath(allocator, layout_ctx, cfg);
-    errdefer allocator.free(recovery_graph);
+    var recovery_graph_owned = true;
+    errdefer if (recovery_graph_owned) allocator.free(recovery_graph);
     const recovery_reach = try cfg.string(allocator, &.{ "recovery", "reach" }, "project");
-    errdefer allocator.free(recovery_reach);
+    var recovery_reach_owned = true;
+    errdefer if (recovery_reach_owned) allocator.free(recovery_reach);
     try validateRecoveryReach(recovery_reach);
     const recovery_budget_chars = try cfg.usizeValue(&.{ "recovery", "budget_chars" }, 12000);
     const recovery = RecoverySettings{ .graph = recovery_graph, .reach = recovery_reach, .budget_chars = recovery_budget_chars };
+    recovery_graph_owned = false;
+    recovery_reach_owned = false;
     errdefer recovery.deinit(allocator);
     const confirm_commands = try cfg.stringList(allocator, &.{"confirm_commands"}, default_confirm_commands);
     var confirm_commands_owned = true;
@@ -435,18 +442,12 @@ fn recoveryGraphPath(allocator: Allocator, layout_ctx: layout.Context, cfg: Conf
 fn runtimePaths(allocator: Allocator, layout_ctx: layout.Context, cfg: Config) !RuntimePaths {
     var paths = RuntimePaths{
         .graph = try layout.sharePath(allocator, layout_ctx, "graphs/zinc-loop.circuitry.yaml"),
-        .context_graph = try layout.sharePath(allocator, layout_ctx, "graphs/zinc-context-recovery.circuitry.yaml"),
         .compaction_graph = try layout.sharePath(allocator, layout_ctx, "graphs/zinc-compaction.circuitry.yaml"),
     };
     errdefer paths.deinit(allocator);
     if (try cfg.optionalString(allocator, &.{ "paths", "graph" })) |v| {
         allocator.free(paths.graph);
         paths.graph = try expandHome(allocator, layout_ctx, v);
-        allocator.free(v);
-    }
-    if (try cfg.optionalString(allocator, &.{ "paths", "context_graph" })) |v| {
-        allocator.free(paths.context_graph);
-        paths.context_graph = try expandHome(allocator, layout_ctx, v);
         allocator.free(v);
     }
     if (try cfg.optionalString(allocator, &.{ "paths", "compaction_graph" })) |v| {

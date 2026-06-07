@@ -1,11 +1,11 @@
 const std = @import("std");
 const circuitry = @import("circuitry");
 const ctxmod = @import("../graph/context.zig");
-const provider = @import("provider.zig");
+const provider = @import("../provider/mod.zig");
 const sessions = @import("../runtime/session.zig");
 const runtime_tools = @import("../tools/schema.zig");
 const uri = @import("../io/uri.zig");
-const trace = @import("../io/trace.zig");
+const runtime = @import("../runtime/mod.zig");
 
 const Allocator = std.mem.Allocator;
 const provider_retry_delay_ms: usize = 1000;
@@ -69,9 +69,19 @@ pub fn run(ctx: *ctxmod.RunContext, messages: *std.ArrayList(provider.Message), 
         const read_ctx = try runtimeReadContext(ctx);
         defer read_ctx.deinit(ctx.allocator);
         for (turn.tool_calls) |call| {
+            var tool_store = try runtime.Store.open(ctx.allocator, ctx.layout_ctx, runtime.scope.default());
+            defer tool_store.close();
+            const called_event = if (record_session) try tool_store.appendEvent(.{ .session_id = ctx.session.id, .type = runtime.events.tool_called, .summary = call.name, .payload_json = call.arguments }) else null;
+            defer if (called_event) |id| ctx.allocator.free(id);
             const result = try execute_tool(ctx, read_ctx.context, spec, call);
             defer result.deinit(ctx.allocator);
-            if (record_session) try sessions.appendToolResult(ctx.allocator, ctx.layout_ctx, ctx.session, call, result);
+            if (record_session) {
+                try sessions.appendToolResult(ctx.allocator, ctx.layout_ctx, ctx.session, call, result);
+                const event_type = if (result.is_error) runtime.events.tool_failed else runtime.events.tool_finished;
+                const event_id = try tool_store.appendEvent(.{ .session_id = ctx.session.id, .type = event_type, .summary = call.name, .payload_json = result.metadata_json orelse "{}" });
+                defer ctx.allocator.free(event_id);
+                try tool_store.writeLog(.{ .run_id = ctx.run_id, .session_id = ctx.session.id, .event_id = event_id, .level = if (result.is_error) "error" else "info", .component = "tool", .message = call.name });
+            }
             if (result.is_error) {
                 if (retries >= ctx.profile.runtime.tool_max_turns) return finalToolFailure(ctx, messages, spec, result.content, reasoning_effort);
                 retries += 1;
@@ -116,10 +126,16 @@ fn finalToolFailure(ctx: *ctxmod.RunContext, messages: *std.ArrayList(provider.M
 fn callProvider(ctx: *ctxmod.RunContext, session: ?sessions.Session, label: []const u8, request: provider.Request) !provider.AssistantTurn {
     var attempts: usize = 0;
     while (true) {
-        const span = trace.span("provider_call");
-        trace.event("llm", "request", "label={s} attempt={d} messages={d} chars={d} tools={d}", .{ label, attempts + 1, request.messages.len, messageChars(request.messages), request.tools_json.len });
+        var store = try runtime.Store.open(ctx.allocator, ctx.layout_ctx, runtime.scope.default());
+        defer store.close();
+        const requested = if (session) |s| try store.appendEvent(.{ .session_id = s.id, .type = runtime.events.model_requested, .summary = label, .payload_json = "{}" }) else null;
+        defer if (requested) |id| ctx.allocator.free(id);
         const turn = provider.call(ctx.allocator, ctx.io, request) catch |err| {
-            span.end("llm", "label={s} attempt={d} error={s}", .{ label, attempts + 1, @errorName(err) });
+            if (session) |s| {
+                const failed = try store.appendEvent(.{ .session_id = s.id, .type = runtime.events.model_failed, .summary = @errorName(err), .payload_json = "{}" });
+                defer ctx.allocator.free(failed);
+                try store.writeLog(.{ .run_id = ctx.run_id, .session_id = s.id, .event_id = failed, .level = "error", .component = "model", .message = @errorName(err) });
+            }
             if (err == error.ProviderLoadingModel) {
                 if (session) |s| try sessions.appendProviderError(ctx.allocator, ctx.layout_ctx, s, "provider loading");
                 sleepMillis(provider_retry_delay_ms);
@@ -130,8 +146,12 @@ fn callProvider(ctx: *ctxmod.RunContext, session: ?sessions.Session, label: []co
             if (session) |s| try sessions.appendProviderError(ctx.allocator, ctx.layout_ctx, s, "provider retry");
             continue;
         };
-        if (session) |s| if (turn.prompt_tokens) |tokens| try sessions.appendProviderUsage(ctx.allocator, ctx.layout_ctx, s, request.profile.model.id, tokens);
-        span.end("llm", "label={s} attempt={d} text_chars={d} tool_calls={d}", .{ label, attempts + 1, turn.text.len, turn.tool_calls.len });
+        if (session) |s| {
+            const responded = try store.appendEvent(.{ .session_id = s.id, .type = runtime.events.model_responded, .summary = label, .payload_json = "{}" });
+            defer ctx.allocator.free(responded);
+            try store.writeLog(.{ .run_id = ctx.run_id, .session_id = s.id, .event_id = responded, .component = "model", .message = "provider response" });
+            if (turn.prompt_tokens) |tokens| try sessions.appendProviderUsage(ctx.allocator, ctx.layout_ctx, s, request.profile.model.id, tokens);
+        }
         return turn;
     }
 }

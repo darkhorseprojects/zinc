@@ -1,11 +1,12 @@
 const std = @import("std");
 const sqlite = @import("sqlite");
-const provider = @import("../model/provider.zig");
+const provider = @import("../provider/mod.zig");
 const tools = @import("../tools/schema.zig");
 const layout = @import("../io/layout.zig");
 const Store = @import("store.zig").Store;
 const ids = @import("ids.zig");
 const scopes = @import("scope.zig");
+const events = @import("events.zig");
 
 const Allocator = std.mem.Allocator;
 
@@ -48,9 +49,13 @@ pub const Compaction = struct {
 pub const Recovery = struct {
     message_count: usize,
     compaction_message_count: usize,
-    context: []u8,
+    text: []u8,
+    sources: [][]u8,
+    notes: [][]u8,
     fn deinit(self: Recovery, allocator: Allocator) void {
-        allocator.free(self.context);
+        allocator.free(self.text);
+        freeStringList(allocator, self.sources);
+        freeStringList(allocator, self.notes);
     }
 };
 
@@ -124,7 +129,7 @@ pub fn open(allocator: Allocator, layout_ctx: layout.Context, resume_id: ?[]cons
     errdefer allocator.free(id);
     try store.ensureSession(id, ".");
     if (resume_id == null and !continue_last) {
-        const event_id = try store.appendEvent(.{ .session_id = id, .type = "session.started", .summary = "session started" });
+        const event_id = try store.appendEvent(.{ .session_id = id, .type = events.session_started, .summary = "session started" });
         allocator.free(event_id);
     }
     try store.setLastSessionId(id);
@@ -146,13 +151,13 @@ pub fn read(allocator: Allocator, layout_ctx: layout.Context, session: Session) 
 pub fn appendUserMessage(allocator: Allocator, layout_ctx: layout.Context, session: Session, content: []const u8) !void {
     var store = try Store.open(allocator, layout_ctx, scopes.default());
     defer store.close();
-    try appendJsonPayloadEvent(allocator, store, session.id, "session.message.user", "user message", .{ .role = "user", .content = content });
+    try appendJsonPayloadEvent(allocator, store, session.id, events.session_message_user, "user message", .{ .role = "user", .content = content });
 }
 
 pub fn appendAssistantText(allocator: Allocator, layout_ctx: layout.Context, session: Session, model_id: []const u8, content: []const u8, reasoning: ?[]const u8) !void {
     var store = try Store.open(allocator, layout_ctx, scopes.default());
     defer store.close();
-    try appendJsonPayloadEvent(allocator, store, session.id, "session.message.assistant", "assistant message", .{ .role = "assistant", .content = content, .model = model_id, .reasoning = reasoning orelse "" });
+    try appendJsonPayloadEvent(allocator, store, session.id, events.session_message_assistant, "assistant message", .{ .role = "assistant", .content = content, .model = model_id, .reasoning = reasoning orelse "" });
 }
 
 pub fn appendAssistantToolCalls(allocator: Allocator, layout_ctx: layout.Context, session: Session, model_id: []const u8, content: []const u8, reasoning: ?[]const u8, calls: []const provider.ToolCall) !void {
@@ -172,14 +177,14 @@ pub fn appendAssistantToolCalls(allocator: Allocator, layout_ctx: layout.Context
     try payload.appendSlice(allocator, "]}");
     var store = try Store.open(allocator, layout_ctx, scopes.default());
     defer store.close();
-    const id = try store.appendEvent(.{ .session_id = session.id, .type = "session.message.assistant", .summary = "assistant tool calls", .payload_json = payload.items });
+    const id = try store.appendEvent(.{ .session_id = session.id, .type = events.session_message_assistant, .summary = "assistant tool calls", .payload_json = payload.items });
     allocator.free(id);
 }
 
 pub fn appendToolResult(allocator: Allocator, layout_ctx: layout.Context, session: Session, call: provider.ToolCall, result: tools.ToolResult) !void {
     var store = try Store.open(allocator, layout_ctx, scopes.default());
     defer store.close();
-    try appendJsonPayloadEvent(allocator, store, session.id, "tool.finished", call.name, .{ .role = "tool", .name = call.name, .tool_call_id = call.id, .ok = !result.is_error, .content = result.content });
+    try appendJsonPayloadEvent(allocator, store, session.id, events.tool_finished, call.name, .{ .role = "tool", .name = call.name, .tool_call_id = call.id, .ok = !result.is_error, .content = result.content });
 }
 
 pub fn appendProviderError(allocator: Allocator, layout_ctx: layout.Context, session: Session, message: []const u8) !void {
@@ -193,36 +198,43 @@ pub fn appendProviderError(allocator: Allocator, layout_ctx: layout.Context, ses
 pub fn appendProviderUsage(allocator: Allocator, layout_ctx: layout.Context, session: Session, model_id: []const u8, prompt_tokens: usize) !void {
     var store = try Store.open(allocator, layout_ctx, scopes.default());
     defer store.close();
-    try appendJsonPayloadEvent(allocator, store, session.id, "model.usage", "provider usage", .{ .model = model_id, .prompt_tokens = prompt_tokens });
+    try appendJsonPayloadEvent(allocator, store, session.id, events.model_usage, "provider usage", .{ .model = model_id, .prompt_tokens = prompt_tokens });
 }
 
 pub fn appendCompaction(allocator: Allocator, layout_ctx: layout.Context, session: Session, message_count: usize, summary: []const u8) !void {
     var store = try Store.open(allocator, layout_ctx, scopes.default());
     defer store.close();
-    try appendJsonPayloadEvent(allocator, store, session.id, "session.compacted", "session compacted", .{ .message_count = message_count, .summary = summary });
+    try appendJsonPayloadEvent(allocator, store, session.id, events.session_compacted, "session compacted", .{ .message_count = message_count, .summary = summary });
 }
 
 pub fn appendRecoveryStarted(allocator: Allocator, layout_ctx: layout.Context, session: Session, reach: []const u8, budget_chars: usize) !void {
     var store = try Store.open(allocator, layout_ctx, scopes.default());
     defer store.close();
-    try appendJsonPayloadEvent(allocator, store, session.id, "context.recovery.started", "context recovery started", .{ .reach = reach, .budget_chars = budget_chars });
+    try appendJsonPayloadEvent(allocator, store, session.id, events.recovery_started, "context recovery started", .{ .reach = reach, .budget_chars = budget_chars });
 }
 
-pub fn appendRecovery(allocator: Allocator, layout_ctx: layout.Context, session: Session, message_count: usize, compaction_message_count: usize, context: []const u8) !void {
+pub fn appendRecovery(allocator: Allocator, layout_ctx: layout.Context, session: Session, message_count: usize, compaction_message_count: usize, text: []const u8, sources: []const []const u8, notes: []const []const u8) !void {
     var store = try Store.open(allocator, layout_ctx, scopes.default());
     defer store.close();
-    try appendJsonPayloadEvent(allocator, store, session.id, "context.recovery.finished", "context recovery finished", .{ .message_count = message_count, .compaction_message_count = compaction_message_count, .context = context });
+    try appendJsonPayloadEvent(allocator, store, session.id, events.recovery_finished, "context recovery finished", .{ .message_count = message_count, .compaction_message_count = compaction_message_count, .text = text, .sources = sources, .notes = notes, .output_chars = text.len });
 }
 
 pub fn appendRecoveryFailed(allocator: Allocator, layout_ctx: layout.Context, session: Session, message: []const u8) !void {
     var store = try Store.open(allocator, layout_ctx, scopes.default());
     defer store.close();
-    try appendJsonPayloadEvent(allocator, store, session.id, "context.recovery.failed", "context recovery failed", .{ .message = message });
+    try appendJsonPayloadEvent(allocator, store, session.id, events.recovery_failed, "context recovery failed", .{ .message = message });
 }
 
 fn readFromStore(allocator: Allocator, store: Store, session_id: []const u8) !Log {
     const Row = struct { type: sqlite.Text, payload_json: sqlite.Text };
-    const stmt = try store.db.prepare(struct { session_id: sqlite.Text }, Row, "select type, payload_json from events where session_id = :session_id order by time, rowid");
+    const stmt = try store.db.prepare(struct { session_id: sqlite.Text }, Row,
+        \\with recursive active(id, depth) as (
+        \\  select b.head_event_id, 0 from sessions s join branch_heads b on b.session_id = s.id and b.branch = s.current_branch where s.id = :session_id
+        \\  union all
+        \\  select e.parent_id, active.depth + 1 from events e join active on e.id = active.id where e.parent_id is not null
+        \\)
+        \\select e.type, e.payload_json from events e join active on active.id = e.id order by active.depth desc
+    );
     defer stmt.finalize();
     try stmt.bind(.{ .session_id = sqlite.text(session_id) });
     defer stmt.reset();
@@ -235,17 +247,17 @@ fn readFromStore(allocator: Allocator, store: Store, session_id: []const u8) !Lo
     var usage: ?ProviderUsage = null;
     errdefer if (usage) |u| u.deinit(allocator);
     while (try stmt.step()) |row| {
-        if (std.mem.eql(u8, row.type.data, "session.message.user") or std.mem.eql(u8, row.type.data, "session.message.assistant")) {
+        if (std.mem.eql(u8, row.type.data, events.session_message_user) or std.mem.eql(u8, row.type.data, events.session_message_assistant)) {
             try messages.append(allocator, try readMessagePayload(allocator, row.payload_json.data));
-        } else if (std.mem.eql(u8, row.type.data, "tool.finished")) {
+        } else if (std.mem.eql(u8, row.type.data, events.tool_finished)) {
             try messages.append(allocator, try readToolPayload(allocator, row.payload_json.data));
-        } else if (std.mem.eql(u8, row.type.data, "session.compacted")) {
+        } else if (std.mem.eql(u8, row.type.data, events.session_compacted)) {
             if (compaction) |old| old.deinit(allocator);
             compaction = try readCompactionPayload(allocator, row.payload_json.data);
-        } else if (std.mem.eql(u8, row.type.data, "context.recovery.finished")) {
+        } else if (std.mem.eql(u8, row.type.data, events.recovery_finished)) {
             if (recovery) |old| old.deinit(allocator);
             recovery = try readRecoveryPayload(allocator, row.payload_json.data);
-        } else if (std.mem.eql(u8, row.type.data, "model.usage")) {
+        } else if (std.mem.eql(u8, row.type.data, events.model_usage)) {
             if (usage) |old| old.deinit(allocator);
             usage = try readUsagePayload(allocator, row.payload_json.data);
         }
@@ -301,7 +313,7 @@ fn readRecoveryPayload(allocator: Allocator, text: []const u8) !Recovery {
     const message_count = row.get("message_count") orelse return error.BadSessionEvent;
     const compaction_message_count = row.get("compaction_message_count") orelse return error.BadSessionEvent;
     if (message_count != .integer or message_count.integer < 0 or compaction_message_count != .integer or compaction_message_count.integer < 0) return error.BadSessionEvent;
-    return .{ .message_count = @intCast(message_count.integer), .compaction_message_count = @intCast(compaction_message_count.integer), .context = try allocator.dupe(u8, stringField(row, "context") orelse "") };
+    return .{ .message_count = @intCast(message_count.integer), .compaction_message_count = @intCast(compaction_message_count.integer), .text = try allocator.dupe(u8, stringField(row, "text") orelse ""), .sources = try stringArrayField(allocator, row, "sources"), .notes = try stringArrayField(allocator, row, "notes") };
 }
 
 fn readUsagePayload(allocator: Allocator, text: []const u8) !ProviderUsage {
@@ -469,6 +481,23 @@ fn optionalNonEmptyField(allocator: Allocator, row: std.json.ObjectMap, name: []
     const value = stringField(row, name) orelse return null;
     if (value.len == 0) return null;
     return try allocator.dupe(u8, value);
+}
+
+fn stringArrayField(allocator: Allocator, row: std.json.ObjectMap, name: []const u8) ![][]u8 {
+    const value = row.get(name) orelse return allocator.alloc([]u8, 0);
+    if (value != .array) return error.BadSessionEvent;
+    var out = try allocator.alloc([]u8, value.array.items.len);
+    errdefer freeStringList(allocator, out);
+    for (value.array.items, 0..) |item, i| {
+        if (item != .string) return error.BadSessionEvent;
+        out[i] = try allocator.dupe(u8, item.string);
+    }
+    return out;
+}
+
+fn freeStringList(allocator: Allocator, list: [][]u8) void {
+    for (list) |item| allocator.free(item);
+    allocator.free(list);
 }
 
 fn freeMessages(allocator: Allocator, messages: []Message) void {

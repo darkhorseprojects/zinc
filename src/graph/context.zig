@@ -84,4 +84,5 @@ pub const RunContext = struct {
     inputs: []const BoundInput,
     frame: ExecutionFrame,
     bash_allowances: *BashAllowances,
+    run_id: ?[]const u8 = null,
 };

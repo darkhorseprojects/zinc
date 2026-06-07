@@ -37,10 +37,10 @@ out=$($ZN --fresh 'test sqlite runtime' 2>&1)
 printf '%s' "$out" | grep -q 'mock ok'
 out2=$($ZN --continue 'test recovery runtime' 2>&1)
 printf '%s' "$out2" | grep -q 'mock ok'
-[ -f .zinc/runtime/zinc.db ]
+[ -f .zinc/state/zinc.db ]
 python - <<'PY'
 import sqlite3
-con=sqlite3.connect('.zinc/runtime/zinc.db')
+con=sqlite3.connect('.zinc/state/zinc.db')
 types=[r[0] for r in con.execute('select type from events order by time')]
 assert 'session.started' in types, types
 assert 'session.message.user' in types, types
