@@ -1,10 +1,11 @@
 const std = @import("std");
 
 pub fn build(b: *std.Build) void {
-    const target = b.standardTargetOptions(.{});
+    const target = b.standardTargetOptions(.{ .default_target = .{ .abi = .gnu } });
     const optimize = b.standardOptimizeOption(.{});
 
     const circuitry_dep = b.dependency("circuitry", .{ .target = target, .optimize = optimize });
+    const sqlite_dep = b.dependency("sqlite", .{ .target = target, .optimize = optimize });
 
     const exe_mod = b.createModule(.{
         .root_source_file = b.path("src/main.zig"),
@@ -12,6 +13,7 @@ pub fn build(b: *std.Build) void {
         .optimize = optimize,
     });
     exe_mod.addImport("circuitry", circuitry_dep.module("circuitry"));
+    exe_mod.addImport("sqlite", sqlite_dep.module("sqlite"));
 
     const exe = b.addExecutable(.{
         .name = "zn",
@@ -33,6 +35,7 @@ pub fn build(b: *std.Build) void {
         .optimize = optimize,
     });
     test_mod.addImport("circuitry", circuitry_dep.module("circuitry"));
+    test_mod.addImport("sqlite", sqlite_dep.module("sqlite"));
     const tests = b.addTest(.{ .root_module = test_mod });
     const test_step = b.step("test", "Run unit tests");
     test_step.dependOn(&b.addRunArtifact(tests).step);

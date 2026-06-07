@@ -19,16 +19,12 @@ pub const Dirs = struct {
     config_dir: []u8,
     data_dir: []u8,
     cache_dir: []u8,
-    state_dir: []u8,
-    session_dir: []u8,
 
     pub fn deinit(self: Dirs, allocator: Allocator) void {
         allocator.free(self.home);
         allocator.free(self.config_dir);
         allocator.free(self.data_dir);
         allocator.free(self.cache_dir);
-        allocator.free(self.state_dir);
-        allocator.free(self.session_dir);
     }
 };
 
@@ -53,15 +49,11 @@ pub fn resolve(allocator: Allocator, os: platform.OS, env: Env) !Dirs {
     errdefer allocator.free(data_dir);
     const cache_dir = try defaultCacheDir(allocator, os, home, env);
     errdefer allocator.free(cache_dir);
-    const state_dir = try defaultStateDir(allocator, os, home, env);
-    errdefer allocator.free(state_dir);
     return .{
         .home = home,
         .config_dir = config_dir,
         .data_dir = data_dir,
         .cache_dir = cache_dir,
-        .state_dir = state_dir,
-        .session_dir = try path.joinDisplay(allocator, os, &.{ data_dir, "sessions" }),
     };
 }
 
@@ -108,22 +100,12 @@ fn defaultCacheDir(allocator: Allocator, os: platform.OS, home: []const u8, env:
     };
 }
 
-fn defaultStateDir(allocator: Allocator, os: platform.OS, home: []const u8, env: Env) ![]u8 {
-    return switch (os) {
-        .linux => path.joinDisplay(allocator, os, &.{ home, ".local", "state", "zinc" }),
-        .macos => path.joinDisplay(allocator, os, &.{ home, "Library", "Application Support", "zinc", "State" }),
-        .windows => path.joinDisplay(allocator, os, &.{ env.localappdata orelse return error.LocalAppDataNotSet, "zinc", "State" }),
-    };
-}
-
 test "linux dirs honor XDG" {
     const dirs = try resolve(std.testing.allocator, .linux, .{ .home = "/home/a", .xdg_config_home = "/cfg", .xdg_data_home = "/data", .xdg_cache_home = "/cache" });
     defer dirs.deinit(std.testing.allocator);
     try std.testing.expectEqualStrings("/cfg/zinc", dirs.config_dir);
     try std.testing.expectEqualStrings("/data/zinc", dirs.data_dir);
     try std.testing.expectEqualStrings("/cache/zinc", dirs.cache_dir);
-    try std.testing.expectEqualStrings("/home/a/.local/state/zinc", dirs.state_dir);
-    try std.testing.expectEqualStrings("/data/zinc/sessions", dirs.session_dir);
 }
 
 test "macos dirs" {
@@ -131,7 +113,6 @@ test "macos dirs" {
     defer dirs.deinit(std.testing.allocator);
     try std.testing.expectEqualStrings("/Users/a/Library/Application Support/zinc", dirs.config_dir);
     try std.testing.expectEqualStrings("/Users/a/Library/Caches/zinc", dirs.cache_dir);
-    try std.testing.expectEqualStrings("/Users/a/Library/Application Support/zinc/State", dirs.state_dir);
 }
 
 test "windows dirs" {
@@ -139,5 +120,4 @@ test "windows dirs" {
     defer dirs.deinit(std.testing.allocator);
     try std.testing.expectEqualStrings("C:\\Users\\a\\AppData\\Roaming\\zinc", dirs.config_dir);
     try std.testing.expectEqualStrings("C:\\Users\\a\\AppData\\Local\\zinc\\Cache", dirs.cache_dir);
-    try std.testing.expectEqualStrings("C:\\Users\\a\\AppData\\Local\\zinc\\State", dirs.state_dir);
 }

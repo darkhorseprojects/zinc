@@ -41,8 +41,8 @@ When working in a Zinc project, know the local layout:
 .zinc/packages/<name>/                installed package code and assets
 .zinc/config/packages/<name>.yaml     user/project package config
 .zinc/runtime/packages/<name>/        package working runtime
-.zinc/sessions/                       conversation transcripts
-.zinc/logs/                           runtime logs
+.zinc/runtime/zinc.db                 sessions, events, logs, branches
+.zinc/runtime/artifacts/              large runtime artifacts
 .zinc/tmp/                            short-lived temporary files
 ```
 

@@ -2,7 +2,7 @@ const std = @import("std");
 const config = @import("../config/mod.zig");
 const layout = @import("../io/layout.zig");
 const graph = @import("mod.zig");
-const sessions = @import("../session/mod.zig");
+const sessions = @import("../runtime/session.zig");
 const uri = @import("../io/uri.zig");
 
 const Allocator = std.mem.Allocator;

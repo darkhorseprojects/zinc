@@ -10,7 +10,7 @@ const packages = @import("../packages/mod.zig");
 const platform = @import("../platform.zig");
 const provider = @import("../model/provider.zig");
 const runtime_tools = @import("../tools/schema.zig");
-const sessions = @import("../session/mod.zig");
+const sessions = @import("../runtime/session.zig");
 const tool_exec = @import("../tools/mod.zig");
 const uri = @import("../io/uri.zig");
 
@@ -160,8 +160,8 @@ fn resolveModelWithProfile(ctx: *RunContext, id: []const u8, res: graph.Resource
     try provider.appendMessage(ctx.allocator, &messages, .{ .role = "user", .content = user_content, .parts = model_inputs.parts.items });
     if (is_root) {
         const session_content = sessionUserContent(ctx, user_content);
-        try sessions.appendUserMessage(ctx.allocator, ctx.session.path, session_content);
-        try sessions.rememberLast(ctx.session);
+        try sessions.appendUserMessage(ctx.allocator, ctx.layout_ctx, ctx.session, session_content);
+        try sessions.rememberLast(ctx.allocator, ctx.layout_ctx, ctx.session);
     }
 
     const reasoning_effort = ctx.profile.reasoningEffort();
@@ -171,7 +171,7 @@ fn resolveModelWithProfile(ctx: *RunContext, id: []const u8, res: graph.Resource
     const result = try model.run(ctx, &messages, spec, reasoning_effort, executeTool);
     errdefer result.deinit(ctx.allocator);
     if (schema_value) |schema| try model.validateJsonSchema(ctx.allocator, schema, result.text) else if (wants_json) try model.validateJson(ctx.allocator, result.text);
-    if (is_root) try sessions.appendAssistantText(ctx.allocator, ctx.session.path, ctx.profile.model.id, std.mem.trim(u8, result.text, " \t\r\n"), result.reasoning);
+    if (is_root) try sessions.appendAssistantText(ctx.allocator, ctx.layout_ctx, ctx.session, ctx.profile.model.id, std.mem.trim(u8, result.text, " \t\r\n"), result.reasoning);
     if (result.reasoning) |value| ctx.allocator.free(value);
     return .{ .text = result.text };
 }
@@ -200,9 +200,9 @@ pub fn callPackageTool(allocator: Allocator, io: std.Io, layout_ctx: layout.Cont
     defer profile.deinit(allocator);
     const loaded_graph = try graph.load(allocator, io, profile.paths.graph);
     defer loaded_graph.deinit(allocator);
-    const session = try sessions.open(allocator, null, false);
+    const session = try sessions.open(allocator, layout_ctx, null, false);
     defer session.deinit(allocator);
-    var log = try sessions.readParsed(allocator, session.path);
+    var log = try sessions.read(allocator, layout_ctx, session);
     defer log.deinit(allocator);
     var bash_allowances: ctxmod.BashAllowances = .empty;
     defer bash_allowances.deinit(allocator);
@@ -423,7 +423,7 @@ fn runtimeReadContext(ctx: *RunContext) !ctxmod.RuntimeReadContext {
     const inputs = try ctx.allocator.alloc(uri.Input, ctx.inputs.len);
     for (ctx.inputs, 0..) |input, i| inputs[i] = .{ .id = input.id, .value = input.value };
     return .{
-        .context = .{ .layout_ctx = ctx.layout_ctx, .session_id = ctx.session.id, .session_path = ctx.session.path, .session_dir = std.fs.path.dirname(ctx.session.path) orelse ".zinc/sessions", .session_log = ctx.log.raw, .session_head_messages = ctx.profile.runtime.session_head_messages, .session_tail_messages = ctx.profile.runtime.session_tail_messages, .session_context_truncate_chars = ctx.profile.runtime.session_context_truncate_chars, .inputs = inputs },
+        .context = .{ .layout_ctx = ctx.layout_ctx, .session_id = ctx.session.id, .session_head_messages = ctx.profile.runtime.session_head_messages, .session_tail_messages = ctx.profile.runtime.session_tail_messages, .session_context_truncate_chars = ctx.profile.runtime.session_context_truncate_chars, .inputs = inputs },
         .inputs = inputs,
     };
 }

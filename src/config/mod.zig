@@ -101,15 +101,28 @@ pub const ModelConfig = struct {
         self.reasoning.deinit(allocator);
     }
 };
+pub const RecoverySettings = struct {
+    graph: []u8,
+    reach: []u8,
+    budget_chars: usize,
+
+    pub fn deinit(self: RecoverySettings, allocator: Allocator) void {
+        allocator.free(self.graph);
+        allocator.free(self.reach);
+    }
+};
+
 pub const RuntimeProfile = struct {
     paths: RuntimePaths,
     runtime: RuntimeSettings,
+    recovery: RecoverySettings,
     default_model: []u8,
     provider: ProviderConfig,
     model: ModelConfig,
     pub fn deinit(self: RuntimeProfile, allocator: Allocator) void {
         self.paths.deinit(allocator);
         self.runtime.deinit(allocator);
+        self.recovery.deinit(allocator);
         allocator.free(self.default_model);
         self.provider.deinit(allocator);
         self.model.deinit(allocator);
@@ -224,6 +237,14 @@ pub fn loadRuntimeProfile(allocator: Allocator, io: std.Io, layout_ctx: layout.C
     const resource_read_max_bytes = try cfg.usizeValue(&.{ "runtime", "resource_read_max_bytes" }, 32 * 1024 * 1024);
     const input_text_file_max_bytes = try cfg.usizeValue(&.{ "runtime", "input_text_file_max_bytes" }, 8 * 1024 * 1024);
     const input_file_max_bytes = try cfg.usizeValue(&.{ "runtime", "input_file_max_bytes" }, 32 * 1024 * 1024);
+    const recovery_graph = try recoveryGraphPath(allocator, layout_ctx, cfg);
+    errdefer allocator.free(recovery_graph);
+    const recovery_reach = try cfg.string(allocator, &.{ "recovery", "reach" }, "project");
+    errdefer allocator.free(recovery_reach);
+    try validateRecoveryReach(recovery_reach);
+    const recovery_budget_chars = try cfg.usizeValue(&.{ "recovery", "budget_chars" }, 12000);
+    const recovery = RecoverySettings{ .graph = recovery_graph, .reach = recovery_reach, .budget_chars = recovery_budget_chars };
+    errdefer recovery.deinit(allocator);
     const confirm_commands = try cfg.stringList(allocator, &.{"confirm_commands"}, default_confirm_commands);
     var confirm_commands_owned = true;
     errdefer if (confirm_commands_owned) {
@@ -261,7 +282,7 @@ pub fn loadRuntimeProfile(allocator: Allocator, io: std.Io, layout_ctx: layout.C
     errdefer model.deinit(allocator);
     var provider = try loadProvider(allocator, model);
     errdefer provider.deinit(allocator);
-    return .{ .paths = paths, .runtime = runtime, .default_model = default_model, .provider = provider, .model = model };
+    return .{ .paths = paths, .runtime = runtime, .recovery = recovery, .default_model = default_model, .provider = provider, .model = model };
 }
 
 pub fn loadRuntimePaths(allocator: Allocator, io: std.Io, layout_ctx: layout.Context) !RuntimePaths {
@@ -389,6 +410,26 @@ fn loadModel(allocator: Allocator, cfg: Config, id: []const u8) !ModelConfig {
             .effort = try cfg.string(allocator, &.{ "models", id, "reasoning", "effort" }, "low"),
         },
     };
+}
+
+fn validateRecoveryReach(reach: []const u8) !void {
+    if (std.mem.eql(u8, reach, "none")) return;
+    if (std.mem.eql(u8, reach, "session")) return;
+    if (std.mem.eql(u8, reach, "project")) return;
+    if (std.mem.eql(u8, reach, "root")) return;
+    if (std.mem.eql(u8, reach, "all")) return;
+    return error.InvalidConfigValue;
+}
+
+fn recoveryGraphPath(allocator: Allocator, layout_ctx: layout.Context, cfg: Config) ![]u8 {
+    const raw = try cfg.optionalString(allocator, &.{ "recovery", "graph" }) orelse return layout.sharePath(allocator, layout_ctx, "graphs/zinc-context-recovery.circuitry.yaml");
+    defer allocator.free(raw);
+    if (std.mem.indexOfAny(u8, raw, "/\\") == null and !std.mem.endsWith(u8, raw, ".yaml") and !std.mem.endsWith(u8, raw, ".yml")) {
+        const rel = try std.fmt.allocPrint(allocator, "graphs/{s}.circuitry.yaml", .{raw});
+        defer allocator.free(rel);
+        return layout.sharePath(allocator, layout_ctx, rel);
+    }
+    return expandHome(allocator, layout_ctx, raw);
 }
 
 fn runtimePaths(allocator: Allocator, layout_ctx: layout.Context, cfg: Config) !RuntimePaths {

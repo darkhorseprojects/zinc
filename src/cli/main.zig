@@ -42,7 +42,10 @@ fn runInner(init: std.process.Init) !void {
     if (std.mem.eql(u8, cmd, "pkg")) return packageCommandArgs(allocator, init.io, layout_ctx, &args);
     if (std.mem.eql(u8, cmd, "compact")) return compactCommandArgs(allocator, init.io, layout_ctx, &args);
     if (std.mem.eql(u8, cmd, "update")) return updateCommandArgs(allocator, init.io, layout_ctx, &args);
-    if (std.mem.eql(u8, cmd, "session-dir")) return commands.printSessionDir(allocator);
+    if (std.mem.eql(u8, cmd, "db")) return dbCommandArgs(allocator, init.io, layout_ctx, &args);
+    if (std.mem.eql(u8, cmd, "session")) return sessionCommandArgs(allocator, layout_ctx, &args);
+    if (std.mem.eql(u8, cmd, "event")) return eventCommandArgs(allocator, layout_ctx, &args);
+    if (std.mem.eql(u8, cmd, "logs")) return logsCommandArgs(allocator, layout_ctx, &args);
 
     var parts: std.ArrayList([]const u8) = .empty;
     defer parts.deinit(allocator);
@@ -95,6 +98,44 @@ fn updateCommandArgs(allocator: std.mem.Allocator, io: std.Io, layout_ctx: layou
     const parts = try collectArgs(allocator, args);
     defer allocator.free(parts);
     return commands.updateFromArgs(allocator, io, layout_ctx, parts);
+}
+
+fn dbCommandArgs(allocator: std.mem.Allocator, io: std.Io, layout_ctx: layout.Context, args: *std.process.Args.Iterator) !void {
+    _ = io;
+    const sub = args.next() orelse return commands.usage();
+    if (std.mem.eql(u8, sub, "path")) return commands.printDbPath(allocator, layout_ctx);
+    if (std.mem.eql(u8, sub, "tables")) return commands.dbTables(allocator, layout_ctx);
+    if (std.mem.eql(u8, sub, "schema")) return commands.dbSchema(allocator, layout_ctx);
+    if (std.mem.eql(u8, sub, "query")) return commands.dbQuery(allocator, layout_ctx, args.next() orelse return error.MissingSql);
+    return commands.usage();
+}
+
+fn sessionCommandArgs(allocator: std.mem.Allocator, layout_ctx: layout.Context, args: *std.process.Args.Iterator) !void {
+    const sub = args.next() orelse return commands.usage();
+    if (std.mem.eql(u8, sub, "list")) return commands.sessionList(allocator, layout_ctx);
+    if (std.mem.eql(u8, sub, "tree")) return commands.sessionTree(allocator, layout_ctx);
+    if (std.mem.eql(u8, sub, "checkout")) return commands.sessionCheckout(allocator, layout_ctx, args.next() orelse return error.MissingBranchName);
+    if (std.mem.eql(u8, sub, "branch")) {
+        var at: ?[]const u8 = null;
+        var name: ?[]const u8 = null;
+        while (args.next()) |arg| {
+            if (std.mem.eql(u8, arg, "--at")) at = args.next() orelse return error.MissingEventId else if (std.mem.eql(u8, arg, "--name")) name = args.next() orelse return error.MissingBranchName else return error.InvalidSessionBranchArgument;
+        }
+        return commands.sessionBranch(allocator, layout_ctx, at orelse return error.MissingEventId, name orelse return error.MissingBranchName);
+    }
+    return commands.usage();
+}
+
+fn eventCommandArgs(allocator: std.mem.Allocator, layout_ctx: layout.Context, args: *std.process.Args.Iterator) !void {
+    const sub = args.next() orelse return commands.usage();
+    if (std.mem.eql(u8, sub, "tail")) return commands.eventTail(allocator, layout_ctx);
+    return commands.usage();
+}
+
+fn logsCommandArgs(allocator: std.mem.Allocator, layout_ctx: layout.Context, args: *std.process.Args.Iterator) !void {
+    const sub = args.next() orelse return commands.usage();
+    if (std.mem.eql(u8, sub, "tail")) return commands.logsTail(allocator, layout_ctx);
+    return commands.usage();
 }
 
 fn cleanCommandArgs(allocator: std.mem.Allocator, io: std.Io, layout_ctx: layout.Context, args: *std.process.Args.Iterator) !void {

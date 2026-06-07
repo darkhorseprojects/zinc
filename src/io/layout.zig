@@ -16,10 +16,6 @@ pub const Context = struct {
     }
 };
 
-pub fn statePath(allocator: Allocator, layout: Context, basename: []const u8) ![]u8 {
-    return platform.path.joinDisplay(allocator, layout.os, &.{ layout.dirs.state_dir, basename });
-}
-
 pub fn sharePath(allocator: Allocator, layout: Context, path: []const u8) ![]u8 {
     return platform.path.joinDisplay(allocator, layout.os, &.{ layout.dirs.data_dir, path });
 }

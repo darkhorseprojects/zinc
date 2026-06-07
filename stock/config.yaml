@@ -20,6 +20,11 @@ confirm_commands:
   - shutdown
   - reboot
 
+recovery:
+  graph: zinc-context-recovery
+  reach: project
+  budget_chars: 12000
+
 runtime:
   provider_max_retries: 5
   tool_max_turns: 12

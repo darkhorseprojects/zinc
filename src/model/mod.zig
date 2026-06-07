@@ -2,7 +2,7 @@ const std = @import("std");
 const circuitry = @import("circuitry");
 const ctxmod = @import("../graph/context.zig");
 const provider = @import("provider.zig");
-const sessions = @import("../session/mod.zig");
+const sessions = @import("../runtime/session.zig");
 const runtime_tools = @import("../tools/schema.zig");
 const uri = @import("../io/uri.zig");
 const trace = @import("../io/trace.zig");
@@ -34,20 +34,9 @@ pub const Result = struct {
 
 pub fn run(ctx: *ctxmod.RunContext, messages: *std.ArrayList(provider.Message), spec: Spec, reasoning_effort: ?[]const u8, execute_tool: ExecuteTool) !Result {
     var retries: usize = 0;
-    var last_parsed_size: usize = ctx.log.raw.len;
     while (true) {
-        if (ctx.frame.isInteractiveTarget(spec.label)) {
-            var dir = std.Io.Dir.cwd();
-            if (dir.statFile(ctx.io, ctx.session.path, .{})) |stat| {
-                if (stat.size != last_parsed_size) {
-                    ctx.log.deinit(ctx.allocator);
-                    ctx.log.* = try sessions.readParsed(ctx.allocator, ctx.session.path);
-                    last_parsed_size = ctx.log.raw.len;
-                }
-            } else |_| {}
-        }
-        const session_path = if (ctx.frame.isInteractiveTarget(spec.label)) ctx.session.path else null;
-        const turn = try callProvider(ctx.allocator, ctx.io, session_path, ctx.profile.runtime.provider_max_retries, spec.label, .{ .profile = ctx.profile, .reasoning_effort = reasoning_effort, .json_response = spec.json, .tools_json = spec.tools_json, .messages = messages.items });
+        const record_session = ctx.frame.isInteractiveTarget(spec.label);
+        const turn = try callProvider(ctx, if (record_session) ctx.session else null, spec.label, .{ .profile = ctx.profile, .reasoning_effort = reasoning_effort, .json_response = spec.json, .tools_json = spec.tools_json, .messages = messages.items });
         defer provider.freeTurn(ctx.allocator, turn);
         if (turn.tool_calls.len == 0) {
             const clean = try provider.cleanText(ctx.allocator, turn.text, ctx.profile);
@@ -76,13 +65,13 @@ pub fn run(ctx: *ctxmod.RunContext, messages: *std.ArrayList(provider.Message), 
             return .{ .text = clean, .reasoning = if (turn.reasoning) |value| try ctx.allocator.dupe(u8, value) else null };
         }
         try provider.appendMessage(ctx.allocator, messages, .{ .role = "assistant", .content = turn.text, .reasoning = turn.reasoning, .tool_calls = turn.tool_calls });
-        if (ctx.frame.isInteractiveTarget(spec.label)) try sessions.appendAssistantToolCalls(ctx.allocator, ctx.session.path, ctx.profile.model.id, turn.text, turn.reasoning, turn.tool_calls);
+        if (record_session) try sessions.appendAssistantToolCalls(ctx.allocator, ctx.layout_ctx, ctx.session, ctx.profile.model.id, turn.text, turn.reasoning, turn.tool_calls);
         const read_ctx = try runtimeReadContext(ctx);
         defer read_ctx.deinit(ctx.allocator);
         for (turn.tool_calls) |call| {
             const result = try execute_tool(ctx, read_ctx.context, spec, call);
             defer result.deinit(ctx.allocator);
-            if (ctx.frame.isInteractiveTarget(spec.label)) try sessions.appendToolResult(ctx.allocator, ctx.session.path, call, result);
+            if (record_session) try sessions.appendToolResult(ctx.allocator, ctx.layout_ctx, ctx.session, call, result);
             if (result.is_error) {
                 if (retries >= ctx.profile.runtime.tool_max_turns) return finalToolFailure(ctx, messages, spec, result.content, reasoning_effort);
                 retries += 1;
@@ -111,7 +100,7 @@ fn finalToolFailure(ctx: *ctxmod.RunContext, messages: *std.ArrayList(provider.M
     const instruction = try std.fmt.allocPrint(ctx.allocator, "Tool attempts reached runtime.tool_max_turns={d}. Stop calling tools. Explain what failed, what was learned, and what the user can try next. Include the relevant command/result details from the failed tool results. Last failure:\n{s}", .{ ctx.profile.runtime.tool_max_turns, last_failure });
     defer ctx.allocator.free(instruction);
     try provider.appendMessage(ctx.allocator, messages, .{ .role = "user", .content = instruction });
-    const turn = callProvider(ctx.allocator, ctx.io, null, ctx.profile.runtime.provider_max_retries, spec.label, .{ .profile = ctx.profile, .reasoning_effort = reasoning_effort, .json_response = false, .tools_json = "[]", .messages = messages.items }) catch {
+    const turn = callProvider(ctx, null, spec.label, .{ .profile = ctx.profile, .reasoning_effort = reasoning_effort, .json_response = false, .tools_json = "[]", .messages = messages.items }) catch {
         return .{ .text = try std.fmt.allocPrint(ctx.allocator, fallback, .{last_failure}) };
     };
     defer provider.freeTurn(ctx.allocator, turn);
@@ -124,24 +113,24 @@ fn finalToolFailure(ctx: *ctxmod.RunContext, messages: *std.ArrayList(provider.M
     return .{ .text = clean, .reasoning = if (turn.reasoning) |value| try ctx.allocator.dupe(u8, value) else null };
 }
 
-fn callProvider(allocator: Allocator, io: std.Io, session_path: ?[]const u8, provider_max_retries: usize, label: []const u8, request: provider.Request) !provider.AssistantTurn {
+fn callProvider(ctx: *ctxmod.RunContext, session: ?sessions.Session, label: []const u8, request: provider.Request) !provider.AssistantTurn {
     var attempts: usize = 0;
     while (true) {
         const span = trace.span("provider_call");
         trace.event("llm", "request", "label={s} attempt={d} messages={d} chars={d} tools={d}", .{ label, attempts + 1, request.messages.len, messageChars(request.messages), request.tools_json.len });
-        const turn = provider.call(allocator, io, request) catch |err| {
+        const turn = provider.call(ctx.allocator, ctx.io, request) catch |err| {
             span.end("llm", "label={s} attempt={d} error={s}", .{ label, attempts + 1, @errorName(err) });
             if (err == error.ProviderLoadingModel) {
-                if (session_path) |path| try sessions.appendProviderError(allocator, path, "provider loading");
+                if (session) |s| try sessions.appendProviderError(ctx.allocator, ctx.layout_ctx, s, "provider loading");
                 sleepMillis(provider_retry_delay_ms);
                 continue;
             }
-            if (!isTransient(err) or attempts >= provider_max_retries) return err;
+            if (!isTransient(err) or attempts >= ctx.profile.runtime.provider_max_retries) return err;
             attempts += 1;
-            if (session_path) |path| try sessions.appendProviderError(allocator, path, "provider retry");
+            if (session) |s| try sessions.appendProviderError(ctx.allocator, ctx.layout_ctx, s, "provider retry");
             continue;
         };
-        if (session_path) |path| if (turn.prompt_tokens) |tokens| try sessions.appendProviderUsage(allocator, path, request.profile.model.id, tokens);
+        if (session) |s| if (turn.prompt_tokens) |tokens| try sessions.appendProviderUsage(ctx.allocator, ctx.layout_ctx, s, request.profile.model.id, tokens);
         span.end("llm", "label={s} attempt={d} text_chars={d} tool_calls={d}", .{ label, attempts + 1, turn.text.len, turn.tool_calls.len });
         return turn;
     }
@@ -151,7 +140,7 @@ fn runtimeReadContext(ctx: *ctxmod.RunContext) !ctxmod.RuntimeReadContext {
     const inputs = try ctx.allocator.alloc(uri.Input, ctx.inputs.len);
     for (ctx.inputs, 0..) |input, i| inputs[i] = .{ .id = input.id, .value = input.value };
     return .{
-        .context = .{ .layout_ctx = ctx.layout_ctx, .session_id = ctx.session.id, .session_path = ctx.session.path, .session_dir = std.fs.path.dirname(ctx.session.path) orelse ".zinc/sessions", .session_log = ctx.log.raw, .session_head_messages = ctx.profile.runtime.session_head_messages, .session_tail_messages = ctx.profile.runtime.session_tail_messages, .session_context_truncate_chars = ctx.profile.runtime.session_context_truncate_chars, .inputs = inputs },
+        .context = .{ .layout_ctx = ctx.layout_ctx, .session_id = ctx.session.id, .session_head_messages = ctx.profile.runtime.session_head_messages, .session_tail_messages = ctx.profile.runtime.session_tail_messages, .session_context_truncate_chars = ctx.profile.runtime.session_context_truncate_chars, .inputs = inputs },
         .inputs = inputs,
     };
 }

@@ -70,14 +70,21 @@ Config paths:
 ## CLI
 
 ```bash
-zn [--default] [--model id] "prompt"
-zn run [--default] [--model id] [graph|--graph id|path] [--export name] [--input name=value] [--text name=value|@file] [--file name=path] [--image name=path] [--session id|--continue] "prompt"
+zn [--default] [--model id] [--fresh|--recovery reach] "prompt"
+zn run [--default] [--model id] [--fresh|--recovery reach] [graph|--graph id|path] [--export name] [--input name=value] [--text name=value|@file] [--file name=path] [--image name=path] [--session id|--continue] "prompt"
 zn check [graph]
 zn compact [--dry-run] [--session id|--continue] [graph]
 zn graph list
 zn graph show <graph>
 zn config get <path>
-zn clean [--local|--global] [--yes] [sessions | logs | packages | generated | config | runtime | all]
+zn db path|tables|schema|query <sql>
+zn session list
+zn session tree
+zn session branch --at <event-id> --name <name>
+zn session checkout <branch>
+zn event tail
+zn logs tail
+zn clean [--local|--global] [--yes] [runtime | packages | generated | config | all]
 zn pkg list
 zn pkg add [--local|--global] [--replace] [--yes] [--model id] <source>
 zn pkg remove [--local|--global] [--yes] [--model id] <name>
@@ -98,8 +105,8 @@ A project may have a local `.zinc/` workspace:
 .zinc/packages/<name>/                installed package code and assets
 .zinc/config/packages/<name>.yaml     user/project package config
 .zinc/runtime/packages/<name>/        package working runtime
-.zinc/sessions/                       conversation transcripts
-.zinc/logs/                           runtime logs
+.zinc/runtime/zinc.db                 sessions, events, logs, branches
+.zinc/runtime/artifacts/              large runtime artifacts
 .zinc/tmp/                            short-lived temporary files
 ```
 

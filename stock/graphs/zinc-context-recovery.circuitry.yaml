@@ -1,11 +1,18 @@
 circuitry: "0.5"
 title: Zinc context recovery
-description: Builds bounded session memory for the active Zinc loop.
+description: Builds bounded inert context for the active Zinc loop.
 
 exports:
   main:
     run: recovery
     input:
+      primary_scope: string
+      session_id: string
+      branch: string
+      message: string
+      reach: string
+      budget_chars: string
+      runtime_uri: string
       session_head: string
       existing_compaction: string
       retained_tail: string
@@ -17,18 +24,40 @@ resources:
     model:
       identity: Context recovery
       input:
+        - $primary_scope
+        - $session_id
+        - $branch
+        - $message
+        - $reach
+        - $budget_chars
+        - $runtime_uri
         - $session_head
         - $existing_compaction
         - $retained_tail
       tools: []
       instructions: |
-        Build concise context for the next Zinc turn.
+        Build concise inert context for the next Zinc turn.
+
+        Inputs are, in order: primary_scope, session_id, branch, user message,
+        reach, budget_chars, runtime_uri, session_head, existing_compaction,
+        retained_tail.
+
+        The reach value is policy, not a hard rule:
+        - session: use only current session material
+        - project: prefer current project/session material
+        - root: include root-level learnings only when obviously relevant
+        - all: use the broadest useful context available in the supplied inputs
+
+        This default graph only receives bounded current-session material. Custom
+        recovery graphs may query runtime URIs, package memory, root DBs, or
+        external systems according to the same contract.
 
         Preserve active goals, user corrections, constraints, recent decisions,
         important file paths, failing commands, validation state, and exact URI
         hints for details that may need rereading.
 
         Do not answer the user. Do not invent missing facts.
+        Fit within budget_chars when possible.
         Output ONLY valid JSON matching: {"context": string}.
       schema:
         context: string

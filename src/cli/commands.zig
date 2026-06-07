@@ -7,7 +7,8 @@ const graph = @import("../graph/mod.zig");
 const layout = @import("../io/layout.zig");
 const packages = @import("../packages/mod.zig");
 const resource = @import("../graph/resource.zig");
-const sessions = @import("../session/mod.zig");
+const runtime = @import("../runtime/mod.zig");
+const sqlite = @import("sqlite");
 
 const Allocator = std.mem.Allocator;
 
@@ -22,7 +23,7 @@ pub fn usage() void {
         \\
         \\usage:
         \\  zn check [graph]
-        \\  zn clean [--local|--global] [--yes] [sessions | logs | packages | generated | config | runtime | all]
+        \\  zn clean [--local|--global] [--yes] [runtime | packages | generated | config | all]
         \\  zn doctor
         \\  zn config get <path>
         \\  zn compact [--dry-run] [--session id|--continue] [graph]
@@ -38,7 +39,10 @@ pub fn usage() void {
         \\  zn pkg show [--local|--global] <name>
         \\  zn pkg exec <package> <script>
         \\  zn pkg call <tool> <json-arguments>
-        \\  zn session-dir
+        \\  zn db path|tables|schema|query <sql>
+        \\  zn session list|tree|branch --at <event-id> --name <name>|checkout <branch>
+        \\  zn event tail
+        \\  zn logs tail
         \\
     , .{});
 }
@@ -78,7 +82,7 @@ pub fn runFromArgs(allocator: Allocator, io: std.Io, layout_ctx: layout.Context,
     defer allocator.free(resolved_graph);
     const prompt = try std.mem.join(allocator, " ", parsed_args.prompt_parts.items);
     defer allocator.free(prompt);
-    try engine.runGraph(allocator, io, layout_ctx, resolved_graph, parsed_args.selected_export, parsed_args.model_id, prompt, parsed_args.resume_id, parsed_args.continue_last, parsed_args.inputs.items);
+    try engine.runGraph(allocator, io, layout_ctx, resolved_graph, parsed_args.selected_export, parsed_args.model_id, prompt, parsed_args.resume_id, parsed_args.continue_last, parsed_args.inputs.items, .{ .reach = parsed_args.recovery_reach, .graph = parsed_args.recovery_graph });
 }
 
 const RunArgs = struct {
@@ -90,6 +94,8 @@ const RunArgs = struct {
     resume_id: ?[]const u8 = null,
     continue_last: bool = false,
     use_default: bool = false,
+    recovery_reach: ?[]const u8 = null,
+    recovery_graph: ?[]const u8 = null,
 
     fn deinit(self: *RunArgs, allocator: Allocator) void {
         self.prompt_parts.deinit(allocator);
@@ -104,6 +110,39 @@ fn parseRunArgs(allocator: Allocator, args: []const []const u8) !RunArgs {
     var i: usize = 0;
     while (i < args.len) : (i += 1) {
         const arg = args[i];
+        if (std.mem.eql(u8, arg, "--fresh")) {
+            parsed.recovery_reach = "none";
+            continue;
+        }
+        if (std.mem.eql(u8, arg, "--recover")) {
+            parsed.recovery_reach = null;
+            continue;
+        }
+        if (std.mem.eql(u8, arg, "--session-recover")) {
+            parsed.recovery_reach = "session";
+            continue;
+        }
+        if (std.mem.eql(u8, arg, "--root-recover")) {
+            parsed.recovery_reach = "root";
+            continue;
+        }
+        if (std.mem.eql(u8, arg, "--all-recover")) {
+            parsed.recovery_reach = "all";
+            continue;
+        }
+        if (std.mem.eql(u8, arg, "--recovery")) {
+            i += 1;
+            if (i >= args.len) return error.MissingRecoveryReach;
+            try validateRecoveryReach(args[i]);
+            parsed.recovery_reach = args[i];
+            continue;
+        }
+        if (std.mem.eql(u8, arg, "--recovery-graph")) {
+            i += 1;
+            if (i >= args.len) return error.MissingRecoveryGraph;
+            parsed.recovery_graph = args[i];
+            continue;
+        }
         if (std.mem.eql(u8, arg, "--default")) {
             if (parsed.graph_path != null) return error.ConflictingGraphFlags;
             parsed.use_default = true;
@@ -147,6 +186,15 @@ fn parseRunArgs(allocator: Allocator, args: []const []const u8) !RunArgs {
             try appendInputArg(allocator, &parsed.inputs, kind, args[i]);
             continue;
         }
+        if (std.mem.startsWith(u8, arg, "--recovery=")) {
+            try validateRecoveryReach(arg["--recovery=".len..]);
+            parsed.recovery_reach = arg["--recovery=".len..];
+            continue;
+        }
+        if (std.mem.startsWith(u8, arg, "--recovery-graph=")) {
+            parsed.recovery_graph = arg["--recovery-graph=".len..];
+            continue;
+        }
         if (std.mem.startsWith(u8, arg, "--model=")) {
             parsed.model_id = arg["--model=".len..];
             continue;
@@ -172,6 +220,15 @@ fn parseRunArgs(allocator: Allocator, args: []const []const u8) !RunArgs {
         try parsed.prompt_parts.append(allocator, arg);
     }
     return parsed;
+}
+
+fn validateRecoveryReach(reach: []const u8) !void {
+    if (std.mem.eql(u8, reach, "none")) return;
+    if (std.mem.eql(u8, reach, "session")) return;
+    if (std.mem.eql(u8, reach, "project")) return;
+    if (std.mem.eql(u8, reach, "root")) return;
+    if (std.mem.eql(u8, reach, "all")) return;
+    return error.InvalidRecoveryReach;
 }
 
 fn defaultGraphPath(allocator: Allocator, stock_graph: []const u8) ![]u8 {
@@ -238,9 +295,89 @@ pub fn compactFromArgs(allocator: Allocator, io: std.Io, layout_ctx: layout.Cont
     try engine.compactSession(allocator, io, layout_ctx, graph_path, resume_id, continue_last);
 }
 
-pub fn printSessionDir(_: Allocator) !void {
-    try files.mkdirP(".zinc/sessions");
-    std.debug.print(".zinc/sessions\n", .{});
+pub fn printDbPath(allocator: Allocator, layout_ctx: layout.Context) !void {
+    const path = try runtime.scope.dbPath(allocator, layout_ctx, runtime.scope.default());
+    defer allocator.free(path);
+    std.debug.print("{s}\n", .{path});
+}
+
+fn runtimeDbPathReady(allocator: Allocator, layout_ctx: layout.Context) ![]u8 {
+    var store = try runtime.Store.open(allocator, layout_ctx, runtime.scope.default());
+    const path = try allocator.dupe(u8, store.path);
+    store.close();
+    return path;
+}
+
+pub fn dbTables(allocator: Allocator, layout_ctx: layout.Context) !void {
+    const path = try runtimeDbPathReady(allocator, layout_ctx);
+    defer allocator.free(path);
+    const text = try runtime.inspect.tables(allocator, path);
+    defer allocator.free(text);
+    std.debug.print("{s}", .{text});
+}
+
+pub fn dbSchema(allocator: Allocator, layout_ctx: layout.Context) !void {
+    const path = try runtimeDbPathReady(allocator, layout_ctx);
+    defer allocator.free(path);
+    const text = try runtime.inspect.schema(allocator, path);
+    defer allocator.free(text);
+    std.debug.print("{s}", .{text});
+}
+
+pub fn dbQuery(allocator: Allocator, layout_ctx: layout.Context, sql: []const u8) !void {
+    const path = try runtimeDbPathReady(allocator, layout_ctx);
+    defer allocator.free(path);
+    const text = try runtime.inspect.query(allocator, path, sql);
+    defer allocator.free(text);
+    std.debug.print("{s}", .{text});
+}
+
+pub fn sessionList(allocator: Allocator, layout_ctx: layout.Context) !void {
+    try dbQuery(allocator, layout_ctx, "select id, current_branch, updated_at, cwd from sessions order by updated_at desc limit 64");
+}
+
+pub fn sessionTree(allocator: Allocator, layout_ctx: layout.Context) !void {
+    try dbQuery(allocator, layout_ctx, "select session_id, branch, head_event_id, updated_at from branch_heads order by updated_at desc");
+}
+
+pub fn sessionBranch(allocator: Allocator, layout_ctx: layout.Context, at: []const u8, name: []const u8) !void {
+    try validateRuntimeToken(at);
+    try validateRuntimeToken(name);
+    var store = try runtime.Store.open(allocator, layout_ctx, runtime.scope.default());
+    defer store.close();
+    const session_id = try store.lastSessionId(allocator) orelse return error.SessionNotFound;
+    defer allocator.free(session_id);
+    const now = try runtime.ids.timestamp(allocator);
+    defer allocator.free(now);
+    try store.db.exec("insert into branch_heads(session_id, branch, head_event_id, updated_at) values (:session_id, :branch, :head_event_id, :updated_at) on conflict(session_id, branch) do update set head_event_id = excluded.head_event_id, updated_at = excluded.updated_at", .{ .session_id = sqlite.text(session_id), .branch = sqlite.text(name), .head_event_id = sqlite.text(at), .updated_at = sqlite.text(now) });
+    const event_id = try store.appendEvent(.{ .session_id = session_id, .type = "session.branch.created", .summary = name, .payload_json = "{}" });
+    allocator.free(event_id);
+    std.debug.print("created branch {s} at {s}\n", .{ name, at });
+}
+
+pub fn sessionCheckout(allocator: Allocator, layout_ctx: layout.Context, name: []const u8) !void {
+    try validateRuntimeToken(name);
+    var store = try runtime.Store.open(allocator, layout_ctx, runtime.scope.default());
+    defer store.close();
+    const session_id = try store.lastSessionId(allocator) orelse return error.SessionNotFound;
+    defer allocator.free(session_id);
+    try store.db.exec("update sessions set current_branch = :branch where id = :session_id", .{ .branch = sqlite.text(name), .session_id = sqlite.text(session_id) });
+    const event_id = try store.appendEvent(.{ .session_id = session_id, .branch = name, .type = "session.branch.checked_out", .summary = name, .payload_json = "{}" });
+    allocator.free(event_id);
+    std.debug.print("checked out branch {s}\n", .{name});
+}
+
+fn validateRuntimeToken(value: []const u8) !void {
+    if (value.len == 0 or value.len > 128) return error.InvalidRuntimeToken;
+    for (value) |c| if (!std.ascii.isAlphanumeric(c) and c != '-' and c != '_' and c != '.') return error.InvalidRuntimeToken;
+}
+
+pub fn eventTail(allocator: Allocator, layout_ctx: layout.Context) !void {
+    try dbQuery(allocator, layout_ctx, "select time, id, session_id, branch, type, summary from recent_events limit 40");
+}
+
+pub fn logsTail(allocator: Allocator, layout_ctx: layout.Context) !void {
+    try dbQuery(allocator, layout_ctx, "select time, level, component, message, event_id from recent_logs limit 80");
 }
 pub fn graphList(allocator: Allocator, io: std.Io, layout_ctx: layout.Context) !void {
     const text = try packages.listGraphs(allocator, io, layout_ctx);
@@ -505,15 +642,13 @@ fn validateGraphFile(allocator: Allocator, io: std.Io, path: []const u8) !void {
 }
 
 pub fn clean(allocator: Allocator, io: std.Io, layout_ctx: layout.Context, scope: packages.Scope, target_str: []const u8, yes: bool) !void {
-    const Target = enum { sessions, logs, packages, generated, config, runtime, all };
+    const Target = enum { runtime, packages, generated, config, all };
     const target = std.meta.stringToEnum(Target, target_str) orelse return error.InvalidCleanTarget;
     std.debug.print("Clean Zinc artifacts\n\nscope: {s}\ntarget: {s}\n", .{ @tagName(scope), @tagName(target) });
     if (!yes) try confirmOrFail("Continue?");
     var dir = std.Io.Dir.cwd();
     switch (scope) {
         .local => {
-            if (target == .sessions or target == .all) dir.deleteTree(io, ".zinc/sessions") catch |err| if (err != error.FileNotFound) return err;
-            if (target == .logs or target == .all) dir.deleteTree(io, ".zinc/logs") catch |err| if (err != error.FileNotFound) return err;
             if (target == .packages or target == .all) dir.deleteTree(io, ".zinc/packages") catch |err| if (err != error.FileNotFound) return err;
             if (target == .generated or target == .all) dir.deleteTree(io, ".zinc/generated") catch |err| if (err != error.FileNotFound) return err;
             if (target == .config or target == .all) dir.deleteTree(io, ".zinc/config") catch |err| if (err != error.FileNotFound) return err;
@@ -525,7 +660,11 @@ pub fn clean(allocator: Allocator, io: std.Io, layout_ctx: layout.Context, scope
                 defer allocator.free(global_pkgs);
                 dir.deleteTree(io, global_pkgs) catch |err| if (err != error.FileNotFound) return err;
             }
-
+            if (target == .runtime or target == .all) {
+                const global_runtime = try layout.sharePath(allocator, layout_ctx, "runtime");
+                defer allocator.free(global_runtime);
+                dir.deleteTree(io, global_runtime) catch |err| if (err != error.FileNotFound) return err;
+            }
         },
     }
     std.debug.print("cleaned {s} {s} artifacts\n", .{ @tagName(scope), @tagName(target) });

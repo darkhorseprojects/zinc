@@ -6,7 +6,7 @@ const platform = @import("../platform.zig");
 const process = @import("../io/process.zig");
 const provider = @import("../model/provider.zig");
 const runtime_tools = @import("schema.zig");
-const sessions = @import("../session/mod.zig");
+const sessions = @import("../runtime/session.zig");
 const uri = @import("../io/uri.zig");
 const model = @import("../model/mod.zig");
 

@@ -5,11 +5,16 @@ const files = @import("../io/fs.zig");
 const layout = @import("../io/layout.zig");
 const graph = @import("mod.zig");
 const resource = @import("resource.zig");
-const sessions = @import("../session/mod.zig");
+const sessions = @import("../runtime/session.zig");
 const trace = @import("../io/trace.zig");
 
 const Allocator = std.mem.Allocator;
 const context_chars_per_token: usize = 3;
+
+pub const RecoveryOverride = struct {
+    reach: ?[]const u8 = null,
+    graph: ?[]const u8 = null,
+};
 
 fn fail(comptime fmt: []const u8, args: anytype) error{UserError}!void {
     std.debug.print("error: " ++ fmt ++ "\n", args);
@@ -19,7 +24,7 @@ fn fail(comptime fmt: []const u8, args: anytype) error{UserError}!void {
 pub fn run(allocator: Allocator, io: std.Io, layout_ctx: layout.Context, user_prompt: []const u8, resume_id: ?[]const u8, continue_last: bool, graph_path_override: ?[]const u8, runtime_inputs: []const graph.RuntimeInput) !void {
     const runtime_paths = try config.loadRuntimePaths(allocator, io, layout_ctx);
     defer runtime_paths.deinit(allocator);
-    return runGraph(allocator, io, layout_ctx, graph_path_override orelse runtime_paths.graph, null, null, user_prompt, resume_id, continue_last, runtime_inputs);
+    return runGraph(allocator, io, layout_ctx, graph_path_override orelse runtime_paths.graph, null, null, user_prompt, resume_id, continue_last, runtime_inputs, .{});
 }
 
 pub fn compactSession(allocator: Allocator, io: std.Io, layout_ctx: layout.Context, graph_path: []const u8, resume_id: ?[]const u8, continue_last: bool) !void {
@@ -27,13 +32,13 @@ pub fn compactSession(allocator: Allocator, io: std.Io, layout_ctx: layout.Conte
     defer allocator.free(model_id);
     const profile = try config.loadRuntimeProfile(allocator, io, layout_ctx, model_id);
     defer profile.deinit(allocator);
-    const session = try sessions.open(allocator, resume_id, continue_last);
+    const session = try sessions.open(allocator, layout_ctx, resume_id, continue_last);
     defer session.deinit(allocator);
     try runCompaction(allocator, io, layout_ctx, &profile, session, graph_path);
-    try sessions.rememberLast(session);
+    try sessions.rememberLast(allocator, layout_ctx, session);
 }
 
-pub fn runGraph(allocator: Allocator, io: std.Io, layout_ctx: layout.Context, graph_path: []const u8, selected_export: ?[]const u8, model_override: ?[]const u8, user_prompt: []const u8, resume_id: ?[]const u8, continue_last: bool, runtime_inputs: []const graph.RuntimeInput) !void {
+pub fn runGraph(allocator: Allocator, io: std.Io, layout_ctx: layout.Context, graph_path: []const u8, selected_export: ?[]const u8, model_override: ?[]const u8, user_prompt: []const u8, resume_id: ?[]const u8, continue_last: bool, runtime_inputs: []const graph.RuntimeInput, recovery_override: RecoveryOverride) !void {
     const span = trace.span("engine_run");
     defer span.end("engine", "graph={s} prompt_chars={d}", .{ graph_path, user_prompt.len });
 
@@ -48,18 +53,18 @@ pub fn runGraph(allocator: Allocator, io: std.Io, layout_ctx: layout.Context, gr
     const profile = try config.loadRuntimeProfile(allocator, io, layout_ctx, model_id);
     defer profile.deinit(allocator);
 
-    const session = try sessions.open(allocator, resume_id, continue_last);
+    const session = try sessions.open(allocator, layout_ctx, resume_id, continue_last);
     defer session.deinit(allocator);
 
-    var log = try sessions.readParsed(allocator, session.path);
+    var log = try sessions.read(allocator, layout_ctx, session);
     defer log.deinit(allocator);
     if (try shouldCompactLog(allocator, io, log, &profile)) {
         try runCompaction(allocator, io, layout_ctx, &profile, session, profile.paths.compaction_graph);
         log.deinit(allocator);
-        log = try sessions.readParsed(allocator, session.path);
+        log = try sessions.read(allocator, layout_ctx, session);
     }
 
-    const recovered_context = try recoveredContextForRun(allocator, io, layout_ctx, loaded_graph, selected_export, &profile, session, log);
+    const recovered_context = try recoveredContextForRun(allocator, io, layout_ctx, loaded_graph, selected_export, &profile, session, log, user_prompt, recovery_override);
     defer if (recovered_context) |text| allocator.free(text);
     const graph_inputs = try runtimeInputsForLoop(allocator, loaded_graph, selected_export, runtime_inputs, recovered_context);
     defer freeRuntimeInputList(allocator, graph_inputs, runtime_inputs.len);
@@ -86,17 +91,24 @@ pub fn runGraph(allocator: Allocator, io: std.Io, layout_ctx: layout.Context, gr
     try files.writeAllOut("\n");
 
     log.deinit(allocator);
-    log = try sessions.readParsed(allocator, session.path);
+    log = try sessions.read(allocator, layout_ctx, session);
     if (try shouldCompactLog(allocator, io, log, &profile)) try runCompaction(allocator, io, layout_ctx, &profile, session, profile.paths.compaction_graph);
 }
 
-fn recoveredContextForRun(allocator: Allocator, io: std.Io, layout_ctx: layout.Context, loaded_graph: graph.Graph, selected_export: ?[]const u8, profile: *const config.RuntimeProfile, session: sessions.Session, log: sessions.Log) !?[]u8 {
+fn recoveredContextForRun(allocator: Allocator, io: std.Io, layout_ctx: layout.Context, loaded_graph: graph.Graph, selected_export: ?[]const u8, profile: *const config.RuntimeProfile, session: sessions.Session, log: sessions.Log, user_prompt: []const u8, recovery_override: RecoveryOverride) !?[]u8 {
     if (!try graph.hasInputForExport(allocator, loaded_graph, selected_export, "recovered_context")) return null;
     const boundary = compactionBoundary(log);
     if (log.recovery) |recovery| if (recovery.compaction_message_count == boundary) return try allocator.dupe(u8, recovery.context);
-    const context = try runContextRecovery(allocator, io, layout_ctx, profile, session, log, profile.paths.context_graph);
+    const graph_path = recovery_override.graph orelse profile.recovery.graph;
+    const reach = recovery_override.reach orelse profile.recovery.reach;
+    if (std.mem.eql(u8, reach, "none")) return try allocator.dupe(u8, "");
+    try sessions.appendRecoveryStarted(allocator, layout_ctx, session, reach, profile.recovery.budget_chars);
+    const context = runContextRecovery(allocator, io, layout_ctx, profile, session, log, graph_path, user_prompt, reach) catch |err| {
+        try sessions.appendRecoveryFailed(allocator, layout_ctx, session, @errorName(err));
+        return err;
+    };
     errdefer allocator.free(context);
-    if (log.messageCount() != 0) try sessions.appendRecovery(allocator, session.path, log.messageCount(), boundary, context);
+    if (log.messageCount() != 0) try sessions.appendRecovery(allocator, layout_ctx, session, log.messageCount(), boundary, context);
     return context;
 }
 
@@ -105,14 +117,14 @@ fn compactionBoundary(log: sessions.Log) usize {
 }
 
 fn runCompaction(allocator: Allocator, io: std.Io, layout_ctx: layout.Context, profile: *const config.RuntimeProfile, session: sessions.Session, graph_path: []const u8) !void {
-    const log = try sessions.readParsed(allocator, session.path);
+    const log = try sessions.read(allocator, layout_ctx, session);
     defer log.deinit(allocator);
     if (log.messageCount() == 0) return;
     const loaded_graph = try graph.load(allocator, io, graph_path);
     defer loaded_graph.deinit(allocator);
     const target = graph.exportTargetResourceId(loaded_graph, null) orelse return fail("graph has no default export; add `exports.main`", .{});
     if (graph.resource(loaded_graph, target) == null) return fail("export target not found: {s}", .{target});
-    var log_mut = try sessions.readParsed(allocator, session.path);
+    var log_mut = try sessions.read(allocator, layout_ctx, session);
     defer log_mut.deinit(allocator);
     const compaction_inputs = try runtimeInputsForCompaction(allocator, loaded_graph, log, profile);
     defer freeRuntimeInputList(allocator, compaction_inputs, 0);
@@ -128,10 +140,10 @@ fn runCompaction(allocator: Allocator, io: std.Io, layout_ctx: layout.Context, p
     defer result.deinit(allocator);
     const summary = try parseStringField(allocator, result.text, "summary");
     defer allocator.free(summary);
-    try sessions.appendCompaction(allocator, session.path, log.messageCount(), summary);
+    try sessions.appendCompaction(allocator, layout_ctx, session, log.messageCount(), summary);
 }
 
-fn runContextRecovery(allocator: Allocator, io: std.Io, layout_ctx: layout.Context, profile: *const config.RuntimeProfile, session: sessions.Session, log: sessions.Log, graph_path: []const u8) ![]u8 {
+fn runContextRecovery(allocator: Allocator, io: std.Io, layout_ctx: layout.Context, profile: *const config.RuntimeProfile, session: sessions.Session, log: sessions.Log, graph_path: []const u8, user_prompt: []const u8, reach: []const u8) ![]u8 {
     if (log.messageCount() == 0) return allocator.dupe(u8, "");
     const loaded_graph = try graph.load(allocator, io, graph_path);
     defer loaded_graph.deinit(allocator);
@@ -143,9 +155,9 @@ fn runContextRecovery(allocator: Allocator, io: std.Io, layout_ctx: layout.Conte
         std.debug.print("error: context recovery target not found: {s}\n", .{target});
         return error.UserError;
     }
-    var log_mut = try sessions.readParsed(allocator, session.path);
+    var log_mut = try sessions.read(allocator, layout_ctx, session);
     defer log_mut.deinit(allocator);
-    const recovery_inputs = try runtimeInputsForCompaction(allocator, loaded_graph, log, profile);
+    const recovery_inputs = try runtimeInputsForRecovery(allocator, loaded_graph, log, profile, session, user_prompt, reach);
     defer freeRuntimeInputList(allocator, recovery_inputs, 0);
     const bound = try resource.bindInputs(allocator, loaded_graph, null, "", recovery_inputs);
     defer resource.freeBoundInputs(allocator, bound);
@@ -172,6 +184,26 @@ fn runtimeInputsForLoop(allocator: Allocator, loaded_graph: graph.Graph, selecte
         errdefer allocator.free(context);
         try out.append(allocator, .{ .id = try allocator.dupe(u8, "recovered_context"), .kind = .text, .value = context, .content_type = try allocator.dupe(u8, "text/plain") });
     }
+    return out.toOwnedSlice(allocator);
+}
+
+fn runtimeInputsForRecovery(allocator: Allocator, loaded_graph: graph.Graph, log: sessions.Log, profile: *const config.RuntimeProfile, session: sessions.Session, user_prompt: []const u8, reach: []const u8) ![]graph.RuntimeInput {
+    var out: std.ArrayList(graph.RuntimeInput) = .empty;
+    errdefer {
+        freeRuntimeInputList(allocator, out.items, 0);
+        out.deinit(allocator);
+    }
+    if (graph.hasInput(loaded_graph, "primary_scope")) try appendRuntimeInput(allocator, &out, "primary_scope", try allocator.dupe(u8, if (@import("../runtime/scope.zig").default() == .local) "local" else "global"));
+    if (graph.hasInput(loaded_graph, "session_id")) try appendRuntimeInput(allocator, &out, "session_id", try allocator.dupe(u8, session.id));
+    if (graph.hasInput(loaded_graph, "branch")) try appendRuntimeInput(allocator, &out, "branch", try allocator.dupe(u8, "main"));
+    if (graph.hasInput(loaded_graph, "message")) try appendRuntimeInput(allocator, &out, "message", try allocator.dupe(u8, user_prompt));
+    if (graph.hasInput(loaded_graph, "reach")) try appendRuntimeInput(allocator, &out, "reach", try allocator.dupe(u8, reach));
+    if (graph.hasInput(loaded_graph, "budget_chars")) try appendRuntimeInput(allocator, &out, "budget_chars", try std.fmt.allocPrint(allocator, "{d}", .{profile.recovery.budget_chars}));
+    if (graph.hasInput(loaded_graph, "runtime_uri")) try appendRuntimeInput(allocator, &out, "runtime_uri", try allocator.dupe(u8, "runtime:current"));
+    if (graph.hasInput(loaded_graph, "session_head")) try appendRuntimeInput(allocator, &out, "session_head", try renderSessionHead(allocator, log, profile));
+    if (graph.hasInput(loaded_graph, "existing_compaction")) try appendRuntimeInput(allocator, &out, "existing_compaction", try renderExistingCompaction(allocator, log));
+    if (graph.hasInput(loaded_graph, "retained_tail")) try appendRuntimeInput(allocator, &out, "retained_tail", try renderRetainedTail(allocator, log, profile));
+    if (graph.hasInput(loaded_graph, "messages_to_compact")) try appendRuntimeInput(allocator, &out, "messages_to_compact", try renderMessagesToCompact(allocator, log, profile));
     return out.toOwnedSlice(allocator);
 }
 
