@@ -261,7 +261,12 @@ pub fn updateFromArgs(allocator: Allocator, io: std.Io, layout_ctx: @import("../
         .linux, .macos => try runCommand(allocator, io, &.{
             "sh",
             "-c",
-            "curl -fsSL \"$0\" | sh -s -- --version \"$1\"",
+            \\if command -v gh >/dev/null 2>&1 && gh auth status >/dev/null 2>&1; then
+            \\  gh api repos/darkhorseprojects/zinc/contents/scripts/install-unix.sh -H "Accept: application/vnd.github.raw" | sh -s -- --version "$1"
+            \\else
+            \\  curl -fsSL "$0" | sh -s -- --version "$1"
+            \\fi
+            ,
             unix_installer_url,
             target,
         }, "failed to install Zinc update"),
@@ -271,7 +276,14 @@ pub fn updateFromArgs(allocator: Allocator, io: std.Io, layout_ctx: @import("../
             "-ExecutionPolicy",
             "Bypass",
             "-Command",
-            "$script = Join-Path $env:TEMP 'install-zinc.ps1'; Invoke-WebRequest -Uri $args[0] -OutFile $script; & $script -Version $args[1]",
+            \\$script = Join-Path $env:TEMP 'install-zinc.ps1'
+            \\if ((Get-Command gh -ErrorAction SilentlyContinue) -and (gh auth status 2>&1 | Out-String -Stream | Select-String "Logged in to")) {
+            \\  gh api repos/darkhorseprojects/zinc/contents/scripts/install-windows.ps1 -H "Accept: application/vnd.github.raw" -OutFile $script
+            \\} else {
+            \\  Invoke-WebRequest -Uri $args[0] -OutFile $script
+            \\}
+            \\& $script -Version $args[1]
+            ,
             windows_installer_url,
             target,
         }, "failed to install Zinc update"),

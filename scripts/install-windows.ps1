@@ -19,12 +19,21 @@ try {
     if ($Archive) {
         Copy-Item -LiteralPath $Archive -Destination $ArchivePath
     } else {
-        if ($Version -eq "latest") {
-            $Url = "https://github.com/$Repo/releases/latest/download/$Asset"
+        if ((Get-Command gh -ErrorAction SilentlyContinue) -and (gh auth status 2>&1 | Out-String -Stream | Select-String "Logged in to")) {
+            Write-Host "Downloading release using GitHub CLI..."
+            if ($Version -eq "latest") {
+                gh release download -R $Repo -p $Asset -O $ArchivePath
+            } else {
+                gh release download $Version -R $Repo -p $Asset -O $ArchivePath
+            }
         } else {
-            $Url = "https://github.com/$Repo/releases/download/$Version/$Asset"
+            if ($Version -eq "latest") {
+                $Url = "https://github.com/$Repo/releases/latest/download/$Asset"
+            } else {
+                $Url = "https://github.com/$Repo/releases/download/$Version/$Asset"
+            }
+            Invoke-WebRequest -Uri $Url -OutFile $ArchivePath
         }
-        Invoke-WebRequest -Uri $Url -OutFile $ArchivePath
     }
 
     Expand-Archive -LiteralPath $ArchivePath -DestinationPath $Temp -Force

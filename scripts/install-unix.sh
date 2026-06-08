@@ -64,13 +64,22 @@ trap cleanup EXIT INT HUP TERM
 if [ -n "$archive" ]; then
   cp "$archive" "$tmp/$asset"
 else
-  need curl
-  if [ "$version" = "latest" ]; then
-    url="https://github.com/$repo/releases/latest/download/$asset"
+  if command -v gh >/dev/null 2>&1 && gh auth status >/dev/null 2>&1; then
+    echo "Downloading release using GitHub CLI..."
+    if [ "$version" = "latest" ]; then
+      gh release download -R "$repo" -p "$asset" -O "$tmp/$asset"
+    else
+      gh release download "$version" -R "$repo" -p "$asset" -O "$tmp/$asset"
+    fi
   else
-    url="https://github.com/$repo/releases/download/$version/$asset"
+    need curl
+    if [ "$version" = "latest" ]; then
+      url="https://github.com/$repo/releases/latest/download/$asset"
+    else
+      url="https://github.com/$repo/releases/download/$version/$asset"
+    fi
+    curl -fL "$url" -o "$tmp/$asset"
   fi
-  curl -fL "$url" -o "$tmp/$asset"
 fi
 
 need tar

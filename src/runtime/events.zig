@@ -25,6 +25,3 @@ pub const recovery_started = "context.recovery.started";
 pub const recovery_finished = "context.recovery.finished";
 pub const recovery_failed = "context.recovery.failed";
 
-pub const hook_started = "hook.started";
-pub const hook_finished = "hook.finished";
-pub const hook_failed = "hook.failed";

@@ -30,7 +30,12 @@ pub fn regeneratePackageGraph(allocator: Allocator, io: std.Io, layout_ctx: layo
         \\resources:
         \\
     )) {
-        std.Io.Dir.cwd().deleteFile(std.Options.debug_io, package_graph_path) catch {};
+        try files.write(package_graph_path,
+            \\circuitry: "0.5"
+            \\title: Zinc packages
+            \\resources: {}
+            \\
+        );
         out.deinit(allocator);
         return;
     }

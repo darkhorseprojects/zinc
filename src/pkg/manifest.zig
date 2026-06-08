@@ -166,8 +166,7 @@ fn readAssets(allocator: Allocator, root: *const circuitry.value.Value, path: []
 }
 
 fn readInstall(allocator: Allocator, root: *const circuitry.value.Value) !?InstallSpec {
-    const value = valueAt(root, &.{ "attach", "model" }) orelse
-        valueAt(root, &.{ "install", "model" }) orelse return null;
+    const value = valueAt(root, &.{ "install", "model" }) orelse return null;
     if (value.* != .mapping) return error.InvalidPackageManifest;
     const input = try readInstallRefs(allocator, value, "input");
     errdefer freeStringList(allocator, input);

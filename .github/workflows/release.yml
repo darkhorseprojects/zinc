@@ -33,7 +33,7 @@ jobs:
         with:
           version: 0.16.0
       - name: Prepare Zig cache
-        run: mkdir -p "$ZIG_GLOBAL_CACHE_DIR" "$ZIG_LOCAL_CACHE_DIR"
+        run: mkdir -p "$ZIG_GLOBAL_CACHE_DIR/tmp" "$ZIG_LOCAL_CACHE_DIR"
       - run: zig build test
       - run: zig build -Doptimize=ReleaseFast -Dtarget=${{ matrix.target }}
       - name: Package archive
