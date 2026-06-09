@@ -21,6 +21,8 @@ pub fn build(b: *std.Build) void {
         .name = "zn",
         .root_module = exe_mod,
     });
+    exe.use_llvm = true;
+    exe.use_lld = true;
 
     b.installArtifact(exe);
 
@@ -40,6 +42,8 @@ pub fn build(b: *std.Build) void {
     test_mod.addImport("limbo", limbo_dep.module("limbo"));
     test_mod.addImport("serde", serde_dep.module("serde"));
     const tests = b.addTest(.{ .root_module = test_mod });
+    tests.use_llvm = true;
+    tests.use_lld = true;
     const test_step = b.step("test", "Run unit tests");
     test_step.dependOn(&b.addRunArtifact(tests).step);
 }
