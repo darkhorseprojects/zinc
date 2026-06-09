@@ -1,261 +1,416 @@
 const std = @import("std");
-const sqlite = @import("sqlite");
-const files = @import("../io/fs.zig");
+const limbo = @import("limbo");
 const layout = @import("../io/layout.zig");
-const ids = @import("ids.zig");
-const schema = @import("schema.zig");
-const scopes = @import("scope.zig");
+const files = @import("../io/fs.zig");
 
 const Allocator = std.mem.Allocator;
 
+pub const circuitry_docs = struct {
+    id: []const u8,
+    path: ?[]const u8,
+    name: ?[]const u8,
+    source: []const u8,
+    updated_at: i64,
+};
+
+pub const runs = struct {
+    id: []const u8,
+    doc_id: ?[]const u8,
+    status: ?[]const u8,
+    started_at: ?i64,
+    finished_at: ?i64,
+};
+
+pub const actions = struct {
+    id: []const u8,
+    run_id: ?[]const u8,
+    seq: i64,
+    action: ?[]const u8,
+    cwd: ?[]const u8,
+    status: ?[]const u8,
+    approval: ?[]const u8,
+    stdout_uri: ?[]const u8,
+    stderr_uri: ?[]const u8,
+    metadata_json: ?[]const u8,
+};
+
+pub const approvals = struct {
+    id: []const u8,
+    run_id: ?[]const u8,
+    kind: ?[]const u8,
+    subject: ?[]const u8,
+    decision: ?[]const u8,
+    created_at: ?i64,
+};
+
+pub const packages = struct {
+    name: []const u8,
+    version: ?[]const u8,
+    source: ?[]const u8,
+    scope: ?[]const u8,
+    path: ?[]const u8,
+    status: ?[]const u8,
+    installed_at: ?i64,
+    checked_at: ?i64,
+};
+
 pub const Store = struct {
     allocator: Allocator,
-    path: []u8,
-    path_z: [:0]u8,
-    db: sqlite.Database,
+    global_db: limbo.Database,
+    workspace_db: limbo.Database,
+    has_workspace: bool,
 
-    pub fn open(allocator: Allocator, layout_ctx: layout.Context, scope: scopes.Scope) !Store {
-        const path = try scopes.dbPath(allocator, layout_ctx, scope);
-        errdefer allocator.free(path);
+    pub fn open(allocator: Allocator) !Store {
+        const global_dir = try layout.globalPath(allocator, "");
+        defer allocator.free(global_dir);
+        try files.mkdirP(global_dir);
 
-        const old_path = try oldDbPath(allocator, layout_ctx, scope);
-        defer allocator.free(old_path);
-        if (files.existsPath(old_path) and !files.existsPath(path)) {
-            if (std.fs.path.dirname(path)) |dir| try files.mkdirP(dir);
-            const io = std.Options.debug_io;
-            std.Io.Dir.cwd().rename(old_path, std.Io.Dir.cwd(), path, io) catch {};
-            
-            const old_wal = try std.fmt.allocPrint(allocator, "{s}-wal", .{old_path});
-            defer allocator.free(old_wal);
-            const wal = try std.fmt.allocPrint(allocator, "{s}-wal", .{path});
-            defer allocator.free(wal);
-            std.Io.Dir.cwd().rename(old_wal, std.Io.Dir.cwd(), wal, io) catch {};
+        const global_db_path = try layout.globalPath(allocator, "zinc.db");
+        defer allocator.free(global_db_path);
+        const global_db_path_z = try allocator.dupeZ(u8, global_db_path);
+        defer allocator.free(global_db_path_z);
+        var global_db = try limbo.Database.open(.{ .path = global_db_path_z });
+        errdefer global_db.close();
 
-            const old_shm = try std.fmt.allocPrint(allocator, "{s}-shm", .{old_path});
-            defer allocator.free(old_shm);
-            const shm = try std.fmt.allocPrint(allocator, "{s}-shm", .{path});
-            defer allocator.free(shm);
-            std.Io.Dir.cwd().rename(old_shm, std.Io.Dir.cwd(), shm, io) catch {};
+        var workspace_db = global_db;
+        var has_workspace = false;
+
+        if (try layout.workspacePath(allocator, "")) |ws_dir| {
+            defer allocator.free(ws_dir);
+            try files.mkdirP(ws_dir);
+
+            if (try layout.workspacePath(allocator, "zinc.db")) |ws_db_path| {
+                defer allocator.free(ws_db_path);
+                const ws_db_path_z = try allocator.dupeZ(u8, ws_db_path);
+                defer allocator.free(ws_db_path_z);
+                workspace_db = try limbo.Database.open(.{ .path = ws_db_path_z });
+                has_workspace = true;
+            }
         }
 
-        if (std.fs.path.dirname(path)) |dir| try files.mkdirP(dir);
-        const path_z = try allocator.dupeZ(u8, path);
-        errdefer allocator.free(path_z);
-        const db = try sqlite.Database.open(.{ .path = path_z.ptr, .mode = .ReadWrite, .create = true });
-        var store = Store{ .allocator = allocator, .path = path, .path_z = path_z, .db = db };
-        errdefer store.close();
-        try schema.configure(store.db);
-        try schema.migrate(store.db);
+        var store = Store{
+            .allocator = allocator,
+            .global_db = global_db,
+            .workspace_db = workspace_db,
+            .has_workspace = has_workspace,
+        };
+
+        try store.migrate();
         return store;
     }
 
-    fn oldDbPath(allocator: Allocator, layout_ctx: layout.Context, scope: scopes.Scope) ![]u8 {
-        return switch (scope) {
-            .local => allocator.dupe(u8, ".zinc/runtime/zinc.db"),
-            .global => layout.sharePath(allocator, layout_ctx, "runtime/zinc.db"),
-        };
-    }
-
     pub fn close(self: *Store) void {
-        self.db.close();
-        self.allocator.free(self.path_z);
-        self.allocator.free(self.path);
+        self.global_db.close();
+        if (self.has_workspace) {
+            self.workspace_db.close();
+        }
     }
 
-    pub fn lastSessionId(self: Store, allocator: Allocator) !?[]u8 {
-        const Row = struct { value_json: sqlite.Text };
-        const stmt = try self.db.prepare(struct {}, Row, "select value_json from meta where key = 'last_session_id'");
-        defer stmt.finalize();
-        try stmt.bind(.{});
-        defer stmt.reset();
-        const row = try stmt.step() orelse return null;
-        return try parseJsonString(allocator, row.value_json.data);
+    fn migrate(self: *Store) !void {
+        // Global tables
+        try self.global_db.exec("create table if not exists packages(name text primary key, version text, source text, scope text, path text, status text, installed_at integer, checked_at integer)", .{});
+        try self.global_db.exec("create table if not exists config(key text primary key, value text)", .{});
+
+        // Workspace tables
+        try self.workspace_db.exec("create table if not exists circuitry_docs(id text primary key, path text, name text, source text not null, updated_at integer not null)", .{});
+        try self.workspace_db.exec("create table if not exists runs(id text primary key, doc_id text, status text, started_at integer, finished_at integer)", .{});
+        try self.workspace_db.exec("create table if not exists actions(id text primary key, run_id text, seq integer, action text, cwd text, status text, approval text, stdout_uri text, stderr_uri text, metadata_json text)", .{});
+        try self.workspace_db.exec("create table if not exists approvals(id text primary key, run_id text, kind text, subject text, decision text, created_at integer)", .{});
+        try self.workspace_db.exec("create table if not exists config(key text primary key, value text)", .{});
     }
 
-    pub fn setLastSessionId(self: Store, id: []const u8) !void {
-        const payload = try jsonString(self.allocator, id);
-        defer self.allocator.free(payload);
-        try self.db.exec("insert into meta(key, value_json) values ('last_session_id', :value_json) on conflict(key) do update set value_json = excluded.value_json", .{ .value_json = sqlite.text(payload) });
-    }
-
-    pub fn ensureSession(self: Store, id: []const u8, cwd: []const u8) !void {
-        const now = try ids.timestamp(self.allocator);
-        defer self.allocator.free(now);
-        try self.db.exec(
-            "insert into sessions(id, cwd, created_at, updated_at, current_branch, status) values (:id, :cwd, :created_at, :updated_at, 'main', 'active') on conflict(id) do nothing",
-            .{ .id = sqlite.text(id), .cwd = sqlite.text(cwd), .created_at = sqlite.text(now), .updated_at = sqlite.text(now) },
+    // --- Config ---
+    pub fn setConfig(self: *Store, key: []const u8, value: []const u8) !void {
+        try self.global_db.exec(
+            "insert into config(key, value) values (:key, :value) on conflict(key) do update set value = excluded.value",
+            .{ .key = limbo.text(key), .value = limbo.text(value) },
         );
     }
 
-    pub fn sessionExists(self: Store, id: []const u8) !bool {
-        const Row = struct { count: usize };
-        const stmt = try self.db.prepare(struct { id: sqlite.Text }, Row, "select count(*) as count from sessions where id = :id");
+    pub fn getConfig(self: *Store, key: []const u8) !?[]const u8 {
+        const Row = struct { value: limbo.Text };
+        var stmt = try self.global_db.prepare(struct { key: limbo.Text }, Row, "select value from config where key = :key");
         defer stmt.finalize();
-        try stmt.bind(.{ .id = sqlite.text(id) });
-        defer stmt.reset();
-        const row = try stmt.step() orelse return false;
-        return row.count != 0;
+        try stmt.bind(.{ .key = limbo.text(key) });
+        if (try stmt.step()) |row| {
+            return try self.allocator.dupe(u8, row.value.data);
+        }
+        return null;
     }
 
-    pub fn appendEvent(self: Store, args: EventInsert) ![]u8 {
-        const id = try ids.new(self.allocator, "e");
-        errdefer self.allocator.free(id);
-        const now = try ids.timestamp(self.allocator);
-        defer self.allocator.free(now);
-        const branch = args.branch orelse try self.currentBranchTemp(args.session_id);
-        defer if (args.branch == null) self.allocator.free(branch);
-        const parent = args.parent_id orelse try self.branchHeadTemp(args.session_id, branch);
-        defer if (args.parent_id == null) if (parent) |p| self.allocator.free(p);
-        try self.db.exec(
-            \\insert into events(id, session_id, parent_id, branch, type, source_kind, source_name, time, summary, payload_json)
-            \\values (:id, :session_id, :parent_id, :branch, :type, :source_kind, :source_name, :time, :summary, :payload_json)
-        , .{
-            .id = sqlite.text(id),
-            .session_id = sqlite.text(args.session_id),
-            .parent_id = if (parent) |p| sqlite.text(p) else null,
-            .branch = sqlite.text(branch),
-            .type = sqlite.text(args.type),
-            .source_kind = sqlite.text(args.source_kind),
-            .source_name = sqlite.text(args.source_name),
-            .time = sqlite.text(now),
-            .summary = if (args.summary) |s| sqlite.text(s) else null,
-            .payload_json = sqlite.text(args.payload_json),
-        });
-        try self.db.exec(
-            \\insert into branch_heads(session_id, branch, head_event_id, updated_at)
-            \\values (:session_id, :branch, :head_event_id, :updated_at)
-            \\on conflict(session_id, branch) do update set head_event_id = excluded.head_event_id, updated_at = excluded.updated_at
-        , .{ .session_id = sqlite.text(args.session_id), .branch = sqlite.text(branch), .head_event_id = sqlite.text(id), .updated_at = sqlite.text(now) });
-        try self.db.exec("update sessions set updated_at = :updated_at where id = :session_id", .{ .updated_at = sqlite.text(now), .session_id = sqlite.text(args.session_id) });
-        return id;
+    // --- Circuitry Docs ---
+    pub fn insertDoc(self: *Store, doc: circuitry_docs) !void {
+        try self.workspace_db.exec(
+            "insert into circuitry_docs(id, path, name, source, updated_at) values (:id, :path, :name, :source, :updated_at) on conflict(id) do update set path=excluded.path, name=excluded.name, source=excluded.source, updated_at=excluded.updated_at",
+            .{
+                .id = limbo.text(doc.id),
+                .path = if (doc.path) |p| limbo.text(p) else null,
+                .name = if (doc.name) |n| limbo.text(n) else null,
+                .source = limbo.text(doc.source),
+                .updated_at = doc.updated_at,
+            },
+        );
     }
 
-    pub fn writeLog(self: Store, args: LogInsert) !void {
-        const now = try ids.timestamp(self.allocator);
-        defer self.allocator.free(now);
-        try self.db.exec(
-            \\insert into logs(run_id, session_id, event_id, time, level, component, message, fields_json)
-            \\values (:run_id, :session_id, :event_id, :time, :level, :component, :message, :fields_json)
-        , .{
-            .run_id = if (args.run_id) |v| sqlite.text(v) else null,
-            .session_id = if (args.session_id) |v| sqlite.text(v) else null,
-            .event_id = if (args.event_id) |v| sqlite.text(v) else null,
-            .time = sqlite.text(now),
-            .level = sqlite.text(args.level),
-            .component = sqlite.text(args.component),
-            .message = sqlite.text(args.message),
-            .fields_json = sqlite.text(args.fields_json orelse "{}"),
-        });
-    }
-
-    pub fn startRun(self: Store, session_id: []const u8, command: []const u8, metadata_json: []const u8) ![]u8 {
-        const id = try ids.new(self.allocator, "r");
-        errdefer self.allocator.free(id);
-        const now = try ids.timestamp(self.allocator);
-        defer self.allocator.free(now);
-        try self.db.exec("insert into runs(id, session_id, started_at, status, command, metadata_json) values (:id, :session_id, :started_at, 'running', :command, :metadata_json)", .{ .id = sqlite.text(id), .session_id = sqlite.text(session_id), .started_at = sqlite.text(now), .command = sqlite.text(command), .metadata_json = sqlite.text(metadata_json) });
-        return id;
-    }
-
-    pub fn finishRun(self: Store, id: []const u8, status: []const u8, metadata_json: ?[]const u8) !void {
-        const now = try ids.timestamp(self.allocator);
-        defer self.allocator.free(now);
-        if (metadata_json) |meta| try self.db.exec("update runs set finished_at = :finished_at, status = :status, metadata_json = :metadata_json where id = :id", .{ .finished_at = sqlite.text(now), .status = sqlite.text(status), .metadata_json = sqlite.text(meta), .id = sqlite.text(id) }) else try self.db.exec("update runs set finished_at = :finished_at, status = :status where id = :id", .{ .finished_at = sqlite.text(now), .status = sqlite.text(status), .id = sqlite.text(id) });
-    }
-
-    pub fn currentBranch(self: Store, allocator: Allocator, session_id: []const u8) ![]u8 {
-        const value = try self.currentBranchTemp(session_id);
-        if (allocator.ptr == self.allocator.ptr) return value;
-        defer self.allocator.free(value);
-        return allocator.dupe(u8, value);
-    }
-
-    pub fn branchExists(self: Store, session_id: []const u8, branch: []const u8) !bool {
-        const Row = struct { count: usize };
-        const stmt = try self.db.prepare(struct { session_id: sqlite.Text, branch: sqlite.Text }, Row, "select count(*) as count from branch_heads where session_id = :session_id and branch = :branch");
+    pub fn getDoc(self: *Store, id: []const u8) !?circuitry_docs {
+        const Row = struct {
+            id: limbo.Text,
+            path: ?limbo.Text,
+            name: ?limbo.Text,
+            source: limbo.Text,
+            updated_at: i64,
+        };
+        var stmt = try self.workspace_db.prepare(struct { id: limbo.Text }, Row, "select id, path, name, source, updated_at from circuitry_docs where id = :id");
         defer stmt.finalize();
-        try stmt.bind(.{ .session_id = sqlite.text(session_id), .branch = sqlite.text(branch) });
-        defer stmt.reset();
-        const row = try stmt.step() orelse return false;
-        return row.count != 0;
+        try stmt.bind(.{ .id = limbo.text(id) });
+        if (try stmt.step()) |row| {
+            return circuitry_docs{
+                .id = try self.allocator.dupe(u8, row.id.data),
+                .path = if (row.path) |p| try self.allocator.dupe(u8, p.data) else null,
+                .name = if (row.name) |n| try self.allocator.dupe(u8, n.data) else null,
+                .source = try self.allocator.dupe(u8, row.source.data),
+                .updated_at = row.updated_at,
+            };
+        }
+        return null;
     }
 
-    pub fn eventSession(self: Store, allocator: Allocator, event_id: []const u8) ![]u8 {
-        const Row = struct { session_id: sqlite.Text };
-        const stmt = try self.db.prepare(struct { id: sqlite.Text }, Row, "select session_id from events where id = :id");
+    // --- Runs ---
+    pub fn insertRun(self: *Store, run_obj: runs) !void {
+        try self.workspace_db.exec(
+            "insert into runs(id, doc_id, status, started_at, finished_at) values (:id, :doc_id, :status, :started_at, :finished_at) on conflict(id) do update set status=excluded.status, finished_at=excluded.finished_at",
+            .{
+                .id = limbo.text(run_obj.id),
+                .doc_id = if (run_obj.doc_id) |d| limbo.text(d) else null,
+                .status = if (run_obj.status) |s| limbo.text(s) else null,
+                .started_at = run_obj.started_at,
+                .finished_at = run_obj.finished_at,
+            },
+        );
+    }
+
+    pub fn getRun(self: *Store, id: []const u8) !?runs {
+        const Row = struct {
+            id: limbo.Text,
+            doc_id: ?limbo.Text,
+            status: ?limbo.Text,
+            started_at: ?i64,
+            finished_at: ?i64,
+        };
+        var stmt = try self.workspace_db.prepare(struct { id: limbo.Text }, Row, "select id, doc_id, status, started_at, finished_at from runs where id = :id");
         defer stmt.finalize();
-        try stmt.bind(.{ .id = sqlite.text(event_id) });
-        defer stmt.reset();
-        const row = try stmt.step() orelse return error.EventNotFound;
-        return allocator.dupe(u8, row.session_id.data);
+        try stmt.bind(.{ .id = limbo.text(id) });
+        if (try stmt.step()) |row| {
+            return runs{
+                .id = try self.allocator.dupe(u8, row.id.data),
+                .doc_id = if (row.doc_id) |d| try self.allocator.dupe(u8, d.data) else null,
+                .status = if (row.status) |s| try self.allocator.dupe(u8, s.data) else null,
+                .started_at = row.started_at,
+                .finished_at = row.finished_at,
+            };
+        }
+        return null;
     }
 
-    pub fn createBranch(self: Store, at_event_id: []const u8, name: []const u8) ![]u8 {
-        const session_id = try self.eventSession(self.allocator, at_event_id);
-        defer self.allocator.free(session_id);
-        return self.appendEvent(.{ .session_id = session_id, .parent_id = at_event_id, .branch = name, .type = @import("events.zig").session_branch_created, .summary = name, .payload_json = "{}" });
+    // --- Actions ---
+    pub fn insertAction(self: *Store, act: actions) !void {
+        try self.workspace_db.exec(
+            "insert into actions(id, run_id, seq, action, cwd, status, approval, stdout_uri, stderr_uri, metadata_json) values (:id, :run_id, :seq, :action, :cwd, :status, :approval, :stdout_uri, :stderr_uri, :metadata_json)",
+            .{
+                .id = limbo.text(act.id),
+                .run_id = if (act.run_id) |r| limbo.text(r) else null,
+                .seq = act.seq,
+                .action = if (act.action) |a| limbo.text(a) else null,
+                .cwd = if (act.cwd) |c| limbo.text(c) else null,
+                .status = if (act.status) |s| limbo.text(s) else null,
+                .approval = if (act.approval) |ap| limbo.text(ap) else null,
+                .stdout_uri = if (act.stdout_uri) |o| limbo.text(o) else null,
+                .stderr_uri = if (act.stderr_uri) |se| limbo.text(se) else null,
+                .metadata_json = if (act.metadata_json) |m| limbo.text(m) else null,
+            },
+        );
     }
 
-    pub fn checkoutBranch(self: Store, session_id: []const u8, name: []const u8) ![]u8 {
-        if (!try self.branchExists(session_id, name)) return error.BranchNotFound;
-        try self.db.exec("update sessions set current_branch = :branch where id = :session_id", .{ .branch = sqlite.text(name), .session_id = sqlite.text(session_id) });
-        return self.appendEvent(.{ .session_id = session_id, .branch = name, .type = @import("events.zig").session_branch_checked_out, .summary = name, .payload_json = "{}" });
-    }
-
-    fn currentBranchTemp(self: Store, session_id: []const u8) ![]u8 {
-        const Row = struct { current_branch: sqlite.Text };
-        const stmt = try self.db.prepare(struct { session_id: sqlite.Text }, Row, "select current_branch from sessions where id = :session_id");
+    pub fn listActions(self: *Store, run_id: []const u8) ![]actions {
+        const Row = struct {
+            id: limbo.Text,
+            run_id: ?limbo.Text,
+            seq: i64,
+            action: ?limbo.Text,
+            cwd: ?limbo.Text,
+            status: ?limbo.Text,
+            approval: ?limbo.Text,
+            stdout_uri: ?limbo.Text,
+            stderr_uri: ?limbo.Text,
+            metadata_json: ?limbo.Text,
+        };
+        var stmt = try self.workspace_db.prepare(struct { run_id: limbo.Text }, Row, "select id, run_id, seq, action, cwd, status, approval, stdout_uri, stderr_uri, metadata_json from actions where run_id = :run_id order by seq asc");
         defer stmt.finalize();
-        try stmt.bind(.{ .session_id = sqlite.text(session_id) });
-        defer stmt.reset();
-        const row = try stmt.step() orelse return self.allocator.dupe(u8, "main");
-        return self.allocator.dupe(u8, row.current_branch.data);
+        try stmt.bind(.{ .run_id = limbo.text(run_id) });
+        var list: std.ArrayList(actions) = .empty;
+        errdefer {
+            for (list.items) |act| self.freeAction(act);
+            list.deinit(self.allocator);
+        }
+        while (try stmt.step()) |row| {
+            try list.append(self.allocator, actions{
+                .id = try self.allocator.dupe(u8, row.id.data),
+                .run_id = if (row.run_id) |r| try self.allocator.dupe(u8, r.data) else null,
+                .seq = row.seq,
+                .action = if (row.action) |a| try self.allocator.dupe(u8, a.data) else null,
+                .cwd = if (row.cwd) |c| try self.allocator.dupe(u8, c.data) else null,
+                .status = if (row.status) |s| try self.allocator.dupe(u8, s.data) else null,
+                .approval = if (row.approval) |ap| try self.allocator.dupe(u8, ap.data) else null,
+                .stdout_uri = if (row.stdout_uri) |o| try self.allocator.dupe(u8, o.data) else null,
+                .stderr_uri = if (row.stderr_uri) |se| try self.allocator.dupe(u8, se.data) else null,
+                .metadata_json = if (row.metadata_json) |m| try self.allocator.dupe(u8, m.data) else null,
+            });
+        }
+        return list.toOwnedSlice(self.allocator);
     }
 
-    fn branchHeadTemp(self: Store, session_id: []const u8, branch: []const u8) !?[]u8 {
-        const Row = struct { head_event_id: sqlite.Text };
-        const stmt = try self.db.prepare(struct { session_id: sqlite.Text, branch: sqlite.Text }, Row, "select head_event_id from branch_heads where session_id = :session_id and branch = :branch");
+    pub fn freeAction(self: *Store, act: actions) void {
+        self.allocator.free(act.id);
+        if (act.run_id) |r| self.allocator.free(r);
+        if (act.action) |a| self.allocator.free(a);
+        if (act.cwd) |c| self.allocator.free(c);
+        if (act.status) |s| self.allocator.free(s);
+        if (act.approval) |ap| self.allocator.free(ap);
+        if (act.stdout_uri) |o| self.allocator.free(o);
+        if (act.stderr_uri) |se| self.allocator.free(se);
+        if (act.metadata_json) |m| self.allocator.free(m);
+    }
+
+    // --- Approvals ---
+    pub fn insertApproval(self: *Store, app: approvals) !void {
+        try self.workspace_db.exec(
+            "insert into approvals(id, run_id, kind, subject, decision, created_at) values (:id, :run_id, :kind, :subject, :decision, :created_at) on conflict(id) do update set decision=excluded.decision",
+            .{
+                .id = limbo.text(app.id),
+                .run_id = if (app.run_id) |r| limbo.text(r) else null,
+                .kind = if (app.kind) |k| limbo.text(k) else null,
+                .subject = if (app.subject) |s| limbo.text(s) else null,
+                .decision = if (app.decision) |d| limbo.text(d) else null,
+                .created_at = app.created_at,
+            },
+        );
+    }
+
+    pub fn getApprovalForSubject(self: *Store, run_id: []const u8, kind: []const u8, subject: []const u8) !?approvals {
+        const Row = struct {
+            id: limbo.Text,
+            run_id: ?limbo.Text,
+            kind: ?limbo.Text,
+            subject: ?limbo.Text,
+            decision: ?limbo.Text,
+            created_at: ?i64,
+        };
+        var stmt = try self.workspace_db.prepare(struct { run_id: limbo.Text, kind: limbo.Text, subject: limbo.Text }, Row, "select id, run_id, kind, subject, decision, created_at from approvals where run_id = :run_id and kind = :kind and subject = :subject");
         defer stmt.finalize();
-        try stmt.bind(.{ .session_id = sqlite.text(session_id), .branch = sqlite.text(branch) });
-        defer stmt.reset();
-        const row = try stmt.step() orelse return null;
-        return try self.allocator.dupe(u8, row.head_event_id.data);
+        try stmt.bind(.{ .run_id = limbo.text(run_id), .kind = limbo.text(kind), .subject = limbo.text(subject) });
+        if (try stmt.step()) |row| {
+            return approvals{
+                .id = try self.allocator.dupe(u8, row.id.data),
+                .run_id = if (row.run_id) |r| try self.allocator.dupe(u8, r.data) else null,
+                .kind = if (row.kind) |k| try self.allocator.dupe(u8, k.data) else null,
+                .subject = if (row.subject) |s| try self.allocator.dupe(u8, s.data) else null,
+                .decision = if (row.decision) |d| try self.allocator.dupe(u8, d.data) else null,
+                .created_at = row.created_at,
+            };
+        }
+        return null;
+    }
+
+    // --- Packages ---
+    pub fn insertPackage(self: *Store, pkg: packages) !void {
+        try self.global_db.exec(
+            "insert into packages(name, version, source, scope, path, status, installed_at, checked_at) values (:name, :version, :source, :scope, :path, :status, :installed_at, :checked_at) on conflict(name) do update set version=excluded.version, source=excluded.source, scope=excluded.scope, path=excluded.path, status=excluded.status, checked_at=excluded.checked_at",
+            .{
+                .name = limbo.text(pkg.name),
+                .version = if (pkg.version) |v| limbo.text(v) else null,
+                .source = if (pkg.source) |s| limbo.text(s) else null,
+                .scope = if (pkg.scope) |sc| limbo.text(sc) else null,
+                .path = if (pkg.path) |p| limbo.text(p) else null,
+                .status = if (pkg.status) |st| limbo.text(st) else null,
+                .installed_at = pkg.installed_at,
+                .checked_at = pkg.checked_at,
+            },
+        );
+    }
+
+    pub fn deletePackage(self: *Store, name: []const u8) !void {
+        try self.global_db.exec("delete from packages where name = :name", .{ .name = limbo.text(name) });
+    }
+
+    pub fn getPackage(self: *Store, name: []const u8) !?packages {
+        const Row = struct {
+            name: limbo.Text,
+            version: ?limbo.Text,
+            source: ?limbo.Text,
+            scope: ?limbo.Text,
+            path: ?limbo.Text,
+            status: ?limbo.Text,
+            installed_at: ?i64,
+            checked_at: ?i64,
+        };
+        var stmt = try self.global_db.prepare(struct { name: limbo.Text }, Row, "select name, version, source, scope, path, status, installed_at, checked_at from packages where name = :name");
+        defer stmt.finalize();
+        try stmt.bind(.{ .name = limbo.text(name) });
+        if (try stmt.step()) |row| {
+            return packages{
+                .name = try self.allocator.dupe(u8, row.name.data),
+                .version = if (row.version) |v| try self.allocator.dupe(u8, v.data) else null,
+                .source = if (row.source) |s| try self.allocator.dupe(u8, s.data) else null,
+                .scope = if (row.scope) |sc| try self.allocator.dupe(u8, sc.data) else null,
+                .path = if (row.path) |p| try self.allocator.dupe(u8, p.data) else null,
+                .status = if (row.status) |st| try self.allocator.dupe(u8, st.data) else null,
+                .installed_at = row.installed_at,
+                .checked_at = row.checked_at,
+            };
+        }
+        return null;
+    }
+
+    pub fn listPackages(self: *Store) ![]packages {
+        const Row = struct {
+            name: limbo.Text,
+            version: ?limbo.Text,
+            source: ?limbo.Text,
+            scope: ?limbo.Text,
+            path: ?limbo.Text,
+            status: ?limbo.Text,
+            installed_at: ?i64,
+            checked_at: ?i64,
+        };
+        var stmt = try self.global_db.prepare(struct {}, Row, "select name, version, source, scope, path, status, installed_at, checked_at from packages order by name asc");
+        defer stmt.finalize();
+        try stmt.bind(.{});
+        var list: std.ArrayList(packages) = .empty;
+        errdefer {
+            for (list.items) |pkg| self.freePackage(pkg);
+            list.deinit(self.allocator);
+        }
+        while (try stmt.step()) |row| {
+            try list.append(self.allocator, packages{
+                .name = try self.allocator.dupe(u8, row.name.data),
+                .version = if (row.version) |v| try self.allocator.dupe(u8, v.data) else null,
+                .source = if (row.source) |s| try self.allocator.dupe(u8, s.data) else null,
+                .scope = if (row.scope) |sc| try self.allocator.dupe(u8, sc.data) else null,
+                .path = if (row.path) |p| try self.allocator.dupe(u8, p.data) else null,
+                .status = if (row.status) |st| try self.allocator.dupe(u8, st.data) else null,
+                .installed_at = row.installed_at,
+                .checked_at = row.checked_at,
+            });
+        }
+        return list.toOwnedSlice(self.allocator);
+    }
+
+    pub fn freePackage(self: *Store, pkg: packages) void {
+        self.allocator.free(pkg.name);
+        if (pkg.version) |v| self.allocator.free(v);
+        if (pkg.source) |s| self.allocator.free(s);
+        if (pkg.scope) |sc| self.allocator.free(sc);
+        if (pkg.path) |p| self.allocator.free(p);
+        if (pkg.status) |st| self.allocator.free(st);
     }
 };
-
-pub const EventInsert = struct {
-    session_id: []const u8,
-    parent_id: ?[]const u8 = null,
-    branch: ?[]const u8 = null,
-    type: []const u8,
-    source_kind: []const u8 = "core",
-    source_name: []const u8 = "zinc",
-    summary: ?[]const u8 = null,
-    payload_json: []const u8 = "{}",
-};
-
-pub const LogInsert = struct {
-    run_id: ?[]const u8 = null,
-    session_id: ?[]const u8 = null,
-    event_id: ?[]const u8 = null,
-    level: []const u8 = "info",
-    component: []const u8,
-    message: []const u8,
-    fields_json: ?[]const u8 = null,
-};
-
-fn jsonString(allocator: Allocator, value: []const u8) ![]u8 {
-    var out: std.ArrayList(u8) = .empty;
-    errdefer out.deinit(allocator);
-    var aw: std.Io.Writer.Allocating = .fromArrayList(allocator, &out);
-    try std.json.Stringify.value(value, .{}, &aw.writer);
-    out = aw.toArrayList();
-    return out.toOwnedSlice(allocator);
-}
-
-fn parseJsonString(allocator: Allocator, text: []const u8) ![]u8 {
-    var parsed = try std.json.parseFromSlice(std.json.Value, allocator, text, .{});
-    defer parsed.deinit();
-    if (parsed.value != .string) return error.InvalidRuntimeStoreValue;
-    return allocator.dupe(u8, parsed.value.string);
-}

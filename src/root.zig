@@ -1,15 +1,12 @@
-pub const platform = @import("platform.zig");
-pub const graph = @import("graph/mod.zig");
-pub const model = @import("model/mod.zig");
-pub const provider = @import("provider/mod.zig");
-pub const tools = @import("tools/mod.zig");
-pub const tool_schema = @import("tools/schema.zig");
-pub const packages = @import("pkg/mod.zig");
-pub const config = @import("config/mod.zig");
-pub const runtime = @import("runtime/mod.zig");
-pub const fs = @import("io/fs.zig");
-pub const layout = @import("io/layout.zig");
-pub const process = @import("io/process.zig");
-pub const uri = @import("io/uri.zig");
-pub const cmd = @import("cmd/mod.zig");
-pub const app = @import("app.zig");
+const std = @import("std");
+
+test {
+    _ = @import("platform/mod.zig");
+    _ = @import("io/fs.zig");
+    _ = @import("io/process.zig");
+    _ = @import("io/layout.zig");
+    _ = @import("policy/mod.zig");
+    _ = @import("pkg/mod.zig");
+    _ = @import("runtime/mod.zig");
+    _ = @import("app.zig");
+}

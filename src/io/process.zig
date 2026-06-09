@@ -1,9 +1,12 @@
 const std = @import("std");
 const files = @import("fs.zig");
-const platform = @import("../platform.zig");
+const platform = @import("../platform/mod.zig");
 const shell = @import("../platform/shell.zig");
 
 const Allocator = std.mem.Allocator;
+
+pub const run = @import("../platform/process.zig").run;
+pub const Result = @import("../platform/process.zig").Result;
 
 pub const ProcessResult = struct {
     stdout: []u8,
@@ -29,7 +32,7 @@ const Tail = struct {
     }
 };
 
-pub fn runShell(allocator: Allocator, io: std.Io, command: []const u8, cwd: ?[]const u8, max_output_bytes: usize, max_capture_bytes: usize) !ProcessResult {
+pub fn runShell(allocator: Allocator, io: std.Io, command: []const u8, cwd: ?[]const u8, max_output_bytes: usize, max_capture_bytes: usize, run_id: []const u8) !ProcessResult {
     const child_cwd: std.process.Child.Cwd = if (cwd) |path| .{ .path = path } else .inherit;
     const shell_name = shell.defaultName(platform.currentOS());
     const argv = try shell.argv(allocator, shell_name, command);
@@ -44,23 +47,28 @@ pub fn runShell(allocator: Allocator, io: std.Io, command: []const u8, cwd: ?[]c
     const total_bytes = result.stdout.len + result.stderr.len;
     var output_path: ?[]u8 = null;
     errdefer if (output_path) |path| allocator.free(path);
-    if (total_bytes > max_output_bytes) output_path = try writeTempOutput(allocator, result.stdout, result.stderr);
+    if (total_bytes > max_output_bytes) {
+        output_path = try writeTempOutput(allocator, run_id, result.stdout, result.stderr);
+    }
     return .{ .stdout = result.stdout, .stderr = result.stderr, .code = code, .output_path = output_path, .truncated = output_path != null };
 }
 
-pub fn shellSummary(allocator: Allocator, command: []const u8, result: ProcessResult, max_output_bytes: usize, max_output_lines: usize) ![]u8 {
+pub fn shellSummary(allocator: Allocator, command: []const u8, result: ProcessResult, max_output_bytes: usize, max_output_lines: usize, run_id: []const u8) ![]u8 {
     _ = command;
     const stdout_tail = try tailText(allocator, result.stdout, max_output_bytes, max_output_lines);
     defer stdout_tail.deinit(allocator);
     const stderr_tail = try tailText(allocator, result.stderr, max_output_bytes, max_output_lines);
     defer stderr_tail.deinit(allocator);
     var out: std.ArrayList(u8) = .empty;
-    errdefer out.deinit(allocator);
-    try out.print(allocator, "exit={d}\nstdout:\n{s}\nstderr:\n{s}", .{ result.code, stdout_tail.text, stderr_tail.text });
-    if (result.output_path) |path| {
-        try out.print(allocator, "\n\n[streams truncated: stdout {d} bytes, stderr {d} bytes. Full capture: {s}]", .{ result.stdout.len, result.stderr.len, path });
+    defer out.deinit(allocator);
+    try out.print(allocator, "exit: {d}\nstdout: {d} bytes captured\n\npreview:\n{s}\n", .{ result.code, result.stdout.len, stdout_tail.text });
+    if (stderr_tail.text.len > 0) {
+        try out.print(allocator, "\nstderr:\n{s}\n", .{stderr_tail.text});
+    }
+    if (result.output_path) |_| {
+        try out.print(allocator, "\n[truncated]\n\nfull:\n  zinc://run/{s}/stdout\n", .{run_id});
     } else if (stdout_tail.truncated or stderr_tail.truncated) {
-        try out.print(allocator, "\n\n[streams truncated: stdout {d} bytes, stderr {d} bytes]", .{ result.stdout.len, result.stderr.len });
+        try out.print(allocator, "\n[truncated]\n\nfull:\n  zinc://run/{s}/stdout\n", .{run_id});
     }
     return out.toOwnedSlice(allocator);
 }
@@ -69,21 +77,14 @@ pub fn shellMetadata(allocator: Allocator, command: []const u8, result: ProcessR
     var metadata: std.ArrayList(u8) = .empty;
     errdefer metadata.deinit(allocator);
     try metadata.appendSlice(allocator, "{\"command\":");
-    try files.appendJsonString(allocator, &metadata, command);
+    try appendJsonEscaped(allocator, &metadata, command);
     try metadata.print(allocator, ",\"exit\":{d},\"stdout_bytes\":{d},\"stderr_bytes\":{d},\"truncated\":", .{ result.code, result.stdout.len, result.stderr.len });
     try metadata.appendSlice(allocator, if (result.truncated) "true" else "false");
     if (result.output_path) |path| {
         try metadata.appendSlice(allocator, ",\"output_path\":");
-        try files.appendJsonString(allocator, &metadata, path);
+        try appendJsonEscaped(allocator, &metadata, path);
     }
-    if (!result.truncated) {
-        try metadata.appendSlice(allocator, ",\"stdout\":");
-        try files.appendJsonString(allocator, &metadata, result.stdout);
-        try metadata.appendSlice(allocator, ",\"stderr\":");
-        try files.appendJsonString(allocator, &metadata, result.stderr);
-    }
-    try metadata.appendSlice(allocator, ",\"is_error\":");
-    try metadata.appendSlice(allocator, if (result.code == 0) "false}" else "true}");
+    try metadata.appendSlice(allocator, "}");
     return metadata.toOwnedSlice(allocator);
 }
 
@@ -111,28 +112,25 @@ fn tailStart(text: []const u8, max_bytes: usize, max_lines: usize) usize {
     return start;
 }
 
-fn writeTempOutput(allocator: Allocator, stdout: []const u8, stderr: []const u8) ![]u8 {
-    const path = try tempPath(allocator);
-    errdefer allocator.free(path);
-    var out: std.ArrayList(u8) = .empty;
-    defer out.deinit(allocator);
-    try out.appendSlice(allocator, "stdout:\n");
-    try out.appendSlice(allocator, stdout);
-    try out.appendSlice(allocator, "\nstderr:\n");
-    try out.appendSlice(allocator, stderr);
-    try files.write(path, out.items);
-    return path;
+fn writeTempOutput(allocator: Allocator, run_id: []const u8, stdout: []const u8, stderr: []const u8) ![]u8 {
+    // Workspace path
+    const dir = try std.fmt.allocPrint(allocator, ".zinc/tmp/runs/{s}", .{run_id});
+    defer allocator.free(dir);
+    try files.mkdirP(dir);
+    
+    const out_path = try std.fmt.allocPrint(allocator, ".zinc/tmp/runs/{s}/stdout", .{run_id});
+    errdefer allocator.free(out_path);
+    try files.write(out_path, stdout);
+
+    const err_path = try std.fmt.allocPrint(allocator, ".zinc/tmp/runs/{s}/stderr", .{run_id});
+    defer allocator.free(err_path);
+    try files.write(err_path, stderr);
+
+    return out_path;
 }
 
-fn tempPath(allocator: Allocator) ![]u8 {
-    try files.mkdirP(".zinc/tmp");
-    var bytes: [8]u8 = undefined;
-    randomBytes(&bytes);
-    return std.fmt.allocPrint(allocator, ".zinc/tmp/{x:0>2}{x:0>2}{x:0>2}{x:0>2}{x:0>2}{x:0>2}{x:0>2}{x:0>2}.log", .{ bytes[0], bytes[1], bytes[2], bytes[3], bytes[4], bytes[5], bytes[6], bytes[7] });
-}
-
-fn randomBytes(bytes: []u8) void {
-    const ts = std.Io.Clock.real.now(std.Options.debug_io);
-    var prng = std.Random.DefaultPrng.init(@as(u64, @truncate(@as(u96, @bitCast(ts.nanoseconds)))));
-    prng.random().bytes(bytes);
+fn appendJsonEscaped(allocator: Allocator, out: *std.ArrayList(u8), value: []const u8) !void {
+    var aw: std.Io.Writer.Allocating = std.Io.Writer.Allocating.fromArrayList(allocator, out);
+    defer out.* = aw.toArrayList();
+    try std.json.Stringify.value(value, .{}, &aw.writer);
 }

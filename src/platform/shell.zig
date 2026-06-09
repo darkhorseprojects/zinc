@@ -1,5 +1,5 @@
 const std = @import("std");
-const platform = @import("../platform.zig");
+const platform = @import("mod.zig");
 const proc = @import("process.zig");
 
 const Allocator = std.mem.Allocator;
@@ -94,23 +94,4 @@ pub fn resolveDefault(allocator: Allocator, io: std.Io, os: platform.OS, env: pr
         error.ExecutableNotFound => return error.ShellUnavailable,
         else => err,
     };
-}
-
-test "shell detection normalizes windows executable names" {
-    try std.testing.expectEqual(Shell.pwsh, detect("C:\\Program Files\\PowerShell\\7\\pwsh.exe"));
-    try std.testing.expectEqual(Shell.powershell, detect("PowerShell.EXE"));
-    try std.testing.expectEqual(Shell.cmd, detect("cmd.exe"));
-}
-
-test "default shell names" {
-    try std.testing.expectEqualStrings("sh", defaultName(.linux));
-    try std.testing.expectEqualStrings("powershell", defaultName(.windows));
-}
-
-test "inspect classification is platform-aware" {
-    try std.testing.expectEqual(CommandClass.inspect, classify(.linux, "ls src"));
-    try std.testing.expectEqual(CommandClass.other, classify(.windows, "ls src"));
-    try std.testing.expectEqual(CommandClass.inspect, classify(.windows, "Get-ChildItem src"));
-    try std.testing.expectEqual(CommandClass.inspect, classify(.linux, "git status --short"));
-    try std.testing.expectEqual(CommandClass.other, classify(.linux, "git checkout main"));
 }

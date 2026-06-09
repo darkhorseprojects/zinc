@@ -1,119 +1,118 @@
 const std = @import("std");
-const packages = @import("../pkg/mod.zig");
-const resource = @import("../graph/resource.zig");
+const Store = @import("../runtime/store.zig").Store;
+const pkg_install = @import("../pkg/install.zig");
+const manifest = @import("../pkg/manifest.zig");
 const files = @import("../io/fs.zig");
-const cmd = @import("mod.zig");
+const proc = @import("../io/process.zig");
+const platform = @import("../platform/mod.zig");
 
 const Allocator = std.mem.Allocator;
 
-pub fn packageList(allocator: Allocator, io: std.Io, layout_ctx: @import("../io/layout.zig").Context) !void {
-    const text = try packages.listPackages(allocator, io, layout_ctx);
-    defer allocator.free(text);
-    if (text.len == 0) std.debug.print("no packages found\n", .{}) else std.debug.print("{s}", .{text});
-}
+pub fn runPkg(allocator: Allocator, io: std.Io, store: *Store, args: []const []const u8) !void {
+    if (args.len == 0) return usage();
+    const cmd = args[0];
 
-pub fn packageAdd(allocator: Allocator, io: std.Io, layout_ctx: @import("../io/layout.zig").Context, args: []const []const u8) !void {
-    const parsed = try parsePackageArgs(args, true);
-    const source = parsed.value orelse return error.MissingPackageSource;
-    const options = packages.InstallOptions{ .scope = parsed.scope orelse .local, .replace = parsed.replace, .model = parsed.model };
-    const plan = packages.previewAdd(allocator, io, layout_ctx, source, options) catch |err| switch (err) {
-        error.InvalidPackageManifest => return cmd.fail("invalid package manifest", .{}),
-        error.PackageInstallTargetRequired => return cmd.fail("package install target required; pass --model <id>", .{}),
-        error.PackageInstallTargetNotFound => return cmd.fail("package install target not found", .{}),
-        else => return err,
-    };
-    defer plan.deinit(allocator, io);
-    std.debug.print("Install Zinc package\n\n{s}\n", .{plan.text});
-    if (!parsed.yes) try cmd.confirmOrFail("Install?");
-    var package = packages.installPreviewed(allocator, io, layout_ctx, plan, source, options) catch |err| switch (err) {
-        error.PackageInstallTargetRequired => return cmd.fail("package install target required; pass --model <id>", .{}),
-        error.PackageInstallTargetNotFound => return cmd.fail("package install target not found", .{}),
-        else => return err,
-    };
-    defer package.deinit(allocator);
-    std.debug.print("added {s}: {s}\n", .{ cmd.scopeName(package.scope), package.path });
-}
+    if (std.mem.eql(u8, cmd, "install")) {
+        if (args.len < 2) {
+            try files.writeAllErr("Error: Missing package path or name.\n");
+            return;
+        }
+        var path: []const u8 = args[1];
+        var is_global = false;
 
-pub fn packageRemove(allocator: Allocator, io: std.Io, layout_ctx: @import("../io/layout.zig").Context, args: []const []const u8) !void {
-    const parsed = try parsePackageArgs(args, false);
-    const name = parsed.value orelse return error.MissingPackageName;
-    const text = try packages.show(allocator, io, layout_ctx, name, parsed.scope);
-    defer allocator.free(text);
-    std.debug.print("Remove Zinc package\n\n{s}\n", .{text});
-    if (!parsed.yes) try cmd.confirmOrFail("Remove?");
-    var package = packages.remove(allocator, io, layout_ctx, name, parsed.scope, parsed.model) catch |err| switch (err) {
-        error.PackageInstallTargetRequired => return cmd.fail("package install target required; pass --model <id>", .{}),
-        error.PackageInstallTargetNotFound => return cmd.fail("package install target not found", .{}),
-        else => return err,
-    };
-    defer package.deinit(allocator);
-    std.debug.print("removed {s}: {s}\n", .{ cmd.scopeName(package.scope), package.name });
-}
+        // Check for flags
+        for (args[1..]) |arg| {
+            if (std.mem.eql(u8, arg, "--global")) {
+                is_global = true;
+            } else if (std.mem.eql(u8, arg, "--local")) {
+                is_global = false;
+            } else {
+                path = arg;
+            }
+        }
 
-pub fn packageUpdate(allocator: Allocator, io: std.Io, layout_ctx: @import("../io/layout.zig").Context, args: []const []const u8) !void {
-    const parsed = try parsePackageArgs(args, false);
-    const name = parsed.value orelse return error.MissingPackageName;
-    if (std.mem.eql(u8, name, "--all")) {
-        const text = try packages.listPackages(allocator, io, layout_ctx);
-        defer allocator.free(text);
-        std.debug.print("Update all Zinc packages\n\n{s}\n", .{if (text.len == 0) "no packages found\n" else text});
-        if (!parsed.yes) try cmd.confirmOrFail("Update all?");
-        const updated = try packages.updateAll(allocator, io, layout_ctx);
-        defer allocator.free(updated);
-        std.debug.print("{s}", .{updated});
-        return;
+        try pkg_install.install(allocator, io, store, path, is_global);
+    } else if (std.mem.eql(u8, cmd, "remove")) {
+        if (args.len < 2) {
+            try files.writeAllErr("Error: Missing package name.\n");
+            return;
+        }
+        const name = args[1];
+        try pkg_install.remove(allocator, io, store, name);
+    } else if (std.mem.eql(u8, cmd, "list")) {
+        const pkgs = try store.listPackages();
+        defer {
+            for (pkgs) |p| store.freePackage(p);
+            allocator.free(pkgs);
+        }
+
+        try files.writeAllOut("Installed Packages:\n");
+        for (pkgs) |p| {
+            try files.writeAllOut("  - ");
+            try files.writeAllOut(p.name);
+            try files.writeAllOut(" (");
+            try files.writeAllOut(p.version orelse "0.0.0");
+            try files.writeAllOut(") [");
+            try files.writeAllOut(p.scope orelse "local");
+            try files.writeAllOut("] -> ");
+            try files.writeAllOut(p.path orelse "");
+            try files.writeAllOut("\n");
+        }
+    } else if (std.mem.eql(u8, cmd, "check")) {
+        if (args.len < 2) {
+            try files.writeAllErr("Error: Missing package name.\n");
+            return;
+        }
+        const name = args[1];
+        const pkg = (try store.getPackage(name)) orelse {
+            try files.writeAllErr("Package not found.\n");
+            return;
+        };
+        defer store.freePackage(pkg);
+
+        // Load manifest
+        const manifest_path = try std.fs.path.join(allocator, &.{ pkg.path.?, "zinc.pkg.yaml" });
+        defer allocator.free(manifest_path);
+
+        const manifest_bytes = try files.readLimited(allocator, manifest_path, 10 * 1024 * 1024);
+        defer allocator.free(manifest_bytes);
+
+        var parsed = try manifest.parse(allocator, manifest_bytes);
+        defer parsed.deinit();
+
+        const os = platform.currentOS();
+        const os_name = @tagName(os);
+        if (parsed.getScript("check", os_name)) |script_rel| {
+            const check_script_path = try std.fs.path.join(allocator, &.{ pkg.path.?, script_rel });
+            defer allocator.free(check_script_path);
+
+            if (files.existsPath(check_script_path)) {
+                try files.writeAllOut("Running package check script...\n");
+                const run_res = try proc.run(allocator, io, &.{check_script_path}, pkg.path.?, 10 * 1024 * 1024);
+                defer run_res.deinit(allocator);
+
+                if (run_res.stdout.len > 0) try files.writeAllOut(run_res.stdout);
+                if (run_res.stderr.len > 0) try files.writeAllErr(run_res.stderr);
+
+                if (run_res.code == 0) {
+                    try files.writeAllOut("Package check passed.\n");
+                    var updated_pkg = pkg;
+                    updated_pkg.checked_at = std.Io.Clock.now(.real, io).toSeconds();
+                    try store.insertPackage(updated_pkg);
+                } else {
+                    try files.writeAllErr("Package check failed.\n");
+                }
+            } else {
+                try files.writeAllOut("No check script found.\n");
+            }
+        } else {
+            try files.writeAllOut("No check script defined for this platform.\n");
+        }
+    } else {
+        return usage();
     }
-    const plan = try packages.previewUpdate(allocator, io, layout_ctx, name, parsed.scope);
-    defer plan.deinit(allocator, io);
-    std.debug.print("Update Zinc package\n\n{s}\n", .{plan.text});
-    if (!parsed.yes) try cmd.confirmOrFail("Update?");
-    var package = try packages.update(allocator, io, layout_ctx, name, parsed.scope);
-    defer package.deinit(allocator);
-    std.debug.print("updated {s}: {s}\n", .{ cmd.scopeName(package.scope), package.path });
 }
 
-pub fn packageShow(allocator: Allocator, io: std.Io, layout_ctx: @import("../io/layout.zig").Context, args: []const []const u8) !void {
-    const parsed = try parsePackageArgs(args, false);
-    const name = parsed.value orelse return error.MissingPackageName;
-    const text = try packages.show(allocator, io, layout_ctx, name, parsed.scope);
-    defer allocator.free(text);
-    std.debug.print("{s}", .{text});
-}
-
-pub fn packageExec(allocator: Allocator, io: std.Io, layout_ctx: @import("../io/layout.zig").Context, args: []const []const u8) !void {
-    if (args.len < 2) return error.MissingPackageScript;
-    const out = try packages.execScript(allocator, io, layout_ctx, args[0], args[1]);
-    defer allocator.free(out);
-    std.debug.print("{s}", .{out});
-}
-
-pub fn packageCall(allocator: Allocator, io: std.Io, layout_ctx: @import("../io/layout.zig").Context, args: []const []const u8) !void {
-    if (args.len != 2) return error.InvalidToolArguments;
-    const result = try resource.callPackageTool(allocator, io, layout_ctx, args[0], args[1]);
-    defer result.deinit(allocator);
-    try files.writeAllOut(result.content);
-    try files.writeAllOut("\n");
-    if (result.is_error) return error.UserError;
-}
-
-const PackageArgs = struct { scope: ?packages.Scope = null, replace: bool = false, yes: bool = false, model: ?[]const u8 = null, value: ?[]const u8 = null };
-
-fn parsePackageArgs(args: []const []const u8, allow_replace: bool) !PackageArgs {
-    var parsed = PackageArgs{};
-    var i: usize = 0;
-    while (i < args.len) : (i += 1) {
-        const arg = args[i];
-        if (std.mem.eql(u8, arg, "--local")) {
-            if (parsed.scope != null) return error.ConflictingScopeFlags;
-            parsed.scope = .local;
-        } else if (std.mem.eql(u8, arg, "--global")) {
-            if (parsed.scope != null) return error.ConflictingScopeFlags;
-            parsed.scope = .global;
-        } else if (std.mem.eql(u8, arg, "--model")) {
-            i += 1;
-            if (i >= args.len) return error.MissingModelId;
-            parsed.model = args[i];
-        } else if (std.mem.eql(u8, arg, "--replace") and allow_replace) parsed.replace = true else if (std.mem.eql(u8, arg, "--yes")) parsed.yes = true else if (parsed.value == null) parsed.value = arg else return error.TooManyArguments;
-    }
-    return parsed;
+fn usage() !void {
+    try files.writeAllErr("Usage: zn pkg <install|remove|list|check> [args]\n");
 }

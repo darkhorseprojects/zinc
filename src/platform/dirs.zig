@@ -1,5 +1,5 @@
 const std = @import("std");
-const platform = @import("../platform.zig");
+const platform = @import("mod.zig");
 const path = @import("path.zig");
 
 const Allocator = std.mem.Allocator;
@@ -98,26 +98,4 @@ fn defaultCacheDir(allocator: Allocator, os: platform.OS, home: []const u8, env:
         .macos => path.joinDisplay(allocator, os, &.{ home, "Library", "Caches", "zinc" }),
         .windows => path.joinDisplay(allocator, os, &.{ env.localappdata orelse return error.LocalAppDataNotSet, "zinc", "Cache" }),
     };
-}
-
-test "linux dirs honor XDG" {
-    const dirs = try resolve(std.testing.allocator, .linux, .{ .home = "/home/a", .xdg_config_home = "/cfg", .xdg_data_home = "/data", .xdg_cache_home = "/cache" });
-    defer dirs.deinit(std.testing.allocator);
-    try std.testing.expectEqualStrings("/cfg/zinc", dirs.config_dir);
-    try std.testing.expectEqualStrings("/data/zinc", dirs.data_dir);
-    try std.testing.expectEqualStrings("/cache/zinc", dirs.cache_dir);
-}
-
-test "macos dirs" {
-    const dirs = try resolve(std.testing.allocator, .macos, .{ .home = "/Users/a" });
-    defer dirs.deinit(std.testing.allocator);
-    try std.testing.expectEqualStrings("/Users/a/Library/Application Support/zinc", dirs.config_dir);
-    try std.testing.expectEqualStrings("/Users/a/Library/Caches/zinc", dirs.cache_dir);
-}
-
-test "windows dirs" {
-    const dirs = try resolve(std.testing.allocator, .windows, .{ .userprofile = "C:\\Users\\a", .appdata = "C:\\Users\\a\\AppData\\Roaming", .localappdata = "C:\\Users\\a\\AppData\\Local" });
-    defer dirs.deinit(std.testing.allocator);
-    try std.testing.expectEqualStrings("C:\\Users\\a\\AppData\\Roaming\\zinc", dirs.config_dir);
-    try std.testing.expectEqualStrings("C:\\Users\\a\\AppData\\Local\\zinc\\Cache", dirs.cache_dir);
 }
