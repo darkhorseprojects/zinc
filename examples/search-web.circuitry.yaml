@@ -1,0 +1,16 @@
+circuitry: "0.6"
+name: search-web
+about: Search the web, read sources, and return a cited answer.
+
+takes:
+  query: text
+
+does: |
+  Search for the query.
+  Open relevant sources.
+  Compare results.
+  Return a grounded answer.
+
+gives:
+  answer: text
+  sources: list

@@ -1,155 +1,90 @@
 # Zinc
 
-[![release](https://img.shields.io/github/v/release/darkhorseprojects/zinc?color=64748b&style=flat-square)](https://github.com/darkhorseprojects/zinc/releases)
-[![build](https://img.shields.io/github/actions/workflow/status/darkhorseprojects/zinc/release.yml?label=build&style=flat-square)](https://github.com/darkhorseprojects/zinc/actions)
-[![license](https://img.shields.io/github/license/darkhorseprojects/zinc?color=333333&style=flat-square)](https://github.com/darkhorseprojects/zinc/blob/main/LICENSE)
+Zinc is a local runtime for Circuitry 0.6 action-shapes.
 
-Zinc is a small runtime for Circuitry graphs over OpenAI-compatible chat completion endpoints.
+Zinc loads portable Circuitry action-shapes, prepares their inputs, executes them in a governed environment interception loop, records run traces in Limbo, and settles outputs.
 
-Circuitry describes graph topology. Zinc supplies runtime effects: model endpoint calls, tools, packages, sessions, runtime URIs, config, permissions, and local project layout.
+## Circuitry 0.6 Format
 
-```bash
-zn "inspect this repo"
-```
+Circuitry 0.6 is a tiny YAML shape for reusable actions. Core fields:
 
-## Install
+- `circuitry`
+- `name`
+- `about`
+- `takes`
+- `does`
+- `gives`
 
-Linux and macOS:
-
-```bash
-curl -fsSL https://raw.githubusercontent.com/darkhorseprojects/zinc/main/scripts/install-unix.sh | sh
-```
-
-Windows PowerShell:
-
-```powershell
-iwr https://raw.githubusercontent.com/darkhorseprojects/zinc/main/scripts/install-windows.ps1 -OutFile install-zinc.ps1
-.\install-zinc.ps1
-```
-
-Manual install:
-
-1. Download the asset for your platform from <https://github.com/darkhorseprojects/zinc/releases/latest>.
-2. Extract it.
-3. Put `zn` or `zn.exe` on `PATH`.
-4. Copy `stock/graphs` and `stock/prompts` into the platform data directory.
-5. Copy `stock/config.yaml` into the platform config path if no config exists yet.
-6. Add a model endpoint to your config.
-7. Run `zn doctor`.
-
-## Configure a model
-
-Zinc is endpoint-only. It does not bundle a model, download model files, build inference engines, or start a default server.
-
-Add an OpenAI-compatible endpoint to Zinc config:
+Example (`examples/search-web.circuitry.yaml`):
 
 ```yaml
-default_model: local
+circuitry: "0.6"
+name: search-web
+about: Search the web, read sources, and return a cited answer.
 
-models:
-  local:
-    model: model-name-served-by-your-endpoint
-    base_url: http://127.0.0.1:30000/v1
-    api_key_env:
-    context_window: 8192
-    chars_per_token: 4
-    temperature: 0.7
-    reasoning:
-      enabled: false
-      effort: low
+takes:
+  query: text
+
+does: |
+  Search for the query.
+  Open relevant sources.
+  Compare results.
+  Return a grounded answer.
+
+gives:
+  answer: text
+  sources: list
 ```
-
-Config paths:
-
-| Platform | Config |
-| --- | --- |
-| Linux | `$XDG_CONFIG_HOME/zinc/config.yaml` or `~/.config/zinc/config.yaml` |
-| macOS | `~/Library/Application Support/zinc/config.yaml` |
-| Windows | `%APPDATA%\zinc\config.yaml` |
 
 ## CLI
 
+The Zinc CLI (`zn`) provides a simplified subcommand surface:
+
 ```bash
-zn [--default] [--model id] [--fresh|--recovery reach] "prompt"
-zn run [--default] [--model id] [--fresh|--recovery reach] [graph|--graph id|path] [--export name] [--input name=value] [--text name=value|@file] [--file name=path] [--image name=path] [--session id|--continue] "prompt"
-zn check [graph]
-zn compact [--dry-run] [--session id|--continue] [graph]
-zn graph list
-zn graph show <graph>
-zn config get <path>
-zn db path|tables|schema|query <sql>
-zn session list
-zn session tree
-zn session branch --at <event-id> --name <name>
-zn session checkout <branch>
-zn event tail
-zn logs tail
-zn clean [--local|--global] [--yes] [runtime | packages | generated | config | all]
-zn pkg list
-zn pkg add [--local|--global] [--replace] [--yes] [--model id] <source>
-zn pkg remove [--local|--global] [--yes] [--model id] <name>
-zn pkg update [--local|--global] [--yes] <name|--all>
-zn pkg show [--local|--global] <name>
-zn pkg exec <package> <script>
-zn pkg call <tool> <json-arguments>
-zn doctor
+# Run a Circuitry shape
+zn run <shape-path> [args]
+
+# Read a file or zinc:// reference
+zn read <uri-or-file>
+
+# Inspect a shape, package, run, or reference
+zn inspect <uri-or-file>
+
+# Manage packages (install, remove, list, check)
+zn pkg <subcommand> [args]
+
+# View active configuration
+zn config
 ```
 
-## Local project layout
+## Local Layout
 
-A project may have a local `.zinc/` workspace:
+A workspace uses a local `.zinc` directory for state:
 
 ```text
-.zinc/graphs/                         project graphs
-.zinc/generated/                      Zinc-written wiring
-.zinc/packages/<name>/                installed package code and assets
-.zinc/config/packages/<name>.yaml     user/project package config
-.zinc/runtime/packages/<name>/        package working runtime
-.zinc/runtime/zinc.db                 sessions, events, logs, branches
-.zinc/tmp/                            short-lived temporary captures
+.zinc/
+  packages/     Installed package directories
+  state/
+    zinc.db     Limbo database containing runs, documents, packages, and policy approvals
+  tmp/          Short-lived temporary execution files
 ```
 
-The important split is simple: package code goes in `packages`, user choices go in `config`, package working files go in `runtime`, and generated wiring goes in `generated`.
+## Configuration
 
-## Runtime
+Zinc configuration uses `config.yaml` located in the workspace `.zinc/` or global path (`~/.zinc/config.yaml`).
 
-Zinc's canonical runtime is SQLite. A local project writes `.zinc/runtime/zinc.db`; outside a project Zinc writes `~/.local/share/zinc/runtime/zinc.db`. There is no legacy line-store, export/import stack, or separate output registry. Filesystem paths are normal references; large transient command captures go under `.zinc/tmp`.
+```yaml
+mode: build     # Command interception mode: inspect, open, build
+scope: project  # Access scope: project, home, system
+```
 
-Runtime URIs are read-only navigation surfaces. CLI commands and tools mutate runtime state. Recovery and compaction graphs receive a stable runtime context contract from core: scope, cwd, session id, branch, current message, reach/budget, read-only runtime URIs, session head, retained tail, existing compaction, and messages selected for compaction. Graphs decide how to interpret those facts.
+## Building
 
-## Packages
-
-Install a package from a GitHub subdirectory:
+Zinc is written in Zig 0.16.0. Build from source:
 
 ```bash
-zn pkg add --local github:owner/repo/packages/example#v1.0.0
+zig build
 ```
-
-A package can provide prompts, files, graphs, scripts, and external tools. Local package installs patch `.zinc/graphs/zinc-loop.circuitry.yaml` and write generated package resources to `.zinc/generated/packages.circuitry.yaml`.
-
-Official optional packages live in [`darkhorseprojects/zinc-packages`](https://github.com/darkhorseprojects/zinc-packages). They are not installed by default.
-
-Package tools use external handlers: `process`, `http`, or `mcp`. Graph execution stays built into Zinc through `run_graph`.
-
-## Wiki
-
-The project wiki is the canonical long-form reference:
-
-- [Home](https://github.com/darkhorseprojects/zinc/wiki)
-- [Architecture](https://github.com/darkhorseprojects/zinc/wiki/Architecture)
-- [Project Layout](https://github.com/darkhorseprojects/zinc/wiki/Project-Layout)
-- [Configuration](https://github.com/darkhorseprojects/zinc/wiki/Configuration)
-- [Graphs](https://github.com/darkhorseprojects/zinc/wiki/Graphs)
-- [Runtime](https://github.com/darkhorseprojects/zinc/wiki/Runtime)
-- [Tools](https://github.com/darkhorseprojects/zinc/wiki/Tools)
-- [Packages](https://github.com/darkhorseprojects/zinc/wiki/Packages)
-- [Sessions](https://github.com/darkhorseprojects/zinc/wiki/Sessions)
-
-## Safety
-
-Zinc is a local runtime. When the active graph declares tools, Zinc can read files, write files, edit files, run shell commands, call package handlers, and run graphs through `run_graph`.
-
-Only run graphs and packages you trust.
 
 ## License
 

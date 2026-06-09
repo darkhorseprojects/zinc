@@ -1,4 +1,0 @@
-#!/usr/bin/env sh
-set -eu
-input=$(cat)
-printf '{"ok":true,"content":"hello process tool","input":%s}\n' "$input"
