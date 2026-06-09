@@ -81,19 +81,9 @@ pub fn resolveRead(allocator: Allocator, store: *Store, raw_uri: []const u8) ![]
 
     switch (parsed.type) {
         .run_stdout => {
-            // Check workspace runs first
-            if (try layout.workspacePath(allocator, "")) |ws| {
-                defer allocator.free(ws);
-                const ws_path = try std.fmt.allocPrint(allocator, ".zinc/tmp/runs/{s}/stdout", .{parsed.id});
-                defer allocator.free(ws_path);
-                if (files.existsPath(ws_path)) {
-                    return try files.readLimited(allocator, ws_path, 64 * 1024 * 1024);
-                }
-            }
-            // Check global runs
-            const g_path = try layout.globalPath(allocator, "");
-            defer allocator.free(g_path);
-            const global_path = try std.fmt.allocPrint(allocator, "{s}/tmp/runs/{s}/stdout", .{ g_path, parsed.id });
+            const out_sub = try std.fmt.allocPrint(allocator, "runs/{s}/stdout", .{parsed.id});
+            defer allocator.free(out_sub);
+            const global_path = try layout.tempRunPath(allocator, out_sub);
             defer allocator.free(global_path);
             if (files.existsPath(global_path)) {
                 return try files.readLimited(allocator, global_path, 64 * 1024 * 1024);
@@ -101,17 +91,9 @@ pub fn resolveRead(allocator: Allocator, store: *Store, raw_uri: []const u8) ![]
             return error.RunOutputNotFound;
         },
         .run_stderr => {
-            if (try layout.workspacePath(allocator, "")) |ws| {
-                defer allocator.free(ws);
-                const ws_path = try std.fmt.allocPrint(allocator, ".zinc/tmp/runs/{s}/stderr", .{parsed.id});
-                defer allocator.free(ws_path);
-                if (files.existsPath(ws_path)) {
-                    return try files.readLimited(allocator, ws_path, 64 * 1024 * 1024);
-                }
-            }
-            const g_path = try layout.globalPath(allocator, "");
-            defer allocator.free(g_path);
-            const global_path = try std.fmt.allocPrint(allocator, "{s}/tmp/runs/{s}/stderr", .{ g_path, parsed.id });
+            const err_sub = try std.fmt.allocPrint(allocator, "runs/{s}/stderr", .{parsed.id});
+            defer allocator.free(err_sub);
+            const global_path = try layout.tempRunPath(allocator, err_sub);
             defer allocator.free(global_path);
             if (files.existsPath(global_path)) {
                 return try files.readLimited(allocator, global_path, 64 * 1024 * 1024);
@@ -120,17 +102,9 @@ pub fn resolveRead(allocator: Allocator, store: *Store, raw_uri: []const u8) ![]
         },
         .run_artifact => {
             const art_name = parsed.extra.?;
-            if (try layout.workspacePath(allocator, "")) |ws| {
-                defer allocator.free(ws);
-                const ws_path = try std.fmt.allocPrint(allocator, ".zinc/tmp/runs/{s}/artifacts/{s}", .{ parsed.id, art_name });
-                defer allocator.free(ws_path);
-                if (files.existsPath(ws_path)) {
-                    return try files.readLimited(allocator, ws_path, 64 * 1024 * 1024);
-                }
-            }
-            const g_path = try layout.globalPath(allocator, "");
-            defer allocator.free(g_path);
-            const global_path = try std.fmt.allocPrint(allocator, "{s}/tmp/runs/{s}/artifacts/{s}", .{ g_path, parsed.id, art_name });
+            const art_sub = try std.fmt.allocPrint(allocator, "runs/{s}/artifacts/{s}", .{ parsed.id, art_name });
+            defer allocator.free(art_sub);
+            const global_path = try layout.tempRunPath(allocator, art_sub);
             defer allocator.free(global_path);
             if (files.existsPath(global_path)) {
                 return try files.readLimited(allocator, global_path, 64 * 1024 * 1024);

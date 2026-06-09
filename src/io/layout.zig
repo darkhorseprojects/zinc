@@ -66,3 +66,14 @@ pub fn globalPath(allocator: Allocator, sub: []const u8) ![]u8 {
     defer allocator.free(home);
     return try std.fs.path.join(allocator, &.{ home, ".zinc", sub });
 }
+
+pub fn tempRunPath(allocator: Allocator, sub: []const u8) ![]u8 {
+    const env = process_env orelse return error.EnvironmentNotInitialized;
+    const os = platform.currentOS();
+    const temp = switch (os) {
+        .windows => env.get("TEMP") orelse env.get("TMP") orelse "C:\\Windows\\Temp",
+        .linux, .macos => env.get("TMPDIR") orelse env.get("TEMP") orelse env.get("TMP") orelse "/tmp",
+    };
+    return try std.fs.path.join(allocator, &.{ temp, "zinc", sub });
+}
+

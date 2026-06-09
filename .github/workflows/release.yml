@@ -10,46 +10,99 @@ permissions:
 
 jobs:
   build:
-    runs-on: ubuntu-latest
+    runs-on: ${{ matrix.os }}
     strategy:
       fail-fast: false
       matrix:
         include:
           - target: x86_64-linux-gnu
+            os: ubuntu-latest
             archive: zinc-linux-x86_64.tar.gz
             binary: zn
+            rust_target: x86_64-unknown-linux-gnu
           - target: x86_64-macos
+            os: macos-latest
             archive: zinc-macos-x86_64.tar.gz
             binary: zn
+            rust_target: x86_64-apple-darwin
           - target: aarch64-macos
+            os: macos-latest
             archive: zinc-macos-aarch64.tar.gz
             binary: zn
+            rust_target: aarch64-apple-darwin
           - target: x86_64-windows
+            os: windows-latest
             archive: zinc-windows-x86_64.zip
             binary: zn.exe
+            rust_target: x86_64-pc-windows-msvc
+    defaults:
+      run:
+        shell: bash
     steps:
-      - uses: actions/checkout@v4
+      - name: Checkout Zinc
+        uses: actions/checkout@v4
+        with:
+          path: zinc
+
+      - name: Checkout Circuitry-Zig
+        uses: actions/checkout@v4
+        with:
+          repository: darkhorseprojects/circuitry-zig
+          path: circuitry-zig
+
+      - name: Checkout Limbo-Zig
+        uses: actions/checkout@v4
+        with:
+          repository: darkhorseprojects/limbo-zig
+          path: limbo-zig
+          submodules: recursive
+
+      - name: Install Rust target
+        run: rustup target add ${{ matrix.rust_target }}
+
+      - name: Build Limbo library
+        run: |
+          cd limbo-zig/third_party/limbo
+          cargo build --release -p turso_sqlite3 --target ${{ matrix.rust_target }}
+          mkdir -p target/release
+          if [[ "${{ matrix.os }}" == "windows-latest" ]]; then
+            cp target/${{ matrix.rust_target }}/release/turso_sqlite3.lib target/release/ || cp target/${{ matrix.rust_target }}/release/libturso_sqlite3.a target/release/
+          else
+            cp target/${{ matrix.rust_target }}/release/libturso_sqlite3.a target/release/
+          fi
+
       - uses: mlugg/setup-zig@v2
         with:
           version: 0.16.0
+
       - name: Prepare Zig cache
-        run: mkdir -p "$ZIG_GLOBAL_CACHE_DIR/tmp" "$ZIG_LOCAL_CACHE_DIR"
-      - run: zig build test
-      - run: zig build -Doptimize=ReleaseFast -Dtarget=${{ matrix.target }}
+        run: mkdir -p "zinc/.zig-cache/tmp"
+
+      - name: Test Zinc
+        run: |
+          cd zinc
+          zig build test
+
+      - name: Build Zinc
+        run: |
+          cd zinc
+          zig build -Doptimize=ReleaseFast -Dtarget=${{ matrix.target }}
+
       - name: Package archive
         run: |
           package_dir="package"
           rm -rf "$package_dir"
           mkdir -p "$package_dir"
-          cp "zig-out/bin/${{ matrix.binary }}" "$package_dir/"
-          cp README.md LICENSE "$package_dir/"
-          cp scripts/install-unix.sh scripts/install-windows.ps1 "$package_dir/"
+          cp "zinc/zig-out/bin/${{ matrix.binary }}" "$package_dir/"
+          cp zinc/README.md zinc/LICENSE "$package_dir/"
+          cp zinc/scripts/install-unix.sh zinc/scripts/install-windows.ps1 "$package_dir/"
           if [[ "${{ matrix.archive }}" == *.zip ]]; then
             (cd "$package_dir" && zip -r "../${{ matrix.archive }}" .)
           else
             tar -czf "${{ matrix.archive }}" -C "$package_dir" .
           fi
-          sha256sum "${{ matrix.archive }}" > "${{ matrix.archive }}.sha256"
+          python -c "import hashlib; print(hashlib.sha256(open('${{ matrix.archive }}','rb').read()).hexdigest() + '  ${{ matrix.archive }}')" > "${{ matrix.archive }}.sha256"
+
       - uses: actions/upload-artifact@v4
         with:
           name: ${{ matrix.archive }}

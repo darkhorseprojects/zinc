@@ -2,6 +2,7 @@ const std = @import("std");
 const files = @import("fs.zig");
 const platform = @import("../platform/mod.zig");
 const shell = @import("../platform/shell.zig");
+const layout = @import("layout.zig");
 
 const Allocator = std.mem.Allocator;
 
@@ -113,16 +114,21 @@ fn tailStart(text: []const u8, max_bytes: usize, max_lines: usize) usize {
 }
 
 fn writeTempOutput(allocator: Allocator, run_id: []const u8, stdout: []const u8, stderr: []const u8) ![]u8 {
-    // Workspace path
-    const dir = try std.fmt.allocPrint(allocator, ".zinc/tmp/runs/{s}", .{run_id});
+    const run_sub = try std.fmt.allocPrint(allocator, "runs/{s}", .{run_id});
+    defer allocator.free(run_sub);
+    const dir = try layout.tempRunPath(allocator, run_sub);
     defer allocator.free(dir);
     try files.mkdirP(dir);
     
-    const out_path = try std.fmt.allocPrint(allocator, ".zinc/tmp/runs/{s}/stdout", .{run_id});
+    const out_sub = try std.fmt.allocPrint(allocator, "runs/{s}/stdout", .{run_id});
+    defer allocator.free(out_sub);
+    const out_path = try layout.tempRunPath(allocator, out_sub);
     errdefer allocator.free(out_path);
     try files.write(out_path, stdout);
 
-    const err_path = try std.fmt.allocPrint(allocator, ".zinc/tmp/runs/{s}/stderr", .{run_id});
+    const err_sub = try std.fmt.allocPrint(allocator, "runs/{s}/stderr", .{run_id});
+    defer allocator.free(err_sub);
+    const err_path = try layout.tempRunPath(allocator, err_sub);
     defer allocator.free(err_path);
     try files.write(err_path, stderr);
 
