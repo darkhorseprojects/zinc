@@ -42,7 +42,6 @@ jobs:
           rm -rf "$package_dir"
           mkdir -p "$package_dir"
           cp "zig-out/bin/${{ matrix.binary }}" "$package_dir/"
-          cp -R stock "$package_dir/stock"
           cp README.md LICENSE "$package_dir/"
           cp scripts/install-unix.sh scripts/install-windows.ps1 "$package_dir/"
           if [[ "${{ matrix.archive }}" == *.zip ]]; then
