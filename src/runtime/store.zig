@@ -175,6 +175,13 @@ pub const Store = struct {
         return null;
     }
 
+    pub fn freeDoc(self: *Store, doc: circuitry_docs) void {
+        self.allocator.free(doc.id);
+        if (doc.path) |p| self.allocator.free(p);
+        if (doc.name) |n| self.allocator.free(n);
+        self.allocator.free(doc.source);
+    }
+
     // --- Runs ---
     pub fn insertRun(self: *Store, run_obj: runs) !void {
         try self.workspace_db.exec(

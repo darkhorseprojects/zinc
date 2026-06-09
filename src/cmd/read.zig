@@ -6,9 +6,8 @@ const files = @import("../io/fs.zig");
 const Allocator = std.mem.Allocator;
 
 pub fn runRead(allocator: Allocator, store: *Store, arg: []const u8) !void {
-    _ = store;
     if (std.mem.startsWith(u8, arg, "zinc://")) {
-        const content = try uri.resolveRead(allocator, arg);
+        const content = try uri.resolveRead(allocator, store, arg);
         defer allocator.free(content);
         try files.writeAllOut(content);
     } else {

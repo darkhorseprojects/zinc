@@ -2,6 +2,7 @@ const std = @import("std");
 const Store = @import("store.zig").Store;
 const layout = @import("../io/layout.zig");
 const files = @import("../io/fs.zig");
+const pkg_index = @import("../pkg/index.zig");
 
 const Allocator = std.mem.Allocator;
 
@@ -74,7 +75,7 @@ pub fn parse(allocator: Allocator, raw_uri: []const u8) !ParsedUri {
     return error.UnknownUriPattern;
 }
 
-pub fn resolveRead(allocator: Allocator, raw_uri: []const u8) ![]u8 {
+pub fn resolveRead(allocator: Allocator, store: *Store, raw_uri: []const u8) ![]u8 {
     const parsed = try parse(allocator, raw_uri);
     defer parsed.deinit(allocator);
 
@@ -135,6 +136,24 @@ pub fn resolveRead(allocator: Allocator, raw_uri: []const u8) ![]u8 {
                 return try files.readLimited(allocator, global_path, 64 * 1024 * 1024);
             }
             return error.RunArtifactNotFound;
+        },
+        .doc => {
+            const doc_obj = (try store.getDoc(parsed.id)) orelse return error.DocNotFound;
+            defer store.freeDoc(doc_obj);
+            return try allocator.dupe(u8, doc_obj.source);
+        },
+        .package => {
+            const pkg = (try store.getPackage(parsed.id)) orelse return error.PackageNotFound;
+            defer store.freePackage(pkg);
+            const manifest_path = try std.fs.path.join(allocator, &.{ pkg.path.?, "zinc.pkg.yaml" });
+            defer allocator.free(manifest_path);
+            return try files.readLimited(allocator, manifest_path, 10 * 1024 * 1024);
+        },
+        .package_shape => {
+            const shape_name = parsed.extra.?;
+            const shape_path = try pkg_index.resolveShape(allocator, store, parsed.id, shape_name);
+            defer allocator.free(shape_path);
+            return try files.readLimited(allocator, shape_path, 10 * 1024 * 1024);
         },
         else => return error.UriNotReadable,
     }
