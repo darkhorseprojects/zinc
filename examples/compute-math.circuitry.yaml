@@ -1,0 +1,20 @@
+circuitry: "0.6"
+name: compute-math
+about: Calculate compound interest given a principal, annual rate, and years.
+
+takes:
+  principal: text
+  rate: text
+  years: text
+
+does: |
+  Calculate the compound interest using the formula: A = P * (1 + r)^t
+  where:
+    P = principal
+    r = rate (expressed as decimal, e.g., 0.05 for 5%)
+    t = years
+  Return both the final total amount A and the total interest earned (A - P).
+
+gives:
+  amount: text
+  interest: text
