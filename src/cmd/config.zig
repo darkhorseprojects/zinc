@@ -53,8 +53,8 @@ pub fn loadSettings(allocator: Allocator) !ConfigSettings {
     }
 
     return ConfigSettings{
-        .mode = try allocator.dupe(u8, mode_val),
-        .scope = try allocator.dupe(u8, scope_val),
+        .mode = try arena_allocator.dupe(u8, mode_val),
+        .scope = try arena_allocator.dupe(u8, scope_val),
         .arena = arena,
     };
 }
