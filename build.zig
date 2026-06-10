@@ -33,6 +33,8 @@ pub fn build(b: *std.Build) void {
     if (is_linux) {
         exe.use_llvm = true;
         exe.use_lld = true;
+    } else if (target.result.os.tag == .windows) {
+        exe.addLinkerArg("/FORCE:MULTIPLE");
     }
 
     b.installArtifact(exe);
@@ -56,6 +58,8 @@ pub fn build(b: *std.Build) void {
     if (is_linux) {
         tests.use_llvm = true;
         tests.use_lld = true;
+    } else if (target.result.os.tag == .windows) {
+        tests.addLinkerArg("/FORCE:MULTIPLE");
     }
     const test_step = b.step("test", "Run unit tests");
     test_step.dependOn(&b.addRunArtifact(tests).step);
