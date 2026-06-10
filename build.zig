@@ -3,6 +3,14 @@ const std = @import("std");
 pub fn build(b: *std.Build) void {
     const target = b.standardTargetOptions(.{});
     const optimize = b.standardOptimizeOption(.{});
+
+    // Automatically detect and set sysroot on macOS hosts for macOS targets if not specified
+    if (target.result.os.tag == .macos and b.sysroot == null) {
+        if (std.zig.system.darwin.getSdk(b.allocator, b.graph.io, &target.result)) |sdk| {
+            b.sysroot = sdk;
+        }
+    }
+
     const is_linux = target.result.os.tag == .linux;
 
     const circuitry_dep = b.dependency("circuitry", .{ .target = target, .optimize = optimize });
