@@ -1,7 +1,7 @@
 const std = @import("std");
 
 pub fn build(b: *std.Build) void {
-    const target = b.standardTargetOptions(.{ .default_target = .{ .abi = .gnu } });
+    const target = b.standardTargetOptions(.{});
     const optimize = b.standardOptimizeOption(.{});
     const is_linux = target.result.os.tag == .linux;
 
@@ -13,7 +13,7 @@ pub fn build(b: *std.Build) void {
         .root_source_file = b.path("src/main.zig"),
         .target = target,
         .optimize = optimize,
-        .link_libc = true,
+        .link_libc = is_linux,
     });
     exe_mod.addImport("circuitry", circuitry_dep.module("circuitry"));
     exe_mod.addImport("limbo", limbo_dep.module("limbo"));
@@ -41,7 +41,7 @@ pub fn build(b: *std.Build) void {
         .root_source_file = b.path("src/root.zig"),
         .target = target,
         .optimize = optimize,
-        .link_libc = true,
+        .link_libc = is_linux,
     });
     test_mod.addImport("circuitry", circuitry_dep.module("circuitry"));
     test_mod.addImport("limbo", limbo_dep.module("limbo"));
