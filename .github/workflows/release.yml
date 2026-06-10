@@ -85,12 +85,20 @@ jobs:
       - name: Test Zinc
         run: |
           cd zinc
-          zig build test -Dtarget=${{ matrix.target }}
+          if [[ "${{ matrix.os }}" == "macos-latest" ]]; then
+            zig build test -Dtarget=${{ matrix.target }} --sysroot $(xcrun --show-sdk-path)
+          else
+            zig build test -Dtarget=${{ matrix.target }}
+          fi
 
       - name: Build Zinc
         run: |
           cd zinc
-          zig build -Doptimize=ReleaseFast -Dtarget=${{ matrix.target }}
+          if [[ "${{ matrix.os }}" == "macos-latest" ]]; then
+            zig build -Doptimize=ReleaseFast -Dtarget=${{ matrix.target }} --sysroot $(xcrun --show-sdk-path)
+          else
+            zig build -Doptimize=ReleaseFast -Dtarget=${{ matrix.target }}
+          fi
 
       - name: Package archive
         run: |
