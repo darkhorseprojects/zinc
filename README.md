@@ -63,11 +63,11 @@ A workspace uses a local `.zinc` directory for state:
 
 ```text
 .zinc/
+  zinc.db       Limbo database containing runs, documents, packages, and policy approvals
   packages/     Installed package directories
-  state/
-    zinc.db     Limbo database containing runs, documents, packages, and policy approvals
-  tmp/          Short-lived temporary execution files
 ```
+
+Short-lived run execution outputs (such as stdout, stderr, and artifacts) are stored in the system's temporary directory.
 
 ## Configuration
 
