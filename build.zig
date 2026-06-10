@@ -3,6 +3,7 @@ const std = @import("std");
 pub fn build(b: *std.Build) void {
     const target = b.standardTargetOptions(.{ .default_target = .{ .abi = .gnu } });
     const optimize = b.standardOptimizeOption(.{});
+    const is_linux = target.result.os.tag == .linux;
 
     const circuitry_dep = b.dependency("circuitry", .{ .target = target, .optimize = optimize });
     const limbo_dep = b.dependency("limbo", .{ .target = target, .optimize = optimize });
@@ -12,6 +13,7 @@ pub fn build(b: *std.Build) void {
         .root_source_file = b.path("src/main.zig"),
         .target = target,
         .optimize = optimize,
+        .link_libc = true,
     });
     exe_mod.addImport("circuitry", circuitry_dep.module("circuitry"));
     exe_mod.addImport("limbo", limbo_dep.module("limbo"));
@@ -21,8 +23,10 @@ pub fn build(b: *std.Build) void {
         .name = "zn",
         .root_module = exe_mod,
     });
-    exe.use_llvm = true;
-    exe.use_lld = true;
+    if (is_linux) {
+        exe.use_llvm = true;
+        exe.use_lld = true;
+    }
 
     b.installArtifact(exe);
 
@@ -37,13 +41,16 @@ pub fn build(b: *std.Build) void {
         .root_source_file = b.path("src/root.zig"),
         .target = target,
         .optimize = optimize,
+        .link_libc = true,
     });
     test_mod.addImport("circuitry", circuitry_dep.module("circuitry"));
     test_mod.addImport("limbo", limbo_dep.module("limbo"));
     test_mod.addImport("serde", serde_dep.module("serde"));
     const tests = b.addTest(.{ .root_module = test_mod });
-    tests.use_llvm = true;
-    tests.use_lld = true;
+    if (is_linux) {
+        tests.use_llvm = true;
+        tests.use_lld = true;
+    }
     const test_step = b.step("test", "Run unit tests");
     test_step.dependOn(&b.addRunArtifact(tests).step);
 }
