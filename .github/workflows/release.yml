@@ -63,6 +63,8 @@ jobs:
           rustup target add ${{ matrix.rust_target }}
 
       - name: Build Limbo library
+        env:
+          RUSTFLAGS: "-C panic=abort"
         run: |
           cd limbo-zig/third_party/limbo
           rustup run stable cargo build --release -p turso_sqlite3 --target ${{ matrix.rust_target }}
@@ -83,7 +85,7 @@ jobs:
       - name: Test Zinc
         run: |
           cd zinc
-          zig build test
+          zig build test -Dtarget=${{ matrix.target }}
 
       - name: Build Zinc
         run: |
