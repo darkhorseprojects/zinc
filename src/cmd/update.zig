@@ -115,10 +115,20 @@ fn latestVersion(allocator: Allocator, io: std.Io) ![]u8 {
     const bytes = try http.fetchBytes(allocator, io, url, max_text_bytes);
     defer allocator.free(bytes);
 
-    const Response = struct { tag_name: []const u8 };
-    var parsed = try std.json.parseFromSlice(Response, allocator, bytes, .{ .ignore_unknown_fields = true });
-    defer parsed.deinit();
-    return try allocator.dupe(u8, parsed.value.tag_name);
+    return try parseTagName(allocator, bytes);
+}
+
+fn parseTagName(allocator: Allocator, json: []const u8) ![]u8 {
+    const key = "\"tag_name\"";
+    const key_start = std.mem.indexOf(u8, json, key) orelse return error.MissingReleaseTag;
+    const after_key = json[key_start + key.len ..];
+    const colon = std.mem.indexOfScalar(u8, after_key, ':') orelse return error.InvalidReleaseJson;
+    var rest = after_key[colon + 1 ..];
+    while (rest.len > 0 and std.mem.indexOfScalar(u8, " \t\r\n", rest[0]) != null) rest = rest[1..];
+    if (rest.len == 0 or rest[0] != '"') return error.InvalidReleaseJson;
+    rest = rest[1..];
+    const end = std.mem.indexOfScalar(u8, rest, '"') orelse return error.InvalidReleaseJson;
+    return try allocator.dupe(u8, rest[0..end]);
 }
 
 fn printVersions(target_version: []const u8) !void {
