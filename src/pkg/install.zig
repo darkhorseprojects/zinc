@@ -53,32 +53,6 @@ pub fn install(allocator: Allocator, io: std.Io, store: *Store, source_path: []c
         try std.Io.Dir.symLinkAbsolute(io, abs_source_path, target_package_path, .{ .is_directory = true });
     }
 
-    // Create runtime packages directory
-    const target_runtime_dir = if (is_global)
-        try layout.globalPath(allocator, "runtime/packages")
-    else
-        (try layout.workspacePath(allocator, "runtime/packages")) orelse return error.NoWorkspaceFound;
-    defer allocator.free(target_runtime_dir);
-    try files.mkdirP(target_runtime_dir);
-
-    const target_runtime_pkg_dir = try std.fs.path.join(allocator, &.{ target_runtime_dir, name });
-    defer allocator.free(target_runtime_pkg_dir);
-    try files.mkdirP(target_runtime_pkg_dir);
-
-    // Create config packages directory
-    const target_config_dir = if (is_global)
-        try layout.globalPath(allocator, "config/packages")
-    else
-        (try layout.workspacePath(allocator, "config/packages")) orelse return error.NoWorkspaceFound;
-    defer allocator.free(target_config_dir);
-    try files.mkdirP(target_config_dir);
-
-    const target_config_file = try std.fmt.allocPrint(allocator, "{s}/{s}.yaml", .{ target_config_dir, name });
-    defer allocator.free(target_config_file);
-    if (!files.existsPath(target_config_file)) {
-        try files.write(target_config_file, "{}\n");
-    }
-
     // Run setup script if defined
     const os_name = @tagName(os);
     if (parsed.getScript("setup", os_name)) |script_rel| {
@@ -161,29 +135,6 @@ pub fn remove(allocator: Allocator, io: std.Io, store: *Store, name: []const u8)
 
     // Delete folder symlink
     _ = std.Io.Dir.cwd().deleteTree(io, pkg.path.?) catch {};
-
-    // Delete runtime pkg folder
-    const ws_root = try layout.findWorkspaceRoot(allocator);
-    defer if (ws_root) |w| allocator.free(w);
-    
-    const runtime_dir = if (ws_root == null or std.mem.eql(u8, pkg.scope.?, "global"))
-        try layout.globalPath(allocator, "runtime/packages")
-    else
-        (try layout.workspacePath(allocator, "runtime/packages")).?;
-    defer allocator.free(runtime_dir);
-    const target_runtime_pkg_dir = try std.fs.path.join(allocator, &.{ runtime_dir, name });
-    defer allocator.free(target_runtime_pkg_dir);
-    _ = std.Io.Dir.cwd().deleteTree(io, target_runtime_pkg_dir) catch {};
-
-    // Delete config yaml
-    const config_dir = if (ws_root == null or std.mem.eql(u8, pkg.scope.?, "global"))
-        try layout.globalPath(allocator, "config/packages")
-    else
-        (try layout.workspacePath(allocator, "config/packages")).?;
-    defer allocator.free(config_dir);
-    const target_config_file = try std.fmt.allocPrint(allocator, "{s}/{s}.yaml", .{ config_dir, name });
-    defer allocator.free(target_config_file);
-    _ = std.Io.Dir.deleteFileAbsolute(io, target_config_file) catch {};
 
     // Delete from Database
     try store.deletePackage(name);

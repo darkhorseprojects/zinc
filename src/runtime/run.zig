@@ -101,30 +101,21 @@ pub fn runShape(allocator: Allocator, io: std.Io, store: *Store, shape_path: []c
     // 4. Print Runtime Guidance
     try files.writeAllOut("\n========================================\n");
     try files.writeAllOut("Runtime Guidance:\n");
-    
-    // Check if stock/prompts/runtime.md exists
-    const guidance_path = "stock/prompts/runtime.md";
-    if (files.existsPath(guidance_path)) {
-        const text = try files.readLimited(allocator, guidance_path, 1024 * 1024);
-        defer allocator.free(text);
-        try files.writeAllOut(text);
-    } else {
-        try files.writeAllOut(
-            \\You are inside a Zinc run.
-            \\
-            \\Use the local environment through Zinc.
-            \\
-            \\Prefer the least action needed.
-            \\
-            \\Inspect before changing.
-            \\Read only what is needed.
-            \\Use small actions before large actions.
-            \\Expect approval when an action exceeds policy.
-            \\
-            \\Large outputs may be truncated. Full captures are available as zinc:// refs.
-            \\
-        );
-    }
+    try files.writeAllOut(
+        \\You are inside a Zinc run.
+        \\
+        \\Use the local environment through Zinc.
+        \\
+        \\Prefer the least action needed.
+        \\
+        \\Inspect before changing.
+        \\Read only what is needed.
+        \\Use small actions before large actions.
+        \\Expect approval when an action exceeds policy.
+        \\
+        \\Large outputs may be truncated. Full captures are available as zinc:// refs.
+        \\
+    );
     try files.writeAllOut("\n========================================\n");
 
     // Print Action description (does)

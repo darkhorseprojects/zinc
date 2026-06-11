@@ -1,11 +1,5 @@
 zig-out/
 .zig-cache/
 zig-pkg/
-.zinc/sessions/
-.zinc/logs/
-.zinc/compiled/
-.zinc/packages/
-.zinc/config.json
-*.pkg.json
-*.circuitry.json
+.zinc/
 .DS_Store

@@ -17,7 +17,7 @@ pub const ModeConfig = struct {
     confirm: PatternList,
 };
 
-pub const stock_modes = struct {
+pub const builtin_modes = struct {
     pub const inspect = ModeConfig{
         .default = .deny,
         .allow = &.{ "pwd", "ls", "cat", "rg", "git status", "git diff", "git log" },
@@ -42,11 +42,11 @@ pub const stock_modes = struct {
 
 pub fn execute(allocator: Allocator, io: std.Io, store: *Store, run_id: []const u8, seq: i64, command: []const u8, active_mode_name: []const u8) !void {
     const active_mode = if (std.mem.eql(u8, active_mode_name, "inspect"))
-        stock_modes.inspect
+        builtin_modes.inspect
     else if (std.mem.eql(u8, active_mode_name, "open"))
-        stock_modes.open
+        builtin_modes.open
     else
-        stock_modes.build;
+        builtin_modes.build;
 
     // 1. Determine decision from pattern matching
     var decision = active_mode.default;
