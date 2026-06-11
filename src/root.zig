@@ -8,5 +8,6 @@ test {
     _ = @import("policy/mod.zig");
     _ = @import("pkg/mod.zig");
     _ = @import("runtime/mod.zig");
+    _ = @import("update/mod.zig");
     _ = @import("app.zig");
 }

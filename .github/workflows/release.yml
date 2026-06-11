@@ -19,18 +19,22 @@ jobs:
             os: ubuntu-latest
             archive: zinc-linux-x86_64.tar.gz
             binary: zn
+            raw: zn-x86_64-linux
           - target: x86_64-macos
             os: macos-15-intel
             archive: zinc-macos-x86_64.tar.gz
             binary: zn
+            raw: zn-x86_64-macos
           - target: aarch64-macos
             os: macos-14
             archive: zinc-macos-aarch64.tar.gz
             binary: zn
+            raw: zn-aarch64-macos
           - target: x86_64-windows-msvc
             os: windows-latest
             archive: zinc-windows-x86_64.zip
             binary: zn.exe
+            raw: zn-x86_64-windows.exe
     defaults:
       run:
         shell: bash
@@ -56,10 +60,12 @@ jobs:
           cp "zig-out/bin/${{ matrix.binary }}" "$package_dir/"
           cp README.md LICENSE "$package_dir/"
           cp scripts/install-unix.sh scripts/install-windows.ps1 "$package_dir/"
-          python - <<'PY' "$package_dir" "${{ matrix.archive }}"
+          cp "zig-out/bin/${{ matrix.binary }}" "${{ matrix.raw }}"
+          python - <<'PY' "$package_dir" "${{ matrix.archive }}" "${{ matrix.raw }}"
           import hashlib, pathlib, sys, tarfile, zipfile
           package_dir = pathlib.Path(sys.argv[1])
           archive = pathlib.Path(sys.argv[2])
+          raw = pathlib.Path(sys.argv[3])
           if archive.suffix == ".zip":
               with zipfile.ZipFile(archive, "w", zipfile.ZIP_DEFLATED) as zf:
                   for path in sorted(package_dir.rglob("*")):
@@ -69,7 +75,8 @@ jobs:
               with tarfile.open(archive, "w:gz") as tf:
                   for path in sorted(package_dir.rglob("*")):
                       tf.add(path, path.relative_to(package_dir))
-          archive.with_name(archive.name + ".sha256").write_text(f"{hashlib.sha256(archive.read_bytes()).hexdigest()}  {archive.name}\n")
+          for path in (archive, raw):
+              path.with_name(path.name + ".sha256").write_text(f"{hashlib.sha256(path.read_bytes()).hexdigest()}  {path.name}\n")
           PY
 
       - uses: actions/upload-artifact@v4
@@ -78,6 +85,8 @@ jobs:
           path: |
             ${{ matrix.archive }}
             ${{ matrix.archive }}.sha256
+            ${{ matrix.raw }}
+            ${{ matrix.raw }}.sha256
           if-no-files-found: error
 
   source-package:

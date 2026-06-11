@@ -1,6 +1,7 @@
 const std = @import("std");
 const Store = @import("../runtime/store.zig").Store;
 const pkg_install = @import("../pkg/install.zig");
+const pkg_update = @import("../pkg/update.zig");
 const manifest = @import("../pkg/manifest.zig");
 const files = @import("../io/fs.zig");
 const proc = @import("../io/process.zig");
@@ -32,6 +33,24 @@ pub fn runPkg(allocator: Allocator, io: std.Io, store: *Store, args: []const []c
         }
 
         try pkg_install.install(allocator, io, store, path, is_global);
+    } else if (std.mem.eql(u8, cmd, "update")) {
+        var opts = pkg_update.Options{};
+        for (args[1..]) |arg| {
+            if (std.mem.eql(u8, arg, "--all")) {
+                opts.all = true;
+            } else if (std.mem.eql(u8, arg, "--check")) {
+                opts.check = true;
+            } else if (opts.name == null) {
+                opts.name = arg;
+            } else {
+                return usage();
+            }
+        }
+        if (!opts.all and opts.name == null) {
+            try files.writeAllErr("Error: Missing package name or --all.\n");
+            return;
+        }
+        try pkg_update.update(allocator, io, store, opts);
     } else if (std.mem.eql(u8, cmd, "remove")) {
         if (args.len < 2) {
             try files.writeAllErr("Error: Missing package name.\n");
@@ -114,5 +133,5 @@ pub fn runPkg(allocator: Allocator, io: std.Io, store: *Store, args: []const []c
 }
 
 fn usage() !void {
-    try files.writeAllErr("Usage: zn pkg <install|remove|list|check> [args]\n");
+    try files.writeAllErr("Usage: zn pkg <install|update|remove|list|check> [args]\n");
 }

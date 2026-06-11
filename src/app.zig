@@ -5,6 +5,7 @@ const cmd_read = @import("cmd/read.zig");
 const cmd_inspect = @import("cmd/inspect.zig");
 const cmd_pkg = @import("cmd/pkg.zig");
 const cmd_config = @import("cmd/config.zig");
+const cmd_update = @import("cmd/update.zig");
 const files = @import("io/fs.zig");
 
 pub fn run(init: std.process.Init) !void {
@@ -16,6 +17,21 @@ pub fn run(init: std.process.Init) !void {
     _ = args.next();
 
     const cmd = args.next() orelse return usage();
+
+    if (std.mem.eql(u8, cmd, "update")) {
+        var remaining: std.ArrayList([]const u8) = .empty;
+        defer remaining.deinit(allocator);
+        while (args.next()) |arg| try remaining.append(allocator, arg);
+        try cmd_update.runUpdate(allocator, init.io, remaining.items);
+        return;
+    }
+    if (std.mem.eql(u8, cmd, "internal-replace")) {
+        var remaining: std.ArrayList([]const u8) = .empty;
+        defer remaining.deinit(allocator);
+        while (args.next()) |arg| try remaining.append(allocator, arg);
+        try cmd_update.runInternalReplace(allocator, init.io, remaining.items);
+        return;
+    }
 
     var store = try Store.open(allocator);
     defer store.close();
@@ -70,7 +86,8 @@ fn usage() !void {
         \\  run <shape>                   Run a Circuitry shape
         \\  read <uri-or-file>            Read a file or zinc:// reference
         \\  inspect <uri-or-file>         Inspect a shape, package, run, or reference
-        \\  pkg <subcommand> [args]       Manage packages (install, remove, list, check)
+        \\  pkg <subcommand> [args]       Manage packages (install, update, remove, list, check)
+        \\  update                        Update the zn binary
         \\  config                        Manage configuration
         \\
     );

@@ -54,6 +54,15 @@ pub const packages = struct {
     checked_at: ?i64,
 };
 
+pub const package_sources = struct {
+    package_name: []const u8,
+    kind: []const u8,
+    url: []const u8,
+    ref: []const u8,
+    path: []const u8,
+    rev: ?[]const u8,
+};
+
 pub const Store = struct {
     allocator: Allocator,
     global_db: limbo.Database,
@@ -109,6 +118,7 @@ pub const Store = struct {
     fn migrate(self: *Store) !void {
         // Global tables
         try self.global_db.exec("create table if not exists packages(name text primary key, version text, source text, scope text, path text, status text, installed_at integer, checked_at integer)", .{});
+        try self.global_db.exec("create table if not exists package_sources(package_name text primary key, kind text not null, url text not null, ref text not null, path text not null, rev text)", .{});
         try self.global_db.exec("create table if not exists config(key text primary key, value text)", .{});
 
         // Workspace tables
@@ -346,6 +356,7 @@ pub const Store = struct {
     }
 
     pub fn deletePackage(self: *Store, name: []const u8) !void {
+        try self.global_db.exec("delete from package_sources where package_name = :name", .{ .name = limbo.text(name) });
         try self.global_db.exec("delete from packages where name = :name", .{ .name = limbo.text(name) });
     }
 
@@ -410,6 +421,54 @@ pub const Store = struct {
             });
         }
         return list.toOwnedSlice(self.allocator);
+    }
+
+    pub fn upsertPackageSource(self: *Store, source: package_sources) !void {
+        try self.global_db.exec(
+            "insert into package_sources(package_name, kind, url, ref, path, rev) values (:package_name, :kind, :url, :ref, :path, :rev) on conflict(package_name) do update set kind=excluded.kind, url=excluded.url, ref=excluded.ref, path=excluded.path, rev=excluded.rev",
+            .{
+                .package_name = limbo.text(source.package_name),
+                .kind = limbo.text(source.kind),
+                .url = limbo.text(source.url),
+                .ref = limbo.text(source.ref),
+                .path = limbo.text(source.path),
+                .rev = if (source.rev) |r| limbo.text(r) else null,
+            },
+        );
+    }
+
+    pub fn getPackageSource(self: *Store, package_name: []const u8) !?package_sources {
+        const Row = struct {
+            package_name: limbo.Text,
+            kind: limbo.Text,
+            url: limbo.Text,
+            ref: limbo.Text,
+            path: limbo.Text,
+            rev: ?limbo.Text,
+        };
+        var stmt = try self.global_db.prepare(struct { package_name: limbo.Text }, Row, "select package_name, kind, url, ref, path, rev from package_sources where package_name = :package_name");
+        defer stmt.finalize();
+        try stmt.bind(.{ .package_name = limbo.text(package_name) });
+        if (try stmt.step()) |row| {
+            return package_sources{
+                .package_name = try self.allocator.dupe(u8, row.package_name.data),
+                .kind = try self.allocator.dupe(u8, row.kind.data),
+                .url = try self.allocator.dupe(u8, row.url.data),
+                .ref = try self.allocator.dupe(u8, row.ref.data),
+                .path = try self.allocator.dupe(u8, row.path.data),
+                .rev = if (row.rev) |r| try self.allocator.dupe(u8, r.data) else null,
+            };
+        }
+        return null;
+    }
+
+    pub fn freePackageSource(self: *Store, source: package_sources) void {
+        self.allocator.free(source.package_name);
+        self.allocator.free(source.kind);
+        self.allocator.free(source.url);
+        self.allocator.free(source.ref);
+        self.allocator.free(source.path);
+        if (source.rev) |r| self.allocator.free(r);
     }
 
     pub fn freePackage(self: *Store, pkg: packages) void {

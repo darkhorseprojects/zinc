@@ -1,6 +1,8 @@
 const std = @import("std");
 const Store = @import("../runtime/store.zig").Store;
-const packages_table = @import("../runtime/store.zig").packages;
+const store_types = @import("../runtime/store.zig");
+const packages_table = store_types.packages;
+const package_sources_table = store_types.package_sources;
 const manifest = @import("manifest.zig");
 const layout = @import("../io/layout.zig");
 const files = @import("../io/fs.zig");
@@ -10,7 +12,18 @@ const platform = @import("../platform/mod.zig");
 const Allocator = std.mem.Allocator;
 const io_opt = std.Options.debug_io;
 
+pub const SourceMeta = struct {
+    git: []const u8,
+    ref: []const u8,
+    path: []const u8,
+    rev: ?[]const u8 = null,
+};
+
 pub fn install(allocator: Allocator, io: std.Io, store: *Store, source_path: []const u8, is_global: bool) !void {
+    try installResolved(allocator, io, store, source_path, is_global, null);
+}
+
+pub fn installResolved(allocator: Allocator, io: std.Io, store: *Store, source_path: []const u8, is_global: bool, source_meta: ?SourceMeta) !void {
     const abs_source_path = try std.fs.path.resolve(allocator, &.{source_path});
     defer allocator.free(abs_source_path);
 
@@ -93,6 +106,17 @@ pub fn install(allocator: Allocator, io: std.Io, store: *Store, source_path: []c
         .checked_at = now,
     });
 
+    if (source_meta orelse manifestSource(parsed)) |source| {
+        try store.upsertPackageSource(package_sources_table{
+            .package_name = name,
+            .kind = "git",
+            .url = source.git,
+            .ref = source.ref,
+            .path = source.path,
+            .rev = source.rev,
+        });
+    }
+
     try files.writeAllOut("Package installed successfully.\n");
 }
 
@@ -141,17 +165,37 @@ pub fn remove(allocator: Allocator, io: std.Io, store: *Store, name: []const u8)
     try files.writeAllOut("Package removed successfully.\n");
 }
 
+fn manifestSource(parsed: manifest.PackageManifest) ?SourceMeta {
+    const source = parsed.source orelse return null;
+    return .{ .git = source.git, .ref = source.ref, .path = source.path };
+}
+
 fn copyDir(io: std.Io, src: []const u8, dest: []const u8) !void {
-    // Basic copy fallback
     var src_dir = try std.Io.Dir.openDirAbsolute(io, src, .{ .iterate = true });
     defer src_dir.close(io);
     try std.Io.Dir.createDirAbsolute(io, dest, .default_dir);
     var dest_dir = try std.Io.Dir.openDirAbsolute(io, dest, .{});
     defer dest_dir.close(io);
+    try copyDirContents(io, src_dir, dest_dir);
+}
+
+fn copyDirContents(io: std.Io, src_dir: std.Io.Dir, dest_dir: std.Io.Dir) !void {
     var it = src_dir.iterate();
     while (try it.next(io)) |entry| {
-        if (entry.kind == .file) {
-            try src_dir.copyFile(entry.name, dest_dir, entry.name, io, .{});
+        switch (entry.kind) {
+            .file => try src_dir.copyFile(entry.name, dest_dir, entry.name, io, .{}),
+            .directory => {
+                dest_dir.createDir(io, entry.name, .default_dir) catch |err| switch (err) {
+                    error.PathAlreadyExists => {},
+                    else => return err,
+                };
+                var child_src = try src_dir.openDir(io, entry.name, .{ .iterate = true });
+                defer child_src.close(io);
+                var child_dest = try dest_dir.openDir(io, entry.name, .{});
+                defer child_dest.close(io);
+                try copyDirContents(io, child_src, child_dest);
+            },
+            else => {},
         }
     }
 }

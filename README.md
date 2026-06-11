@@ -50,8 +50,11 @@ zn read <uri-or-file>
 # Inspect a shape, package, run, or reference
 zn inspect <uri-or-file>
 
-# Manage packages (install, remove, list, check)
+# Manage packages (install, update, remove, list, check)
 zn pkg <subcommand> [args]
+
+# Update the zn binary
+zn update
 
 # View active configuration
 zn config
@@ -68,6 +71,19 @@ A workspace uses a local `.zinc` directory for state:
 ```
 
 Short-lived run execution outputs (such as stdout, stderr, and artifacts) are stored in the system's temporary directory.
+
+## Packages
+
+A package may declare a git update source in `zinc.pkg.yaml`:
+
+```yaml
+source:
+  git: https://git.example.org/team/package.git
+  ref: main
+  path: .
+```
+
+`zn pkg update <name>` fetches that git source and reinstalls the package from the resolved `path`. `zn pkg update --all` updates every installed package with a git source.
 
 ## Configuration
 

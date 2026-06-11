@@ -3,10 +3,17 @@ const serde = @import("serde");
 
 const Allocator = std.mem.Allocator;
 
+pub const Source = struct {
+    git: []const u8,
+    ref: []const u8 = "main",
+    path: []const u8 = ".",
+};
+
 pub const PackageManifest = struct {
     name: []const u8,
     version: []const u8,
     about: []const u8,
+    source: ?Source,
     arena: std.heap.ArenaAllocator,
     root: serde.yaml.Value,
 
@@ -54,7 +61,28 @@ pub fn parse(allocator: Allocator, bytes: []const u8) !PackageManifest {
         .name = name_val.string,
         .version = version_val.string,
         .about = about_val.string,
+        .source = try parseSource(root),
         .arena = arena,
         .root = root,
     };
+}
+
+fn parseSource(root: serde.yaml.Value) !?Source {
+    const source_val = root.mapping.getPtr("source") orelse return null;
+    if (source_val.* != .mapping) return error.InvalidSourceType;
+
+    const git_val = source_val.mapping.getPtr("git") orelse return error.MissingSourceGit;
+    if (git_val.* != .string) return error.InvalidSourceGitType;
+
+    return .{
+        .git = git_val.string,
+        .ref = try optionalString(source_val.mapping, "ref", "main", error.InvalidSourceRefType),
+        .path = try optionalString(source_val.mapping, "path", ".", error.InvalidSourcePathType),
+    };
+}
+
+fn optionalString(mapping: serde.yaml.Mapping, key: []const u8, default: []const u8, comptime type_error: anyerror) ![]const u8 {
+    const val = mapping.getPtr(key) orelse return default;
+    if (val.* != .string) return type_error;
+    return val.string;
 }
