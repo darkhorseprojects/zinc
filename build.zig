@@ -14,7 +14,11 @@ pub fn build(b: *std.Build) void {
     const is_linux = target.result.os.tag == .linux;
 
     const circuitry_dep = b.dependency("circuitry", .{ .target = target, .optimize = optimize });
-    const limbo_dep = b.dependency("limbo", .{ .target = target, .optimize = optimize });
+    const limbo_dep = b.dependency("limbo", .{
+        .target = target,
+        .optimize = optimize,
+        .sysroot = b.sysroot,
+    });
     const serde_dep = b.dependency("serde", .{ .target = target, .optimize = optimize });
 
     const exe_mod = b.createModule(.{
@@ -34,7 +38,7 @@ pub fn build(b: *std.Build) void {
         exe.use_llvm = true;
         exe.use_lld = true;
     } else if (target.result.os.tag == .windows) {
-        exe.addLinkerArg("/FORCE:MULTIPLE");
+        exe.bundle_compiler_rt = false;
     }
 
     b.installArtifact(exe);
@@ -59,7 +63,7 @@ pub fn build(b: *std.Build) void {
         tests.use_llvm = true;
         tests.use_lld = true;
     } else if (target.result.os.tag == .windows) {
-        tests.addLinkerArg("/FORCE:MULTIPLE");
+        tests.bundle_compiler_rt = false;
     }
     const test_step = b.step("test", "Run unit tests");
     test_step.dependOn(&b.addRunArtifact(tests).step);

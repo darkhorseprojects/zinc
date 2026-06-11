@@ -86,6 +86,11 @@ Zinc is written in Zig 0.16.0. Build from source:
 zig build
 ```
 
+## Learn more
+
+- [Wiki](https://github.com/darkhorseprojects/zinc/wiki)
+- [Circuitry 0.6](https://github.com/darkhorseprojects/circuitry/wiki)
+
 ## License
 
 Apache-2.0
