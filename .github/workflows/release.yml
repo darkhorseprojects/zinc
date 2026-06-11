@@ -83,7 +83,7 @@ jobs:
           rm -rf "$package"
           mkdir -p "$package"
           cp build.zig build.zig.zon README.md LICENSE "$package/"
-          cp -R src stock scripts examples "$package/"
+          cp -R src scripts examples "$package/"
           tar -czf "${package}.tar.gz" "$package"
           python - <<'PY' "${package}.tar.gz" > "${package}.tar.gz.sha256"
           import hashlib, pathlib, sys
