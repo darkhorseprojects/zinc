@@ -119,16 +119,35 @@ fn latestVersion(allocator: Allocator, io: std.Io) ![]u8 {
 }
 
 fn parseTagName(allocator: Allocator, json: []const u8) ![]u8 {
-    const key = "\"tag_name\"";
-    const key_start = std.mem.indexOf(u8, json, key) orelse return error.MissingReleaseTag;
-    const after_key = json[key_start + key.len ..];
-    const colon = std.mem.indexOfScalar(u8, after_key, ':') orelse return error.InvalidReleaseJson;
-    var rest = after_key[colon + 1 ..];
-    while (rest.len > 0 and std.mem.indexOfScalar(u8, " \t\r\n", rest[0]) != null) rest = rest[1..];
-    if (rest.len == 0 or rest[0] != '"') return error.InvalidReleaseJson;
-    rest = rest[1..];
-    const end = std.mem.indexOfScalar(u8, rest, '"') orelse return error.InvalidReleaseJson;
-    return try allocator.dupe(u8, rest[0..end]);
+    var scanner = std.json.Scanner.initCompleteInput(allocator, json);
+    defer scanner.deinit();
+
+    while (true) {
+        const token = try scanner.nextAlloc(allocator, .alloc_if_needed);
+        defer freeToken(allocator, token);
+
+        switch (token) {
+            .string, .allocated_string => |key| {
+                if (!std.mem.eql(u8, key, "tag_name")) continue;
+                const value = try scanner.nextAlloc(allocator, .alloc_if_needed);
+                defer freeToken(allocator, value);
+                return switch (value) {
+                    .string => |tag| try allocator.dupe(u8, tag),
+                    .allocated_string => |tag| try allocator.dupe(u8, tag),
+                    else => error.InvalidReleaseJson,
+                };
+            },
+            .end_of_document => return error.MissingReleaseTag,
+            else => {},
+        }
+    }
+}
+
+fn freeToken(allocator: Allocator, token: std.json.Token) void {
+    switch (token) {
+        .allocated_string, .allocated_number => |bytes| allocator.free(bytes),
+        else => {},
+    }
 }
 
 fn printVersions(target_version: []const u8) !void {
