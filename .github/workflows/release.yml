@@ -56,12 +56,21 @@ jobs:
           cp "zig-out/bin/${{ matrix.binary }}" "$package_dir/"
           cp README.md LICENSE "$package_dir/"
           cp scripts/install-unix.sh scripts/install-windows.ps1 "$package_dir/"
-          if [[ "${{ matrix.archive }}" == *.zip ]]; then
-            (cd "$package_dir" && zip -r "../${{ matrix.archive }}" .)
-          else
-            tar -czf "${{ matrix.archive }}" -C "$package_dir" .
-          fi
-          python -c "import hashlib; print(hashlib.sha256(open('${{ matrix.archive }}','rb').read()).hexdigest() + '  ${{ matrix.archive }}')" > "${{ matrix.archive }}.sha256"
+          python - <<'PY' "$package_dir" "${{ matrix.archive }}"
+          import hashlib, pathlib, sys, tarfile, zipfile
+          package_dir = pathlib.Path(sys.argv[1])
+          archive = pathlib.Path(sys.argv[2])
+          if archive.suffix == ".zip":
+              with zipfile.ZipFile(archive, "w", zipfile.ZIP_DEFLATED) as zf:
+                  for path in sorted(package_dir.rglob("*")):
+                      if path.is_file():
+                          zf.write(path, path.relative_to(package_dir))
+          else:
+              with tarfile.open(archive, "w:gz") as tf:
+                  for path in sorted(package_dir.rglob("*")):
+                      tf.add(path, path.relative_to(package_dir))
+          archive.with_name(archive.name + ".sha256").write_text(f"{hashlib.sha256(archive.read_bytes()).hexdigest()}  {archive.name}\n")
+          PY
 
       - uses: actions/upload-artifact@v4
         with:
