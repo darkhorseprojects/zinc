@@ -43,7 +43,7 @@ jobs:
           version: 0.16.0
 
       - name: Test Zinc
-        run: zig build test -Dtarget=${{ matrix.target }}
+        run: zig build test -Doptimize=ReleaseFast -Dtarget=${{ matrix.target }}
 
       - name: Build Zinc
         run: zig build -Doptimize=ReleaseFast -Dtarget=${{ matrix.target }}
