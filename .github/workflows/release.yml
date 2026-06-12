@@ -17,24 +17,20 @@ jobs:
         include:
           - target: x86_64-linux-gnu
             os: ubuntu-latest
-            archive: zinc-linux-x86_64.tar.gz
             binary: zn
-            raw: zn-x86_64-linux
+            asset: zn-x86_64-linux
           - target: x86_64-macos
             os: macos-15-intel
-            archive: zinc-macos-x86_64.tar.gz
             binary: zn
-            raw: zn-x86_64-macos
+            asset: zn-x86_64-macos
           - target: aarch64-macos
             os: macos-14
-            archive: zinc-macos-aarch64.tar.gz
             binary: zn
-            raw: zn-aarch64-macos
+            asset: zn-aarch64-macos
           - target: x86_64-windows-msvc
             os: windows-latest
-            archive: zinc-windows-x86_64.zip
             binary: zn.exe
-            raw: zn-x86_64-windows.exe
+            asset: zn-x86_64-windows.exe
     defaults:
       run:
         shell: bash
@@ -52,41 +48,21 @@ jobs:
       - name: Build Zinc
         run: zig build -Doptimize=ReleaseFast -Dtarget=${{ matrix.target }}
 
-      - name: Package archive
+      - name: Package binary
         run: |
-          package_dir="package"
-          rm -rf "$package_dir"
-          mkdir -p "$package_dir"
-          cp "zig-out/bin/${{ matrix.binary }}" "$package_dir/"
-          cp README.md LICENSE "$package_dir/"
-          cp scripts/install-unix.sh scripts/install-windows.ps1 "$package_dir/"
-          cp "zig-out/bin/${{ matrix.binary }}" "${{ matrix.raw }}"
-          python - <<'PY' "$package_dir" "${{ matrix.archive }}" "${{ matrix.raw }}"
-          import hashlib, pathlib, sys, tarfile, zipfile
-          package_dir = pathlib.Path(sys.argv[1])
-          archive = pathlib.Path(sys.argv[2])
-          raw = pathlib.Path(sys.argv[3])
-          if archive.suffix == ".zip":
-              with zipfile.ZipFile(archive, "w", zipfile.ZIP_DEFLATED) as zf:
-                  for path in sorted(package_dir.rglob("*")):
-                      if path.is_file():
-                          zf.write(path, path.relative_to(package_dir))
-          else:
-              with tarfile.open(archive, "w:gz") as tf:
-                  for path in sorted(package_dir.rglob("*")):
-                      tf.add(path, path.relative_to(package_dir))
-          for path in (archive, raw):
-              path.with_name(path.name + ".sha256").write_text(f"{hashlib.sha256(path.read_bytes()).hexdigest()}  {path.name}\n")
+          cp "zig-out/bin/${{ matrix.binary }}" "${{ matrix.asset }}"
+          python - <<'PY' "${{ matrix.asset }}"
+          import hashlib, pathlib, sys
+          path = pathlib.Path(sys.argv[1])
+          path.with_name(path.name + ".sha256").write_text(f"{hashlib.sha256(path.read_bytes()).hexdigest()}  {path.name}\n")
           PY
 
       - uses: actions/upload-artifact@v4
         with:
-          name: ${{ matrix.archive }}
+          name: ${{ matrix.asset }}
           path: |
-            ${{ matrix.archive }}
-            ${{ matrix.archive }}.sha256
-            ${{ matrix.raw }}
-            ${{ matrix.raw }}.sha256
+            ${{ matrix.asset }}
+            ${{ matrix.asset }}.sha256
           if-no-files-found: error
 
   source-package:
@@ -97,7 +73,7 @@ jobs:
       - name: Build Zig source package
         run: |
           version="${GITHUB_REF_NAME#v}"
-          package="zinc-${version}"
+          package="zn-source-${version}"
           rm -rf "$package"
           mkdir -p "$package"
           cp build.zig build.zig.zon README.md LICENSE "$package/"
@@ -111,10 +87,10 @@ jobs:
 
       - uses: actions/upload-artifact@v4
         with:
-          name: zinc-source
+          name: zn-source
           path: |
-            zinc-*.tar.gz
-            zinc-*.tar.gz.sha256
+            zn-source-*.tar.gz
+            zn-source-*.tar.gz.sha256
           if-no-files-found: error
 
   release:
