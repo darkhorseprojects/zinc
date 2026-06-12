@@ -1,9 +1,8 @@
-circuitry: "0.6.1"
+circuitry: "0.6.2"
 name: double shape
 
 takes:
-  $x:
-    type: number
+  $x: number
 
 uses:
   double:
@@ -15,5 +14,4 @@ uses:
       y: $y
 
 gives:
-  $y:
-    type: number
+  $y: number

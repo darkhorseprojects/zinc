@@ -13,7 +13,7 @@ pub fn reportSoftDependencies(allocator: Allocator, store: *Store, parsed: manif
 
     try files.writeAllOut("\nSoft dependencies:\n");
     for (deps) |dep| {
-        const name = index.packageNameFromUri(dep.package);
+        const name = index.packageNameFromSpec(dep.package);
         const installed = try store.getPackage(name);
         if (installed) |pkg| {
             defer store.freePackage(pkg);
@@ -35,5 +35,5 @@ pub fn reportSoftDependencies(allocator: Allocator, store: *Store, parsed: manif
             try files.writeAllOut("\n");
         }
     }
-    try files.writeAllOut("These are not installed automatically. Segments that reference missing soft dependencies will fail only when used.\n");
+    try files.writeAllOut("These are not installed automatically. Package assets that reference missing soft dependencies fail only when used.\n");
 }

@@ -1,4 +1,4 @@
-circuitry: "0.6.1"
+circuitry: "0.6.2"
 name: parallel shapes
 
 zinc:
@@ -6,30 +6,26 @@ zinc:
     parallel: true
     max_parallel: 2
   packages:
-    responses: zinc://package/openai-responses@0.1.4
+    responses: openai-responses@0.1.5
 
 takes:
-  $left_question:
-    type: text
-  $right_question:
-    type: text
+  $left_question: text
+  $right_question: text
 
 uses:
   left:
-    shape: @responses.shapes.short-answer
+    shape: responses.short-answer
     takes:
       question: $left_question
     gives:
       answer: $left_answer
   right:
-    shape: @responses.shapes.short-answer
+    shape: responses.short-answer
     takes:
       question: $right_question
     gives:
       answer: $right_answer
 
 gives:
-  $left_answer:
-    type: text
-  $right_answer:
-    type: text
+  $left_answer: text
+  $right_answer: text

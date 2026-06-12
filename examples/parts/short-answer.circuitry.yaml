@@ -1,9 +1,8 @@
-circuitry: "0.6.1"
+circuitry: "0.6.2"
 name: short answer part
 
 takes:
-  $question:
-    type: text
+  $question: text
 
 uses:
   answer:
@@ -16,5 +15,4 @@ uses:
       answer: $answer
 
 gives:
-  $answer:
-    type: text
+  $answer: text

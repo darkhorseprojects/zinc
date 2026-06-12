@@ -1,4 +1,4 @@
-circuitry: "0.6.1"
+circuitry: "0.6.2"
 name: parallel math
 
 zinc:
@@ -7,8 +7,7 @@ zinc:
     max_parallel: 2
 
 takes:
-  $x:
-    type: number
+  $x: number
 
 uses:
   double:
@@ -35,9 +34,6 @@ uses:
       sum: $total
 
 gives:
-  $double:
-    type: number
-  $triple:
-    type: number
-  $total:
-    type: number
+  $double: number
+  $triple: number
+  $total: number

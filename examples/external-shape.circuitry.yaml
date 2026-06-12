@@ -1,9 +1,8 @@
-circuitry: "0.6.1"
+circuitry: "0.6.2"
 name: external shape demo
 
 takes:
-  $question:
-    type: text
+  $question: text
 
 uses:
   answer:
@@ -14,5 +13,4 @@ uses:
       answer: $answer
 
 gives:
-  $answer:
-    type: text
+  $answer: text

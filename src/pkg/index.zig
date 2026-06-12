@@ -7,39 +7,37 @@ const Allocator = std.mem.Allocator;
 
 pub const PackageRef = struct {
     alias: []const u8,
-    kind: []const u8,
     name: []const u8,
 };
 
 pub fn parsePackageRef(raw: []const u8) !PackageRef {
-    if (!std.mem.startsWith(u8, raw, "@")) return error.NotPackageRef;
-    const body = raw[1..];
-    const first = std.mem.indexOfScalar(u8, body, '.') orelse return error.InvalidPackageRef;
-    const rest = body[first + 1 ..];
-    const second = std.mem.indexOfScalar(u8, rest, '.') orelse return error.InvalidPackageRef;
-    return .{ .alias = body[0..first], .kind = rest[0..second], .name = rest[second + 1 ..] };
+    if (std.mem.startsWith(u8, raw, "@")) return error.InvalidPackageRef;
+    if (std.mem.indexOfScalar(u8, raw, '/')) |_| return error.NotPackageRef;
+    const dot = std.mem.indexOfScalar(u8, raw, '.') orelse return error.NotPackageRef;
+    if (dot == 0 or dot + 1 >= raw.len) return error.InvalidPackageRef;
+    if (std.mem.indexOfScalar(u8, raw[dot + 1 ..], '.')) |_| return error.InvalidPackageRef;
+    return .{ .alias = raw[0..dot], .name = raw[dot + 1 ..] };
 }
 
-pub fn packageNameFromUri(uri: []const u8) []const u8 {
+pub fn packageNameFromSpec(spec: []const u8) []const u8 {
     const prefix = "zinc://package/";
-    if (!std.mem.startsWith(u8, uri, prefix)) return uri;
-    const tail = uri[prefix.len..];
+    const tail = if (std.mem.startsWith(u8, spec, prefix)) spec[prefix.len..] else spec;
     if (std.mem.indexOfScalar(u8, tail, '@')) |at| return tail[0..at];
     if (std.mem.indexOfScalar(u8, tail, '/')) |slash| return tail[0..slash];
     return tail;
 }
 
-pub fn resolveRef(allocator: Allocator, store: *Store, raw: []const u8, alias_uri: ?[]const u8) ![]u8 {
+pub fn resolveRef(allocator: Allocator, store: *Store, raw: []const u8, package_spec: ?[]const u8, capability: []const u8) ![]u8 {
     const parsed = try parsePackageRef(raw);
-    const pkg_name = if (alias_uri) |uri| packageNameFromUri(uri) else parsed.alias;
-    if (alias_uri != null) {
+    const pkg_name = if (package_spec) |spec| packageNameFromSpec(spec) else parsed.alias;
+    if (package_spec != null) {
         const pkg = (try store.getPackage(pkg_name)) orelse return error.SoftDependencyNotInstalled;
         store.freePackage(pkg);
     }
-    return try resolveAsset(allocator, store, pkg_name, parsed.kind, parsed.name);
+    return try resolveAsset(allocator, store, pkg_name, parsed.name, capability);
 }
 
-pub fn resolveAsset(allocator: Allocator, store: *Store, pkg_name: []const u8, kind: []const u8, asset_name: []const u8) ![]u8 {
+pub fn resolveAsset(allocator: Allocator, store: *Store, pkg_name: []const u8, asset_name: []const u8, capability: []const u8) ![]u8 {
     const pkg = (try store.getPackage(pkg_name)) orelse return error.PackageNotFound;
     defer store.freePackage(pkg);
     const root = pkg.path orelse return error.PackagePathMissing;
@@ -53,21 +51,12 @@ pub fn resolveAsset(allocator: Allocator, store: *Store, pkg_name: []const u8, k
     var parsed = try manifest.parse(allocator, manifest_bytes);
     defer parsed.deinit();
 
-    const assets = parsed.getMapField(kind) orelse return error.AssetKindNotFound;
-    const rel_path = assets.getPtr(asset_name) orelse return error.AssetNotFound;
-    if (rel_path.* != .string) return error.InvalidAssetPathType;
+    const asset = try parsed.asset(asset_name);
+    if (!try manifest.assetDoes(asset, capability)) return error.AssetCapabilityMismatch;
 
-    return try std.fs.path.join(allocator, &.{ root, rel_path.string });
+    return try std.fs.path.join(allocator, &.{ root, asset.path });
 }
 
 pub fn resolveShape(allocator: Allocator, store: *Store, pkg_name: []const u8, shape_name: []const u8) ![]u8 {
-    return resolveAsset(allocator, store, pkg_name, "shapes", shape_name);
-}
-
-pub fn resolvePrompt(allocator: Allocator, store: *Store, pkg_name: []const u8, prompt_name: []const u8) ![]u8 {
-    return resolveAsset(allocator, store, pkg_name, "prompts", prompt_name);
-}
-
-pub fn resolveFile(allocator: Allocator, store: *Store, pkg_name: []const u8, file_key: []const u8) ![]u8 {
-    return resolveAsset(allocator, store, pkg_name, "files", file_key);
+    return resolveAsset(allocator, store, pkg_name, shape_name, "circuitry.shape");
 }

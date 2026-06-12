@@ -1,56 +1,8 @@
 # Zinc
 
-Zinc is the host that runs Circuitry action systems.
+Zinc runs `.circuitry.yaml` systems.
 
-Circuitry is YAML for action systems. Zinc loads `.circuitry.yaml`, confirms it through `circuitry-zig`, builds a lazy plan from `$` value wiring, executes needed `uses` entries, stores typed values, and exposes traces through `zinc://` URIs.
-
-## Circuitry 0.6.1
-
-```yaml
-circuitry: "0.6.1"
-name: compute math
-
-takes:
-  $principal:
-    type: number
-  $rate:
-    type: number
-  $years:
-    type: number
-
-uses:
-  compound_interest:
-    takes:
-      principal: $principal
-      rate: $rate
-      years: $years
-    does: |
-      amount = principal * (1 + rate) ^ years
-      interest = amount - principal
-    gives:
-      amount: $amount
-      interest: $interest
-
-gives:
-  $amount:
-    type: number
-  $interest:
-    type: number
-```
-
-Run it:
-
-```bash
-zn run examples/compute-math.circuitry.yaml principal=1000 rate=0.05 years=10
-```
-
-Zinc prints outputs and a run URI.
-
-## Ownership
-
-Circuitry owns `circuitry`, `name`, `about`, `takes`, `uses`, `does`, `gives`, and `$value` references.
-
-Zinc owns `zinc`, `@package` references, `model`, model preset config, package resolution, adapter invocation, value storage, and traces.
+It builds a lazy plan from `$` value wiring, executes ready parts, stores typed values, and exposes run state through `zinc://` URIs.
 
 ## CLI
 
@@ -63,52 +15,100 @@ zn pkg remove <name>
 zn pkg list
 zn pkg check <name>
 zn config
+zn update --check
+zn update
 ```
 
-## Runtime
+## Run
 
-Zinc derives dependency order from `$` references. A part is ready when all values in its local `takes` are available. When `runtime.parallel` is enabled, Zinc runs bounded ready waves concurrently, including inline parts, model-backed parts, and external/package shape parts. Workers return part results; Zinc commits values, reasoning, artifacts, and scoped child traces in plan order for deterministic runs. Values are stored with their type labels and can be read back:
+```bash
+zn run examples/compute-math.circuitry.yaml principal=1000 rate=0.05 years=10
+```
+
+Zinc prints outputs and a run URI.
 
 ```bash
 zn inspect zinc://run/<run_id>
 zn read 'zinc://run/<run_id>/value/$amount'
 ```
 
-Inline parts can execute deterministic arithmetic assignment lines. Model-backed parts resolve through Zinc model presets and package-provided adapters. External and package-provided shapes run through the same value wiring as inline parts.
+`zn update` shows staged progress for target resolution, download, checksum verification, preparation, and install.
 
-The first adapter package is public:
+## Runtime
 
-```text
-zinc://package/openai-responses@0.1.4
-https://github.com/darkhorseprojects/darkhorseprojects-packages/tree/main/openai-responses
+A part is ready when every value in its local `takes` is available. Zinc runs needed parts only. With `runtime.parallel` enabled, Zinc runs bounded ready waves concurrently and commits results in plan order.
+
+```yaml
+zinc:
+  runtime:
+    parallel: true
+    max_parallel: 2
 ```
 
-It installs a self-contained global Zinc config for a local llama.cpp server on `127.0.0.1:30000`, with `context_window: 16384` and `reasoning.max_tokens: 512`.
+`max_parallel: 0` uses the host CPU count.
+
+Inline parts can execute deterministic arithmetic assignment lines. Model-backed parts use configured model presets. Shape parts can point to local files or package assets.
 
 ## Configuration
 
 Zinc reads `.zinc/config.yaml` and `~/.zinc/config.yaml`.
 
 ```yaml
-runtime:
-  parallel: true
-  max_parallel: 0
+packages:
+  responses: openai-responses@0.1.5
 
 models:
-  default: fast
+  default: local-llama
 
-  fast:
-    adapter: @responses.adapters.responses
+  local-llama:
+    adapter: responses.responses
     params:
-      model: gpt-4.1-mini
+      endpoint: http://127.0.0.1:30000
+      endpoint_kind: chat_completions
+      model: local-gemma-4-e4b-it
       temperature: 0.2
 ```
 
 ## Packages
 
-Package manifests are readable YAML and can expose `shapes`, `adapters`, `prompts`, `files`, `docs`, `assets`, and `scripts`. Circuitry files refer to package assets with `@alias.kind.name` and declare aliases under top-level `zinc.packages`.
+A package manifest has one asset namespace. Assets declare what they do.
 
-Packages may declare `soft_dependencies`; Zinc reports them during inspect/install, never installs them automatically, and fails only when a missing optional package segment is used.
+```yaml
+name: openai-responses
+version: "0.1.5"
+about: OpenAI Responses-shaped model adapter package.
+
+assets:
+  short-answer:
+    path: shapes/short-answer.circuitry.yaml
+    does: circuitry.shape
+
+  responses:
+    path: adapters/responses.py
+    does:
+      - zinc.adapter
+      - openai.responses
+```
+
+Authored YAML uses compact `alias.asset` references. Zinc determines the required asset capability from context.
+
+```yaml
+zinc:
+  packages:
+    responses: openai-responses@0.1.5
+
+uses:
+  answer:
+    shape: responses.short-answer
+```
+
+```yaml
+models:
+  local-llama:
+    adapter: responses.responses
+```
+
+Packages may declare `soft_dependencies`; Zinc reports them during inspect/install, never installs them automatically, and fails only when a missing optional asset is used.
 
 ## Building
 
@@ -119,7 +119,6 @@ zig build
 zig build test
 ```
 
-## Learn more
+## Wiki
 
-- [Wiki](https://github.com/darkhorseprojects/zinc/wiki)
-- [Circuitry](https://github.com/darkhorseprojects/circuitry/wiki)
+https://github.com/darkhorseprojects/zinc/wiki

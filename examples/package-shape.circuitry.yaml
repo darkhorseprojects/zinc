@@ -1,22 +1,20 @@
-circuitry: "0.6.1"
+circuitry: "0.6.2"
 name: package shape demo
 
 zinc:
   packages:
-    responses: zinc://package/openai-responses@0.1.4
+    responses: openai-responses@0.1.5
 
 takes:
-  $question:
-    type: text
+  $question: text
 
 uses:
   answer:
-    shape: @responses.shapes.short-answer
+    shape: responses.short-answer
     takes:
       question: $question
     gives:
       answer: $answer
 
 gives:
-  $answer:
-    type: text
+  $answer: text

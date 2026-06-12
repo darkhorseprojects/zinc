@@ -1,14 +1,11 @@
-circuitry: "0.6.1"
+circuitry: "0.6.2"
 name: compute math
 about: Calculate compound interest from explicit numeric inputs.
 
 takes:
-  $principal:
-    type: number
-  $rate:
-    type: number
-  $years:
-    type: number
+  $principal: number
+  $rate: number
+  $years: number
 
 uses:
   compound_interest:
@@ -24,7 +21,5 @@ uses:
       interest: $interest
 
 gives:
-  $amount:
-    type: number
-  $interest:
-    type: number
+  $amount: number
+  $interest: number

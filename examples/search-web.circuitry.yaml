@@ -1,20 +1,19 @@
-circuitry: "0.6.1"
+circuitry: "0.6.2"
 name: search web
 about: Search the web through a Zinc package shape.
 
 zinc:
   packages:
-    browser: zinc://package/browser@0.6.1
-    responses: zinc://package/openai-responses@0.1.4
+    browser: browser@0.6.1
+    responses: openai-responses@0.1.5
 
 takes:
-  $query:
-    type: text
+  $query: text
   $current_date: date
 
 uses:
   search:
-    shape: @browser.shapes.search-web
+    shape: browser.search-web
     takes:
       query: $query
       current_date: $current_date
@@ -33,7 +32,5 @@ uses:
       citations: $citations
 
 gives:
-  $answer:
-    type: text
-  $citations:
-    type: list
+  $answer: text
+  $citations: list

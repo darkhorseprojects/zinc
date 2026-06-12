@@ -464,10 +464,10 @@ fn runShapeReferenceThread(allocator: Allocator, io: std.Io, run_id: []const u8,
 }
 
 fn runShapeReference(allocator: Allocator, io: std.Io, store: *Store, run_id: []const u8, shape_path: []const u8, settings: *const config.ConfigSettings, parent_values: *std.StringHashMap(TypedValue), entry: circuitry.UseEntry, shape_ref: []const u8, result_name: []const u8) anyerror!PartResult {
-    const resolved = if (std.mem.startsWith(u8, shape_ref, "@")) blk: {
-        const parsed_ref = try pkg_index.parsePackageRef(shape_ref);
-        break :blk try pkg_index.resolveRef(allocator, store, shape_ref, settings.packageAlias(parsed_ref.alias));
-    } else try resolveRelative(allocator, shape_path, shape_ref);
+    const resolved = if (pkg_index.parsePackageRef(shape_ref)) |parsed_ref|
+        try pkg_index.resolveRef(allocator, store, shape_ref, settings.packageAlias(parsed_ref.alias), "circuitry.shape")
+    else |_|
+        try resolveRelative(allocator, shape_path, shape_ref);
     defer allocator.free(resolved);
 
     var child = try circuitry.loadFile(io, allocator, resolved);
@@ -509,11 +509,10 @@ fn runModelPart(allocator: Allocator, io: std.Io, store: *Store, run_id: []const
 }
 
 fn resolveAdapterPath(allocator: Allocator, store: *Store, settings: *const config.ConfigSettings, adapter_ref: []const u8) ![]u8 {
-    if (std.mem.startsWith(u8, adapter_ref, "@")) {
-        const parsed_ref = try pkg_index.parsePackageRef(adapter_ref);
-        return try pkg_index.resolveRef(allocator, store, adapter_ref, settings.packageAlias(parsed_ref.alias));
-    }
-    return try allocator.dupe(u8, adapter_ref);
+    if (pkg_index.parsePackageRef(adapter_ref)) |parsed_ref|
+        return try pkg_index.resolveRef(allocator, store, adapter_ref, settings.packageAlias(parsed_ref.alias), "zinc.adapter")
+    else |_|
+        return try allocator.dupe(u8, adapter_ref);
 }
 
 fn runModelPartResolved(allocator: Allocator, io: std.Io, run_id: []const u8, model_name: []const u8, preset: config.ModelPreset, adapter_path: []const u8, values: *std.StringHashMap(TypedValue), entry: circuitry.UseEntry, result_name: []const u8) !PartResult {
@@ -663,13 +662,13 @@ fn adapterRequestYaml(allocator: Allocator, model_name: []const u8, preset: conf
     for (entry.takes) |take| {
         const local = take.local orelse trimDollar(take.value);
         const found = values.get(take.value) orelse return error.MissingInputValue;
-        try out.print(allocator, "  {s}:\n    type: {s}\n    value: |\n", .{ local, found.type_label orelse "value" });
+        try out.print(allocator, "  {s}:\n    {s}: |\n", .{ local, found.type_label orelse "value" });
         var value_lines = std.mem.splitScalar(u8, found.value, '\n');
         while (value_lines.next()) |line| try out.print(allocator, "      {s}\n", .{line});
     }
     try out.appendSlice(allocator, "gives:\n");
     for (entry.gives) |give| {
-        try out.print(allocator, "  {s}:\n    type: {s}\n", .{ give.local orelse trimDollar(give.value), give.type_label orelse "text" });
+        try out.print(allocator, "  {s}: {s}\n", .{ give.local orelse trimDollar(give.value), give.type_label orelse "text" });
     }
     return out.toOwnedSlice(allocator);
 }
@@ -709,7 +708,8 @@ fn applyAdapterResponse(allocator: Allocator, result: *PartResult, entry: circui
             if (value_node.* != .string) continue;
             try result.addOutput(parent, if (type_node) |t| if (t.* == .string) t.string else null else null, value_node.string);
         } else if (item.value_ptr.* == .string) {
-            try result.addOutput(parent, "text", item.value_ptr.string);
+            const expected = bindingForLocal(entry.gives, item.key_ptr.*).?.type_label;
+            try result.addOutput(parent, expected, item.value_ptr.string);
         }
     }
 }
@@ -765,6 +765,14 @@ fn childBindingForLocal(bindings: []const circuitry.ValueBinding, local_name: []
     for (bindings) |binding| {
         if (std.mem.eql(u8, trimDollar(binding.value), local_name)) return binding;
         if (binding.local) |local| if (std.mem.eql(u8, local, local_name)) return binding;
+    }
+    return null;
+}
+
+fn bindingForLocal(bindings: []const circuitry.ValueBinding, local_name: []const u8) ?circuitry.ValueBinding {
+    for (bindings) |binding| {
+        if (binding.local) |local| if (std.mem.eql(u8, local, local_name)) return binding;
+        if (std.mem.eql(u8, trimDollar(binding.value), local_name)) return binding;
     }
     return null;
 }

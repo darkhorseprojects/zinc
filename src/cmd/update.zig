@@ -19,10 +19,12 @@ const Options = struct {
 
 pub fn runUpdate(allocator: Allocator, io: std.Io, args: []const []const u8) !void {
     const opts = try parseArgs(args);
+    if (!opts.check) try progress("resolve", 0, "checking target");
     const target_version = if (std.mem.eql(u8, opts.requested_version, "latest"))
         try latestVersion(allocator, io)
     else
         try allocator.dupe(u8, opts.requested_version);
+    if (!opts.check) try progress("resolve", 1, target_version);
     defer allocator.free(target_version);
 
     if (opts.check) {
@@ -34,11 +36,12 @@ pub fn runUpdate(allocator: Allocator, io: std.Io, args: []const []const u8) !vo
         return;
     }
     if (!opts.yes) {
-        try files.writeAllOut("Updating Zinc ");
+        try files.writeAllOut("\nZinc update\n");
+        try files.writeAllOut("  ");
         try files.writeAllOut(version.current);
         try files.writeAllOut(" -> ");
         try files.writeAllOut(target_version);
-        try files.writeAllOut("\n");
+        try files.writeAllOut("\n\n");
     }
 
     const asset = try assetName();
@@ -53,16 +56,29 @@ pub fn runUpdate(allocator: Allocator, io: std.Io, args: []const []const u8) !vo
     const pending_path = try siblingPath(allocator, exe_path, asset, "pending");
     defer allocator.free(pending_path);
 
+    try progress("download", 0, asset);
     try http.fetchFile(allocator, io, asset_url, pending_path, max_binary_bytes);
-    try verifyChecksum(allocator, io, checksum_url, pending_path);
-    if (platform.currentOS() != .windows) try makeExecutable(io, pending_path);
+    try progress("download", 1, asset);
 
+    try progress("verify", 0, "sha256");
+    try verifyChecksum(allocator, io, checksum_url, pending_path);
+    try progress("verify", 1, "sha256");
+
+    if (platform.currentOS() != .windows) {
+        try progress("prepare", 0, "permissions");
+        try makeExecutable(io, pending_path);
+        try progress("prepare", 1, "permissions");
+    }
+
+    try progress("install", 0, "binary");
     if (platform.currentOS() == .windows) {
         try replaceOnWindows(allocator, io, exe_path, pending_path, asset);
-        try files.writeAllOut("Zinc update staged. It will finish after this process exits.\n");
+        try progress("install", 1, "staged");
+        try files.writeAllOut("\nZinc update staged. It will finish after this process exits.\n");
     } else {
         try std.Io.Dir.renameAbsolute(pending_path, exe_path, io);
-        try files.writeAllOut("Zinc updated.\n");
+        try progress("install", 1, "binary");
+        try files.writeAllOut("\nZinc updated.\n");
     }
 }
 
@@ -88,6 +104,22 @@ pub fn runInternalReplace(allocator: Allocator, io: std.Io, args: []const []cons
         return;
     }
     return error.ReplaceTimedOut;
+}
+
+fn progress(label: []const u8, complete: usize, detail: []const u8) !void {
+    const width: usize = 24;
+    const filled: usize = if (complete == 0) 0 else width;
+    try files.writeAllOut("  ");
+    try files.writeAllOut(label);
+    var pad = label.len;
+    while (pad < 10) : (pad += 1) try files.writeAllOut(" ");
+    try files.writeAllOut("[");
+    var i: usize = 0;
+    while (i < width) : (i += 1) try files.writeAllOut(if (i < filled) "#" else "-");
+    try files.writeAllOut("] ");
+    try files.writeAllOut(if (complete == 0) "  0% " else "100% ");
+    try files.writeAllOut(detail);
+    try files.writeAllOut("\n");
 }
 
 fn parseArgs(args: []const []const u8) !Options {
