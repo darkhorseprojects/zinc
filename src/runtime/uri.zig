@@ -123,18 +123,18 @@ pub fn resolveRead(allocator: Allocator, store: *Store, raw_uri: []const u8) ![]
             const name = parsed.extra.?;
             const row = (try store.getRunText(parsed.id, "artifact", name)) orelse return error.RunArtifactNotFound;
             defer store.freeRunText(row);
-            return try allocator.dupe(u8, row.text);
+            return try allocator.dupe(u8, row.payload);
         },
         .run_plan => {
             const row = (try store.getRunText(parsed.id, "plan", "plan")) orelse return error.RunPlanNotFound;
             defer store.freeRunText(row);
-            return try allocator.dupe(u8, row.text);
+            return try allocator.dupe(u8, row.payload);
         },
         .run_reasoning => {
             const name = parsed.extra.?;
             const row = (try store.getRunText(parsed.id, "reasoning", name)) orelse return error.RunReasoningNotFound;
             defer store.freeRunText(row);
-            return try allocator.dupe(u8, row.text);
+            return try allocator.dupe(u8, row.payload);
         },
         .run_part => {
             const name = parsed.extra.?;
@@ -150,12 +150,12 @@ pub fn resolveRead(allocator: Allocator, store: *Store, raw_uri: []const u8) ![]
             const value_name = parsed.extra.?;
             const row = (try store.getRunValue(parsed.id, value_name)) orelse return error.RunValueNotFound;
             defer store.freeRunValue(row);
-            return try allocator.dupe(u8, row.value);
+            return try allocator.dupe(u8, row.payload);
         },
         .doc => {
             const doc_obj = (try store.getDoc(parsed.id)) orelse return error.DocNotFound;
             defer store.freeDoc(doc_obj);
-            return try allocator.dupe(u8, doc_obj.source);
+            return try allocator.dupe(u8, doc_obj.source_payload);
         },
         .package => {
             const pkg = (try store.getPackage(parsed.id)) orelse return error.PackageNotFound;

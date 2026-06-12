@@ -35,5 +35,5 @@ pub fn reportSoftDependencies(allocator: Allocator, store: *Store, parsed: manif
             try files.writeAllOut("\n");
         }
     }
-    try files.writeAllOut("These are not installed automatically. Package assets that reference missing soft dependencies fail only when used.\n");
+    try files.writeAllOut("These are not installed automatically. References to missing soft dependencies fail only when used.\n");
 }

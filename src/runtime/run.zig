@@ -40,21 +40,61 @@ const ValueDraft = struct {
 const TextDraft = struct {
     kind: []const u8,
     name: []const u8,
-    text: []const u8,
+    payload: []const u8,
+};
+
+const PlanBinding = struct {
+    local: ?[]const u8,
+    value: []const u8,
+    type_label: ?[]const u8,
+};
+
+const PlanValue = struct {
+    name: []const u8,
+    type_label: ?[]const u8,
+    direction: []const u8,
+};
+
+const PlanPart = struct {
+    id: []const u8,
+    name: []const u8,
+    shape: ?[]const u8,
+    model: ?[]const u8,
+    instructions: ?[]const u8,
+    takes: []PlanBinding,
+    gives: []PlanBinding,
+};
+
+const PlanDoc = struct {
+    allocator: Allocator,
+    takes: []PlanValue,
+    gives: []PlanValue,
+    parts: []PlanPart,
+
+    fn deinit(self: *PlanDoc) void {
+        for (self.takes) |value| freePlanValue(self.allocator, value);
+        self.allocator.free(self.takes);
+        for (self.gives) |value| freePlanValue(self.allocator, value);
+        self.allocator.free(self.gives);
+        for (self.parts) |*part| freePlanPart(self.allocator, part);
+        self.allocator.free(self.parts);
+    }
 };
 
 const PartResult = struct {
     allocator: Allocator,
     name: []const u8,
+    doc_part_id: []const u8,
     outputs: std.ArrayList(ValueDraft) = .empty,
     texts: std.ArrayList(TextDraft) = .empty,
 
-    fn init(allocator: Allocator, name: []const u8) !PartResult {
-        return .{ .allocator = allocator, .name = try allocator.dupe(u8, name) };
+    fn init(allocator: Allocator, name: []const u8, doc_part_id: []const u8) !PartResult {
+        return .{ .allocator = allocator, .name = try allocator.dupe(u8, name), .doc_part_id = try allocator.dupe(u8, doc_part_id) };
     }
 
     fn deinit(self: *PartResult) void {
         self.allocator.free(self.name);
+        self.allocator.free(self.doc_part_id);
         for (self.outputs.items) |item| {
             self.allocator.free(item.name);
             if (item.type_label) |label| self.allocator.free(label);
@@ -64,7 +104,7 @@ const PartResult = struct {
         for (self.texts.items) |item| {
             self.allocator.free(item.kind);
             self.allocator.free(item.name);
-            self.allocator.free(item.text);
+            self.allocator.free(item.payload);
         }
         self.texts.deinit(self.allocator);
     }
@@ -77,27 +117,25 @@ const PartResult = struct {
         });
     }
 
-    fn addText(self: *PartResult, kind: []const u8, name: []const u8, text: []const u8) !void {
+    fn addText(self: *PartResult, kind: []const u8, name: []const u8, payload: []const u8) !void {
         try self.texts.append(self.allocator, .{
             .kind = try self.allocator.dupe(u8, kind),
             .name = try self.allocator.dupe(u8, name),
-            .text = try self.allocator.dupe(u8, text),
+            .payload = try self.allocator.dupe(u8, payload),
         });
     }
 };
 
-pub fn runShape(allocator: Allocator, io: std.Io, store: *Store, shape_path: []const u8, args: []const []const u8, settings: *const config.ConfigSettings) !void {
-    const abs_path = try std.fs.path.resolve(allocator, &.{shape_path});
-    defer allocator.free(abs_path);
+fn materializeShapeFile(allocator: Allocator, io: std.Io, store: *Store, abs_path: []const u8) ![]u8 {
+    const source_bytes = try files.readLimited(allocator, abs_path, 16 * 1024 * 1024);
+    defer allocator.free(source_bytes);
 
-    var shape = try circuitry.loadFile(io, allocator, abs_path);
+    var shape = try circuitry.loadText(allocator, source_bytes);
     defer shape.deinit();
-
     var confirmation = try circuitry.confirm(allocator, &shape);
     defer confirmation.deinit();
-
     if (!confirmation.ready) {
-        try files.writeAllErr("Error: Circuitry system is not ready to run.\n");
+        try files.writeAllErr("Error: Circuitry document is not ready to run.\n");
         for (confirmation.problems) |prob| {
             try files.writeAllErr("- ");
             try files.writeAllErr(prob);
@@ -106,22 +144,77 @@ pub fn runShape(allocator: Allocator, io: std.Io, store: *Store, shape_path: []c
         return error.CircuitryShapeNotReady;
     }
 
-    const source_bytes = try files.readLimited(allocator, abs_path, 16 * 1024 * 1024);
-    defer allocator.free(source_bytes);
-
-    var id_buf: [16]u8 = undefined;
-    const doc_id = try std.fmt.allocPrint(allocator, "doc_{s}", .{try randomHex(io, &id_buf)});
-    defer allocator.free(doc_id);
-    const run_id = try std.fmt.allocPrint(allocator, "run_{s}", .{try randomHex(io, &id_buf)});
-    defer allocator.free(run_id);
-
+    const doc_id = try circuitry.stableDocId(allocator, source_bytes);
+    errdefer allocator.free(doc_id);
+    lockRuntimeStore();
+    errdefer unlockRuntimeStore();
     try store.insertDoc(.{
         .id = doc_id,
         .path = abs_path,
         .name = confirmation.card.name,
-        .source = source_bytes,
+        .source_payload = source_bytes,
         .updated_at = std.Io.Clock.now(.real, io).toSeconds(),
     });
+    try store.clearDocFacts(doc_id);
+    try storeNormalizedDoc(allocator, store, doc_id, &confirmation.system);
+    unlockRuntimeStore();
+    return doc_id;
+}
+
+fn storeNormalizedDoc(allocator: Allocator, store: *Store, doc_id: []const u8, doc: *const circuitry.NormalizedDoc) !void {
+    for (doc.takes, 0..) |value, index| try storeDocValue(allocator, store, doc_id, value, index);
+    for (doc.gives, 0..) |value, index| try storeDocValue(allocator, store, doc_id, value, index);
+    for (doc.parts, 0..) |part, index| {
+        const part_key = try circuitry.partKey(allocator, part.name);
+        defer allocator.free(part_key);
+        const part_id = try scopedDocId(allocator, doc_id, part_key);
+        defer allocator.free(part_id);
+        try store.insertDocPart(.{ .id = part_id, .doc_id = doc_id, .order_index = @intCast(index), .name = part.name, .shape = part.shape, .model = part.model, .instructions = part.instructions });
+        for (part.takes) |binding| try storeDocBinding(allocator, store, doc_id, part_id, part.name, .takes, binding);
+        for (part.gives) |binding| try storeDocBinding(allocator, store, doc_id, part_id, part.name, .gives, binding);
+    }
+    for (doc.diagnostics, 0..) |diagnostic, index| {
+        const id = try std.fmt.allocPrint(allocator, "{s}:diagnostic:{d}", .{ doc_id, index });
+        defer allocator.free(id);
+        try store.insertDocDiagnostic(.{ .id = id, .doc_id = doc_id, .severity = "error", .kind = diagnostic.kind, .message = diagnostic.message });
+    }
+}
+
+fn storeDocValue(allocator: Allocator, store: *Store, doc_id: []const u8, value: circuitry.NormalizedValue, order_index: usize) !void {
+    const key = try circuitry.valueKey(allocator, value.direction, value.name);
+    defer allocator.free(key);
+    const id = try scopedDocId(allocator, doc_id, key);
+    defer allocator.free(id);
+    try store.insertDocValue(.{ .id = id, .doc_id = doc_id, .order_index = @intCast(order_index), .name = value.name, .type_label = value.type_label, .direction = @tagName(value.direction) });
+}
+
+fn storeDocBinding(allocator: Allocator, store: *Store, doc_id: []const u8, part_id: []const u8, part_name: []const u8, side: circuitry.Direction, binding: circuitry.NormalizedBinding) !void {
+    const local_or_value = binding.local orelse binding.value;
+    const key = try circuitry.bindingKey(allocator, part_name, side, local_or_value);
+    defer allocator.free(key);
+    const id = try scopedDocId(allocator, doc_id, key);
+    defer allocator.free(id);
+    try store.insertDocBinding(.{ .id = id, .doc_id = doc_id, .part_id = part_id, .side = @tagName(side), .local_name = binding.local, .value_name = binding.value, .type_label = binding.type_label });
+}
+
+fn scopedDocId(allocator: Allocator, doc_id: []const u8, key: []const u8) ![]u8 {
+    return std.fmt.allocPrint(allocator, "{s}:{s}", .{ doc_id, key });
+}
+
+pub fn runShape(allocator: Allocator, io: std.Io, store: *Store, shape_path: []const u8, args: []const []const u8, settings: *const config.ConfigSettings) !void {
+    const abs_path = try std.fs.path.resolve(allocator, &.{shape_path});
+    defer allocator.free(abs_path);
+
+    var shape = try circuitry.loadFile(io, allocator, abs_path);
+    defer shape.deinit();
+    const doc_id = try materializeShapeFile(allocator, io, store, abs_path);
+    defer allocator.free(doc_id);
+    var plan_doc = try loadPlanDoc(allocator, store, doc_id);
+    defer plan_doc.deinit();
+
+    var id_buf: [16]u8 = undefined;
+    const run_id = try std.fmt.allocPrint(allocator, "run_{s}", .{try randomHex(io, &id_buf)});
+    defer allocator.free(run_id);
     try store.insertRun(.{
         .id = run_id,
         .doc_id = doc_id,
@@ -129,27 +222,23 @@ pub fn runShape(allocator: Allocator, io: std.Io, store: *Store, shape_path: []c
         .started_at = std.Io.Clock.now(.real, io).toSeconds(),
         .finished_at = null,
     });
-    try files.writeAllOut("Run URI: zinc://run/");
-    try files.writeAllOut(run_id);
-    try files.writeAllOut("\n");
-
     var values = std.StringHashMap(TypedValue).init(allocator);
     defer freeValues(&values);
 
     var run_settings = settings.*;
     applyShapeRuntime(&run_settings, &shape.root);
 
-    try collectInputs(allocator, &values, confirmation.system.takes, args);
-    const required = try requiredFrontier(allocator, confirmation.system.uses, confirmation.system.gives);
+    try collectInputs(allocator, &values, plan_doc.takes, args);
+    const required = try requiredFrontier(allocator, plan_doc.parts, plan_doc.gives);
     defer allocator.free(required);
-    const plan_text = try planText(allocator, confirmation.system.uses, required);
+    const plan_text = try planText(allocator, plan_doc.parts, required);
     defer allocator.free(plan_text);
     try files.writeAllOut(plan_text);
     const plan_id = try textId(allocator, run_id, "plan", "plan");
     defer allocator.free(plan_id);
-    try store.insertRunText(.{ .id = plan_id, .run_id = run_id, .kind = "plan", .name = "plan", .text = plan_text });
-    try executePlan(allocator, io, store, run_id, abs_path, &run_settings, &values, confirmation.system.uses, required, null);
-    try storeOutputs(allocator, store, run_id, &values, confirmation.system.gives);
+    try store.insertRunText(.{ .id = plan_id, .run_id = run_id, .kind = "plan", .name = "plan", .payload = plan_text });
+    try executePlan(allocator, io, store, run_id, abs_path, &run_settings, &values, plan_doc.parts, required, null);
+    try storeOutputs(allocator, store, run_id, &values, plan_doc.gives);
 
     try store.insertRun(.{
         .id = run_id,
@@ -160,9 +249,9 @@ pub fn runShape(allocator: Allocator, io: std.Io, store: *Store, shape_path: []c
     });
 
     try files.writeAllOut("\nOutputs:\n");
-    for (confirmation.system.gives) |give| {
-        const found = values.get(give.value) orelse return error.MissingOutputValue;
-        try files.writeAllOut(give.value);
+    for (plan_doc.gives) |give| {
+        const found = values.get(give.name) orelse return error.MissingOutputValue;
+        try files.writeAllOut(give.name);
         try files.writeAllOut(": ");
         try files.writeAllOut(found.value);
         try files.writeAllOut("\n");
@@ -170,6 +259,115 @@ pub fn runShape(allocator: Allocator, io: std.Io, store: *Store, shape_path: []c
     try files.writeAllOut("Run URI: zinc://run/");
     try files.writeAllOut(run_id);
     try files.writeAllOut("\n");
+}
+
+fn loadPlanDoc(allocator: Allocator, store: *Store, doc_id: []const u8) !PlanDoc {
+    lockRuntimeStore();
+    defer unlockRuntimeStore();
+    const values = try store.listDocValues(doc_id);
+    defer {
+        for (values) |row| store.freeDocValue(row);
+        allocator.free(values);
+    }
+    const parts = try store.listDocParts(doc_id);
+    defer {
+        for (parts) |row| store.freeDocPart(row);
+        allocator.free(parts);
+    }
+    const bindings = try store.listDocBindings(doc_id);
+    defer {
+        for (bindings) |row| store.freeDocBinding(row);
+        allocator.free(bindings);
+    }
+
+    var takes: std.ArrayList(PlanValue) = .empty;
+    errdefer freePlanValues(allocator, &takes);
+    var gives: std.ArrayList(PlanValue) = .empty;
+    errdefer freePlanValues(allocator, &gives);
+    for (values) |value| {
+        const item = try clonePlanValue(allocator, value);
+        if (std.mem.eql(u8, value.direction, "takes")) try takes.append(allocator, item) else try gives.append(allocator, item);
+    }
+
+    var plan_parts: std.ArrayList(PlanPart) = .empty;
+    errdefer {
+        for (plan_parts.items) |*part| freePlanPart(allocator, part);
+        plan_parts.deinit(allocator);
+    }
+    for (parts) |part| {
+        const part_takes = try bindingsForPart(allocator, bindings, part.id, "takes");
+        errdefer freePlanBindings(allocator, part_takes);
+        const part_gives = try bindingsForPart(allocator, bindings, part.id, "gives");
+        errdefer freePlanBindings(allocator, part_gives);
+        try plan_parts.append(allocator, .{
+            .id = try allocator.dupe(u8, part.id),
+            .name = try allocator.dupe(u8, part.name),
+            .shape = if (part.shape) |s| try allocator.dupe(u8, s) else null,
+            .model = if (part.model) |m| try allocator.dupe(u8, m) else null,
+            .instructions = if (part.instructions) |i| try allocator.dupe(u8, i) else null,
+            .takes = part_takes,
+            .gives = part_gives,
+        });
+    }
+
+    return .{
+        .allocator = allocator,
+        .takes = try takes.toOwnedSlice(allocator),
+        .gives = try gives.toOwnedSlice(allocator),
+        .parts = try plan_parts.toOwnedSlice(allocator),
+    };
+}
+
+fn bindingsForPart(allocator: Allocator, bindings: []const store_mod.circuitry_doc_bindings, part_id: []const u8, side: []const u8) ![]PlanBinding {
+    var out: std.ArrayList(PlanBinding) = .empty;
+    errdefer freePlanBindings(allocator, out.items);
+    for (bindings) |binding| {
+        if (!std.mem.eql(u8, binding.part_id, part_id) or !std.mem.eql(u8, binding.side, side)) continue;
+        try out.append(allocator, .{
+            .local = if (binding.local_name) |local| try allocator.dupe(u8, local) else null,
+            .value = try allocator.dupe(u8, binding.value_name),
+            .type_label = if (binding.type_label) |label| try allocator.dupe(u8, label) else null,
+        });
+    }
+    return out.toOwnedSlice(allocator);
+}
+
+fn clonePlanValue(allocator: Allocator, row: store_mod.circuitry_doc_values) !PlanValue {
+    return .{
+        .name = try allocator.dupe(u8, row.name),
+        .type_label = if (row.type_label) |label| try allocator.dupe(u8, label) else null,
+        .direction = try allocator.dupe(u8, row.direction),
+    };
+}
+
+fn freePlanValues(allocator: Allocator, list: *std.ArrayList(PlanValue)) void {
+    for (list.items) |item| freePlanValue(allocator, item);
+    list.deinit(allocator);
+}
+
+fn freePlanValue(allocator: Allocator, value: PlanValue) void {
+    allocator.free(value.name);
+    if (value.type_label) |label| allocator.free(label);
+    allocator.free(value.direction);
+}
+
+fn freePlanBindings(allocator: Allocator, bindings: []PlanBinding) void {
+    for (bindings) |binding| {
+        if (binding.local) |local| allocator.free(local);
+        allocator.free(binding.value);
+        if (binding.type_label) |label| allocator.free(label);
+    }
+    allocator.free(bindings);
+}
+
+fn freePlanPart(allocator: Allocator, part: *PlanPart) void {
+    allocator.free(part.id);
+    allocator.free(part.name);
+    if (part.shape) |shape_ref| allocator.free(shape_ref);
+    if (part.model) |model| allocator.free(model);
+    if (part.instructions) |instructions| allocator.free(instructions);
+    freePlanBindings(allocator, part.takes);
+    freePlanBindings(allocator, part.gives);
 }
 
 fn applyShapeRuntime(settings: *config.ConfigSettings, root: *const serde.yaml.Value) void {
@@ -187,11 +385,11 @@ fn applyShapeRuntime(settings: *config.ConfigSettings, root: *const serde.yaml.V
     };
 }
 
-fn collectInputs(allocator: Allocator, values: *std.StringHashMap(TypedValue), takes: []const circuitry.ValueBinding, args: []const []const u8) !void {
+fn collectInputs(allocator: Allocator, values: *std.StringHashMap(TypedValue), takes: []const PlanValue, args: []const []const u8) !void {
     for (takes) |take| {
-        const raw_name = if (std.mem.startsWith(u8, take.value, "$")) take.value[1..] else take.value;
-        const provided = findArg(args, take.value) orelse findArg(args, raw_name) orelse return error.MissingInput;
-        try values.put(try allocator.dupe(u8, take.value), .{
+        const raw_name = if (std.mem.startsWith(u8, take.name, "$")) take.name[1..] else take.name;
+        const provided = findArg(args, take.name) orelse findArg(args, raw_name) orelse return error.MissingInput;
+        try values.put(try allocator.dupe(u8, take.name), .{
             .allocator = allocator,
             .type_label = if (take.type_label) |label| try allocator.dupe(u8, label) else null,
             .value = try allocator.dupe(u8, provided),
@@ -208,7 +406,7 @@ fn findArg(args: []const []const u8, name: []const u8) ?[]const u8 {
     return null;
 }
 
-fn planText(allocator: Allocator, uses: []const circuitry.UseEntry, required: []const bool) ![]u8 {
+fn planText(allocator: Allocator, uses: []const PlanPart, required: []const bool) ![]u8 {
     var out: std.ArrayList(u8) = .empty;
     errdefer out.deinit(allocator);
     try out.appendSlice(allocator, "Plan:\n");
@@ -221,28 +419,28 @@ fn planText(allocator: Allocator, uses: []const circuitry.UseEntry, required: []
     return out.toOwnedSlice(allocator);
 }
 
-fn requiredFrontier(allocator: Allocator, uses: []const circuitry.UseEntry, gives: []const circuitry.ValueBinding) ![]bool {
+fn requiredFrontier(allocator: Allocator, uses: []const PlanPart, gives: []const PlanValue) ![]bool {
     const required = try allocator.alloc(bool, uses.len);
     @memset(required, false);
-    for (gives) |give| try requireValue(uses, required, give.value);
+    for (gives) |give| try requireValue(uses, required, give.name);
     return required;
 }
 
-fn requireValue(uses: []const circuitry.UseEntry, required: []bool, value_name: []const u8) !void {
+fn requireValue(uses: []const PlanPart, required: []bool, value_name: []const u8) !void {
     const producer = producerIndex(uses, value_name) orelse return;
     if (required[producer]) return;
     required[producer] = true;
     for (uses[producer].takes) |take| try requireValue(uses, required, take.value);
 }
 
-fn producerIndex(uses: []const circuitry.UseEntry, value_name: []const u8) ?usize {
+fn producerIndex(uses: []const PlanPart, value_name: []const u8) ?usize {
     for (uses, 0..) |entry, index| {
         for (entry.gives) |give| if (std.mem.eql(u8, give.value, value_name)) return index;
     }
     return null;
 }
 
-fn executePlan(allocator: Allocator, io: std.Io, store: *Store, run_id: []const u8, shape_path: []const u8, settings: *const config.ConfigSettings, values: *std.StringHashMap(TypedValue), uses: []const circuitry.UseEntry, required: []const bool, trace_prefix: ?[]const u8) anyerror!void {
+fn executePlan(allocator: Allocator, io: std.Io, store: *Store, run_id: []const u8, shape_path: []const u8, settings: *const config.ConfigSettings, values: *std.StringHashMap(TypedValue), uses: []const PlanPart, required: []const bool, trace_prefix: ?[]const u8) anyerror!void {
     var done = try allocator.alloc(bool, uses.len);
     defer allocator.free(done);
     @memset(done, false);
@@ -275,7 +473,7 @@ fn executePlan(allocator: Allocator, io: std.Io, store: *Store, run_id: []const 
 const WorkerContext = struct {
     io: std.Io,
     run_id: []const u8,
-    entry: circuitry.UseEntry,
+    entry: PlanPart,
     values: *std.StringHashMap(TypedValue),
     settings: *const config.ConfigSettings,
     shape_path: []const u8,
@@ -287,7 +485,7 @@ const WorkerContext = struct {
     err: ?anyerror = null,
 };
 
-fn executeReadyParallelWave(allocator: Allocator, io: std.Io, store: *Store, run_id: []const u8, shape_path: []const u8, settings: *const config.ConfigSettings, values: *std.StringHashMap(TypedValue), uses: []const circuitry.UseEntry, required: []const bool, done: []bool, done_count: *usize, trace_prefix: ?[]const u8) !bool {
+fn executeReadyParallelWave(allocator: Allocator, io: std.Io, store: *Store, run_id: []const u8, shape_path: []const u8, settings: *const config.ConfigSettings, values: *std.StringHashMap(TypedValue), uses: []const PlanPart, required: []const bool, done: []bool, done_count: *usize, trace_prefix: ?[]const u8) !bool {
     const max_parallel = try maxParallel(settings);
     if (max_parallel < 2) return false;
 
@@ -316,7 +514,7 @@ fn executeReadyParallelWave(allocator: Allocator, io: std.Io, store: *Store, run
 
     for (selected.items, 0..) |index, worker_index| {
         const entry = uses[index];
-        try markPart(allocator, store, run_id, entry.name, "running");
+        try markPart(allocator, store, run_id, entry.id, entry.name, "running");
         contexts[worker_index] = .{ .io = io, .run_id = run_id, .entry = entry, .values = values, .settings = settings, .shape_path = shape_path, .trace_prefix = trace_prefix };
         if (isModelPart(entry)) {
             const model_name = entry.model orelse settings.defaultModel();
@@ -380,37 +578,37 @@ fn maxParallel(settings: *const config.ConfigSettings) !usize {
     return std.Thread.getCpuCount() catch 1;
 }
 
-fn parallelSafe(entry: circuitry.UseEntry) bool {
+fn parallelSafe(entry: PlanPart) bool {
     if (entry.shape != null or isModelPart(entry)) return true;
     const instructions = entry.instructions orelse return false;
     return hasAssignments(instructions);
 }
 
-fn isModelPart(entry: circuitry.UseEntry) bool {
+fn isModelPart(entry: PlanPart) bool {
     return entry.model != null or entry.instructions != null and !hasAssignments(entry.instructions.?);
 }
 
-fn ready(values: *std.StringHashMap(TypedValue), takes: []const circuitry.ValueBinding) bool {
+fn ready(values: *std.StringHashMap(TypedValue), takes: []const PlanBinding) bool {
     for (takes) |take| if (!values.contains(take.value)) return false;
     return true;
 }
 
-fn runPart(allocator: Allocator, io: std.Io, store: *Store, run_id: []const u8, shape_path: []const u8, settings: *const config.ConfigSettings, values: *std.StringHashMap(TypedValue), entry: circuitry.UseEntry, trace_prefix: ?[]const u8) anyerror!void {
+fn runPart(allocator: Allocator, io: std.Io, store: *Store, run_id: []const u8, shape_path: []const u8, settings: *const config.ConfigSettings, values: *std.StringHashMap(TypedValue), entry: PlanPart, trace_prefix: ?[]const u8) anyerror!void {
     const trace_name = try scopedName(allocator, trace_prefix, entry.name);
     defer allocator.free(trace_name);
-    try markPart(allocator, store, run_id, trace_name, "running");
+    try markPart(allocator, store, run_id, entry.id, trace_name, "running");
 
     var result = try executePart(allocator, io, store, run_id, shape_path, settings, values, entry, trace_name);
     defer result.deinit();
     try commitPartResult(allocator, store, run_id, values, &result);
 }
 
-fn markPart(allocator: Allocator, store: *Store, run_id: []const u8, name: []const u8, status: []const u8) !void {
+fn markPart(allocator: Allocator, store: *Store, run_id: []const u8, doc_part_id: []const u8, name: []const u8, status: []const u8) !void {
     const part_id = try std.fmt.allocPrint(allocator, "{s}:{s}", .{ run_id, name });
     defer allocator.free(part_id);
     lockRuntimeStore();
     defer unlockRuntimeStore();
-    try store.insertRunPart(.{ .id = part_id, .run_id = run_id, .name = name, .status = status });
+    try store.insertRunPart(.{ .id = part_id, .run_id = run_id, .doc_part_id = doc_part_id, .name = name, .status = status });
 }
 
 fn commitPartResult(allocator: Allocator, store: *Store, run_id: []const u8, values: *std.StringHashMap(TypedValue), result: *const PartResult) !void {
@@ -419,21 +617,21 @@ fn commitPartResult(allocator: Allocator, store: *Store, run_id: []const u8, val
         defer allocator.free(id);
         lockRuntimeStore();
         errdefer unlockRuntimeStore();
-        try store.insertRunText(.{ .id = id, .run_id = run_id, .kind = text.kind, .name = text.name, .text = text.text });
+        try store.insertRunText(.{ .id = id, .run_id = run_id, .kind = text.kind, .name = text.name, .payload = text.payload });
         unlockRuntimeStore();
     }
     for (result.outputs.items) |output| try putText(allocator, values, output.name, output.type_label, output.value);
-    try markPart(allocator, store, run_id, result.name, "finished");
+    try markPart(allocator, store, run_id, result.doc_part_id, result.name, "finished");
 }
 
-fn executePart(allocator: Allocator, io: std.Io, store: *Store, run_id: []const u8, shape_path: []const u8, settings: *const config.ConfigSettings, values: *std.StringHashMap(TypedValue), entry: circuitry.UseEntry, result_name: []const u8) !PartResult {
+fn executePart(allocator: Allocator, io: std.Io, store: *Store, run_id: []const u8, shape_path: []const u8, settings: *const config.ConfigSettings, values: *std.StringHashMap(TypedValue), entry: PlanPart, result_name: []const u8) !PartResult {
     if (entry.shape) |shape_ref| return try runShapeReference(allocator, io, store, run_id, shape_path, settings, values, entry, shape_ref, result_name);
     if (isModelPart(entry)) return try runModelPart(allocator, io, store, run_id, settings, values, entry, result_name);
     return try runAssignmentPart(allocator, values, entry, result_name);
 }
 
-fn runAssignmentPart(allocator: Allocator, values: *std.StringHashMap(TypedValue), entry: circuitry.UseEntry, result_name: []const u8) !PartResult {
-    var result = try PartResult.init(allocator, result_name);
+fn runAssignmentPart(allocator: Allocator, values: *std.StringHashMap(TypedValue), entry: PlanPart, result_name: []const u8) !PartResult {
+    var result = try PartResult.init(allocator, result_name, entry.id);
     errdefer result.deinit();
     var locals = std.StringHashMap(f64).init(allocator);
     defer locals.deinit();
@@ -452,7 +650,7 @@ fn hasAssignments(instructions: []const u8) bool {
     return false;
 }
 
-fn runShapeReferenceThread(allocator: Allocator, io: std.Io, run_id: []const u8, shape_path: []const u8, settings: *const config.ConfigSettings, parent_values: *std.StringHashMap(TypedValue), entry: circuitry.UseEntry, shape_ref: []const u8, result_name: []const u8) anyerror!PartResult {
+fn runShapeReferenceThread(allocator: Allocator, io: std.Io, run_id: []const u8, shape_path: []const u8, settings: *const config.ConfigSettings, parent_values: *std.StringHashMap(TypedValue), entry: PlanPart, shape_ref: []const u8, result_name: []const u8) anyerror!PartResult {
     lockRuntimeStore();
     var store = Store.open(allocator) catch |err| {
         unlockRuntimeStore();
@@ -463,43 +661,42 @@ fn runShapeReferenceThread(allocator: Allocator, io: std.Io, run_id: []const u8,
     return try runShapeReference(allocator, io, &store, run_id, shape_path, settings, parent_values, entry, shape_ref, result_name);
 }
 
-fn runShapeReference(allocator: Allocator, io: std.Io, store: *Store, run_id: []const u8, shape_path: []const u8, settings: *const config.ConfigSettings, parent_values: *std.StringHashMap(TypedValue), entry: circuitry.UseEntry, shape_ref: []const u8, result_name: []const u8) anyerror!PartResult {
+fn runShapeReference(allocator: Allocator, io: std.Io, store: *Store, run_id: []const u8, shape_path: []const u8, settings: *const config.ConfigSettings, parent_values: *std.StringHashMap(TypedValue), entry: PlanPart, shape_ref: []const u8, result_name: []const u8) anyerror!PartResult {
     const resolved = if (pkg_index.parsePackageRef(shape_ref)) |parsed_ref|
-        try pkg_index.resolveRef(allocator, store, shape_ref, settings.packageAlias(parsed_ref.alias), "circuitry.shape")
+        try pkg_index.resolveRef(allocator, store, shape_ref, settings.packageAlias(parsed_ref.alias))
     else |_|
         try resolveRelative(allocator, shape_path, shape_ref);
     defer allocator.free(resolved);
 
-    var child = try circuitry.loadFile(io, allocator, resolved);
-    defer child.deinit();
-    var confirmation = try circuitry.confirm(allocator, &child);
-    defer confirmation.deinit();
-    if (!confirmation.ready) return error.CircuitryShapeNotReady;
+    const child_doc_id = try materializeShapeFile(allocator, io, store, resolved);
+    defer allocator.free(child_doc_id);
+    var child_plan = try loadPlanDoc(allocator, store, child_doc_id);
+    defer child_plan.deinit();
 
     var child_values = std.StringHashMap(TypedValue).init(allocator);
     defer freeValues(&child_values);
 
-    for (confirmation.system.takes) |child_take| {
-        const parent_take = parentBindingForLocal(entry.takes, child_take.value) orelse parentBindingForLocal(entry.takes, trimDollar(child_take.value)) orelse return error.MissingInputValue;
+    for (child_plan.takes) |child_take| {
+        const parent_take = parentBindingForLocal(entry.takes, child_take.name) orelse parentBindingForLocal(entry.takes, trimDollar(child_take.name)) orelse return error.MissingInputValue;
         const found = parent_values.get(parent_take.value) orelse return error.MissingInputValue;
-        try child_values.put(try allocator.dupe(u8, child_take.value), .{ .allocator = allocator, .type_label = if (found.type_label) |t| try allocator.dupe(u8, t) else null, .value = try allocator.dupe(u8, found.value) });
+        try child_values.put(try allocator.dupe(u8, child_take.name), .{ .allocator = allocator, .type_label = if (found.type_label) |t| try allocator.dupe(u8, t) else if (child_take.type_label) |t| try allocator.dupe(u8, t) else null, .value = try allocator.dupe(u8, found.value) });
     }
 
-    const required = try requiredFrontier(allocator, confirmation.system.uses, confirmation.system.gives);
+    const required = try requiredFrontier(allocator, child_plan.parts, child_plan.gives);
     defer allocator.free(required);
-    try executePlan(allocator, io, store, run_id, resolved, settings, &child_values, confirmation.system.uses, required, result_name);
+    try executePlan(allocator, io, store, run_id, resolved, settings, &child_values, child_plan.parts, required, result_name);
 
-    var result = try PartResult.init(allocator, result_name);
+    var result = try PartResult.init(allocator, result_name, entry.id);
     errdefer result.deinit();
     for (entry.gives) |parent_give| {
-        const child_give = childBindingForLocal(confirmation.system.gives, parent_give.local orelse trimDollar(parent_give.value)) orelse return error.MissingOutputValue;
-        const found = child_values.get(child_give.value) orelse return error.MissingOutputValue;
+        const child_give = childValueForLocal(child_plan.gives, parent_give.local orelse trimDollar(parent_give.value)) orelse return error.MissingOutputValue;
+        const found = child_values.get(child_give.name) orelse return error.MissingOutputValue;
         try result.addOutput(parent_give.value, found.type_label orelse child_give.type_label, found.value);
     }
     return result;
 }
 
-fn runModelPart(allocator: Allocator, io: std.Io, store: *Store, run_id: []const u8, settings: *const config.ConfigSettings, values: *std.StringHashMap(TypedValue), entry: circuitry.UseEntry, result_name: []const u8) !PartResult {
+fn runModelPart(allocator: Allocator, io: std.Io, store: *Store, run_id: []const u8, settings: *const config.ConfigSettings, values: *std.StringHashMap(TypedValue), entry: PlanPart, result_name: []const u8) !PartResult {
     const model_name = entry.model orelse settings.defaultModel();
     const preset = settings.modelPreset(model_name) orelse return error.ModelPresetNotFound;
     const adapter_ref = preset.adapter orelse return error.ModelAdapterMissing;
@@ -510,12 +707,12 @@ fn runModelPart(allocator: Allocator, io: std.Io, store: *Store, run_id: []const
 
 fn resolveAdapterPath(allocator: Allocator, store: *Store, settings: *const config.ConfigSettings, adapter_ref: []const u8) ![]u8 {
     if (pkg_index.parsePackageRef(adapter_ref)) |parsed_ref|
-        return try pkg_index.resolveRef(allocator, store, adapter_ref, settings.packageAlias(parsed_ref.alias), "zinc.adapter")
+        return try pkg_index.resolveRef(allocator, store, adapter_ref, settings.packageAlias(parsed_ref.alias))
     else |_|
         return try allocator.dupe(u8, adapter_ref);
 }
 
-fn runModelPartResolved(allocator: Allocator, io: std.Io, run_id: []const u8, model_name: []const u8, preset: config.ModelPreset, adapter_path: []const u8, values: *std.StringHashMap(TypedValue), entry: circuitry.UseEntry, result_name: []const u8) !PartResult {
+fn runModelPartResolved(allocator: Allocator, io: std.Io, run_id: []const u8, model_name: []const u8, preset: config.ModelPreset, adapter_path: []const u8, values: *std.StringHashMap(TypedValue), entry: PlanPart, result_name: []const u8) !PartResult {
     const request = try adapterRequestYaml(allocator, model_name, preset, values, entry);
     defer allocator.free(request);
 
@@ -530,7 +727,7 @@ fn runModelPartResolved(allocator: Allocator, io: std.Io, run_id: []const u8, mo
     defer allocator.free(result.stderr);
     if (result.term != .exited or result.term.exited != 0) return error.AdapterFailed;
 
-    var part_result = try PartResult.init(allocator, result_name);
+    var part_result = try PartResult.init(allocator, result_name, entry.id);
     errdefer part_result.deinit();
     const raw_name = try std.fmt.allocPrint(allocator, "{s}-raw", .{result_name});
     defer allocator.free(raw_name);
@@ -543,7 +740,7 @@ fn runModelPartResolved(allocator: Allocator, io: std.Io, run_id: []const u8, mo
     return part_result;
 }
 
-fn executeAssignments(allocator: Allocator, result: *PartResult, locals: *std.StringHashMap(f64), entry: circuitry.UseEntry) !void {
+fn executeAssignments(allocator: Allocator, result: *PartResult, locals: *std.StringHashMap(f64), entry: PlanPart) !void {
     const instructions = entry.instructions orelse return error.NoExecutableInstructions;
     var completed: usize = 0;
     var lines = std.mem.splitScalar(u8, instructions, '\n');
@@ -566,7 +763,7 @@ fn executeAssignments(allocator: Allocator, result: *PartResult, locals: *std.St
     if (completed == 0) return error.NoExecutableInstructions;
 }
 
-fn systemValueForLocal(gives: []const circuitry.ValueBinding, local_name: []const u8) ?[]const u8 {
+fn systemValueForLocal(gives: []const PlanBinding, local_name: []const u8) ?[]const u8 {
     for (gives) |give| if (give.local) |local| {
         if (std.mem.eql(u8, local, local_name)) return give.value;
     };
@@ -650,7 +847,7 @@ const ExpressionParser = struct {
     }
 };
 
-fn adapterRequestYaml(allocator: Allocator, model_name: []const u8, preset: config.ModelPreset, values: *std.StringHashMap(TypedValue), entry: circuitry.UseEntry) ![]u8 {
+fn adapterRequestYaml(allocator: Allocator, model_name: []const u8, preset: config.ModelPreset, values: *std.StringHashMap(TypedValue), entry: PlanPart) ![]u8 {
     var out: std.ArrayList(u8) = .empty;
     errdefer out.deinit(allocator);
     try out.print(allocator, "part: {s}\nmodel: {s}\nparams:\n", .{ entry.name, model_name });
@@ -692,7 +889,7 @@ fn appendYamlMapping(allocator: Allocator, out: *std.ArrayList(u8), node: *const
     }
 }
 
-fn applyAdapterResponse(allocator: Allocator, result: *PartResult, entry: circuitry.UseEntry, root: *const serde.yaml.Value) !void {
+fn applyAdapterResponse(allocator: Allocator, result: *PartResult, entry: PlanPart, root: *const serde.yaml.Value) !void {
     _ = allocator;
     if (root.* != .mapping) return error.InvalidAdapterResponse;
     if (yamlGet(root, "reasoning")) |reasoning| if (reasoning.* == .string and reasoning.string.len > 0) try result.addText("reasoning", result.name, reasoning.string);
@@ -738,12 +935,12 @@ fn putNumber(allocator: Allocator, values: *std.StringHashMap(TypedValue), name:
     try values.put(owned_name, .{ .allocator = allocator, .type_label = try allocator.dupe(u8, "number"), .value = rendered });
 }
 
-fn storeOutputs(allocator: Allocator, store: *Store, run_id: []const u8, values: *std.StringHashMap(TypedValue), gives: []const circuitry.ValueBinding) !void {
+fn storeOutputs(allocator: Allocator, store: *Store, run_id: []const u8, values: *std.StringHashMap(TypedValue), gives: []const PlanValue) !void {
     for (gives) |give| {
-        const found = values.get(give.value) orelse return error.MissingOutputValue;
-        const id = try std.fmt.allocPrint(allocator, "{s}:{s}", .{ run_id, give.value });
+        const found = values.get(give.name) orelse return error.MissingOutputValue;
+        const id = try std.fmt.allocPrint(allocator, "{s}:{s}", .{ run_id, give.name });
         defer allocator.free(id);
-        try store.insertRunValue(.{ .id = id, .run_id = run_id, .name = give.value, .type_label = found.type_label, .value = found.value });
+        try store.insertRunValue(.{ .id = id, .run_id = run_id, .name = give.name, .type_label = found.type_label, .payload = found.value });
     }
 }
 
@@ -754,22 +951,19 @@ fn yamlGet(node: *const serde.yaml.Value, key: []const u8) ?*const serde.yaml.Va
     return null;
 }
 
-fn parentBindingForLocal(bindings: []const circuitry.ValueBinding, local_name: []const u8) ?circuitry.ValueBinding {
+fn parentBindingForLocal(bindings: []const PlanBinding, local_name: []const u8) ?PlanBinding {
     for (bindings) |binding| {
         if (binding.local) |local| if (std.mem.eql(u8, local, local_name)) return binding;
     }
     return null;
 }
 
-fn childBindingForLocal(bindings: []const circuitry.ValueBinding, local_name: []const u8) ?circuitry.ValueBinding {
-    for (bindings) |binding| {
-        if (std.mem.eql(u8, trimDollar(binding.value), local_name)) return binding;
-        if (binding.local) |local| if (std.mem.eql(u8, local, local_name)) return binding;
-    }
+fn childValueForLocal(values: []const PlanValue, local_name: []const u8) ?PlanValue {
+    for (values) |value| if (std.mem.eql(u8, trimDollar(value.name), local_name)) return value;
     return null;
 }
 
-fn bindingForLocal(bindings: []const circuitry.ValueBinding, local_name: []const u8) ?circuitry.ValueBinding {
+fn bindingForLocal(bindings: []const PlanBinding, local_name: []const u8) ?PlanBinding {
     for (bindings) |binding| {
         if (binding.local) |local| if (std.mem.eql(u8, local, local_name)) return binding;
         if (std.mem.eql(u8, trimDollar(binding.value), local_name)) return binding;

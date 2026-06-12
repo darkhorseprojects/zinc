@@ -53,7 +53,7 @@ pub fn runInspect(allocator: Allocator, store: *Store, arg: []const u8) !void {
                     try files.writeAllOut(" (");
                     try files.writeAllOut(val.type_label orelse "value");
                     try files.writeAllOut("): ");
-                    try files.writeAllOut(val.value);
+                    try files.writeAllOut(val.payload);
                     try files.writeAllOut("\n");
                 }
 
@@ -89,7 +89,7 @@ pub fn runInspect(allocator: Allocator, store: *Store, arg: []const u8) !void {
                 try files.writeAllOut("\nPath: ");
                 try files.writeAllOut(doc.path orelse "unknown");
                 try files.writeAllOut("\n\nSource:\n");
-                try files.writeAllOut(doc.source);
+                try files.writeAllOut(doc.source_payload);
                 try files.writeAllOut("\n");
             },
             .package => {
@@ -152,7 +152,7 @@ pub fn runInspect(allocator: Allocator, store: *Store, arg: []const u8) !void {
                 try files.writeAllOut("\nRun: ");
                 try files.writeAllOut(row.run_id);
                 try files.writeAllOut("\n\n");
-                try files.writeAllOut(row.value);
+                try files.writeAllOut(row.payload);
                 try files.writeAllOut("\n");
             },
             .approval => {

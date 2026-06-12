@@ -27,17 +27,17 @@ pub fn packageNameFromSpec(spec: []const u8) []const u8 {
     return tail;
 }
 
-pub fn resolveRef(allocator: Allocator, store: *Store, raw: []const u8, package_spec: ?[]const u8, capability: []const u8) ![]u8 {
+pub fn resolveRef(allocator: Allocator, store: *Store, raw: []const u8, package_spec: ?[]const u8) ![]u8 {
     const parsed = try parsePackageRef(raw);
     const pkg_name = if (package_spec) |spec| packageNameFromSpec(spec) else parsed.alias;
     if (package_spec != null) {
         const pkg = (try store.getPackage(pkg_name)) orelse return error.SoftDependencyNotInstalled;
         store.freePackage(pkg);
     }
-    return try resolveAsset(allocator, store, pkg_name, parsed.name, capability);
+    return try resolveAsset(allocator, store, pkg_name, parsed.name);
 }
 
-pub fn resolveAsset(allocator: Allocator, store: *Store, pkg_name: []const u8, asset_name: []const u8, capability: []const u8) ![]u8 {
+pub fn resolveAsset(allocator: Allocator, store: *Store, pkg_name: []const u8, asset_name: []const u8) ![]u8 {
     const pkg = (try store.getPackage(pkg_name)) orelse return error.PackageNotFound;
     defer store.freePackage(pkg);
     const root = pkg.path orelse return error.PackagePathMissing;
@@ -52,11 +52,9 @@ pub fn resolveAsset(allocator: Allocator, store: *Store, pkg_name: []const u8, a
     defer parsed.deinit();
 
     const asset = try parsed.asset(asset_name);
-    if (!try manifest.assetDoes(asset, capability)) return error.AssetCapabilityMismatch;
-
     return try std.fs.path.join(allocator, &.{ root, asset.path });
 }
 
 pub fn resolveShape(allocator: Allocator, store: *Store, pkg_name: []const u8, shape_name: []const u8) ![]u8 {
-    return resolveAsset(allocator, store, pkg_name, shape_name, "circuitry.shape");
+    return resolveAsset(allocator, store, pkg_name, shape_name);
 }

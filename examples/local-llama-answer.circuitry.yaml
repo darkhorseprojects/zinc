@@ -1,10 +1,10 @@
-circuitry: "0.6.2"
+circuitry: "0.6.4"
 name: local llama answer
 about: Answer through the package-provided OpenAI Responses-shaped adapter.
 
 zinc:
   packages:
-    responses: openai-responses@0.1.5
+    responses: openai-responses@0.1.7
 
 takes:
   $question: text

@@ -79,8 +79,8 @@ pub fn loadSettings(allocator: Allocator) !ConfigSettings {
 
     var mode_val: []const u8 = "build";
     var scope_val: []const u8 = "project";
-    var runtime_parallel = false;
-    var runtime_max_parallel: usize = 1;
+    var runtime_parallel = true;
+    var runtime_max_parallel: usize = 2;
 
     var bytes: ?[]const u8 = null;
     if (try layout.workspacePath(allocator, "config.yaml")) |ws_path| {

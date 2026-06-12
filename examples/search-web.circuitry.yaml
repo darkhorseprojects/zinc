@@ -1,11 +1,11 @@
-circuitry: "0.6.2"
+circuitry: "0.6.4"
 name: search web
 about: Search the web through a Zinc package shape.
 
 zinc:
   packages:
     browser: browser@0.6.1
-    responses: openai-responses@0.1.5
+    responses: openai-responses@0.1.7
 
 takes:
   $query: text

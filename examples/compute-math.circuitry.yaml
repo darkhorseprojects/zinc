@@ -1,4 +1,4 @@
-circuitry: "0.6.2"
+circuitry: "0.6.4"
 name: compute math
 about: Calculate compound interest from explicit numeric inputs.
 

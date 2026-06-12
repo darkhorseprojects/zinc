@@ -18,7 +18,6 @@ pub const SoftDependency = struct {
 pub const Asset = struct {
     name: []const u8,
     path: []const u8,
-    does: ?*const serde.yaml.Value,
 };
 
 pub const PackageManifest = struct {
@@ -43,11 +42,8 @@ pub const PackageManifest = struct {
     pub fn asset(self: PackageManifest, name: []const u8) !Asset {
         const assets = self.getMapField("assets") orelse return error.AssetSectionNotFound;
         const node = assets.getPtr(name) orelse return error.AssetNotFound;
-        if (node.* == .string) return .{ .name = name, .path = node.string, .does = null };
-        if (node.* != .mapping) return error.InvalidAssetType;
-        const path_val = node.mapping.getPtr("path") orelse return error.MissingAssetPath;
-        if (path_val.* != .string) return error.InvalidAssetPathType;
-        return .{ .name = name, .path = path_val.string, .does = node.mapping.getPtr("does") };
+        if (node.* != .string) return error.InvalidAssetType;
+        return .{ .name = name, .path = node.string };
     }
 
     pub fn softDependencies(self: PackageManifest, allocator: Allocator) ![]SoftDependency {
@@ -93,21 +89,6 @@ pub const PackageManifest = struct {
         return os_script.string;
     }
 };
-
-pub fn assetDoes(asset: Asset, capability: []const u8) !bool {
-    const node = asset.does orelse return false;
-    switch (node.*) {
-        .string => |s| return std.mem.eql(u8, s, capability),
-        .sequence => |items| {
-            for (items) |item| {
-                if (item != .string) return error.InvalidAssetDoesType;
-                if (std.mem.eql(u8, item.string, capability)) return true;
-            }
-            return false;
-        },
-        else => return error.InvalidAssetDoesType,
-    }
-}
 
 fn makeSoftDependency(allocator: Allocator, alias: []const u8, package: []const u8, about: []const u8) !SoftDependency {
     const owned_alias = try allocator.dupe(u8, alias);

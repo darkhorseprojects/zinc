@@ -2,7 +2,7 @@
 
 Zinc runs `.circuitry.yaml` systems.
 
-It builds a lazy plan from `$` value wiring, executes ready parts, stores typed values, and exposes run state through `zinc://` URIs.
+It materializes Circuitry documents into stored normalized facts, plans from the database, executes ready parts, stores payloads as blobs, and exposes run state through `zinc://` URIs.
 
 ## CLI
 
@@ -36,16 +36,15 @@ zn read 'zinc://run/<run_id>/value/$amount'
 
 ## Runtime
 
-A part is ready when every value in its local `takes` is available. Zinc runs needed parts only. With `runtime.parallel` enabled, Zinc runs bounded ready waves concurrently and commits results in plan order.
+A part is ready when every value in its local `takes` is available. Zinc runs needed parts only. Runtime defaults live in Zinc config.
 
 ```yaml
-zinc:
-  runtime:
-    parallel: true
-    max_parallel: 2
+runtime:
+  parallel: true
+  max_parallel: 2
 ```
 
-`max_parallel: 0` uses the host CPU count.
+Graph-level `zinc.runtime` can override those settings for a single Circuitry document. `max_parallel: 0` uses the host CPU count.
 
 Inline parts can execute deterministic arithmetic assignment lines. Model-backed parts use configured model presets. Shape parts can point to local files or package assets.
 
@@ -55,7 +54,7 @@ Zinc reads `.zinc/config.yaml` and `~/.zinc/config.yaml`.
 
 ```yaml
 packages:
-  responses: openai-responses@0.1.5
+  responses: openai-responses@0.1.7
 
 models:
   default: local-llama
@@ -71,31 +70,28 @@ models:
 
 ## Packages
 
-A package manifest has one asset namespace. Assets declare what they do.
+A package manifest has one asset namespace. Each asset is a named path.
 
 ```yaml
 name: openai-responses
-version: "0.1.5"
+version: "0.1.7"
 about: OpenAI Responses-shaped model adapter package.
 
 assets:
-  short-answer:
-    path: shapes/short-answer.circuitry.yaml
-    does: circuitry.shape
-
-  responses:
-    path: adapters/responses.py
-    does:
-      - zinc.adapter
-      - openai.responses
+  short-answer: shapes/short-answer.circuitry.yaml
+  responses: adapters/responses.py
+  runtime-prompt: prompts/runtime.md
+  default-config: config/zinc.models.yaml
+  readme: docs/README.md
+  icon: assets/icon.svg
 ```
 
-Authored YAML uses compact `alias.asset` references. Zinc determines the required asset capability from context.
+Authored YAML uses compact `alias.asset` references.
 
 ```yaml
 zinc:
   packages:
-    responses: openai-responses@0.1.5
+    responses: openai-responses@0.1.7
 
 uses:
   answer:
@@ -108,7 +104,7 @@ models:
     adapter: responses.responses
 ```
 
-Packages may declare `soft_dependencies`; Zinc reports them during inspect/install, never installs them automatically, and fails only when a missing optional asset is used.
+Packages may declare `soft_dependencies`; Zinc reports them during inspect/install and resolves them only when a reference uses them.
 
 ## Building
 
@@ -119,6 +115,6 @@ zig build
 zig build test
 ```
 
-## Wiki
+## Learn more
 
-https://github.com/darkhorseprojects/zinc/wiki
+- [Wiki](https://github.com/darkhorseprojects/zinc/wiki)
