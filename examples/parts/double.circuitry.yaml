@@ -1,0 +1,19 @@
+circuitry: "0.6.1"
+name: double shape
+
+takes:
+  $x:
+    type: number
+
+uses:
+  double:
+    takes:
+      x: $x
+    does: |
+      y = x * 2
+    gives:
+      y: $y
+
+gives:
+  $y:
+    type: number

@@ -1,0 +1,25 @@
+circuitry: "0.6.1"
+name: local llama answer
+about: Answer through the package-provided OpenAI Responses-shaped adapter.
+
+zinc:
+  packages:
+    responses: zinc://package/openai-responses@0.1.4
+
+takes:
+  $question:
+    type: text
+
+uses:
+  answer:
+    model: local-llama
+    takes:
+      question: $question
+    does: |
+      Answer in one short sentence.
+    gives:
+      answer: $answer
+
+gives:
+  $answer:
+    type: text

@@ -1,0 +1,18 @@
+circuitry: "0.6.1"
+name: external shape demo
+
+takes:
+  $question:
+    type: text
+
+uses:
+  answer:
+    shape: ./parts/short-answer.circuitry.yaml
+    takes:
+      question: $question
+    gives:
+      answer: $answer
+
+gives:
+  $answer:
+    type: text

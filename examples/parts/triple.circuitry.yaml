@@ -1,0 +1,19 @@
+circuitry: "0.6.1"
+name: triple shape
+
+takes:
+  $x:
+    type: number
+
+uses:
+  triple:
+    takes:
+      x: $x
+    does: |
+      y = x * 3
+    gives:
+      y: $y
+
+gives:
+  $y:
+    type: number

@@ -9,6 +9,12 @@ pub const Source = struct {
     path: []const u8 = ".",
 };
 
+pub const SoftDependency = struct {
+    alias: []const u8,
+    package: []const u8,
+    about: []const u8,
+};
+
 pub const PackageManifest = struct {
     name: []const u8,
     version: []const u8,
@@ -28,6 +34,38 @@ pub const PackageManifest = struct {
         return val.mapping;
     }
 
+    pub fn softDependencies(self: PackageManifest, allocator: Allocator) ![]SoftDependency {
+        if (self.root != .mapping) return try allocator.alloc(SoftDependency, 0);
+        const deps = self.root.mapping.getPtr("soft_dependencies") orelse return try allocator.alloc(SoftDependency, 0);
+        if (deps.* != .mapping) return error.InvalidSoftDependenciesType;
+        var out: std.ArrayList(SoftDependency) = .empty;
+        errdefer {
+            for (out.items) |dep| {
+                allocator.free(dep.alias);
+                allocator.free(dep.package);
+                allocator.free(dep.about);
+            }
+            out.deinit(allocator);
+        }
+        var it = deps.mapping.iterator();
+        while (it.next()) |entry| {
+            const alias = entry.key_ptr.*;
+            if (entry.value_ptr.* == .string) {
+                try out.append(allocator, try makeSoftDependency(allocator, alias, entry.value_ptr.string, ""));
+            } else if (entry.value_ptr.* == .mapping) {
+                const package_val = entry.value_ptr.mapping.getPtr("package") orelse return error.MissingSoftDependencyPackage;
+                if (package_val.* != .string) return error.InvalidSoftDependencyPackageType;
+                const about_val = entry.value_ptr.mapping.getPtr("about");
+                const about_text = if (about_val) |about| blk: {
+                    if (about.* != .string) return error.InvalidSoftDependencyAboutType;
+                    break :blk about.string;
+                } else "";
+                try out.append(allocator, try makeSoftDependency(allocator, alias, package_val.string, about_text));
+            } else return error.InvalidSoftDependencyType;
+        }
+        return out.toOwnedSlice(allocator);
+    }
+
     pub fn getScript(self: PackageManifest, script_name: []const u8, os_name: []const u8) ?[]const u8 {
         if (self.root != .mapping) return null;
         const scripts = self.root.mapping.getPtr("scripts") orelse return null;
@@ -39,6 +77,25 @@ pub const PackageManifest = struct {
         return os_script.string;
     }
 };
+
+fn makeSoftDependency(allocator: Allocator, alias: []const u8, package: []const u8, about: []const u8) !SoftDependency {
+    const owned_alias = try allocator.dupe(u8, alias);
+    errdefer allocator.free(owned_alias);
+    const owned_package = try allocator.dupe(u8, package);
+    errdefer allocator.free(owned_package);
+    const owned_about = try allocator.dupe(u8, about);
+    errdefer allocator.free(owned_about);
+    return .{ .alias = owned_alias, .package = owned_package, .about = owned_about };
+}
+
+pub fn freeSoftDependencies(allocator: Allocator, deps: []SoftDependency) void {
+    for (deps) |dep| {
+        allocator.free(dep.alias);
+        allocator.free(dep.package);
+        allocator.free(dep.about);
+    }
+    allocator.free(deps);
+}
 
 pub fn parse(allocator: Allocator, bytes: []const u8) !PackageManifest {
     var arena = std.heap.ArenaAllocator.init(allocator);

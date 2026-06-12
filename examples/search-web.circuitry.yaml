@@ -1,16 +1,39 @@
-circuitry: "0.6"
-name: search-web
-about: Search the web, read sources, and return a cited answer.
+circuitry: "0.6.1"
+name: search web
+about: Search the web through a Zinc package shape.
+
+zinc:
+  packages:
+    browser: zinc://package/browser@0.6.1
+    responses: zinc://package/openai-responses@0.1.4
 
 takes:
-  query: text
+  $query:
+    type: text
+  $current_date: date
 
-does: |
-  Search for the query.
-  Open relevant sources.
-  Compare results.
-  Return a grounded answer.
+uses:
+  search:
+    shape: @browser.shapes.search-web
+    takes:
+      query: $query
+      current_date: $current_date
+    gives:
+      sources: $sources
+
+  answer:
+    model: fast
+    takes:
+      query: $query
+      sources: $sources
+    does: |
+      Answer from the sources with citations.
+    gives:
+      answer: $answer
+      citations: $citations
 
 gives:
-  answer: text
-  sources: list
+  $answer:
+    type: text
+  $citations:
+    type: list

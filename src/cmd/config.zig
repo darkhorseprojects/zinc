@@ -6,15 +6,71 @@ const Store = @import("../runtime/store.zig").Store;
 
 const Allocator = std.mem.Allocator;
 
+pub const ModelPreset = struct {
+    adapter: ?[]const u8,
+    params: ?*const serde.yaml.Value,
+};
+
 pub const ConfigSettings = struct {
     mode: []const u8,
     scope: []const u8,
+    runtime_parallel: bool,
+    runtime_max_parallel: usize,
+    root: ?serde.yaml.Value,
+    shape_zinc: ?*const serde.yaml.Value,
     arena: std.heap.ArenaAllocator,
 
     pub fn deinit(self: *ConfigSettings) void {
         self.arena.deinit();
     }
+
+    pub fn defaultModel(self: *const ConfigSettings) []const u8 {
+        const root = self.root orelse return "default";
+        if (root != .mapping) return "default";
+        const models = root.mapping.getPtr("models") orelse return "default";
+        if (models.* != .mapping) return "default";
+        const default = models.mapping.getPtr("default") orelse return "default";
+        return if (default.* == .string) default.string else "default";
+    }
+
+    pub fn packageAlias(self: *const ConfigSettings, alias: []const u8) ?[]const u8 {
+        if (self.shape_zinc) |zinc| {
+            if (packageAliasFrom(zinc, alias)) |uri| return uri;
+        }
+        const root = self.root orelse return null;
+        return packageAliasFrom(&root, alias);
+    }
+
+    pub fn modelPreset(self: *const ConfigSettings, name: []const u8) ?ModelPreset {
+        const root = self.root orelse return null;
+        if (root != .mapping) return null;
+        const models = root.mapping.getPtr("models") orelse return null;
+        if (models.* != .mapping) return null;
+        const preset = models.mapping.getPtr(name) orelse return null;
+        if (preset.* != .mapping) return null;
+        const adapter_value = preset.mapping.getPtr("adapter");
+        const params = preset.mapping.getPtr("params");
+        return .{
+            .adapter = if (adapter_value) |adapter| if (adapter.* == .string) adapter.string else null else null,
+            .params = params,
+        };
+    }
 };
+
+fn yamlGet(node: *const serde.yaml.Value, key: []const u8) ?*const serde.yaml.Value {
+    if (node.* != .mapping) return null;
+    var it = node.mapping.iterator();
+    while (it.next()) |entry| if (std.mem.eql(u8, entry.key_ptr.*, key)) return entry.value_ptr;
+    return null;
+}
+
+fn packageAliasFrom(root: *const serde.yaml.Value, alias: []const u8) ?[]const u8 {
+    if (root.* != .mapping) return null;
+    const packages = yamlGet(root, "packages") orelse return null;
+    if (packages.* != .mapping) return null;
+    const uri = yamlGet(packages, alias) orelse return null;
+    return if (uri.* == .string) uri.string else null;
+}
 
 pub fn loadSettings(allocator: Allocator) !ConfigSettings {
     var arena = std.heap.ArenaAllocator.init(allocator);
@@ -23,6 +79,8 @@ pub fn loadSettings(allocator: Allocator) !ConfigSettings {
 
     var mode_val: []const u8 = "build";
     var scope_val: []const u8 = "project";
+    var runtime_parallel = false;
+    var runtime_max_parallel: usize = 1;
 
     var bytes: ?[]const u8 = null;
     if (try layout.workspacePath(allocator, "config.yaml")) |ws_path| {
@@ -37,9 +95,7 @@ pub fn loadSettings(allocator: Allocator) !ConfigSettings {
     }
 
     var root: ?serde.yaml.Value = null;
-    if (bytes) |b| {
-        root = serde.yaml.parse(arena_allocator, b) catch null;
-    }
+    if (bytes) |b| root = serde.yaml.parse(arena_allocator, b) catch null;
 
     if (root) |r| {
         if (r == .mapping) {
@@ -49,12 +105,28 @@ pub fn loadSettings(allocator: Allocator) !ConfigSettings {
             if (r.mapping.getPtr("scope")) |sv| {
                 if (sv.* == .string) scope_val = sv.string;
             }
+            if (r.mapping.getPtr("runtime")) |runtime| {
+                if (runtime.* == .mapping) {
+                    if (runtime.mapping.getPtr("parallel")) |parallel| switch (parallel.*) {
+                        .boolean => |b| runtime_parallel = b,
+                        else => {},
+                    };
+                    if (runtime.mapping.getPtr("max_parallel")) |max_parallel| switch (max_parallel.*) {
+                        .integer => |i| runtime_max_parallel = if (i <= 0) 0 else @intCast(i),
+                        else => {},
+                    };
+                }
+            }
         }
     }
 
-    return ConfigSettings{
+    return .{
         .mode = try arena_allocator.dupe(u8, mode_val),
         .scope = try arena_allocator.dupe(u8, scope_val),
+        .runtime_parallel = runtime_parallel,
+        .runtime_max_parallel = runtime_max_parallel,
+        .root = root,
+        .shape_zinc = null,
         .arena = arena,
     };
 }
@@ -68,8 +140,15 @@ pub fn runConfig(allocator: Allocator, store: *Store, args: []const []const u8) 
     try files.writeAllOut("Active Configuration:\n");
     try files.writeAllOut("  mode: ");
     try files.writeAllOut(settings.mode);
-    try files.writeAllOut("\n");
-    try files.writeAllOut("  scope: ");
+    try files.writeAllOut("\n  scope: ");
     try files.writeAllOut(settings.scope);
+    try files.writeAllOut("\n  runtime.parallel: ");
+    try files.writeAllOut(if (settings.runtime_parallel) "true" else "false");
+    try files.writeAllOut("\n  runtime.max_parallel: ");
+    var buf: [32]u8 = undefined;
+    const max = try std.fmt.bufPrint(&buf, "{d}", .{settings.runtime_max_parallel});
+    try files.writeAllOut(max);
+    try files.writeAllOut("\n  models.default: ");
+    try files.writeAllOut(settings.defaultModel());
     try files.writeAllOut("\n");
 }

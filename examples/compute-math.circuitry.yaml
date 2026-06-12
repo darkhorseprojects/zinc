@@ -1,20 +1,30 @@
-circuitry: "0.6"
-name: compute-math
-about: Calculate compound interest given a principal, annual rate, and years.
+circuitry: "0.6.1"
+name: compute math
+about: Calculate compound interest from explicit numeric inputs.
 
 takes:
-  principal: text
-  rate: text
-  years: text
+  $principal:
+    type: number
+  $rate:
+    type: number
+  $years:
+    type: number
 
-does: |
-  Calculate the compound interest using the formula: A = P * (1 + r)^t
-  where:
-    P = principal
-    r = rate (expressed as decimal, e.g., 0.05 for 5%)
-    t = years
-  Return both the final total amount A and the total interest earned (A - P).
+uses:
+  compound_interest:
+    takes:
+      principal: $principal
+      rate: $rate
+      years: $years
+    does: |
+      amount = principal * (1 + rate) ^ years
+      interest = amount - principal
+    gives:
+      amount: $amount
+      interest: $interest
 
 gives:
-  amount: text
-  interest: text
+  $amount:
+    type: number
+  $interest:
+    type: number

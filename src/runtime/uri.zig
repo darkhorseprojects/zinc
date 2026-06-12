@@ -12,6 +12,10 @@ pub const UriType = enum {
     run_stderr,
     run_artifact,
     run_action,
+    run_value,
+    run_plan,
+    run_part,
+    run_reasoning,
     doc,
     package,
     package_shape,
@@ -57,6 +61,21 @@ pub fn parse(allocator: Allocator, raw_uri: []const u8) !ParsedUri {
             const seq_str = it.next() orelse return error.InvalidActionUri;
             return ParsedUri{ .type = .run_action, .id = try allocator.dupe(u8, id), .extra = try allocator.dupe(u8, seq_str) };
         }
+        if (std.mem.eql(u8, sub1.?, "value")) {
+            const value_name = it.next() orelse return error.InvalidValueUri;
+            return ParsedUri{ .type = .run_value, .id = try allocator.dupe(u8, id), .extra = try allocator.dupe(u8, value_name) };
+        }
+        if (std.mem.eql(u8, sub1.?, "plan")) {
+            return ParsedUri{ .type = .run_plan, .id = try allocator.dupe(u8, id), .extra = try allocator.dupe(u8, "plan") };
+        }
+        if (std.mem.eql(u8, sub1.?, "part")) {
+            const part_name = it.next() orelse return error.InvalidPartUri;
+            return ParsedUri{ .type = .run_part, .id = try allocator.dupe(u8, id), .extra = try allocator.dupe(u8, part_name) };
+        }
+        if (std.mem.eql(u8, sub1.?, "reasoning")) {
+            const part_name = it.next() orelse return error.InvalidReasoningUri;
+            return ParsedUri{ .type = .run_reasoning, .id = try allocator.dupe(u8, id), .extra = try allocator.dupe(u8, part_name) };
+        }
     } else if (std.mem.eql(u8, category, "doc")) {
         return ParsedUri{ .type = .doc, .id = try allocator.dupe(u8, id) };
     } else if (std.mem.eql(u8, category, "package")) {
@@ -101,15 +120,37 @@ pub fn resolveRead(allocator: Allocator, store: *Store, raw_uri: []const u8) ![]
             return error.RunOutputNotFound;
         },
         .run_artifact => {
-            const art_name = parsed.extra.?;
-            const art_sub = try std.fmt.allocPrint(allocator, "runs/{s}/artifacts/{s}", .{ parsed.id, art_name });
-            defer allocator.free(art_sub);
-            const global_path = try layout.tempRunPath(allocator, art_sub);
-            defer allocator.free(global_path);
-            if (files.existsPath(global_path)) {
-                return try files.readLimited(allocator, global_path, 64 * 1024 * 1024);
+            const name = parsed.extra.?;
+            const row = (try store.getRunText(parsed.id, "artifact", name)) orelse return error.RunArtifactNotFound;
+            defer store.freeRunText(row);
+            return try allocator.dupe(u8, row.text);
+        },
+        .run_plan => {
+            const row = (try store.getRunText(parsed.id, "plan", "plan")) orelse return error.RunPlanNotFound;
+            defer store.freeRunText(row);
+            return try allocator.dupe(u8, row.text);
+        },
+        .run_reasoning => {
+            const name = parsed.extra.?;
+            const row = (try store.getRunText(parsed.id, "reasoning", name)) orelse return error.RunReasoningNotFound;
+            defer store.freeRunText(row);
+            return try allocator.dupe(u8, row.text);
+        },
+        .run_part => {
+            const name = parsed.extra.?;
+            const parts = try store.listRunParts(parsed.id);
+            defer {
+                for (parts) |part| store.freeRunPart(part);
+                allocator.free(parts);
             }
-            return error.RunArtifactNotFound;
+            for (parts) |part| if (std.mem.eql(u8, part.name, name)) return try std.fmt.allocPrint(allocator, "part: {s}\nstatus: {s}\n", .{ part.name, part.status });
+            return error.RunPartNotFound;
+        },
+        .run_value => {
+            const value_name = parsed.extra.?;
+            const row = (try store.getRunValue(parsed.id, value_name)) orelse return error.RunValueNotFound;
+            defer store.freeRunValue(row);
+            return try allocator.dupe(u8, row.value);
         },
         .doc => {
             const doc_obj = (try store.getDoc(parsed.id)) orelse return error.DocNotFound;

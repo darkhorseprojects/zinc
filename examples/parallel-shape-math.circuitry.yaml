@@ -1,0 +1,41 @@
+circuitry: "0.6.1"
+name: parallel shape math
+
+zinc:
+  runtime:
+    parallel: true
+    max_parallel: 2
+
+takes:
+  $x:
+    type: number
+
+uses:
+  double:
+    shape: ./parts/double.circuitry.yaml
+    takes:
+      x: $x
+    gives:
+      y: $double
+  triple:
+    shape: ./parts/triple.circuitry.yaml
+    takes:
+      x: $x
+    gives:
+      y: $triple
+  total:
+    takes:
+      double: $double
+      triple: $triple
+    does: |
+      sum = double + triple
+    gives:
+      sum: $total
+
+gives:
+  $double:
+    type: number
+  $triple:
+    type: number
+  $total:
+    type: number

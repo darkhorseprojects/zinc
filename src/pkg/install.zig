@@ -4,6 +4,7 @@ const store_types = @import("../runtime/store.zig");
 const packages_table = store_types.packages;
 const package_sources_table = store_types.package_sources;
 const manifest = @import("manifest.zig");
+const deps = @import("deps.zig");
 const layout = @import("../io/layout.zig");
 const files = @import("../io/fs.zig");
 const proc = @import("../io/process.zig");
@@ -38,6 +39,7 @@ pub fn installResolved(allocator: Allocator, io: std.Io, store: *Store, source_p
 
     const name = parsed.name;
     const version = parsed.version;
+    try deps.reportSoftDependencies(allocator, store, parsed);
 
     // Target packages directory
     const target_packages_dir = if (is_global)

@@ -1,0 +1,37 @@
+circuitry: "0.6.1"
+name: parallel local llama
+
+zinc:
+  runtime:
+    parallel: true
+    max_parallel: 2
+  packages:
+    responses: zinc://package/openai-responses@0.1.4
+
+takes:
+  $topic:
+    type: text
+
+uses:
+  define:
+    model: local-llama
+    takes:
+      topic: $topic
+    does: |
+      Define the topic in one short sentence.
+    gives:
+      answer: $definition
+  analogy:
+    model: local-llama
+    takes:
+      topic: $topic
+    does: |
+      Give one short analogy for the topic.
+    gives:
+      answer: $analogy
+
+gives:
+  $definition:
+    type: text
+  $analogy:
+    type: text

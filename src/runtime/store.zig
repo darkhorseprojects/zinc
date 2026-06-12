@@ -43,6 +43,29 @@ pub const approvals = struct {
     created_at: ?i64,
 };
 
+pub const run_values = struct {
+    id: []const u8,
+    run_id: []const u8,
+    name: []const u8,
+    type_label: ?[]const u8,
+    value: []const u8,
+};
+
+pub const run_parts = struct {
+    id: []const u8,
+    run_id: []const u8,
+    name: []const u8,
+    status: []const u8,
+};
+
+pub const run_text = struct {
+    id: []const u8,
+    run_id: []const u8,
+    kind: []const u8,
+    name: []const u8,
+    text: []const u8,
+};
+
 pub const packages = struct {
     name: []const u8,
     version: ?[]const u8,
@@ -104,7 +127,7 @@ pub const Store = struct {
             .has_workspace = has_workspace,
         };
 
-        try store.migrate();
+        try store.ensureSchema();
         return store;
     }
 
@@ -115,7 +138,7 @@ pub const Store = struct {
         }
     }
 
-    fn migrate(self: *Store) !void {
+    fn ensureSchema(self: *Store) !void {
         // Global tables
         try self.global_db.exec("create table if not exists packages(name text primary key, version text, source text, scope text, path text, status text, installed_at integer, checked_at integer)", .{});
         try self.global_db.exec("create table if not exists package_sources(package_name text primary key, kind text not null, url text not null, ref text not null, path text not null, rev text)", .{});
@@ -126,6 +149,9 @@ pub const Store = struct {
         try self.workspace_db.exec("create table if not exists runs(id text primary key, doc_id text, status text, started_at integer, finished_at integer)", .{});
         try self.workspace_db.exec("create table if not exists actions(id text primary key, run_id text, seq integer, action text, cwd text, status text, approval text, stdout_uri text, stderr_uri text, metadata_json text)", .{});
         try self.workspace_db.exec("create table if not exists approvals(id text primary key, run_id text, kind text, subject text, decision text, created_at integer)", .{});
+        try self.workspace_db.exec("create table if not exists run_values(id text primary key, run_id text not null, name text not null, type_label text, value text not null)", .{});
+        try self.workspace_db.exec("create table if not exists run_parts(id text primary key, run_id text not null, name text not null, status text not null)", .{});
+        try self.workspace_db.exec("create table if not exists run_text(id text primary key, run_id text not null, kind text not null, name text not null, text text not null)", .{});
         try self.workspace_db.exec("create table if not exists config(key text primary key, value text)", .{});
     }
 
@@ -227,6 +253,12 @@ pub const Store = struct {
             };
         }
         return null;
+    }
+
+    pub fn freeRun(self: *Store, row: runs) void {
+        self.allocator.free(row.id);
+        if (row.doc_id) |doc_id| self.allocator.free(doc_id);
+        if (row.status) |status| self.allocator.free(status);
     }
 
     // --- Actions ---
@@ -336,6 +368,148 @@ pub const Store = struct {
             };
         }
         return null;
+    }
+
+    // --- System runs ---
+    pub fn insertRunValue(self: *Store, row: run_values) !void {
+        try self.workspace_db.exec(
+            "insert into run_values(id, run_id, name, type_label, value) values (:id, :run_id, :name, :type_label, :value) on conflict(id) do update set value=excluded.value, type_label=excluded.type_label",
+            .{
+                .id = limbo.text(row.id),
+                .run_id = limbo.text(row.run_id),
+                .name = limbo.text(row.name),
+                .type_label = if (row.type_label) |t| limbo.text(t) else null,
+                .value = limbo.text(row.value),
+            },
+        );
+    }
+
+    pub fn insertRunPart(self: *Store, row: run_parts) !void {
+        try self.workspace_db.exec(
+            "insert into run_parts(id, run_id, name, status) values (:id, :run_id, :name, :status) on conflict(id) do update set status=excluded.status",
+            .{ .id = limbo.text(row.id), .run_id = limbo.text(row.run_id), .name = limbo.text(row.name), .status = limbo.text(row.status) },
+        );
+    }
+
+    pub fn listRunParts(self: *Store, run_id: []const u8) ![]run_parts {
+        const Row = struct { id: limbo.Text, run_id: limbo.Text, name: limbo.Text, status: limbo.Text };
+        var stmt = try self.workspace_db.prepare(struct { run_id: limbo.Text }, Row, "select id, run_id, name, status from run_parts where run_id = :run_id order by name asc");
+        defer stmt.finalize();
+        try stmt.bind(.{ .run_id = limbo.text(run_id) });
+        var list: std.ArrayList(run_parts) = .empty;
+        errdefer {
+            for (list.items) |row| self.freeRunPart(row);
+            list.deinit(self.allocator);
+        }
+        while (try stmt.step()) |row| try list.append(self.allocator, .{
+            .id = try self.allocator.dupe(u8, row.id.data),
+            .run_id = try self.allocator.dupe(u8, row.run_id.data),
+            .name = try self.allocator.dupe(u8, row.name.data),
+            .status = try self.allocator.dupe(u8, row.status.data),
+        });
+        return list.toOwnedSlice(self.allocator);
+    }
+
+    pub fn freeRunPart(self: *Store, row: run_parts) void {
+        self.allocator.free(row.id);
+        self.allocator.free(row.run_id);
+        self.allocator.free(row.name);
+        self.allocator.free(row.status);
+    }
+
+    pub fn insertRunText(self: *Store, row: run_text) !void {
+        try self.workspace_db.exec(
+            "insert into run_text(id, run_id, kind, name, text) values (:id, :run_id, :kind, :name, :text) on conflict(id) do update set text=excluded.text",
+            .{ .id = limbo.text(row.id), .run_id = limbo.text(row.run_id), .kind = limbo.text(row.kind), .name = limbo.text(row.name), .text = limbo.text(row.text) },
+        );
+    }
+
+    pub fn getRunText(self: *Store, run_id: []const u8, kind: []const u8, name: []const u8) !?run_text {
+        const Row = struct { id: limbo.Text, run_id: limbo.Text, kind: limbo.Text, name: limbo.Text, text: limbo.Text };
+        var stmt = try self.workspace_db.prepare(struct { run_id: limbo.Text, kind: limbo.Text, name: limbo.Text }, Row, "select id, run_id, kind, name, text from run_text where run_id = :run_id and kind = :kind and name = :name");
+        defer stmt.finalize();
+        try stmt.bind(.{ .run_id = limbo.text(run_id), .kind = limbo.text(kind), .name = limbo.text(name) });
+        if (try stmt.step()) |row| return .{
+            .id = try self.allocator.dupe(u8, row.id.data),
+            .run_id = try self.allocator.dupe(u8, row.run_id.data),
+            .kind = try self.allocator.dupe(u8, row.kind.data),
+            .name = try self.allocator.dupe(u8, row.name.data),
+            .text = try self.allocator.dupe(u8, row.text.data),
+        };
+        return null;
+    }
+
+    pub fn listRunText(self: *Store, run_id: []const u8, kind: []const u8) ![]run_text {
+        const Row = struct { id: limbo.Text, run_id: limbo.Text, kind: limbo.Text, name: limbo.Text, text: limbo.Text };
+        var stmt = try self.workspace_db.prepare(struct { run_id: limbo.Text, kind: limbo.Text }, Row, "select id, run_id, kind, name, text from run_text where run_id = :run_id and kind = :kind order by name asc");
+        defer stmt.finalize();
+        try stmt.bind(.{ .run_id = limbo.text(run_id), .kind = limbo.text(kind) });
+        var list: std.ArrayList(run_text) = .empty;
+        errdefer {
+            for (list.items) |row| self.freeRunText(row);
+            list.deinit(self.allocator);
+        }
+        while (try stmt.step()) |row| try list.append(self.allocator, .{
+            .id = try self.allocator.dupe(u8, row.id.data),
+            .run_id = try self.allocator.dupe(u8, row.run_id.data),
+            .kind = try self.allocator.dupe(u8, row.kind.data),
+            .name = try self.allocator.dupe(u8, row.name.data),
+            .text = try self.allocator.dupe(u8, row.text.data),
+        });
+        return list.toOwnedSlice(self.allocator);
+    }
+
+    pub fn freeRunText(self: *Store, row: run_text) void {
+        self.allocator.free(row.id);
+        self.allocator.free(row.run_id);
+        self.allocator.free(row.kind);
+        self.allocator.free(row.name);
+        self.allocator.free(row.text);
+    }
+
+    pub fn listRunValues(self: *Store, run_id: []const u8) ![]run_values {
+        const Row = struct { id: limbo.Text, run_id: limbo.Text, name: limbo.Text, type_label: ?limbo.Text, value: limbo.Text };
+        var stmt = try self.workspace_db.prepare(struct { run_id: limbo.Text }, Row, "select id, run_id, name, type_label, value from run_values where run_id = :run_id order by name asc");
+        defer stmt.finalize();
+        try stmt.bind(.{ .run_id = limbo.text(run_id) });
+        var list: std.ArrayList(run_values) = .empty;
+        errdefer {
+            for (list.items) |row| self.freeRunValue(row);
+            list.deinit(self.allocator);
+        }
+        while (try stmt.step()) |row| {
+            try list.append(self.allocator, .{
+                .id = try self.allocator.dupe(u8, row.id.data),
+                .run_id = try self.allocator.dupe(u8, row.run_id.data),
+                .name = try self.allocator.dupe(u8, row.name.data),
+                .type_label = if (row.type_label) |t| try self.allocator.dupe(u8, t.data) else null,
+                .value = try self.allocator.dupe(u8, row.value.data),
+            });
+        }
+        return list.toOwnedSlice(self.allocator);
+    }
+
+    pub fn getRunValue(self: *Store, run_id: []const u8, name: []const u8) !?run_values {
+        const Row = struct { id: limbo.Text, run_id: limbo.Text, name: limbo.Text, type_label: ?limbo.Text, value: limbo.Text };
+        var stmt = try self.workspace_db.prepare(struct { run_id: limbo.Text, name: limbo.Text }, Row, "select id, run_id, name, type_label, value from run_values where run_id = :run_id and name = :name");
+        defer stmt.finalize();
+        try stmt.bind(.{ .run_id = limbo.text(run_id), .name = limbo.text(name) });
+        if (try stmt.step()) |row| return .{
+            .id = try self.allocator.dupe(u8, row.id.data),
+            .run_id = try self.allocator.dupe(u8, row.run_id.data),
+            .name = try self.allocator.dupe(u8, row.name.data),
+            .type_label = if (row.type_label) |t| try self.allocator.dupe(u8, t.data) else null,
+            .value = try self.allocator.dupe(u8, row.value.data),
+        };
+        return null;
+    }
+
+    pub fn freeRunValue(self: *Store, row: run_values) void {
+        self.allocator.free(row.id);
+        self.allocator.free(row.run_id);
+        self.allocator.free(row.name);
+        if (row.type_label) |t| self.allocator.free(t);
+        self.allocator.free(row.value);
     }
 
     // --- Packages ---

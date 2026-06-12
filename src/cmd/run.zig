@@ -10,5 +10,5 @@ pub fn run(allocator: Allocator, io: std.Io, store: *Store, shape_path: []const 
     var settings = try config_cmd.loadSettings(allocator);
     defer settings.deinit();
 
-    try run_mod.runShape(allocator, io, store, shape_path, args, settings.mode);
+    try run_mod.runShape(allocator, io, store, shape_path, args, &settings);
 }

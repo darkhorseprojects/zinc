@@ -1,112 +1,125 @@
 # Zinc
 
-Zinc is a local runtime for Circuitry 0.6 action-shapes.
+Zinc is the host that runs Circuitry action systems.
 
-Zinc loads portable Circuitry action-shapes, prepares their inputs, executes them in a governed environment interception loop, records run traces in Limbo, and settles outputs.
+Circuitry is YAML for action systems. Zinc loads `.circuitry.yaml`, confirms it through `circuitry-zig`, builds a lazy plan from `$` value wiring, executes needed `uses` entries, stores typed values, and exposes traces through `zinc://` URIs.
 
-## Circuitry 0.6 Format
-
-Circuitry 0.6 is a tiny YAML shape for reusable actions. Core fields:
-
-- `circuitry`
-- `name`
-- `about`
-- `takes`
-- `does`
-- `gives`
-
-Example (`examples/search-web.circuitry.yaml`):
+## Circuitry 0.6.1
 
 ```yaml
-circuitry: "0.6"
-name: search-web
-about: Search the web, read sources, and return a cited answer.
+circuitry: "0.6.1"
+name: compute math
 
 takes:
-  query: text
+  $principal:
+    type: number
+  $rate:
+    type: number
+  $years:
+    type: number
 
-does: |
-  Search for the query.
-  Open relevant sources.
-  Compare results.
-  Return a grounded answer.
+uses:
+  compound_interest:
+    takes:
+      principal: $principal
+      rate: $rate
+      years: $years
+    does: |
+      amount = principal * (1 + rate) ^ years
+      interest = amount - principal
+    gives:
+      amount: $amount
+      interest: $interest
 
 gives:
-  answer: text
-  sources: list
+  $amount:
+    type: number
+  $interest:
+    type: number
 ```
+
+Run it:
+
+```bash
+zn run examples/compute-math.circuitry.yaml principal=1000 rate=0.05 years=10
+```
+
+Zinc prints outputs and a run URI.
+
+## Ownership
+
+Circuitry owns `circuitry`, `name`, `about`, `takes`, `uses`, `does`, `gives`, and `$value` references.
+
+Zinc owns `zinc`, `@package` references, `model`, model preset config, package resolution, adapter invocation, value storage, and traces.
 
 ## CLI
 
-The Zinc CLI (`zn`) provides a simplified subcommand surface:
-
 ```bash
-# Run a Circuitry shape
-zn run <shape-path> [args]
-
-# Read a file or zinc:// reference
+zn run <shape> [name=value ...]
 zn read <uri-or-file>
-
-# Inspect a shape, package, run, or reference
 zn inspect <uri-or-file>
-
-# Manage packages (install, update, remove, list, check)
-zn pkg <subcommand> [args]
-
-# Update the zn binary
-zn update
-
-# View active configuration
+zn pkg install <source-or-name>
+zn pkg remove <name>
+zn pkg list
+zn pkg check <name>
 zn config
 ```
 
-## Local Layout
+## Runtime
 
-A workspace uses a local `.zinc` directory for state:
+Zinc derives dependency order from `$` references. A part is ready when all values in its local `takes` are available. When `runtime.parallel` is enabled, Zinc runs bounded ready waves concurrently, including inline parts, model-backed parts, and external/package shape parts. Workers return part results; Zinc commits values, reasoning, artifacts, and scoped child traces in plan order for deterministic runs. Values are stored with their type labels and can be read back:
+
+```bash
+zn inspect zinc://run/<run_id>
+zn read 'zinc://run/<run_id>/value/$amount'
+```
+
+Inline parts can execute deterministic arithmetic assignment lines. Model-backed parts resolve through Zinc model presets and package-provided adapters. External and package-provided shapes run through the same value wiring as inline parts.
+
+The first adapter package is public:
 
 ```text
-.zinc/
-  zinc.db       Limbo database containing runs, documents, packages, and policy approvals
-  packages/     Installed package directories
+zinc://package/openai-responses@0.1.4
+https://github.com/darkhorseprojects/darkhorseprojects-packages/tree/main/openai-responses
 ```
 
-Short-lived run execution outputs (such as stdout, stderr, and artifacts) are stored in the system's temporary directory.
-
-## Packages
-
-A package may declare a git update source in `zinc.pkg.yaml`:
-
-```yaml
-source:
-  git: https://git.example.org/team/package.git
-  ref: main
-  path: .
-```
-
-`zn pkg update <name>` fetches that git source and reinstalls the package from the resolved `path`. `zn pkg update --all` updates every installed package with a git source.
+It installs a self-contained global Zinc config for a local llama.cpp server on `127.0.0.1:30000`, with `context_window: 16384` and `reasoning.max_tokens: 512`.
 
 ## Configuration
 
-Zinc configuration uses `config.yaml` located in the workspace `.zinc/` or global path (`~/.zinc/config.yaml`).
+Zinc reads `.zinc/config.yaml` and `~/.zinc/config.yaml`.
 
 ```yaml
-mode: build     # Command interception mode: inspect, open, build
-scope: project  # Access scope: project, home, system
+runtime:
+  parallel: true
+  max_parallel: 0
+
+models:
+  default: fast
+
+  fast:
+    adapter: @responses.adapters.responses
+    params:
+      model: gpt-4.1-mini
+      temperature: 0.2
 ```
+
+## Packages
+
+Package manifests are readable YAML and can expose `shapes`, `adapters`, `prompts`, `files`, `docs`, `assets`, and `scripts`. Circuitry files refer to package assets with `@alias.kind.name` and declare aliases under top-level `zinc.packages`.
+
+Packages may declare `soft_dependencies`; Zinc reports them during inspect/install, never installs them automatically, and fails only when a missing optional package segment is used.
 
 ## Building
 
-Zinc is written in Zig 0.16.0. Build from source:
+Zinc is written in Zig 0.16.0.
 
 ```bash
 zig build
+zig build test
 ```
 
 ## Learn more
 
 - [Wiki](https://github.com/darkhorseprojects/zinc/wiki)
-- [Circuitry 0.6](https://github.com/darkhorseprojects/circuitry/wiki)
-
-## License
-
-Apache-2.0
+- [Circuitry](https://github.com/darkhorseprojects/circuitry/wiki)

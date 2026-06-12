@@ -1,0 +1,43 @@
+circuitry: "0.6.1"
+name: parallel math
+
+zinc:
+  runtime:
+    parallel: true
+    max_parallel: 2
+
+takes:
+  $x:
+    type: number
+
+uses:
+  double:
+    takes:
+      x: $x
+    does: |
+      y = x * 2
+    gives:
+      y: $double
+  triple:
+    takes:
+      x: $x
+    does: |
+      y = x * 3
+    gives:
+      y: $triple
+  total:
+    takes:
+      double: $double
+      triple: $triple
+    does: |
+      sum = double + triple
+    gives:
+      sum: $total
+
+gives:
+  $double:
+    type: number
+  $triple:
+    type: number
+  $total:
+    type: number
