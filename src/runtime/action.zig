@@ -27,7 +27,7 @@ pub const builtin_modes = struct {
     pub const build = ModeConfig{
         .default = .confirm,
         .allow = &.{
-            "pwd", "ls", "cat", "rg", "git status", "git diff", "git log",
+            "pwd",       "ls",             "cat",      "rg",            "git status", "git diff", "git log",
             "zig build", "zig build test", "npm test", "npm run build",
         },
         .confirm = &.{ "npm install", "rm", "chmod" },
@@ -35,7 +35,7 @@ pub const builtin_modes = struct {
 
     pub const open = ModeConfig{
         .default = .confirm,
-        .allow = &.{ "*" },
+        .allow = &.{"*"},
         .confirm = &.{},
     };
 };
@@ -83,16 +83,17 @@ pub fn execute(allocator: Allocator, io: std.Io, store: *Store, run_id: []const 
 
     if (app_decision == .deny) {
         // Record denied action
+        const action_path = try std.fmt.allocPrint(allocator, "actions/{d}", .{seq});
+        defer allocator.free(action_path);
         try store.insertAction(actions_table{
             .id = action_id,
             .run_id = run_id,
+            .path = action_path,
             .seq = seq,
             .action = command,
             .cwd = cwd,
             .status = "denied",
             .approval = if (decision == .confirm) "confirm_deny" else "policy_deny",
-            .stdout_uri = null,
-            .stderr_uri = null,
             .metadata_json = "{}",
         });
         return error.ActionDenied;
@@ -106,7 +107,7 @@ pub fn execute(allocator: Allocator, io: std.Io, store: *Store, run_id: []const 
     const res = try proc.runShell(allocator, io, command, null, preview_bytes, capture_bytes, run_id);
     defer res.deinit(allocator);
 
-    const summary = try proc.shellSummary(allocator, command, res, preview_bytes, preview_lines, run_id);
+    const summary = try proc.shellSummary(allocator, command, res, preview_bytes, preview_lines, run_id, seq);
     defer allocator.free(summary);
 
     const metadata = try proc.shellMetadata(allocator, command, res);
@@ -116,24 +117,39 @@ pub fn execute(allocator: Allocator, io: std.Io, store: *Store, run_id: []const 
     try files.writeAllOut(summary);
     try files.writeAllOut("\n");
 
-    const stdout_uri = try std.fmt.allocPrint(allocator, "zinc://run/{s}/stdout", .{run_id});
-    defer allocator.free(stdout_uri);
-    const stderr_uri = try std.fmt.allocPrint(allocator, "zinc://run/{s}/stderr", .{run_id});
-    defer allocator.free(stderr_uri);
+    const action_path = try std.fmt.allocPrint(allocator, "actions/{d}", .{seq});
+    defer allocator.free(action_path);
 
     // 4. Record action in database
     try store.insertAction(actions_table{
         .id = action_id,
         .run_id = run_id,
+        .path = action_path,
         .seq = seq,
         .action = command,
         .cwd = cwd,
         .status = if (res.code == 0) "success" else "failure",
         .approval = if (decision == .confirm) "confirm_allow" else "policy_allow",
-        .stdout_uri = stdout_uri,
-        .stderr_uri = stderr_uri,
         .metadata_json = metadata,
     });
+    const stdout_id = try outputId(allocator, action_id, "stdout");
+    defer allocator.free(stdout_id);
+    const stdout_path = try outputPath(allocator, seq, "stdout");
+    defer allocator.free(stdout_path);
+    try store.insertActionOutput(.{ .id = stdout_id, .action_id = action_id, .run_id = run_id, .path = stdout_path, .stream = "stdout", .payload = res.stdout, .bytes = @intCast(res.stdout.len), .truncated = if (res.truncated) 1 else 0 });
+    const stderr_id = try outputId(allocator, action_id, "stderr");
+    defer allocator.free(stderr_id);
+    const stderr_path = try outputPath(allocator, seq, "stderr");
+    defer allocator.free(stderr_path);
+    try store.insertActionOutput(.{ .id = stderr_id, .action_id = action_id, .run_id = run_id, .path = stderr_path, .stream = "stderr", .payload = res.stderr, .bytes = @intCast(res.stderr.len), .truncated = if (res.truncated) 1 else 0 });
+}
+
+fn outputId(allocator: Allocator, action_id: []const u8, stream: []const u8) ![]u8 {
+    return try std.fmt.allocPrint(allocator, "{s}:{s}", .{ action_id, stream });
+}
+
+fn outputPath(allocator: Allocator, seq: i64, stream: []const u8) ![]u8 {
+    return try std.fmt.allocPrint(allocator, "actions/{d}/{s}", .{ seq, stream });
 }
 
 fn randomId(allocator: Allocator, io: std.Io, prefix: []const u8) ![]u8 {

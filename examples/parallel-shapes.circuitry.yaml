@@ -6,7 +6,7 @@ zinc:
     parallel: true
     max_parallel: 2
   packages:
-    responses: openai-responses@0.1.7
+    responses: openai-responses@0.1.8
 
 takes:
   $left_question: text
@@ -14,13 +14,13 @@ takes:
 
 uses:
   left:
-    shape: responses.short-answer
+    shape: responses.shapes.short_answer
     takes:
       question: $left_question
     gives:
       answer: $left_answer
   right:
-    shape: responses.short-answer
+    shape: responses.shapes.short_answer
     takes:
       question: $right_question
     gives:

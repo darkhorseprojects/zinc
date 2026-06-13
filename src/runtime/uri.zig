@@ -1,175 +1,100 @@
 const std = @import("std");
 const Store = @import("store.zig").Store;
-const layout = @import("../io/layout.zig");
 const files = @import("../io/fs.zig");
 const pkg_index = @import("../pkg/index.zig");
 
 const Allocator = std.mem.Allocator;
 
-pub const UriType = enum {
-    run,
-    run_stdout,
-    run_stderr,
-    run_artifact,
-    run_action,
-    run_value,
-    run_plan,
-    run_part,
-    run_reasoning,
-    doc,
-    package,
-    package_shape,
-    approval,
-};
+pub const Root = enum { runs, docs, packages, config };
 
 pub const ParsedUri = struct {
-    type: UriType,
+    root: Root,
     id: []const u8,
-    extra: ?[]const u8 = null,
+    path: []const u8,
 
     pub fn deinit(self: ParsedUri, allocator: Allocator) void {
         allocator.free(self.id);
-        if (self.extra) |e| allocator.free(e);
+        allocator.free(self.path);
     }
 };
 
 pub fn parse(allocator: Allocator, raw_uri: []const u8) !ParsedUri {
     const prefix = "zinc://";
     if (!std.mem.startsWith(u8, raw_uri, prefix)) return error.InvalidScheme;
-    const path = raw_uri[prefix.len..];
+    const body = raw_uri[prefix.len..];
+    var it = std.mem.splitScalar(u8, body, '/');
+    const root_text = it.next() orelse return error.InvalidUri;
+    const id = it.next() orelse return error.InvalidUri;
+    const root: Root = if (std.mem.eql(u8, root_text, "runs")) .runs else if (std.mem.eql(u8, root_text, "docs")) .docs else if (std.mem.eql(u8, root_text, "packages")) .packages else if (std.mem.eql(u8, root_text, "config")) .config else return error.UnknownUriRoot;
 
-    var it = std.mem.splitScalar(u8, path, '/');
-    const category = it.next() orelse return error.InvalidUriCategory;
-    const id = it.next() orelse return error.InvalidUriId;
-
-    if (std.mem.eql(u8, category, "run")) {
-        const sub1 = it.next();
-        if (sub1 == null) {
-            return ParsedUri{ .type = .run, .id = try allocator.dupe(u8, id) };
-        }
-        if (std.mem.eql(u8, sub1.?, "stdout")) {
-            return ParsedUri{ .type = .run_stdout, .id = try allocator.dupe(u8, id) };
-        }
-        if (std.mem.eql(u8, sub1.?, "stderr")) {
-            return ParsedUri{ .type = .run_stderr, .id = try allocator.dupe(u8, id) };
-        }
-        if (std.mem.eql(u8, sub1.?, "artifact")) {
-            const art_name = it.next() orelse return error.InvalidArtifactUri;
-            return ParsedUri{ .type = .run_artifact, .id = try allocator.dupe(u8, id), .extra = try allocator.dupe(u8, art_name) };
-        }
-        if (std.mem.eql(u8, sub1.?, "action")) {
-            const seq_str = it.next() orelse return error.InvalidActionUri;
-            return ParsedUri{ .type = .run_action, .id = try allocator.dupe(u8, id), .extra = try allocator.dupe(u8, seq_str) };
-        }
-        if (std.mem.eql(u8, sub1.?, "value")) {
-            const value_name = it.next() orelse return error.InvalidValueUri;
-            return ParsedUri{ .type = .run_value, .id = try allocator.dupe(u8, id), .extra = try allocator.dupe(u8, value_name) };
-        }
-        if (std.mem.eql(u8, sub1.?, "plan")) {
-            return ParsedUri{ .type = .run_plan, .id = try allocator.dupe(u8, id), .extra = try allocator.dupe(u8, "plan") };
-        }
-        if (std.mem.eql(u8, sub1.?, "part")) {
-            const part_name = it.next() orelse return error.InvalidPartUri;
-            return ParsedUri{ .type = .run_part, .id = try allocator.dupe(u8, id), .extra = try allocator.dupe(u8, part_name) };
-        }
-        if (std.mem.eql(u8, sub1.?, "reasoning")) {
-            const part_name = it.next() orelse return error.InvalidReasoningUri;
-            return ParsedUri{ .type = .run_reasoning, .id = try allocator.dupe(u8, id), .extra = try allocator.dupe(u8, part_name) };
-        }
-    } else if (std.mem.eql(u8, category, "doc")) {
-        return ParsedUri{ .type = .doc, .id = try allocator.dupe(u8, id) };
-    } else if (std.mem.eql(u8, category, "package")) {
-        const sub1 = it.next();
-        if (sub1 == null) {
-            return ParsedUri{ .type = .package, .id = try allocator.dupe(u8, id) };
-        }
-        if (std.mem.eql(u8, sub1.?, "shape")) {
-            const shape_name = it.next() orelse return error.InvalidPackageShapeUri;
-            return ParsedUri{ .type = .package_shape, .id = try allocator.dupe(u8, id), .extra = try allocator.dupe(u8, shape_name) };
-        }
-    } else if (std.mem.eql(u8, category, "approval")) {
-        return ParsedUri{ .type = .approval, .id = try allocator.dupe(u8, id) };
-    }
-
-    return error.UnknownUriPattern;
+    const rest_start = prefix.len + root_text.len + 1 + id.len;
+    const rest = if (raw_uri.len > rest_start + 1) raw_uri[rest_start + 1 ..] else "";
+    return .{ .root = root, .id = try allocator.dupe(u8, id), .path = try allocator.dupe(u8, rest) };
 }
 
 pub fn resolveRead(allocator: Allocator, store: *Store, raw_uri: []const u8) ![]u8 {
     const parsed = try parse(allocator, raw_uri);
     defer parsed.deinit(allocator);
 
-    switch (parsed.type) {
-        .run_stdout => {
-            const out_sub = try std.fmt.allocPrint(allocator, "runs/{s}/stdout", .{parsed.id});
-            defer allocator.free(out_sub);
-            const global_path = try layout.tempRunPath(allocator, out_sub);
-            defer allocator.free(global_path);
-            if (files.existsPath(global_path)) {
-                return try files.readLimited(allocator, global_path, 64 * 1024 * 1024);
-            }
-            return error.RunOutputNotFound;
+    switch (parsed.root) {
+        .runs => return try readRunPath(allocator, store, parsed.id, parsed.path),
+        .docs => {
+            if (parsed.path.len != 0 and !std.mem.eql(u8, parsed.path, "source")) return error.DocPathNotReadable;
+            const doc = (try store.getDoc(parsed.id)) orelse return error.DocNotFound;
+            defer store.freeDoc(doc);
+            return try allocator.dupe(u8, doc.source_payload);
         },
-        .run_stderr => {
-            const err_sub = try std.fmt.allocPrint(allocator, "runs/{s}/stderr", .{parsed.id});
-            defer allocator.free(err_sub);
-            const global_path = try layout.tempRunPath(allocator, err_sub);
-            defer allocator.free(global_path);
-            if (files.existsPath(global_path)) {
-                return try files.readLimited(allocator, global_path, 64 * 1024 * 1024);
-            }
-            return error.RunOutputNotFound;
-        },
-        .run_artifact => {
-            const name = parsed.extra.?;
-            const row = (try store.getRunText(parsed.id, "artifact", name)) orelse return error.RunArtifactNotFound;
-            defer store.freeRunText(row);
-            return try allocator.dupe(u8, row.payload);
-        },
-        .run_plan => {
-            const row = (try store.getRunText(parsed.id, "plan", "plan")) orelse return error.RunPlanNotFound;
-            defer store.freeRunText(row);
-            return try allocator.dupe(u8, row.payload);
-        },
-        .run_reasoning => {
-            const name = parsed.extra.?;
-            const row = (try store.getRunText(parsed.id, "reasoning", name)) orelse return error.RunReasoningNotFound;
-            defer store.freeRunText(row);
-            return try allocator.dupe(u8, row.payload);
-        },
-        .run_part => {
-            const name = parsed.extra.?;
-            const parts = try store.listRunParts(parsed.id);
-            defer {
-                for (parts) |part| store.freeRunPart(part);
-                allocator.free(parts);
-            }
-            for (parts) |part| if (std.mem.eql(u8, part.name, name)) return try std.fmt.allocPrint(allocator, "part: {s}\nstatus: {s}\n", .{ part.name, part.status });
-            return error.RunPartNotFound;
-        },
-        .run_value => {
-            const value_name = parsed.extra.?;
-            const row = (try store.getRunValue(parsed.id, value_name)) orelse return error.RunValueNotFound;
-            defer store.freeRunValue(row);
-            return try allocator.dupe(u8, row.payload);
-        },
-        .doc => {
-            const doc_obj = (try store.getDoc(parsed.id)) orelse return error.DocNotFound;
-            defer store.freeDoc(doc_obj);
-            return try allocator.dupe(u8, doc_obj.source_payload);
-        },
-        .package => {
+        .packages => {
             const pkg = (try store.getPackage(parsed.id)) orelse return error.PackageNotFound;
             defer store.freePackage(pkg);
-            const manifest_path = try std.fs.path.join(allocator, &.{ pkg.path.?, "zinc.pkg.yaml" });
-            defer allocator.free(manifest_path);
-            return try files.readLimited(allocator, manifest_path, 10 * 1024 * 1024);
+            const root = pkg.path orelse return error.PackagePathMissing;
+            if (parsed.path.len == 0 or std.mem.eql(u8, parsed.path, "manifest")) {
+                const manifest_path = try std.fs.path.join(allocator, &.{ root, "zinc.pkg.yaml" });
+                defer allocator.free(manifest_path);
+                return try files.readLimited(allocator, manifest_path, 10 * 1024 * 1024);
+            }
+            const asset_path = try pkg_index.resolveAsset(allocator, store, parsed.id, parsed.path);
+            defer allocator.free(asset_path);
+            return try files.readLimited(allocator, asset_path, 64 * 1024 * 1024);
         },
-        .package_shape => {
-            const shape_name = parsed.extra.?;
-            const shape_path = try pkg_index.resolveShape(allocator, store, parsed.id, shape_name);
-            defer allocator.free(shape_path);
-            return try files.readLimited(allocator, shape_path, 10 * 1024 * 1024);
-        },
-        else => return error.UriNotReadable,
+        .config => return error.ConfigPathNotReadable,
     }
+}
+
+fn readRunPath(allocator: Allocator, store: *Store, run_id: []const u8, path: []const u8) ![]u8 {
+    if (path.len == 0) return runSummary(allocator, store, run_id);
+    if (std.mem.startsWith(u8, path, "values/")) {
+        const row = (try store.getRunValue(run_id, path)) orelse return error.RunValueNotFound;
+        defer store.freeRunValue(row);
+        return try allocator.dupe(u8, row.payload);
+    }
+    if (std.mem.startsWith(u8, path, "parts/")) {
+        const parts = try store.listRunParts(run_id);
+        defer {
+            for (parts) |part| store.freeRunPart(part);
+            allocator.free(parts);
+        }
+        for (parts) |part| if (std.mem.eql(u8, part.path, path)) return try std.fmt.allocPrint(allocator, "part: {s}\npath: {s}\nstatus: {s}\n", .{ part.name, part.path, part.status });
+        return error.RunPartNotFound;
+    }
+    if (std.mem.startsWith(u8, path, "actions/")) {
+        const row = (try store.getActionOutput(run_id, path)) orelse return error.ActionOutputNotFound;
+        defer store.freeActionOutput(row);
+        return try allocator.dupe(u8, row.payload);
+    }
+    if (std.mem.eql(u8, path, "plan") or std.mem.startsWith(u8, path, "artifacts/") or std.mem.startsWith(u8, path, "reasoning/")) {
+        const row = (try store.getRunText(run_id, path)) orelse return error.RunTextNotFound;
+        defer store.freeRunText(row);
+        return try allocator.dupe(u8, row.payload);
+    }
+    return error.RunPathNotReadable;
+}
+
+fn runSummary(allocator: Allocator, store: *Store, run_id: []const u8) ![]u8 {
+    const run = (try store.getRun(run_id)) orelse return error.RunNotFound;
+    defer store.freeRun(run);
+    var out: std.ArrayList(u8) = .empty;
+    errdefer out.deinit(allocator);
+    try out.print(allocator, "run: {s}\nstatus: {s}\ndoc: {s}\n", .{ run.id, run.status orelse "unknown", run.doc_id orelse "none" });
+    return out.toOwnedSlice(allocator);
 }

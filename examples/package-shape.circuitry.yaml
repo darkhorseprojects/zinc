@@ -3,14 +3,14 @@ name: package shape demo
 
 zinc:
   packages:
-    responses: openai-responses@0.1.7
+    responses: openai-responses@0.1.8
 
 takes:
   $question: text
 
 uses:
   answer:
-    shape: responses.short-answer
+    shape: responses.shapes.short_answer
     takes:
       question: $question
     gives:

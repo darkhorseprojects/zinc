@@ -5,7 +5,7 @@ about: Search the web through a Zinc package shape.
 zinc:
   packages:
     browser: browser@0.6.1
-    responses: openai-responses@0.1.7
+    responses: openai-responses@0.1.8
 
 takes:
   $query: text

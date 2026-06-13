@@ -1,13 +1,11 @@
 const std = @import("std");
 const Store = @import("../runtime/store.zig").Store;
-const manifest = @import("manifest.zig");
-const files = @import("../io/fs.zig");
 
 const Allocator = std.mem.Allocator;
 
 pub const PackageRef = struct {
     alias: []const u8,
-    name: []const u8,
+    path: []const u8,
 };
 
 pub fn parsePackageRef(raw: []const u8) !PackageRef {
@@ -15,12 +13,19 @@ pub fn parsePackageRef(raw: []const u8) !PackageRef {
     if (std.mem.indexOfScalar(u8, raw, '/')) |_| return error.NotPackageRef;
     const dot = std.mem.indexOfScalar(u8, raw, '.') orelse return error.NotPackageRef;
     if (dot == 0 or dot + 1 >= raw.len) return error.InvalidPackageRef;
-    if (std.mem.indexOfScalar(u8, raw[dot + 1 ..], '.')) |_| return error.InvalidPackageRef;
-    return .{ .alias = raw[0..dot], .name = raw[dot + 1 ..] };
+    return .{ .alias = raw[0..dot], .path = raw[dot + 1 ..] };
+}
+
+fn assetPath(allocator: Allocator, value: []const u8) ![]u8 {
+    const out = try allocator.dupe(u8, value);
+    for (out) |*c| {
+        if (c.* == '.') c.* = '/';
+    }
+    return out;
 }
 
 pub fn packageNameFromSpec(spec: []const u8) []const u8 {
-    const prefix = "zinc://package/";
+    const prefix = "zinc://packages/";
     const tail = if (std.mem.startsWith(u8, spec, prefix)) spec[prefix.len..] else spec;
     if (std.mem.indexOfScalar(u8, tail, '@')) |at| return tail[0..at];
     if (std.mem.indexOfScalar(u8, tail, '/')) |slash| return tail[0..slash];
@@ -34,27 +39,20 @@ pub fn resolveRef(allocator: Allocator, store: *Store, raw: []const u8, package_
         const pkg = (try store.getPackage(pkg_name)) orelse return error.SoftDependencyNotInstalled;
         store.freePackage(pkg);
     }
-    return try resolveAsset(allocator, store, pkg_name, parsed.name);
+    const path = try assetPath(allocator, parsed.path);
+    defer allocator.free(path);
+    return try resolveAsset(allocator, store, pkg_name, path);
 }
 
-pub fn resolveAsset(allocator: Allocator, store: *Store, pkg_name: []const u8, asset_name: []const u8) ![]u8 {
+pub fn resolveAsset(allocator: Allocator, store: *Store, pkg_name: []const u8, asset_path: []const u8) ![]u8 {
     const pkg = (try store.getPackage(pkg_name)) orelse return error.PackageNotFound;
     defer store.freePackage(pkg);
     const root = pkg.path orelse return error.PackagePathMissing;
-
-    const manifest_path = try std.fs.path.join(allocator, &.{ root, "zinc.pkg.yaml" });
-    defer allocator.free(manifest_path);
-
-    const manifest_bytes = try files.readLimited(allocator, manifest_path, 10 * 1024 * 1024);
-    defer allocator.free(manifest_bytes);
-
-    var parsed = try manifest.parse(allocator, manifest_bytes);
-    defer parsed.deinit();
-
-    const asset = try parsed.asset(asset_name);
-    return try std.fs.path.join(allocator, &.{ root, asset.path });
+    const asset = (try store.getPackageAsset(pkg_name, asset_path)) orelse return error.AssetNotFound;
+    defer store.freePackageAsset(asset);
+    return try std.fs.path.join(allocator, &.{ root, asset.file_path });
 }
 
-pub fn resolveShape(allocator: Allocator, store: *Store, pkg_name: []const u8, shape_name: []const u8) ![]u8 {
-    return resolveAsset(allocator, store, pkg_name, shape_name);
+pub fn resolveShape(allocator: Allocator, store: *Store, pkg_name: []const u8, shape_path: []const u8) ![]u8 {
+    return resolveAsset(allocator, store, pkg_name, shape_path);
 }

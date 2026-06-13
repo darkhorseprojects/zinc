@@ -28,8 +28,8 @@ zn run examples/compute-math.circuitry.yaml principal=1000 rate=0.05 years=10
 Zinc prints outputs and a run URI.
 
 ```bash
-zn inspect zinc://run/<run_id>
-zn read 'zinc://run/<run_id>/value/$amount'
+zn inspect zinc://runs/<run_id>
+zn read 'zinc://runs/<run_id>/values/amount'
 ```
 
 `zn update` shows staged progress for target resolution, download, checksum verification, preparation, and install.
@@ -54,13 +54,13 @@ Zinc reads `.zinc/config.yaml` and `~/.zinc/config.yaml`.
 
 ```yaml
 packages:
-  responses: openai-responses@0.1.7
+  responses: openai-responses@0.1.8
 
 models:
   default: local-llama
 
   local-llama:
-    adapter: responses.responses
+    adapter: responses.adapter
     params:
       endpoint: http://127.0.0.1:30000
       endpoint_kind: chat_completions
@@ -70,38 +70,48 @@ models:
 
 ## Packages
 
-A package manifest has one asset namespace. Each asset is a named path.
+A package manifest has a navigable asset tree. Each leaf asset is any file in the package.
 
 ```yaml
 name: openai-responses
-version: "0.1.7"
+version: "0.1.8"
 about: OpenAI Responses-shaped model adapter package.
 
 assets:
-  short-answer: shapes/short-answer.circuitry.yaml
-  responses: adapters/responses.py
-  runtime-prompt: prompts/runtime.md
-  default-config: config/zinc.models.yaml
-  readme: docs/README.md
-  icon: assets/icon.svg
+  adapter:
+    path: adapters/responses.py
+  shapes:
+    short_answer:
+      path: shapes/short-answer.circuitry.yaml
+  prompts:
+    runtime:
+      path: prompts/runtime.md
+  config:
+    default:
+      path: config/zinc.models.yaml
+  docs:
+    readme:
+      path: docs/README.md
+  icon:
+    path: assets/icon.svg
 ```
 
-Authored YAML uses compact `alias.asset` references.
+Authored YAML uses `alias.path.to.asset` references.
 
 ```yaml
 zinc:
   packages:
-    responses: openai-responses@0.1.7
+    responses: openai-responses@0.1.8
 
 uses:
   answer:
-    shape: responses.short-answer
+    shape: responses.shapes.short_answer
 ```
 
 ```yaml
 models:
   local-llama:
-    adapter: responses.responses
+    adapter: responses.adapter
 ```
 
 Packages may declare `soft_dependencies`; Zinc reports them during inspect/install and resolves them only when a reference uses them.

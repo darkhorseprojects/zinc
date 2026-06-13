@@ -54,7 +54,7 @@ pub fn runShell(allocator: Allocator, io: std.Io, command: []const u8, cwd: ?[]c
     return .{ .stdout = result.stdout, .stderr = result.stderr, .code = code, .output_path = output_path, .truncated = output_path != null };
 }
 
-pub fn shellSummary(allocator: Allocator, command: []const u8, result: ProcessResult, max_output_bytes: usize, max_output_lines: usize, run_id: []const u8) ![]u8 {
+pub fn shellSummary(allocator: Allocator, command: []const u8, result: ProcessResult, max_output_bytes: usize, max_output_lines: usize, run_id: []const u8, seq: i64) ![]u8 {
     _ = command;
     const stdout_tail = try tailText(allocator, result.stdout, max_output_bytes, max_output_lines);
     defer stdout_tail.deinit(allocator);
@@ -67,9 +67,9 @@ pub fn shellSummary(allocator: Allocator, command: []const u8, result: ProcessRe
         try out.print(allocator, "\nstderr:\n{s}\n", .{stderr_tail.text});
     }
     if (result.output_path) |_| {
-        try out.print(allocator, "\n[truncated]\n\nfull:\n  zinc://run/{s}/stdout\n", .{run_id});
+        try out.print(allocator, "\n[truncated]\n\nfull:\n  zinc://runs/{s}/actions/{d}/stdout\n", .{ run_id, seq });
     } else if (stdout_tail.truncated or stderr_tail.truncated) {
-        try out.print(allocator, "\n[truncated]\n\nfull:\n  zinc://run/{s}/stdout\n", .{run_id});
+        try out.print(allocator, "\n[truncated]\n\nfull:\n  zinc://runs/{s}/actions/{d}/stdout\n", .{ run_id, seq });
     }
     return out.toOwnedSlice(allocator);
 }
@@ -119,7 +119,7 @@ fn writeTempOutput(allocator: Allocator, run_id: []const u8, stdout: []const u8,
     const dir = try layout.tempRunPath(allocator, run_sub);
     defer allocator.free(dir);
     try files.mkdirP(dir);
-    
+
     const out_sub = try std.fmt.allocPrint(allocator, "runs/{s}/stdout", .{run_id});
     defer allocator.free(out_sub);
     const out_path = try layout.tempRunPath(allocator, out_sub);

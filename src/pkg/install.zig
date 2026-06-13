@@ -25,7 +25,7 @@ pub fn install(allocator: Allocator, io: std.Io, store: *Store, source_path: []c
 }
 
 pub fn installResolved(allocator: Allocator, io: std.Io, store: *Store, source_path: []const u8, is_global: bool, source_meta: ?SourceMeta) !void {
-    const abs_source_path = try std.fs.path.resolve(allocator, &.{source_path});
+    const abs_source_path = try absoluteDirPath(allocator, io, source_path);
     defer allocator.free(abs_source_path);
 
     const manifest_path = try std.fs.path.join(allocator, &.{ abs_source_path, "zinc.pkg.yaml" });
@@ -108,6 +108,8 @@ pub fn installResolved(allocator: Allocator, io: std.Io, store: *Store, source_p
         .checked_at = now,
     });
 
+    try materializePackageFacts(allocator, store, parsed, os_name);
+
     if (source_meta orelse manifestSource(parsed)) |source| {
         try store.upsertPackageSource(package_sources_table{
             .package_name = name,
@@ -120,6 +122,19 @@ pub fn installResolved(allocator: Allocator, io: std.Io, store: *Store, source_p
     }
 
     try files.writeAllOut("Package installed successfully.\n");
+}
+
+fn materializePackageFacts(allocator: Allocator, store: *Store, parsed: manifest.PackageManifest, os_name: []const u8) !void {
+    try store.clearPackageFacts(parsed.name);
+    const assets = try parsed.assets(allocator);
+    defer manifest.freeAssets(allocator, assets);
+    for (assets) |asset| try store.insertPackageAsset(.{ .package_name = parsed.name, .path = asset.path, .file_path = asset.file_path, .metadata_json = null });
+    inline for (&.{ "setup", "check", "remove" }) |script_name| {
+        if (parsed.getScript(script_name, os_name)) |script_rel| try store.insertPackageScript(.{ .package_name = parsed.name, .path = script_name, .file_path = script_rel });
+    }
+    const soft_deps = try parsed.softDependencies(allocator);
+    defer manifest.freeSoftDependencies(allocator, soft_deps);
+    for (soft_deps) |dep| try store.insertPackageDependency(.{ .package_name = parsed.name, .alias = dep.alias, .package_spec = dep.package, .about = dep.about });
 }
 
 pub fn remove(allocator: Allocator, io: std.Io, store: *Store, name: []const u8) !void {
@@ -165,6 +180,14 @@ pub fn remove(allocator: Allocator, io: std.Io, store: *Store, name: []const u8)
     // Delete from Database
     try store.deletePackage(name);
     try files.writeAllOut("Package removed successfully.\n");
+}
+
+fn absoluteDirPath(allocator: Allocator, io: std.Io, path: []const u8) ![]u8 {
+    if (std.fs.path.isAbsolute(path)) return try allocator.dupe(u8, path);
+    const cwd_buf = try allocator.alloc(u8, std.fs.max_path_bytes);
+    defer allocator.free(cwd_buf);
+    const cwd_len = try std.process.currentPath(io, cwd_buf);
+    return try std.fs.path.resolve(allocator, &.{ cwd_buf[0..cwd_len], path });
 }
 
 fn manifestSource(parsed: manifest.PackageManifest) ?SourceMeta {

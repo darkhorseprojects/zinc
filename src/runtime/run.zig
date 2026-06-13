@@ -5,6 +5,7 @@ const files = @import("../io/fs.zig");
 const layout = @import("../io/layout.zig");
 const config = @import("../cmd/config.zig");
 const pkg_index = @import("../pkg/index.zig");
+const path_mod = @import("../path.zig");
 const serde = @import("serde");
 const circuitry = @import("circuitry");
 
@@ -38,8 +39,8 @@ const ValueDraft = struct {
 };
 
 const TextDraft = struct {
-    kind: []const u8,
-    name: []const u8,
+    path: []const u8,
+    role: []const u8,
     payload: []const u8,
 };
 
@@ -58,6 +59,7 @@ const PlanValue = struct {
 const PlanPart = struct {
     id: []const u8,
     name: []const u8,
+    path: []const u8,
     shape: ?[]const u8,
     model: ?[]const u8,
     instructions: ?[]const u8,
@@ -147,8 +149,8 @@ const PartResult = struct {
         }
         self.outputs.deinit(self.allocator);
         for (self.texts.items) |item| {
-            self.allocator.free(item.kind);
-            self.allocator.free(item.name);
+            self.allocator.free(item.path);
+            self.allocator.free(item.role);
             self.allocator.free(item.payload);
         }
         self.texts.deinit(self.allocator);
@@ -162,10 +164,10 @@ const PartResult = struct {
         });
     }
 
-    fn addText(self: *PartResult, kind: []const u8, name: []const u8, payload: []const u8) !void {
+    fn addText(self: *PartResult, path: []const u8, role: []const u8, payload: []const u8) !void {
         try self.texts.append(self.allocator, .{
-            .kind = try self.allocator.dupe(u8, kind),
-            .name = try self.allocator.dupe(u8, name),
+            .path = try self.allocator.dupe(u8, path),
+            .role = try self.allocator.dupe(u8, role),
             .payload = try self.allocator.dupe(u8, payload),
         });
     }
@@ -214,14 +216,18 @@ fn storeNormalizedDoc(allocator: Allocator, store: *Store, doc_id: []const u8, d
         defer allocator.free(part_key);
         const part_id = try scopedDocId(allocator, doc_id, part_key);
         defer allocator.free(part_id);
-        try store.insertDocPart(.{ .id = part_id, .doc_id = doc_id, .order_index = @intCast(index), .name = part.name, .shape = part.shape, .model = part.model, .instructions = part.instructions });
+        const part_path = try path_mod.join(allocator, &.{ "uses", path_mod.valueSegment(part.name) });
+        defer allocator.free(part_path);
+        try store.insertDocPart(.{ .id = part_id, .doc_id = doc_id, .path = part_path, .order_index = @intCast(index), .name = part.name, .shape = part.shape, .model = part.model, .instructions = part.instructions });
         for (part.takes) |binding| try storeDocBinding(allocator, store, doc_id, part_id, part.name, .takes, binding);
         for (part.gives) |binding| try storeDocBinding(allocator, store, doc_id, part_id, part.name, .gives, binding);
     }
     for (doc.diagnostics, 0..) |diagnostic, index| {
         const id = try std.fmt.allocPrint(allocator, "{s}:diagnostic:{d}", .{ doc_id, index });
         defer allocator.free(id);
-        try store.insertDocDiagnostic(.{ .id = id, .doc_id = doc_id, .severity = "error", .kind = diagnostic.kind, .message = diagnostic.message });
+        const diag_path = try std.fmt.allocPrint(allocator, "diagnostics/{d}", .{index});
+        defer allocator.free(diag_path);
+        try store.insertDocDiagnostic(.{ .id = id, .doc_id = doc_id, .path = diag_path, .severity = "error", .kind = diagnostic.kind, .message = diagnostic.message });
     }
 }
 
@@ -230,7 +236,10 @@ fn storeDocValue(allocator: Allocator, store: *Store, doc_id: []const u8, value:
     defer allocator.free(key);
     const id = try scopedDocId(allocator, doc_id, key);
     defer allocator.free(id);
-    try store.insertDocValue(.{ .id = id, .doc_id = doc_id, .order_index = @intCast(order_index), .name = value.name, .type_label = value.type_label, .direction = @tagName(value.direction) });
+    const direction = @tagName(value.direction);
+    const value_path = try path_mod.valuePath(allocator, direction, value.name);
+    defer allocator.free(value_path);
+    try store.insertDocValue(.{ .id = id, .doc_id = doc_id, .path = value_path, .order_index = @intCast(order_index), .name = value.name, .type_label = value.type_label, .direction = direction });
 }
 
 fn storeDocBinding(allocator: Allocator, store: *Store, doc_id: []const u8, part_id: []const u8, part_name: []const u8, side: circuitry.Direction, binding: circuitry.NormalizedBinding) !void {
@@ -239,7 +248,9 @@ fn storeDocBinding(allocator: Allocator, store: *Store, doc_id: []const u8, part
     defer allocator.free(key);
     const id = try scopedDocId(allocator, doc_id, key);
     defer allocator.free(id);
-    try store.insertDocBinding(.{ .id = id, .doc_id = doc_id, .part_id = part_id, .side = @tagName(side), .local_name = binding.local, .value_name = binding.value, .type_label = binding.type_label });
+    const binding_path = try path_mod.join(allocator, &.{ "uses", path_mod.valueSegment(part_name), @tagName(side), path_mod.valueSegment(local_or_value) });
+    defer allocator.free(binding_path);
+    try store.insertDocBinding(.{ .id = id, .doc_id = doc_id, .path = binding_path, .part_id = part_id, .side = @tagName(side), .local_name = binding.local, .value_name = binding.value, .type_label = binding.type_label });
 }
 
 fn scopedDocId(allocator: Allocator, doc_id: []const u8, key: []const u8) ![]u8 {
@@ -274,10 +285,15 @@ pub fn runShape(allocator: Allocator, io: std.Io, store: *Store, shape_path: []c
     defer allocator.free(run_id);
     var execution = try RunExecution.start(io, store, run_id, doc_id);
     defer execution.fail();
+    try files.writeAllOut("Run URI: zinc://runs/");
+    try files.writeAllOut(run_id);
+    try files.writeAllOut("\n");
 
-    const plan_id = try textId(allocator, run_id, "plan", "plan");
+    try storeInputValues(allocator, store, run_id, &values, plan_doc.takes);
+    try storePlanSteps(allocator, store, run_id, plan_doc.parts, required);
+    const plan_id = try textId(allocator, run_id, "plan");
     defer allocator.free(plan_id);
-    try store.insertRunText(.{ .id = plan_id, .run_id = run_id, .kind = "plan", .name = "plan", .payload = plan_text });
+    try store.insertRunText(.{ .id = plan_id, .run_id = run_id, .path = "plan", .role = "plan", .payload = plan_text });
     try files.writeAllOut(plan_text);
     try executePlan(allocator, io, store, run_id, abs_path, &run_settings, &values, plan_doc.parts, required, null);
     try storeOutputs(allocator, store, run_id, &values, plan_doc.gives);
@@ -292,9 +308,6 @@ pub fn runShape(allocator: Allocator, io: std.Io, store: *Store, shape_path: []c
         try files.writeAllOut(found.value);
         try files.writeAllOut("\n");
     }
-    try files.writeAllOut("Run URI: zinc://run/");
-    try files.writeAllOut(run_id);
-    try files.writeAllOut("\n");
 }
 
 fn loadPlanDoc(allocator: Allocator, store: *Store, doc_id: []const u8) !PlanDoc {
@@ -338,6 +351,7 @@ fn loadPlanDoc(allocator: Allocator, store: *Store, doc_id: []const u8) !PlanDoc
         try plan_parts.append(allocator, .{
             .id = try allocator.dupe(u8, part.id),
             .name = try allocator.dupe(u8, part.name),
+            .path = try allocator.dupe(u8, part.path),
             .shape = if (part.shape) |s| try allocator.dupe(u8, s) else null,
             .model = if (part.model) |m| try allocator.dupe(u8, m) else null,
             .instructions = if (part.instructions) |i| try allocator.dupe(u8, i) else null,
@@ -399,6 +413,7 @@ fn freePlanBindings(allocator: Allocator, bindings: []PlanBinding) void {
 fn freePlanPart(allocator: Allocator, part: *PlanPart) void {
     allocator.free(part.id);
     allocator.free(part.name);
+    allocator.free(part.path);
     if (part.shape) |shape_ref| allocator.free(shape_ref);
     if (part.model) |model| allocator.free(model);
     if (part.instructions) |instructions| allocator.free(instructions);
@@ -437,35 +452,40 @@ fn collectInputs(allocator: Allocator, values: *std.StringHashMap(TypedValue), t
 fn validateInputArgs(takes: []const PlanValue, args: []const []const u8, shape_path: []const u8) !void {
     for (args, 0..) |arg, index| {
         const eq = std.mem.indexOfScalar(u8, arg, '=') orelse {
-            try files.writeAllErr("error: invalid run argument \"");
+            try writeInputHeader(shape_path);
+            try files.writeAllErr("\nInvalid input argument:\n  ");
             try files.writeAllErr(arg);
-            try files.writeAllErr("\"\n\nrun inputs use name=value syntax.\n\nexample:\n  zn run ");
-            try files.writeAllErr(shape_path);
-            try writeExpectedExampleArgs(takes);
-            try files.writeAllErr("\n");
+            try files.writeAllErr("\n\nInputs use name=value syntax.\n\n");
+            try writeExpectedInputs(takes);
+            try writeExample(takes, shape_path);
             return error.InvalidRunInput;
         };
         if (eq == 0) {
-            try files.writeAllErr("error: input name is empty in argument \"");
+            try writeInputHeader(shape_path);
+            try files.writeAllErr("\nInvalid input argument:\n  ");
             try files.writeAllErr(arg);
-            try files.writeAllErr("\"\n");
+            try files.writeAllErr("\n\nThe input name is empty.\n");
             return error.InvalidRunInput;
         }
         const name = arg[0..eq];
         const expected = expectedInput(takes, name) orelse {
-            try files.writeAllErr("error: unknown input \"");
+            try writeInputHeader(shape_path);
+            try files.writeAllErr("\nUnknown input:\n  ");
             try files.writeAllErr(name);
-            try files.writeAllErr("\"\n\nexpected inputs:\n");
+            try files.writeAllErr("\n\n");
             try writeExpectedInputs(takes);
+            try writeExample(takes, shape_path);
             return error.InvalidRunInput;
         };
-        try validateInputValue(expected, arg[eq + 1 ..], shape_path);
+        try validateInputValue(expected, arg[eq + 1 ..], shape_path, takes);
         for (args[0..index]) |prior| {
             const prior_eq = std.mem.indexOfScalar(u8, prior, '=') orelse continue;
             if (sameInputName(takes, prior[0..prior_eq], name)) {
-                try files.writeAllErr("error: duplicate input \"");
+                try writeInputHeader(shape_path);
+                try files.writeAllErr("\nDuplicate input:\n  ");
                 try files.writeAllErr(name);
-                try files.writeAllErr("\"\n");
+                try files.writeAllErr("\n\nEach input may be provided once.\n\n");
+                try writeExpectedInputs(takes);
                 return error.InvalidRunInput;
             }
         }
@@ -473,16 +493,12 @@ fn validateInputArgs(takes: []const PlanValue, args: []const []const u8, shape_p
 
     for (takes) |take| {
         if (findArg(args, take.name) != null or findArg(args, trimDollar(take.name)) != null) continue;
-        try files.writeAllErr("error: missing required input for ");
-        try files.writeAllErr(shape_path);
-        try files.writeAllErr("\n\nmissing:\n  ");
-        try writeInputSpec(take);
-        try files.writeAllErr("\n\nexpected inputs:\n");
+        try writeInputHeader(shape_path);
+        try files.writeAllErr("\nMissing required input:\n  ");
+        try writeAlignedInput(take, maxInputNameLen(takes));
+        try files.writeAllErr("\n\n");
         try writeExpectedInputs(takes);
-        try files.writeAllErr("\nexample:\n  zn run ");
-        try files.writeAllErr(shape_path);
-        try writeExpectedExampleArgs(takes);
-        try files.writeAllErr("\n");
+        try writeExample(takes, shape_path);
         return error.MissingRunInput;
     }
 }
@@ -492,17 +508,19 @@ fn expectedInput(takes: []const PlanValue, name: []const u8) ?PlanValue {
     return null;
 }
 
-fn validateInputValue(take: PlanValue, value: []const u8, shape_path: []const u8) !void {
+fn validateInputValue(take: PlanValue, value: []const u8, shape_path: []const u8, takes: []const PlanValue) !void {
     const label = take.type_label orelse return;
     if (!std.mem.eql(u8, label, "number")) return;
     _ = std.fmt.parseFloat(f64, value) catch {
-        try files.writeAllErr("error: invalid value for input \"");
+        try writeInputHeader(shape_path);
+        try files.writeAllErr("\nInvalid input:\n  ");
         try files.writeAllErr(trimDollar(take.name));
-        try files.writeAllErr("\" in ");
-        try files.writeAllErr(shape_path);
-        try files.writeAllErr("\n\nexpected: number\nreceived: ");
+        try files.writeAllErr(" = ");
         try files.writeAllErr(value);
-        try files.writeAllErr("\n");
+        try files.writeAllErr("\n\nExpected:\n  ");
+        try writeAlignedInput(take, maxInputNameLen(takes));
+        try files.writeAllErr("\n\n");
+        try writeExample(takes, shape_path);
         return error.InvalidInputValue;
     };
 }
@@ -516,28 +534,46 @@ fn inputNameMatches(take: PlanValue, name: []const u8) bool {
     return std.mem.eql(u8, take.name, name) or std.mem.eql(u8, trimDollar(take.name), name);
 }
 
+fn writeInputHeader(shape_path: []const u8) !void {
+    try files.writeAllErr("Cannot run ");
+    try files.writeAllErr(shape_path);
+    try files.writeAllErr("\n");
+}
+
 fn writeExpectedInputs(takes: []const PlanValue) !void {
+    try files.writeAllErr("This shape expects:\n");
+    const width = maxInputNameLen(takes);
     for (takes) |take| {
         try files.writeAllErr("  ");
-        try writeInputSpec(take);
+        try writeAlignedInput(take, width);
         try files.writeAllErr("\n");
     }
 }
 
-fn writeInputSpec(take: PlanValue) !void {
-    try files.writeAllErr(trimDollar(take.name));
-    try files.writeAllErr("=<");
+fn writeAlignedInput(take: PlanValue, width: usize) !void {
+    const name = trimDollar(take.name);
+    try files.writeAllErr(name);
+    var i = name.len;
+    while (i < width + 2) : (i += 1) try files.writeAllErr(" ");
     try files.writeAllErr(take.type_label orelse "value");
-    try files.writeAllErr(">");
 }
 
-fn writeExpectedExampleArgs(takes: []const PlanValue) !void {
+fn maxInputNameLen(takes: []const PlanValue) usize {
+    var width: usize = 0;
+    for (takes) |take| width = @max(width, trimDollar(take.name).len);
+    return width;
+}
+
+fn writeExample(takes: []const PlanValue, shape_path: []const u8) !void {
+    try files.writeAllErr("\nRun it with:\n  zn run ");
+    try files.writeAllErr(shape_path);
     for (takes) |take| {
         try files.writeAllErr(" ");
         try files.writeAllErr(trimDollar(take.name));
         try files.writeAllErr("=");
         try files.writeAllErr(exampleValue(take.type_label));
     }
+    try files.writeAllErr("\n");
 }
 
 fn exampleValue(type_label: ?[]const u8) []const u8 {
@@ -625,6 +661,7 @@ const WorkerContext = struct {
     run_id: []const u8,
     entry: PlanPart,
     values: *std.StringHashMap(TypedValue),
+    store: *Store,
     settings: *const config.ConfigSettings,
     shape_path: []const u8,
     trace_prefix: ?[]const u8 = null,
@@ -665,7 +702,7 @@ fn executeReadyParallelWave(allocator: Allocator, io: std.Io, store: *Store, run
     for (selected.items, 0..) |index, worker_index| {
         const entry = uses[index];
         try markPart(allocator, store, run_id, entry.id, entry.name, "running");
-        contexts[worker_index] = .{ .io = io, .run_id = run_id, .entry = entry, .values = values, .settings = settings, .shape_path = shape_path, .trace_prefix = trace_prefix };
+        contexts[worker_index] = .{ .io = io, .run_id = run_id, .entry = entry, .values = values, .store = store, .settings = settings, .shape_path = shape_path, .trace_prefix = trace_prefix };
         if (isModelPart(entry)) {
             const model_name = entry.model orelse settings.defaultModel();
             const preset = settings.modelPreset(model_name) orelse return error.ModelPresetNotFound;
@@ -694,17 +731,17 @@ fn executeReadyParallelWave(allocator: Allocator, io: std.Io, store: *Store, run
 
 fn partWorker(ctx: *WorkerContext) void {
     if (ctx.adapter_path) |adapter_path| {
-        const result_name = scopedName(std.heap.page_allocator, ctx.trace_prefix, ctx.entry.name) catch |err| {
+        const result_name = scopedPath(std.heap.page_allocator, ctx.trace_prefix, ctx.entry.name) catch |err| {
             ctx.err = err;
             return;
         };
         defer std.heap.page_allocator.free(result_name);
-        ctx.result = runModelPartResolved(std.heap.page_allocator, ctx.io, ctx.run_id, ctx.model_name.?, ctx.model_preset.?, adapter_path, ctx.values, ctx.entry, result_name) catch |err| {
+        ctx.result = runModelPartResolved(std.heap.page_allocator, ctx.io, ctx.store, ctx.run_id, ctx.model_name.?, ctx.model_preset.?, adapter_path, ctx.values, ctx.entry, result_name) catch |err| {
             ctx.err = err;
             return;
         };
     } else {
-        const result_name = scopedName(std.heap.page_allocator, ctx.trace_prefix, ctx.entry.name) catch |err| {
+        const result_name = scopedPath(std.heap.page_allocator, ctx.trace_prefix, ctx.entry.name) catch |err| {
             ctx.err = err;
             return;
         };
@@ -744,7 +781,7 @@ fn ready(values: *std.StringHashMap(TypedValue), takes: []const PlanBinding) boo
 }
 
 fn runPart(allocator: Allocator, io: std.Io, store: *Store, run_id: []const u8, shape_path: []const u8, settings: *const config.ConfigSettings, values: *std.StringHashMap(TypedValue), entry: PlanPart, trace_prefix: ?[]const u8) anyerror!void {
-    const trace_name = try scopedName(allocator, trace_prefix, entry.name);
+    const trace_name = try scopedPath(allocator, trace_prefix, entry.name);
     defer allocator.free(trace_name);
     try markPart(allocator, store, run_id, entry.id, trace_name, "running");
 
@@ -754,23 +791,30 @@ fn runPart(allocator: Allocator, io: std.Io, store: *Store, run_id: []const u8, 
 }
 
 fn markPart(allocator: Allocator, store: *Store, run_id: []const u8, doc_part_id: []const u8, name: []const u8, status: []const u8) !void {
-    const part_id = try std.fmt.allocPrint(allocator, "{s}:{s}", .{ run_id, name });
+    const part_path = try std.fmt.allocPrint(allocator, "parts/{s}", .{name});
+    defer allocator.free(part_path);
+    const part_id = try std.fmt.allocPrint(allocator, "{s}:{s}", .{ run_id, part_path });
     defer allocator.free(part_id);
     lockRuntimeStore();
     defer unlockRuntimeStore();
-    try store.insertRunPart(.{ .id = part_id, .run_id = run_id, .doc_part_id = doc_part_id, .name = name, .status = status });
+    try store.insertRunPart(.{ .id = part_id, .run_id = run_id, .path = part_path, .doc_part_id = doc_part_id, .name = path_mod.basename(name), .status = status });
 }
 
 fn commitPartResult(allocator: Allocator, store: *Store, run_id: []const u8, values: *std.StringHashMap(TypedValue), result: *const PartResult) !void {
     for (result.texts.items) |text| {
-        const id = try textId(allocator, run_id, text.kind, text.name);
+        const id = try textId(allocator, run_id, text.path);
         defer allocator.free(id);
         lockRuntimeStore();
         errdefer unlockRuntimeStore();
-        try store.insertRunText(.{ .id = id, .run_id = run_id, .kind = text.kind, .name = text.name, .payload = text.payload });
+        try store.insertRunText(.{ .id = id, .run_id = run_id, .path = text.path, .role = text.role, .payload = text.payload });
         unlockRuntimeStore();
     }
-    for (result.outputs.items) |output| try putText(allocator, values, output.name, output.type_label, output.value);
+    const producer_part_path = try std.fmt.allocPrint(allocator, "parts/{s}", .{result.name});
+    defer allocator.free(producer_part_path);
+    for (result.outputs.items) |output| {
+        try putText(allocator, values, output.name, output.type_label, output.value);
+        try storeRunValue(allocator, store, run_id, output.name, output.type_label, "intermediate", producer_part_path, output.value);
+    }
     try markPart(allocator, store, run_id, result.doc_part_id, result.name, "finished");
 }
 
@@ -862,7 +906,7 @@ fn runModelPart(allocator: Allocator, io: std.Io, store: *Store, run_id: []const
     const adapter_ref = preset.adapter orelse return error.ModelAdapterMissing;
     const adapter_path = try resolveAdapterPath(allocator, store, settings, adapter_ref);
     defer allocator.free(adapter_path);
-    return try runModelPartResolved(allocator, io, run_id, model_name, preset, adapter_path, values, entry, result_name);
+    return try runModelPartResolved(allocator, io, store, run_id, model_name, preset, adapter_path, values, entry, result_name);
 }
 
 fn resolveAdapterPath(allocator: Allocator, store: *Store, settings: *const config.ConfigSettings, adapter_ref: []const u8) ![]u8 {
@@ -872,7 +916,7 @@ fn resolveAdapterPath(allocator: Allocator, store: *Store, settings: *const conf
         return try allocator.dupe(u8, adapter_ref);
 }
 
-fn runModelPartResolved(allocator: Allocator, io: std.Io, run_id: []const u8, model_name: []const u8, preset: config.ModelPreset, adapter_path: []const u8, values: *std.StringHashMap(TypedValue), entry: PlanPart, result_name: []const u8) !PartResult {
+fn runModelPartResolved(allocator: Allocator, io: std.Io, store: *Store, run_id: []const u8, model_name: []const u8, preset: config.ModelPreset, adapter_path: []const u8, values: *std.StringHashMap(TypedValue), entry: PlanPart, result_name: []const u8) !PartResult {
     const request = try adapterRequestYaml(allocator, model_name, preset, values, entry);
     defer allocator.free(request);
 
@@ -881,18 +925,27 @@ fn runModelPartResolved(allocator: Allocator, io: std.Io, run_id: []const u8, mo
     const request_path = try layout.tempRunPath(allocator, request_sub);
     defer allocator.free(request_path);
     try files.write(request_path, request);
+    const request_artifact_path = try std.fmt.allocPrint(allocator, "artifacts/{s}/request", .{result_name});
+    defer allocator.free(request_artifact_path);
+    try insertRunTextDirect(allocator, store, run_id, request_artifact_path, "artifact", request);
+
     const argv = [_][]const u8{ adapter_path, request_path };
     const result = try std.process.run(allocator, io, .{ .argv = &argv, .stdout_limit = .limited(10 * 1024 * 1024), .stderr_limit = .limited(1024 * 1024) });
     defer allocator.free(result.stdout);
     defer allocator.free(result.stderr);
+
+    const raw_path = try std.fmt.allocPrint(allocator, "artifacts/{s}/response/raw", .{result_name});
+    defer allocator.free(raw_path);
+    try insertRunTextDirect(allocator, store, run_id, raw_path, "artifact", result.stdout);
+    if (result.stderr.len > 0) {
+        const stderr_path = try std.fmt.allocPrint(allocator, "artifacts/{s}/response/stderr", .{result_name});
+        defer allocator.free(stderr_path);
+        try insertRunTextDirect(allocator, store, run_id, stderr_path, "artifact", result.stderr);
+    }
     if (result.term != .exited or result.term.exited != 0) return error.AdapterFailed;
 
     var part_result = try PartResult.init(allocator, result_name, entry.id);
     errdefer part_result.deinit();
-    const raw_name = try std.fmt.allocPrint(allocator, "{s}-raw", .{result_name});
-    defer allocator.free(raw_name);
-    try part_result.addText("artifact", raw_name, result.stdout);
-
     var arena = std.heap.ArenaAllocator.init(allocator);
     defer arena.deinit();
     const root = try serde.yaml.parse(arena.allocator(), result.stdout);
@@ -1074,10 +1127,17 @@ fn appendYamlMapping(allocator: Allocator, out: *std.ArrayList(u8), node: *const
 }
 
 fn applyAdapterResponse(allocator: Allocator, result: *PartResult, entry: PlanPart, root: *const serde.yaml.Value) !void {
-    _ = allocator;
     if (root.* != .mapping) return error.InvalidAdapterResponse;
-    if (yamlGet(root, "reasoning")) |reasoning| if (reasoning.* == .string and reasoning.string.len > 0) try result.addText("reasoning", result.name, reasoning.string);
-    if (yamlGet(root, "text")) |text| if (text.* == .string and text.string.len > 0) try result.addText("artifact", result.name, text.string);
+    if (yamlGet(root, "reasoning")) |reasoning| if (reasoning.* == .string and reasoning.string.len > 0) {
+        const reasoning_path = try std.fmt.allocPrint(allocator, "reasoning/{s}", .{result.name});
+        defer allocator.free(reasoning_path);
+        try result.addText(reasoning_path, "reasoning", reasoning.string);
+    };
+    if (yamlGet(root, "text")) |text| if (text.* == .string and text.string.len > 0) {
+        const text_path = try std.fmt.allocPrint(allocator, "artifacts/{s}/text", .{result.name});
+        defer allocator.free(text_path);
+        try result.addText(text_path, "artifact", text.string);
+    };
     const gives = yamlGet(root, "gives") orelse return error.AdapterResponseMissingGives;
     if (gives.* != .mapping) return error.AdapterResponseMissingGives;
     var it = gives.mapping.iterator();
@@ -1119,12 +1179,47 @@ fn putNumber(allocator: Allocator, values: *std.StringHashMap(TypedValue), name:
     try values.put(owned_name, .{ .allocator = allocator, .type_label = try allocator.dupe(u8, "number"), .value = rendered });
 }
 
+fn insertRunTextDirect(allocator: Allocator, store: *Store, run_id: []const u8, path: []const u8, role: []const u8, payload: []const u8) !void {
+    const id = try textId(allocator, run_id, path);
+    defer allocator.free(id);
+    lockRuntimeStore();
+    defer unlockRuntimeStore();
+    try store.insertRunText(.{ .id = id, .run_id = run_id, .path = path, .role = role, .payload = payload });
+}
+
+fn storeInputValues(allocator: Allocator, store: *Store, run_id: []const u8, values: *std.StringHashMap(TypedValue), takes: []const PlanValue) !void {
+    for (takes) |take| {
+        const found = values.get(take.name) orelse return error.MissingInputValue;
+        try storeRunValue(allocator, store, run_id, take.name, found.type_label, "input", null, found.value);
+    }
+}
+
 fn storeOutputs(allocator: Allocator, store: *Store, run_id: []const u8, values: *std.StringHashMap(TypedValue), gives: []const PlanValue) !void {
     for (gives) |give| {
         const found = values.get(give.name) orelse return error.MissingOutputValue;
-        const id = try std.fmt.allocPrint(allocator, "{s}:{s}", .{ run_id, give.name });
+        try storeRunValue(allocator, store, run_id, give.name, found.type_label, "output", null, found.value);
+    }
+}
+
+fn storeRunValue(allocator: Allocator, store: *Store, run_id: []const u8, name: []const u8, type_label: ?[]const u8, origin: []const u8, producer_part_path: ?[]const u8, payload: []const u8) !void {
+    const value_path = try path_mod.valuePath(allocator, "values", name);
+    defer allocator.free(value_path);
+    const id = try std.fmt.allocPrint(allocator, "{s}:{s}", .{ run_id, value_path });
+    defer allocator.free(id);
+    lockRuntimeStore();
+    defer unlockRuntimeStore();
+    try store.insertRunValue(.{ .id = id, .run_id = run_id, .path = value_path, .name = name, .type_label = type_label, .origin = origin, .producer_part_path = producer_part_path, .payload = payload });
+}
+
+fn storePlanSteps(allocator: Allocator, store: *Store, run_id: []const u8, parts: []const PlanPart, required: []const bool) !void {
+    for (parts, 0..) |part, index| {
+        const step_path = try std.fmt.allocPrint(allocator, "plan/{d}", .{index});
+        defer allocator.free(step_path);
+        const part_path = try std.fmt.allocPrint(allocator, "parts/{s}", .{part.path["uses/".len..]});
+        defer allocator.free(part_path);
+        const id = try std.fmt.allocPrint(allocator, "{s}:{s}", .{ run_id, step_path });
         defer allocator.free(id);
-        try store.insertRunValue(.{ .id = id, .run_id = run_id, .name = give.name, .type_label = found.type_label, .payload = found.value });
+        try store.insertRunPlanStep(.{ .id = id, .run_id = run_id, .path = step_path, .part_path = part_path, .order_index = @intCast(index), .required = if (required[index]) 1 else 0, .status = if (required[index]) "pending" else "skipped", .reason = null });
     }
 }
 
@@ -1165,13 +1260,15 @@ fn resolveRelative(allocator: Allocator, base_file: []const u8, rel: []const u8)
     return try std.fs.path.resolve(allocator, &.{ dir, rel });
 }
 
-fn textId(allocator: Allocator, run_id: []const u8, kind: []const u8, name: []const u8) ![]u8 {
-    return try std.fmt.allocPrint(allocator, "{s}:{s}:{s}", .{ run_id, kind, name });
+fn textId(allocator: Allocator, run_id: []const u8, path: []const u8) ![]u8 {
+    return try std.fmt.allocPrint(allocator, "{s}:{s}", .{ run_id, path });
 }
 
-fn scopedName(allocator: Allocator, prefix: ?[]const u8, name: []const u8) ![]u8 {
-    if (prefix) |p| return try std.fmt.allocPrint(allocator, "{s}.{s}", .{ p, name });
-    return try allocator.dupe(u8, name);
+fn scopedPath(allocator: Allocator, prefix: ?[]const u8, name: []const u8) ![]u8 {
+    const segment = path_mod.valueSegment(name);
+    try path_mod.validateSegment(segment);
+    if (prefix) |p| return try std.fmt.allocPrint(allocator, "{s}/{s}", .{ p, segment });
+    return try allocator.dupe(u8, segment);
 }
 
 fn freeValues(values: *std.StringHashMap(TypedValue)) void {

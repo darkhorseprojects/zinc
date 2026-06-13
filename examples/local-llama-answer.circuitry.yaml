@@ -4,7 +4,7 @@ about: Answer through the package-provided OpenAI Responses-shaped adapter.
 
 zinc:
   packages:
-    responses: openai-responses@0.1.7
+    responses: openai-responses@0.1.8
 
 takes:
   $question: text

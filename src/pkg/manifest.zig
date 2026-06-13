@@ -16,8 +16,8 @@ pub const SoftDependency = struct {
 };
 
 pub const Asset = struct {
-    name: []const u8,
     path: []const u8,
+    file_path: []const u8,
 };
 
 pub const PackageManifest = struct {
@@ -39,11 +39,30 @@ pub const PackageManifest = struct {
         return val.mapping;
     }
 
-    pub fn asset(self: PackageManifest, name: []const u8) !Asset {
-        const assets = self.getMapField("assets") orelse return error.AssetSectionNotFound;
-        const node = assets.getPtr(name) orelse return error.AssetNotFound;
-        if (node.* != .string) return error.InvalidAssetType;
-        return .{ .name = name, .path = node.string };
+    pub fn asset(self: PackageManifest, asset_path: []const u8) !Asset {
+        const asset_map = self.getMapField("assets") orelse return error.AssetSectionNotFound;
+        var it = std.mem.splitScalar(u8, asset_path, '/');
+        var current: *const serde.yaml.Value = asset_map.getPtr(it.next() orelse return error.AssetNotFound) orelse return error.AssetNotFound;
+        while (it.next()) |segment| {
+            if (current.* != .mapping) return error.AssetNotFound;
+            current = current.mapping.getPtr(segment) orelse return error.AssetNotFound;
+        }
+        if (current.* != .mapping) return error.InvalidAssetType;
+        const path_node = current.mapping.getPtr("path") orelse return error.AssetPathMissing;
+        if (path_node.* != .string) return error.InvalidAssetPathType;
+        return .{ .path = asset_path, .file_path = path_node.string };
+    }
+
+    pub fn assets(self: PackageManifest, allocator: Allocator) ![]Asset {
+        const assets_map = self.getMapField("assets") orelse return try allocator.alloc(Asset, 0);
+        var out: std.ArrayList(Asset) = .empty;
+        errdefer {
+            for (out.items) |asset_item| allocator.free(asset_item.path);
+            out.deinit(allocator);
+        }
+        var it = assets_map.iterator();
+        while (it.next()) |entry| try collectAssets(allocator, &out, entry.key_ptr.*, entry.value_ptr);
+        return out.toOwnedSlice(allocator);
     }
 
     pub fn softDependencies(self: PackageManifest, allocator: Allocator) ![]SoftDependency {
@@ -90,14 +109,23 @@ pub const PackageManifest = struct {
     }
 };
 
+fn collectAssets(allocator: Allocator, out: *std.ArrayList(Asset), prefix: []const u8, node: *const serde.yaml.Value) !void {
+    if (node.* != .mapping) return error.InvalidAssetType;
+    if (node.mapping.getPtr("path")) |path_node| {
+        if (path_node.* != .string) return error.InvalidAssetPathType;
+        try out.append(allocator, .{ .path = try allocator.dupe(u8, prefix), .file_path = path_node.string });
+        return;
+    }
+    var it = node.mapping.iterator();
+    while (it.next()) |entry| {
+        const child = try std.fmt.allocPrint(allocator, "{s}/{s}", .{ prefix, entry.key_ptr.* });
+        defer allocator.free(child);
+        try collectAssets(allocator, out, child, entry.value_ptr);
+    }
+}
+
 fn makeSoftDependency(allocator: Allocator, alias: []const u8, package: []const u8, about: []const u8) !SoftDependency {
-    const owned_alias = try allocator.dupe(u8, alias);
-    errdefer allocator.free(owned_alias);
-    const owned_package = try allocator.dupe(u8, package);
-    errdefer allocator.free(owned_package);
-    const owned_about = try allocator.dupe(u8, about);
-    errdefer allocator.free(owned_about);
-    return .{ .alias = owned_alias, .package = owned_package, .about = owned_about };
+    return .{ .alias = try allocator.dupe(u8, alias), .package = try allocator.dupe(u8, package), .about = try allocator.dupe(u8, about) };
 }
 
 pub fn freeSoftDependencies(allocator: Allocator, deps: []SoftDependency) void {
@@ -109,45 +137,32 @@ pub fn freeSoftDependencies(allocator: Allocator, deps: []SoftDependency) void {
     allocator.free(deps);
 }
 
+pub fn freeAssets(allocator: Allocator, assets_list: []Asset) void {
+    for (assets_list) |asset_item| allocator.free(asset_item.path);
+    allocator.free(assets_list);
+}
+
 pub fn parse(allocator: Allocator, bytes: []const u8) !PackageManifest {
     var arena = std.heap.ArenaAllocator.init(allocator);
     errdefer arena.deinit();
     const arena_allocator = arena.allocator();
-
     const root = try serde.yaml.parse(arena_allocator, bytes);
     if (root != .mapping) return error.InvalidManifestType;
-
     const name_val = root.mapping.getPtr("name") orelse return error.MissingName;
     if (name_val.* != .string) return error.InvalidNameType;
-
     const version_val = root.mapping.getPtr("version") orelse return error.MissingVersion;
     if (version_val.* != .string) return error.InvalidVersionType;
-
     const about_val = root.mapping.getPtr("about") orelse root.mapping.getPtr("description") orelse &serde.yaml.Value{ .string = "" };
     if (about_val.* != .string) return error.InvalidAboutType;
-
-    return PackageManifest{
-        .name = name_val.string,
-        .version = version_val.string,
-        .about = about_val.string,
-        .source = try parseSource(root),
-        .arena = arena,
-        .root = root,
-    };
+    return .{ .name = name_val.string, .version = version_val.string, .about = about_val.string, .source = try parseSource(root), .arena = arena, .root = root };
 }
 
 fn parseSource(root: serde.yaml.Value) !?Source {
     const source_val = root.mapping.getPtr("source") orelse return null;
     if (source_val.* != .mapping) return error.InvalidSourceType;
-
     const git_val = source_val.mapping.getPtr("git") orelse return error.MissingSourceGit;
     if (git_val.* != .string) return error.InvalidSourceGitType;
-
-    return .{
-        .git = git_val.string,
-        .ref = try optionalString(source_val.mapping, "ref", "main", error.InvalidSourceRefType),
-        .path = try optionalString(source_val.mapping, "path", ".", error.InvalidSourcePathType),
-    };
+    return .{ .git = git_val.string, .ref = try optionalString(source_val.mapping, "ref", "main", error.InvalidSourceRefType), .path = try optionalString(source_val.mapping, "path", ".", error.InvalidSourcePathType) };
 }
 
 fn optionalString(mapping: serde.yaml.Mapping, key: []const u8, default: []const u8, comptime type_error: anyerror) ![]const u8 {
