@@ -81,6 +81,51 @@ const PlanDoc = struct {
     }
 };
 
+const RunExecution = struct {
+    io: std.Io,
+    store: *Store,
+    id: []const u8,
+    doc_id: []const u8,
+    started_at: i64,
+    active: bool = true,
+
+    fn start(io: std.Io, store: *Store, id: []const u8, doc_id: []const u8) !RunExecution {
+        const started_at = std.Io.Clock.now(.real, io).toSeconds();
+        try store.insertRun(.{
+            .id = id,
+            .doc_id = doc_id,
+            .status = "running",
+            .started_at = started_at,
+            .finished_at = null,
+        });
+        return .{ .io = io, .store = store, .id = id, .doc_id = doc_id, .started_at = started_at };
+    }
+
+    fn finish(self: *RunExecution) !void {
+        if (!self.active) return;
+        try self.store.insertRun(.{
+            .id = self.id,
+            .doc_id = self.doc_id,
+            .status = "finished",
+            .started_at = self.started_at,
+            .finished_at = std.Io.Clock.now(.real, self.io).toSeconds(),
+        });
+        self.active = false;
+    }
+
+    fn fail(self: *RunExecution) void {
+        if (!self.active) return;
+        self.store.insertRun(.{
+            .id = self.id,
+            .doc_id = self.doc_id,
+            .status = "failed",
+            .started_at = self.started_at,
+            .finished_at = std.Io.Clock.now(.real, self.io).toSeconds(),
+        }) catch {};
+        self.active = false;
+    }
+};
+
 const PartResult = struct {
     allocator: Allocator,
     name: []const u8,
@@ -212,41 +257,32 @@ pub fn runShape(allocator: Allocator, io: std.Io, store: *Store, shape_path: []c
     var plan_doc = try loadPlanDoc(allocator, store, doc_id);
     defer plan_doc.deinit();
 
-    var id_buf: [16]u8 = undefined;
-    const run_id = try std.fmt.allocPrint(allocator, "run_{s}", .{try randomHex(io, &id_buf)});
-    defer allocator.free(run_id);
-    try store.insertRun(.{
-        .id = run_id,
-        .doc_id = doc_id,
-        .status = "running",
-        .started_at = std.Io.Clock.now(.real, io).toSeconds(),
-        .finished_at = null,
-    });
     var values = std.StringHashMap(TypedValue).init(allocator);
     defer freeValues(&values);
 
     var run_settings = settings.*;
     applyShapeRuntime(&run_settings, &shape.root);
 
-    try collectInputs(allocator, &values, plan_doc.takes, args);
+    try collectInputs(allocator, &values, plan_doc.takes, args, shape_path);
     const required = try requiredFrontier(allocator, plan_doc.parts, plan_doc.gives);
     defer allocator.free(required);
     const plan_text = try planText(allocator, plan_doc.parts, required);
     defer allocator.free(plan_text);
-    try files.writeAllOut(plan_text);
+
+    var id_buf: [16]u8 = undefined;
+    const run_id = try std.fmt.allocPrint(allocator, "run_{s}", .{try randomHex(io, &id_buf)});
+    defer allocator.free(run_id);
+    var execution = try RunExecution.start(io, store, run_id, doc_id);
+    defer execution.fail();
+
     const plan_id = try textId(allocator, run_id, "plan", "plan");
     defer allocator.free(plan_id);
     try store.insertRunText(.{ .id = plan_id, .run_id = run_id, .kind = "plan", .name = "plan", .payload = plan_text });
+    try files.writeAllOut(plan_text);
     try executePlan(allocator, io, store, run_id, abs_path, &run_settings, &values, plan_doc.parts, required, null);
     try storeOutputs(allocator, store, run_id, &values, plan_doc.gives);
 
-    try store.insertRun(.{
-        .id = run_id,
-        .doc_id = doc_id,
-        .status = "finished",
-        .started_at = null,
-        .finished_at = std.Io.Clock.now(.real, io).toSeconds(),
-    });
+    try execution.finish();
 
     try files.writeAllOut("\nOutputs:\n");
     for (plan_doc.gives) |give| {
@@ -385,16 +421,130 @@ fn applyShapeRuntime(settings: *config.ConfigSettings, root: *const serde.yaml.V
     };
 }
 
-fn collectInputs(allocator: Allocator, values: *std.StringHashMap(TypedValue), takes: []const PlanValue, args: []const []const u8) !void {
+fn collectInputs(allocator: Allocator, values: *std.StringHashMap(TypedValue), takes: []const PlanValue, args: []const []const u8, shape_path: []const u8) !void {
+    try validateInputArgs(takes, args, shape_path);
     for (takes) |take| {
-        const raw_name = if (std.mem.startsWith(u8, take.name, "$")) take.name[1..] else take.name;
-        const provided = findArg(args, take.name) orelse findArg(args, raw_name) orelse return error.MissingInput;
+        const raw_name = trimDollar(take.name);
+        const provided = findArg(args, take.name) orelse findArg(args, raw_name) orelse unreachable;
         try values.put(try allocator.dupe(u8, take.name), .{
             .allocator = allocator,
             .type_label = if (take.type_label) |label| try allocator.dupe(u8, label) else null,
             .value = try allocator.dupe(u8, provided),
         });
     }
+}
+
+fn validateInputArgs(takes: []const PlanValue, args: []const []const u8, shape_path: []const u8) !void {
+    for (args, 0..) |arg, index| {
+        const eq = std.mem.indexOfScalar(u8, arg, '=') orelse {
+            try files.writeAllErr("error: invalid run argument \"");
+            try files.writeAllErr(arg);
+            try files.writeAllErr("\"\n\nrun inputs use name=value syntax.\n\nexample:\n  zn run ");
+            try files.writeAllErr(shape_path);
+            try writeExpectedExampleArgs(takes);
+            try files.writeAllErr("\n");
+            return error.InvalidRunInput;
+        };
+        if (eq == 0) {
+            try files.writeAllErr("error: input name is empty in argument \"");
+            try files.writeAllErr(arg);
+            try files.writeAllErr("\"\n");
+            return error.InvalidRunInput;
+        }
+        const name = arg[0..eq];
+        const expected = expectedInput(takes, name) orelse {
+            try files.writeAllErr("error: unknown input \"");
+            try files.writeAllErr(name);
+            try files.writeAllErr("\"\n\nexpected inputs:\n");
+            try writeExpectedInputs(takes);
+            return error.InvalidRunInput;
+        };
+        try validateInputValue(expected, arg[eq + 1 ..], shape_path);
+        for (args[0..index]) |prior| {
+            const prior_eq = std.mem.indexOfScalar(u8, prior, '=') orelse continue;
+            if (sameInputName(takes, prior[0..prior_eq], name)) {
+                try files.writeAllErr("error: duplicate input \"");
+                try files.writeAllErr(name);
+                try files.writeAllErr("\"\n");
+                return error.InvalidRunInput;
+            }
+        }
+    }
+
+    for (takes) |take| {
+        if (findArg(args, take.name) != null or findArg(args, trimDollar(take.name)) != null) continue;
+        try files.writeAllErr("error: missing required input for ");
+        try files.writeAllErr(shape_path);
+        try files.writeAllErr("\n\nmissing:\n  ");
+        try writeInputSpec(take);
+        try files.writeAllErr("\n\nexpected inputs:\n");
+        try writeExpectedInputs(takes);
+        try files.writeAllErr("\nexample:\n  zn run ");
+        try files.writeAllErr(shape_path);
+        try writeExpectedExampleArgs(takes);
+        try files.writeAllErr("\n");
+        return error.MissingRunInput;
+    }
+}
+
+fn expectedInput(takes: []const PlanValue, name: []const u8) ?PlanValue {
+    for (takes) |take| if (inputNameMatches(take, name)) return take;
+    return null;
+}
+
+fn validateInputValue(take: PlanValue, value: []const u8, shape_path: []const u8) !void {
+    const label = take.type_label orelse return;
+    if (!std.mem.eql(u8, label, "number")) return;
+    _ = std.fmt.parseFloat(f64, value) catch {
+        try files.writeAllErr("error: invalid value for input \"");
+        try files.writeAllErr(trimDollar(take.name));
+        try files.writeAllErr("\" in ");
+        try files.writeAllErr(shape_path);
+        try files.writeAllErr("\n\nexpected: number\nreceived: ");
+        try files.writeAllErr(value);
+        try files.writeAllErr("\n");
+        return error.InvalidInputValue;
+    };
+}
+
+fn sameInputName(takes: []const PlanValue, left: []const u8, right: []const u8) bool {
+    for (takes) |take| if (inputNameMatches(take, left) and inputNameMatches(take, right)) return true;
+    return false;
+}
+
+fn inputNameMatches(take: PlanValue, name: []const u8) bool {
+    return std.mem.eql(u8, take.name, name) or std.mem.eql(u8, trimDollar(take.name), name);
+}
+
+fn writeExpectedInputs(takes: []const PlanValue) !void {
+    for (takes) |take| {
+        try files.writeAllErr("  ");
+        try writeInputSpec(take);
+        try files.writeAllErr("\n");
+    }
+}
+
+fn writeInputSpec(take: PlanValue) !void {
+    try files.writeAllErr(trimDollar(take.name));
+    try files.writeAllErr("=<");
+    try files.writeAllErr(take.type_label orelse "value");
+    try files.writeAllErr(">");
+}
+
+fn writeExpectedExampleArgs(takes: []const PlanValue) !void {
+    for (takes) |take| {
+        try files.writeAllErr(" ");
+        try files.writeAllErr(trimDollar(take.name));
+        try files.writeAllErr("=");
+        try files.writeAllErr(exampleValue(take.type_label));
+    }
+}
+
+fn exampleValue(type_label: ?[]const u8) []const u8 {
+    const label = type_label orelse return "value";
+    if (std.mem.eql(u8, label, "number")) return "1";
+    if (std.mem.eql(u8, label, "text")) return "text";
+    return "value";
 }
 
 fn findArg(args: []const []const u8, name: []const u8) ?[]const u8 {
@@ -638,7 +788,17 @@ fn runAssignmentPart(allocator: Allocator, values: *std.StringHashMap(TypedValue
     for (entry.takes) |take| {
         const local = take.local orelse continue;
         const value = values.get(take.value) orelse return error.MissingInputValue;
-        try locals.put(local, try std.fmt.parseFloat(f64, value.value));
+        const number = std.fmt.parseFloat(f64, value.value) catch {
+            try files.writeAllErr("error: invalid numeric input for part \"");
+            try files.writeAllErr(entry.name);
+            try files.writeAllErr("\"\n\ninput: ");
+            try files.writeAllErr(trimDollar(take.value));
+            try files.writeAllErr("\nexpected: number\nreceived: ");
+            try files.writeAllErr(value.value);
+            try files.writeAllErr("\n");
+            return error.InvalidInputValue;
+        };
+        try locals.put(local, number);
     }
     try executeAssignments(allocator, &result, &locals, entry);
     return result;
@@ -751,7 +911,27 @@ fn executeAssignments(allocator: Allocator, result: *PartResult, locals: *std.St
         const target = std.mem.trim(u8, line[0..eq], " \t");
         const expression = std.mem.trim(u8, line[eq + 1 ..], " \t");
         var parser = ExpressionParser{ .text = expression, .locals = locals };
-        const number = try parser.parse();
+        const number = parser.parse() catch |err| {
+            try files.writeAllErr("error: invalid assignment expression in part \"");
+            try files.writeAllErr(entry.name);
+            try files.writeAllErr("\"\n\nline: ");
+            try files.writeAllErr(line);
+            try files.writeAllErr("\nexpression: ");
+            try files.writeAllErr(expression);
+            try files.writeAllErr("\nreason: ");
+            if (err == error.UnknownVariable) {
+                try files.writeAllErr("unknown variable");
+                if (parser.unknown_variable) |name| {
+                    try files.writeAllErr(" \"");
+                    try files.writeAllErr(name);
+                    try files.writeAllErr("\"");
+                }
+            } else {
+                try files.writeAllErr(@errorName(err));
+            }
+            try files.writeAllErr("\n");
+            return error.InvalidAssignmentExpression;
+        };
         try locals.put(target, number);
         if (systemValueForLocal(entry.gives, target)) |value_name| {
             const rendered = try std.fmt.allocPrint(allocator, "{d:.2}", .{number});
@@ -774,6 +954,7 @@ const ExpressionParser = struct {
     text: []const u8,
     index: usize = 0,
     locals: *std.StringHashMap(f64),
+    unknown_variable: ?[]const u8 = null,
 
     fn parse(self: *ExpressionParser) anyerror!f64 {
         const result = try self.expression();
@@ -829,7 +1010,10 @@ const ExpressionParser = struct {
         while (self.index < self.text.len and (std.ascii.isAlphanumeric(self.text[self.index]) or self.text[self.index] == '_' or self.text[self.index] == '$')) self.index += 1;
         if (start == self.index) return error.InvalidExpression;
         const name = self.text[start..self.index];
-        return self.locals.get(name) orelse error.UnknownVariable;
+        return self.locals.get(name) orelse {
+            self.unknown_variable = name;
+            return error.UnknownVariable;
+        };
     }
 
     fn skipSpace(self: *ExpressionParser) void {

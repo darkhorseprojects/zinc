@@ -16,7 +16,10 @@ pub fn run(init: std.process.Init) !void {
 
     _ = args.next();
 
-    const cmd = args.next() orelse return usage();
+    const cmd = args.next() orelse {
+        try usage();
+        return error.InvalidUsage;
+    };
 
     if (std.mem.eql(u8, cmd, "update")) {
         var remaining: std.ArrayList([]const u8) = .empty;
@@ -39,7 +42,8 @@ pub fn run(init: std.process.Init) !void {
     if (std.mem.eql(u8, cmd, "run")) {
         const shape = args.next() orelse {
             try files.writeAllErr("Error: Missing shape path.\n");
-            return usage();
+            try usage();
+            return error.InvalidUsage;
         };
         var remaining: std.ArrayList([]const u8) = .empty;
         defer remaining.deinit(allocator);
@@ -50,13 +54,15 @@ pub fn run(init: std.process.Init) !void {
     } else if (std.mem.eql(u8, cmd, "read")) {
         const target = args.next() orelse {
             try files.writeAllErr("Error: Missing target to read.\n");
-            return usage();
+            try usage();
+            return error.InvalidUsage;
         };
         try cmd_read.runRead(allocator, &store, target);
     } else if (std.mem.eql(u8, cmd, "inspect")) {
         const target = args.next() orelse {
             try files.writeAllErr("Error: Missing target to inspect.\n");
-            return usage();
+            try usage();
+            return error.InvalidUsage;
         };
         try cmd_inspect.runInspect(allocator, &store, target);
     } else if (std.mem.eql(u8, cmd, "pkg")) {
@@ -74,7 +80,11 @@ pub fn run(init: std.process.Init) !void {
         }
         try cmd_config.runConfig(allocator, &store, remaining.items);
     } else {
-        return usage();
+        try files.writeAllErr("Error: Unknown command: ");
+        try files.writeAllErr(cmd);
+        try files.writeAllErr("\n");
+        try usage();
+        return error.InvalidUsage;
     }
 }
 

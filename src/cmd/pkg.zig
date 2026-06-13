@@ -10,13 +10,16 @@ const platform = @import("../platform/mod.zig");
 const Allocator = std.mem.Allocator;
 
 pub fn runPkg(allocator: Allocator, io: std.Io, store: *Store, args: []const []const u8) !void {
-    if (args.len == 0) return usage();
+    if (args.len == 0) {
+        try usage();
+        return error.InvalidUsage;
+    }
     const cmd = args[0];
 
     if (std.mem.eql(u8, cmd, "install")) {
         if (args.len < 2) {
             try files.writeAllErr("Error: Missing package path or name.\n");
-            return;
+            return error.InvalidUsage;
         }
         var path: []const u8 = args[1];
         var is_global = false;
@@ -43,18 +46,19 @@ pub fn runPkg(allocator: Allocator, io: std.Io, store: *Store, args: []const []c
             } else if (opts.name == null) {
                 opts.name = arg;
             } else {
-                return usage();
+                try usage();
+                return error.InvalidUsage;
             }
         }
         if (!opts.all and opts.name == null) {
             try files.writeAllErr("Error: Missing package name or --all.\n");
-            return;
+            return error.InvalidUsage;
         }
         try pkg_update.update(allocator, io, store, opts);
     } else if (std.mem.eql(u8, cmd, "remove")) {
         if (args.len < 2) {
             try files.writeAllErr("Error: Missing package name.\n");
-            return;
+            return error.InvalidUsage;
         }
         const name = args[1];
         try pkg_install.remove(allocator, io, store, name);
@@ -80,7 +84,7 @@ pub fn runPkg(allocator: Allocator, io: std.Io, store: *Store, args: []const []c
     } else if (std.mem.eql(u8, cmd, "check")) {
         if (args.len < 2) {
             try files.writeAllErr("Error: Missing package name.\n");
-            return;
+            return error.InvalidUsage;
         }
         const name = args[1];
         const pkg = (try store.getPackage(name)) orelse {
@@ -128,7 +132,8 @@ pub fn runPkg(allocator: Allocator, io: std.Io, store: *Store, args: []const []c
             try files.writeAllOut("No check script defined for this platform.\n");
         }
     } else {
-        return usage();
+        try usage();
+        return error.InvalidUsage;
     }
 }
 
