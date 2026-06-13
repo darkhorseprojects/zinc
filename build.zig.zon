@@ -5,8 +5,8 @@
     .minimum_zig_version = "0.16.0",
     .dependencies = .{
         .circuitry = .{
-            .url = "https://github.com/darkhorseprojects/circuitry-zig/archive/refs/tags/v0.2.5.tar.gz",
-            .hash = "circuitry-0.2.5-pvX_DQUSAQClNU7cSCIBvJReKpHKjkbHlrrGklv7mZXv",
+            .url = "https://github.com/darkhorseprojects/circuitry-zig/releases/download/v0.2.6/circuitry-zig-0.2.6.tar.gz",
+            .hash = "circuitry-0.2.6-pvX_DWgnAQDQ04_XkPdoRQ2pPpOacTq3xCs2Gz4QczVR",
         },
         .limbo = .{
             .url = "https://github.com/darkhorseprojects/limbo-zig/releases/download/v0.1.6/limbo-zig-0.1.6.tar.gz",

@@ -212,12 +212,10 @@ fn storeNormalizedDoc(allocator: Allocator, store: *Store, doc_id: []const u8, d
     for (doc.takes, 0..) |value, index| try storeDocValue(allocator, store, doc_id, value, index);
     for (doc.gives, 0..) |value, index| try storeDocValue(allocator, store, doc_id, value, index);
     for (doc.parts, 0..) |part, index| {
-        const part_key = try circuitry.partKey(allocator, part.name);
-        defer allocator.free(part_key);
-        const part_id = try scopedDocId(allocator, doc_id, part_key);
-        defer allocator.free(part_id);
         const part_path = try path_mod.join(allocator, &.{ "uses", path_mod.valueSegment(part.name) });
         defer allocator.free(part_path);
+        const part_id = try scopedDocId(allocator, doc_id, part_path);
+        defer allocator.free(part_id);
         try store.insertDocPart(.{ .id = part_id, .doc_id = doc_id, .path = part_path, .order_index = @intCast(index), .name = part.name, .shape = part.shape, .model = part.model, .instructions = part.instructions });
         for (part.takes) |binding| try storeDocBinding(allocator, store, doc_id, part_id, part.name, .takes, binding);
         for (part.gives) |binding| try storeDocBinding(allocator, store, doc_id, part_id, part.name, .gives, binding);
@@ -232,24 +230,20 @@ fn storeNormalizedDoc(allocator: Allocator, store: *Store, doc_id: []const u8, d
 }
 
 fn storeDocValue(allocator: Allocator, store: *Store, doc_id: []const u8, value: circuitry.NormalizedValue, order_index: usize) !void {
-    const key = try circuitry.valueKey(allocator, value.direction, value.name);
-    defer allocator.free(key);
-    const id = try scopedDocId(allocator, doc_id, key);
-    defer allocator.free(id);
     const direction = @tagName(value.direction);
     const value_path = try path_mod.valuePath(allocator, direction, value.name);
     defer allocator.free(value_path);
+    const id = try scopedDocId(allocator, doc_id, value_path);
+    defer allocator.free(id);
     try store.insertDocValue(.{ .id = id, .doc_id = doc_id, .path = value_path, .order_index = @intCast(order_index), .name = value.name, .type_label = value.type_label, .direction = direction });
 }
 
 fn storeDocBinding(allocator: Allocator, store: *Store, doc_id: []const u8, part_id: []const u8, part_name: []const u8, side: circuitry.Direction, binding: circuitry.NormalizedBinding) !void {
     const local_or_value = binding.local orelse binding.value;
-    const key = try circuitry.bindingKey(allocator, part_name, side, local_or_value);
-    defer allocator.free(key);
-    const id = try scopedDocId(allocator, doc_id, key);
-    defer allocator.free(id);
     const binding_path = try path_mod.join(allocator, &.{ "uses", path_mod.valueSegment(part_name), @tagName(side), path_mod.valueSegment(local_or_value) });
     defer allocator.free(binding_path);
+    const id = try scopedDocId(allocator, doc_id, binding_path);
+    defer allocator.free(id);
     try store.insertDocBinding(.{ .id = id, .doc_id = doc_id, .path = binding_path, .part_id = part_id, .side = @tagName(side), .local_name = binding.local, .value_name = binding.value, .type_label = binding.type_label });
 }
 
