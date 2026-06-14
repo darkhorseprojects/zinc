@@ -1,8 +1,8 @@
 # Zinc
 
-Zinc runs `.circuitry.yaml` systems.
+Zinc runs `.circuitry.yaml` systems through package capabilities.
 
-It materializes Circuitry documents into stored normalized facts, plans from the database, executes ready parts, stores payloads as blobs, and exposes run state through `zinc://` URIs.
+Circuitry owns the language layer: `takes`, `uses`, `does`, `gives`, bindings, composition, and diagnostics. Packages own integrations, tools, providers, shell behavior, OS behavior, and package config interpretation. Zinc coordinates package resolution, config loading, request formation, fragment memory, and assembly over Limbo.
 
 ## CLI
 
@@ -10,10 +10,11 @@ It materializes Circuitry documents into stored normalized facts, plans from the
 zn run <shape> [name=value ...]
 zn read <uri-or-file>
 zn inspect <uri-or-file>
-zn pkg install <source-or-name>
+zn pkg install <package-dir> [--global|--workspace]
 zn pkg remove <name>
 zn pkg list
 zn pkg check <name>
+zn pkg update <name|--all> [--check]
 zn config
 zn update --check
 zn update
@@ -22,45 +23,48 @@ zn update
 ## Run
 
 ```bash
-zn run examples/compute-math.circuitry.yaml principal=1000 rate=0.05 years=10
+zn run examples/local-llama-answer.circuitry.yaml question="what is zinc?"
 ```
 
-Zinc prints outputs and a run URI.
+Execution is visible through the Limbo fragment fabric:
 
 ```bash
-zn inspect zinc://runs/<run_id>
-zn read 'zinc://runs/<run_id>/values/amount'
+zn inspect zinc://packages
+zn inspect zinc://fragments
+zn inspect zinc://choices
+zn inspect zinc://config
+zn read zinc://fragments/<fragment>
+zn read zinc://choices/<choice>
 ```
 
-`zn update` shows staged progress for target resolution, download, checksum verification, preparation, and install.
+The core tables are intentionally small:
 
-## Runtime
-
-A part is ready when every value in its local `takes` is available. Zinc runs needed parts only. Runtime defaults live in Zinc config.
-
-```yaml
-runtime:
-  parallel: true
-  max_parallel: 2
+```text
+packages(package, root)
+fragments(fragment, target, request, result, time)
+choices(choice, fragment)
+config(key, value)
 ```
 
-Graph-level `zinc.runtime` can override those settings for a single Circuitry document. `max_parallel: 0` uses the host CPU count.
+A fragment is completed work. Its identity is derived from the target, exact request bytes, and exact result bytes. A choice is mutable memory from target/request identity to the chosen fragment.
 
-Inline parts can execute deterministic arithmetic assignment lines. Model-backed parts use configured model presets. Shape parts can point to local files or package assets.
+```text
+choice   = hash(target + request)
+fragment = hash(target + request + result)
+```
+
+`does` is instruction material passed to the selected capability. It is not shell text, arithmetic, or Zinc code.
 
 ## Configuration
 
 Zinc reads `.zinc/config.yaml` and `~/.zinc/config.yaml`.
 
 ```yaml
-packages:
-  responses: openai-responses@0.1.8
-
 models:
   default: local-llama
 
   local-llama:
-    adapter: responses.adapter
+    adapter: openai-responses.adapter
     params:
       endpoint: http://127.0.0.1:30000
       endpoint_kind: chat_completions
@@ -68,53 +72,47 @@ models:
       temperature: 0.2
 ```
 
+Model profiles and adapter params stay in YAML. Package config remains in the package unless a human explicitly copies or references it.
+
 ## Packages
 
-A package manifest has a navigable asset tree. Each leaf asset is any file in the package.
+A package is an arbitrary self-contained directory with `zinc.pkg.yaml`. Zinc registers only the package root in Limbo and walks the manifest lazily; it does not catalog assets, scripts, dependencies, provider settings, or package internals into runtime tables.
 
 ```yaml
 name: openai-responses
-version: "0.1.8"
+version: "0.2.0"
 about: OpenAI Responses-shaped model adapter package.
 
-assets:
-  adapter:
-    path: adapters/responses.py
-  shapes:
-    short_answer:
-      path: shapes/short-answer.circuitry.yaml
-  prompts:
-    runtime:
-      path: prompts/runtime.md
-  config:
-    default:
-      path: config/zinc.models.yaml
-  docs:
-    readme:
-      path: docs/README.md
-  icon:
-    path: assets/icon.svg
+source:
+  git: https://github.com/darkhorseprojects/darkhorseprojects-packages.git
+  ref: main
+  path: openai-responses
+
+adapter: adapters/responses.py
+
+shapes:
+  short_answer: shapes/short-answer.circuitry.yaml
+
+config:
+  models: config/zinc.models.yaml
+
+setup:
+  linux: scripts/setup
+check:
+  linux: scripts/check
+remove:
+  linux: scripts/remove
 ```
 
-Authored YAML uses `alias.path.to.asset` references.
+References are manifest paths:
 
-```yaml
-zinc:
-  packages:
-    responses: openai-responses@0.1.8
-
-uses:
-  answer:
-    shape: responses.shapes.short_answer
+```text
+openai-responses.adapter
+openai-responses.shapes.short_answer
+openai-responses.config.models
 ```
 
-```yaml
-models:
-  local-llama:
-    adapter: responses.adapter
-```
-
-Packages may declare `soft_dependencies`; Zinc reports them during inspect/install and resolves them only when a reference uses them.
+Package systems integrate at their package boundary. Zinc does not absorb npm, Python, shell, PowerShell, provider, or OS-specific internals.
 
 ## Building
 
@@ -124,7 +122,3 @@ Zinc is written in Zig 0.16.0.
 zig build
 zig build test
 ```
-
-## Learn more
-
-- [Wiki](https://github.com/darkhorseprojects/zinc/wiki)

@@ -1,16 +1,12 @@
 circuitry: "0.6.4"
 name: package shape demo
 
-zinc:
-  packages:
-    responses: openai-responses@0.1.8
-
 takes:
   $question: text
 
 uses:
   answer:
-    shape: responses.shapes.short_answer
+    shape: openai-responses.shapes.short_answer
     takes:
       question: $question
     gives:

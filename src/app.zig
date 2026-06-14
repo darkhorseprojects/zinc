@@ -1,5 +1,5 @@
 const std = @import("std");
-const Store = @import("runtime/store.zig").Store;
+const Store = @import("substrate.zig").Store;
 const cmd_run = @import("cmd/run.zig");
 const cmd_read = @import("cmd/read.zig");
 const cmd_inspect = @import("cmd/inspect.zig");
@@ -95,7 +95,7 @@ fn usage() !void {
         \\Commands:
         \\  run <shape>                   Run a Circuitry shape
         \\  read <uri-or-file>            Read a file or zinc:// reference
-        \\  inspect <uri-or-file>         Inspect a shape, package, run, or reference
+        \\  inspect <uri-or-file>         Inspect a shape, package, substrate, or reference
         \\  pkg <subcommand> [args]       Manage packages (install, update, remove, list, check)
         \\  update                        Update the zn binary
         \\  config                        Manage configuration

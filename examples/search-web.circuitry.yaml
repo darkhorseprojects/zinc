@@ -1,11 +1,6 @@
 circuitry: "0.6.4"
 name: search web
-about: Search the web through a Zinc package shape.
-
-zinc:
-  packages:
-    browser: browser@0.6.1
-    responses: openai-responses@0.1.8
+about: Compose package capabilities without Zinc owning their internals.
 
 takes:
   $query: text
@@ -13,7 +8,7 @@ takes:
 
 uses:
   search:
-    shape: browser.search-web
+    shape: browser.search_web
     takes:
       query: $query
       current_date: $current_date

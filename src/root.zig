@@ -5,9 +5,10 @@ test {
     _ = @import("io/fs.zig");
     _ = @import("io/process.zig");
     _ = @import("io/layout.zig");
-    _ = @import("policy/mod.zig");
-    _ = @import("pkg/mod.zig");
-    _ = @import("runtime/mod.zig");
+    _ = @import("substrate.zig");
+    _ = @import("fragment.zig");
+    _ = @import("package.zig");
+    _ = @import("execute.zig");
     _ = @import("update/mod.zig");
     _ = @import("app.zig");
 }

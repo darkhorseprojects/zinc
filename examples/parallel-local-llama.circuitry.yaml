@@ -1,13 +1,6 @@
 circuitry: "0.6.4"
 name: parallel local llama
 
-zinc:
-  runtime:
-    parallel: true
-    max_parallel: 2
-  packages:
-    responses: openai-responses@0.1.8
-
 takes:
   $topic: text
 

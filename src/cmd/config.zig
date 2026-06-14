@@ -2,7 +2,7 @@ const std = @import("std");
 const serde = @import("serde");
 const files = @import("../io/fs.zig");
 const layout = @import("../io/layout.zig");
-const Store = @import("../runtime/store.zig").Store;
+const Store = @import("../substrate.zig").Store;
 
 const Allocator = std.mem.Allocator;
 
@@ -14,8 +14,6 @@ pub const ModelPreset = struct {
 pub const ConfigSettings = struct {
     mode: []const u8,
     scope: []const u8,
-    runtime_parallel: bool,
-    runtime_max_parallel: usize,
     root: ?serde.yaml.Value,
     shape_zinc: ?*const serde.yaml.Value,
     arena: std.heap.ArenaAllocator,
@@ -79,8 +77,6 @@ pub fn loadSettings(allocator: Allocator) !ConfigSettings {
 
     var mode_val: []const u8 = "build";
     var scope_val: []const u8 = "project";
-    var runtime_parallel = true;
-    var runtime_max_parallel: usize = 2;
 
     var bytes: ?[]const u8 = null;
     if (try layout.workspacePath(allocator, "config.yaml")) |ws_path| {
@@ -105,26 +101,12 @@ pub fn loadSettings(allocator: Allocator) !ConfigSettings {
             if (r.mapping.getPtr("scope")) |sv| {
                 if (sv.* == .string) scope_val = sv.string;
             }
-            if (r.mapping.getPtr("runtime")) |runtime| {
-                if (runtime.* == .mapping) {
-                    if (runtime.mapping.getPtr("parallel")) |parallel| switch (parallel.*) {
-                        .boolean => |b| runtime_parallel = b,
-                        else => {},
-                    };
-                    if (runtime.mapping.getPtr("max_parallel")) |max_parallel| switch (max_parallel.*) {
-                        .integer => |i| runtime_max_parallel = if (i <= 0) 0 else @intCast(i),
-                        else => {},
-                    };
-                }
-            }
         }
     }
 
     return .{
         .mode = try arena_allocator.dupe(u8, mode_val),
         .scope = try arena_allocator.dupe(u8, scope_val),
-        .runtime_parallel = runtime_parallel,
-        .runtime_max_parallel = runtime_max_parallel,
         .root = root,
         .shape_zinc = null,
         .arena = arena,
@@ -142,12 +124,6 @@ pub fn runConfig(allocator: Allocator, store: *Store, args: []const []const u8) 
     try files.writeAllOut(settings.mode);
     try files.writeAllOut("\n  scope: ");
     try files.writeAllOut(settings.scope);
-    try files.writeAllOut("\n  runtime.parallel: ");
-    try files.writeAllOut(if (settings.runtime_parallel) "true" else "false");
-    try files.writeAllOut("\n  runtime.max_parallel: ");
-    var buf: [32]u8 = undefined;
-    const max = try std.fmt.bufPrint(&buf, "{d}", .{settings.runtime_max_parallel});
-    try files.writeAllOut(max);
     try files.writeAllOut("\n  models.default: ");
     try files.writeAllOut(settings.defaultModel());
     try files.writeAllOut("\n");

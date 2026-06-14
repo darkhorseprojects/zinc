@@ -1,142 +1,79 @@
 const std = @import("std");
-const Store = @import("../runtime/store.zig").Store;
-const pkg_install = @import("../pkg/install.zig");
-const pkg_update = @import("../pkg/update.zig");
-const manifest = @import("../pkg/manifest.zig");
+const Substrate = @import("../substrate.zig").Store;
+const package = @import("../package.zig");
 const files = @import("../io/fs.zig");
-const proc = @import("../io/process.zig");
-const platform = @import("../platform/mod.zig");
 
 const Allocator = std.mem.Allocator;
 
-pub fn runPkg(allocator: Allocator, io: std.Io, store: *Store, args: []const []const u8) !void {
-    if (args.len == 0) {
-        try usage();
-        return error.InvalidUsage;
-    }
+pub fn runPkg(allocator: Allocator, io: std.Io, store: *Substrate, args: []const []const u8) !void {
+    if (args.len == 0) return usage();
     const cmd = args[0];
+    if (std.mem.eql(u8, cmd, "install")) return install(allocator, io, store, args[1..]);
+    if (std.mem.eql(u8, cmd, "remove")) return remove(allocator, io, store, args[1..]);
+    if (std.mem.eql(u8, cmd, "check")) return check(allocator, io, store, args[1..]);
+    if (std.mem.eql(u8, cmd, "update")) return update(allocator, io, store, args[1..]);
+    if (std.mem.eql(u8, cmd, "list")) return list(allocator, store);
+    return usage();
+}
 
-    if (std.mem.eql(u8, cmd, "install")) {
-        if (args.len < 2) {
-            try files.writeAllErr("Error: Missing package path or name.\n");
-            return error.InvalidUsage;
-        }
-        var path: []const u8 = args[1];
-        var is_global = false;
+fn install(allocator: Allocator, io: std.Io, store: *Substrate, args: []const []const u8) !void {
+    if (args.len == 0) return usage();
+    var scope: package.Scope = .workspace;
+    var root: ?[]const u8 = null;
+    for (args) |arg| {
+        if (std.mem.eql(u8, arg, "--global")) scope = .global else if (std.mem.eql(u8, arg, "--workspace")) scope = .workspace else root = arg;
+    }
+    try package.install(allocator, io, store, root orelse return usage(), scope);
+}
 
-        // Check for flags
-        for (args[1..]) |arg| {
-            if (std.mem.eql(u8, arg, "--global")) {
-                is_global = true;
-            } else if (std.mem.eql(u8, arg, "--local")) {
-                is_global = false;
-            } else {
-                path = arg;
-            }
-        }
+fn remove(allocator: Allocator, io: std.Io, store: *Substrate, args: []const []const u8) !void {
+    if (args.len != 1) return usage();
+    try package.remove(allocator, io, store, args[0]);
+}
 
-        try pkg_install.install(allocator, io, store, path, is_global);
-    } else if (std.mem.eql(u8, cmd, "update")) {
-        var opts = pkg_update.Options{};
-        for (args[1..]) |arg| {
-            if (std.mem.eql(u8, arg, "--all")) {
-                opts.all = true;
-            } else if (std.mem.eql(u8, arg, "--check")) {
-                opts.check = true;
-            } else if (opts.name == null) {
-                opts.name = arg;
-            } else {
-                try usage();
-                return error.InvalidUsage;
-            }
-        }
-        if (!opts.all and opts.name == null) {
-            try files.writeAllErr("Error: Missing package name or --all.\n");
-            return error.InvalidUsage;
-        }
-        try pkg_update.update(allocator, io, store, opts);
-    } else if (std.mem.eql(u8, cmd, "remove")) {
-        if (args.len < 2) {
-            try files.writeAllErr("Error: Missing package name.\n");
-            return error.InvalidUsage;
-        }
-        const name = args[1];
-        try pkg_install.remove(allocator, io, store, name);
-    } else if (std.mem.eql(u8, cmd, "list")) {
+fn check(allocator: Allocator, io: std.Io, store: *Substrate, args: []const []const u8) !void {
+    if (args.len != 1) return usage();
+    try package.check(allocator, io, store, args[0]);
+}
+
+fn update(allocator: Allocator, io: std.Io, store: *Substrate, args: []const []const u8) !void {
+    var check_only = false;
+    var all = false;
+    var name: ?[]const u8 = null;
+    for (args) |arg| {
+        if (std.mem.eql(u8, arg, "--check")) check_only = true else if (std.mem.eql(u8, arg, "--all")) all = true else name = arg;
+    }
+    if (all) {
         const pkgs = try store.listPackages();
         defer {
-            for (pkgs) |p| store.freePackage(p);
+            for (pkgs) |pkg| store.freePackage(pkg);
             allocator.free(pkgs);
         }
+        for (pkgs) |pkg| try package.update(allocator, io, store, pkg.package, check_only);
+        return;
+    }
+    try package.update(allocator, io, store, name orelse return usage(), check_only);
+}
 
-        try files.writeAllOut("Installed Packages:\n");
-        for (pkgs) |p| {
-            try files.writeAllOut("  - ");
-            try files.writeAllOut(p.name);
-            try files.writeAllOut(" (");
-            try files.writeAllOut(p.version orelse "0.0.0");
-            try files.writeAllOut(") [");
-            try files.writeAllOut(p.scope orelse "local");
-            try files.writeAllOut("] -> ");
-            try files.writeAllOut(p.path orelse "");
-            try files.writeAllOut("\n");
-        }
-    } else if (std.mem.eql(u8, cmd, "check")) {
-        if (args.len < 2) {
-            try files.writeAllErr("Error: Missing package name.\n");
-            return error.InvalidUsage;
-        }
-        const name = args[1];
-        const pkg = (try store.getPackage(name)) orelse {
-            try files.writeAllErr("Package not found.\n");
-            return;
-        };
-        defer store.freePackage(pkg);
-
-        // Load manifest
-        const manifest_path = try std.fs.path.join(allocator, &.{ pkg.path.?, "zinc.pkg.yaml" });
-        defer allocator.free(manifest_path);
-
-        const manifest_bytes = try files.readLimited(allocator, manifest_path, 10 * 1024 * 1024);
-        defer allocator.free(manifest_bytes);
-
-        var parsed = try manifest.parse(allocator, manifest_bytes);
-        defer parsed.deinit();
-
-        const os = platform.currentOS();
-        const os_name = @tagName(os);
-        if (parsed.getScript("check", os_name)) |script_rel| {
-            const check_script_path = try std.fs.path.join(allocator, &.{ pkg.path.?, script_rel });
-            defer allocator.free(check_script_path);
-
-            if (files.existsPath(check_script_path)) {
-                try files.writeAllOut("Running package check script...\n");
-                const run_res = try proc.run(allocator, io, &.{check_script_path}, pkg.path.?, 10 * 1024 * 1024);
-                defer run_res.deinit(allocator);
-
-                if (run_res.stdout.len > 0) try files.writeAllOut(run_res.stdout);
-                if (run_res.stderr.len > 0) try files.writeAllErr(run_res.stderr);
-
-                if (run_res.code == 0) {
-                    try files.writeAllOut("Package check passed.\n");
-                    var updated_pkg = pkg;
-                    updated_pkg.checked_at = std.Io.Clock.now(.real, io).toSeconds();
-                    try store.insertPackage(updated_pkg);
-                } else {
-                    try files.writeAllErr("Package check failed.\n");
-                }
-            } else {
-                try files.writeAllOut("No check script found.\n");
-            }
-        } else {
-            try files.writeAllOut("No check script defined for this platform.\n");
-        }
-    } else {
-        try usage();
-        return error.InvalidUsage;
+fn list(allocator: Allocator, store: *Substrate) !void {
+    const pkgs = try store.listPackages();
+    defer {
+        for (pkgs) |pkg| store.freePackage(pkg);
+        allocator.free(pkgs);
+    }
+    for (pkgs) |pkg| {
+        var manifest = package.Manifest.open(allocator, pkg.root) catch null;
+        defer if (manifest) |*m| m.deinit();
+        try files.writeAllOut(pkg.package);
+        try files.writeAllOut(" ");
+        if (manifest) |m| try files.writeAllOut(m.version) else try files.writeAllOut("?");
+        try files.writeAllOut(" ");
+        try files.writeAllOut(pkg.root);
+        try files.writeAllOut("\n");
     }
 }
 
-fn usage() !void {
-    try files.writeAllErr("Usage: zn pkg <install|update|remove|list|check> [args]\n");
+fn usage() error{InvalidUsage} {
+    files.writeAllErr("usage: zn pkg <install|remove|check|update|list>\n") catch {};
+    return error.InvalidUsage;
 }

@@ -1,26 +1,19 @@
 circuitry: "0.6.4"
 name: parallel shapes
 
-zinc:
-  runtime:
-    parallel: true
-    max_parallel: 2
-  packages:
-    responses: openai-responses@0.1.8
-
 takes:
   $left_question: text
   $right_question: text
 
 uses:
   left:
-    shape: responses.shapes.short_answer
+    shape: openai-responses.shapes.short_answer
     takes:
       question: $left_question
     gives:
       answer: $left_answer
   right:
-    shape: responses.shapes.short_answer
+    shape: openai-responses.shapes.short_answer
     takes:
       question: $right_question
     gives:

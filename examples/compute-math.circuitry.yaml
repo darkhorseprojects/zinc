@@ -1,6 +1,6 @@
 circuitry: "0.6.4"
-name: compute math
-about: Calculate compound interest from explicit numeric inputs.
+name: explain compound interest
+about: Ask a capable model/package to explain the calculation from explicit inputs.
 
 takes:
   $principal: number
@@ -8,18 +8,16 @@ takes:
   $years: number
 
 uses:
-  compound_interest:
+  explanation:
+    model: local-llama
     takes:
       principal: $principal
       rate: $rate
       years: $years
     does: |
-      amount = principal * (1 + rate) ^ years
-      interest = amount - principal
+      Explain the compound-interest result for these inputs. Include the formula and final amount.
     gives:
-      amount: $amount
-      interest: $interest
+      answer: $answer
 
 gives:
-  $amount: number
-  $interest: number
+  $answer: text
