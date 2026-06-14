@@ -1,7 +1,7 @@
-# Zinc ⚙️
+# Zinc ✦
 
 [![GitHub release](https://img.shields.io/github/v/release/darkhorseprojects/zinc?color=64748b&style=flat-square)](https://github.com/darkhorseprojects/zinc/releases/latest)
-[![release status](https://img.shields.io/github/actions/workflow/status/darkhorseprojects/zinc/release.yml?label=release&style=flat-square)](https://github.com/darkhorseprojects/zinc/actions)
+[![release run](https://github.com/darkhorseprojects/zinc/actions/workflows/release.yml/badge.svg)](https://github.com/darkhorseprojects/zinc/actions)
 [![license](https://img.shields.io/github/license/darkhorseprojects/zinc?color=333333&style=flat-square)](https://github.com/darkhorseprojects/zinc/blob/main/LICENSE)
 
 Zinc remembers fragments and moves heads.
@@ -24,7 +24,7 @@ The head moves to that fragment
 
 Circuitry names variables and confirms shaped YAML. Packages own software, settings, docs, shells, providers, and request/result interpretation. Zinc keeps package identity, manifest navigation, opaque config, exact byte fragments, and head pointers over Limbo.
 
-## CLI
+## ◌ CLI
 
 ```bash
 zn run <shape> [name=value ...]
@@ -42,7 +42,7 @@ zn update --check
 zn update
 ```
 
-## Run
+## ⟡ Run
 
 ```bash
 zn run examples/local-llama-answer.circuitry.yaml question="what is zinc?"
@@ -78,7 +78,7 @@ fragment = hash(target + request + result)
 
 `does` is instruction bytes passed to package software. It is not shell text, arithmetic, or Zinc code.
 
-## Configuration
+## ⌁ Configuration
 
 Zinc reads `.zinc/config.yaml` and `~/.zinc/config.yaml`.
 
@@ -89,7 +89,7 @@ defaults:
 
 The value is an opaque package ref. Zinc does not open it as a native model profile. Packages interpret their own settings.
 
-## Packages
+## ▣ Packages
 
 A package is an arbitrary self-contained directory with `zinc.pkg.yaml`. Zinc registers package identity and root; it does not catalog package files into its database.
 
@@ -126,7 +126,7 @@ openai-responses.shapes.short_answer
 
 Package systems integrate at their package boundary. Zinc does not absorb npm, Python, shell, PowerShell, provider, or OS-specific internals.
 
-## Read more
+## ↯ Read more
 
 - [Architecture](https://github.com/darkhorseprojects/zinc/wiki/Architecture)
 - [Fragments and Heads](https://github.com/darkhorseprojects/zinc/wiki/Fragments-and-Heads)
@@ -134,14 +134,14 @@ Package systems integrate at their package boundary. Zinc does not absorb npm, P
 - [Executor](https://github.com/darkhorseprojects/zinc/wiki/Executor)
 - [URI Reference](https://github.com/darkhorseprojects/zinc/wiki/URI-Reference)
 
-## Learn more
+## ✧ Learn more
 
 - [Circuitry](https://github.com/darkhorseprojects/circuitry) confirms shaped YAML and variables.
 - [circuitry-zig](https://github.com/darkhorseprojects/circuitry-zig) reads and confirms Circuitry from Zig.
 - [limbo-zig](https://github.com/darkhorseprojects/limbo-zig) stores rows and bytes.
 - [darkhorseprojects-packages](https://github.com/darkhorseprojects/darkhorseprojects-packages) contains independent software/settings packages.
 
-## Building
+## ⟡ Building
 
 Zinc is written in Zig 0.16.0.
 
