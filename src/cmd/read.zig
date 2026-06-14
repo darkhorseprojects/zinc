@@ -18,7 +18,7 @@ fn readZinc(allocator: Allocator, store: *Substrate, uri: []const u8) ![]u8 {
     const body = uri["zinc://".len..];
     if (std.mem.startsWith(u8, body, "packages/")) return readPackage(allocator, store, body["packages/".len..]);
     if (std.mem.startsWith(u8, body, "fragments/")) return readFragment(allocator, store, body["fragments/".len..]);
-    if (std.mem.startsWith(u8, body, "choices/")) return readChoice(allocator, store, body["choices/".len..]);
+    if (std.mem.startsWith(u8, body, "heads/")) return readHead(allocator, store, body["heads/".len..]);
     if (std.mem.startsWith(u8, body, "config/")) return readConfig(allocator, store, body["config/".len..]);
     return error.UnknownZincUri;
 }
@@ -36,9 +36,9 @@ fn readFragment(allocator: Allocator, store: *Substrate, id: []const u8) ![]u8 {
     return try allocator.dupe(u8, row.result);
 }
 
-fn readChoice(allocator: Allocator, store: *Substrate, id: []const u8) ![]u8 {
-    const row = (try store.getChoice(id)) orelse return error.ChoiceNotFound;
-    defer store.freeChoice(row);
+fn readHead(allocator: Allocator, store: *Substrate, id: []const u8) ![]u8 {
+    const row = (try store.getHead(id)) orelse return error.HeadNotFound;
+    defer store.freeHead(row);
     return try std.fmt.allocPrint(allocator, "{s}\n", .{row.fragment});
 }
 

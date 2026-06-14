@@ -1,7 +1,7 @@
 const std = @import("std");
 const substrate = @import("substrate.zig");
 
-pub fn choice(target: []const u8, request: []const u8) [64]u8 {
+pub fn head(target: []const u8, request: []const u8) [64]u8 {
     var h = std.crypto.hash.sha2.Sha256.init(.{});
     h.update(target);
     h.update("\x00");
@@ -23,9 +23,9 @@ pub fn fragment(target: []const u8, request: []const u8, result: []const u8) [64
     return std.fmt.bytesToHex(digest, .lower);
 }
 
-pub fn chosen(store: *substrate.Store, choice_hex: []const u8) !?substrate.Fragment {
-    const row = (try store.getChoice(choice_hex)) orelse return null;
-    defer store.freeChoice(row);
+pub fn headFragment(store: *substrate.Store, head_hex: []const u8) !?substrate.Fragment {
+    const row = (try store.getHead(head_hex)) orelse return null;
+    defer store.freeHead(row);
     return try store.getFragment(row.fragment);
 }
 
@@ -35,16 +35,16 @@ pub fn put(store: *substrate.Store, target: []const u8, request: []const u8, res
     return fragment_hex;
 }
 
-pub fn choose(store: *substrate.Store, target: []const u8, request: []const u8, fragment_hex: []const u8) ![64]u8 {
-    const choice_hex = choice(target, request);
-    try store.putChoice(.{ .choice = &choice_hex, .fragment = fragment_hex });
-    return choice_hex;
+pub fn putHead(store: *substrate.Store, target: []const u8, request: []const u8, fragment_hex: []const u8) ![64]u8 {
+    const head_hex = head(target, request);
+    try store.putHead(.{ .head = &head_hex, .fragment = fragment_hex });
+    return head_hex;
 }
 
-pub fn putAndChoose(store: *substrate.Store, target: []const u8, request: []const u8, result: []const u8, time: i64) !struct { fragment: [64]u8, choice: [64]u8 } {
+pub fn putAndHead(store: *substrate.Store, target: []const u8, request: []const u8, result: []const u8, time: i64) !struct { fragment: [64]u8, head: [64]u8 } {
     const fragment_hex = try put(store, target, request, result, time);
-    const choice_hex = try choose(store, target, request, &fragment_hex);
-    return .{ .fragment = fragment_hex, .choice = choice_hex };
+    const head_hex = try putHead(store, target, request, &fragment_hex);
+    return .{ .fragment = fragment_hex, .head = head_hex };
 }
 
 pub fn payloadHash(bytes: []const u8) [64]u8 {

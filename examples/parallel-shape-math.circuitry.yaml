@@ -1,13 +1,8 @@
-circuitry: "0.6.4"
+circuitry: "0.7.0"
 name: parallel shape math
 
-zinc:
-  runtime:
-    parallel: true
-    max_parallel: 2
-
 takes:
-  $x: number
+  - $x
 
 uses:
   double:
@@ -32,6 +27,6 @@ uses:
       sum: $total
 
 gives:
-  $double: number
-  $triple: number
-  $total: number
+  - $double
+  - $triple
+  - $total

@@ -62,13 +62,17 @@ fn list(allocator: Allocator, store: *Substrate) !void {
         allocator.free(pkgs);
     }
     for (pkgs) |pkg| {
-        var manifest = package.Manifest.open(allocator, pkg.root) catch null;
-        defer if (manifest) |*m| m.deinit();
         try files.writeAllOut(pkg.package);
         try files.writeAllOut(" ");
-        if (manifest) |m| try files.writeAllOut(m.version) else try files.writeAllOut("?");
+        try files.writeAllOut(pkg.version);
         try files.writeAllOut(" ");
         try files.writeAllOut(pkg.root);
+        if (pkg.source_git) |git| {
+            try files.writeAllOut(" ");
+            try files.writeAllOut(git);
+            try files.writeAllOut("@");
+            try files.writeAllOut(pkg.source_ref orelse "?");
+        }
         try files.writeAllOut("\n");
     }
 }

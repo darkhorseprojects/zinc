@@ -14,4 +14,3 @@ pub fn currentOS() OS {
 
 pub const dirs = @import("dirs.zig");
 pub const path = @import("path.zig");
-pub const shell = @import("shell.zig");

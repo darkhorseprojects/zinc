@@ -12,34 +12,14 @@ const proc = @import("io/process.zig");
 const Allocator = std.mem.Allocator;
 const assembly_target = "zinc.assembly";
 
-pub const Advance = union(enum) {
-    advanced: []u8,
-    complete: []u8,
-    waiting,
-
-    pub fn deinit(self: Advance, allocator: Allocator) void {
-        switch (self) {
-            .advanced => |path| allocator.free(path),
-            .complete => |result| allocator.free(result),
-            .waiting => {},
-        }
-    }
-};
-
 pub fn shape(allocator: Allocator, io: std.Io, store: *Substrate, source_path: []const u8, args: []const []const u8, settings: *const config.ConfigSettings) !void {
     const prepared = try prepare(allocator, io, store, source_path, args);
     defer allocator.free(prepared);
-    const step = try advance(allocator, io, store, prepared, settings);
-    defer step.deinit(allocator);
-    switch (step) {
-        .complete => |result| {
-            if (result.len > 0) {
-                try files.writeAllOut(result);
-                if (result[result.len - 1] != '\n') try files.writeAllOut("\n");
-            }
-        },
-        .advanced => {},
-        .waiting => return error.ExecutionWaiting,
+    const result = try advance(allocator, io, store, prepared, settings);
+    defer allocator.free(result);
+    if (result.len > 0) {
+        try files.writeAllOut(result);
+        if (result[result.len - 1] != '\n') try files.writeAllOut("\n");
     }
 }
 
@@ -48,13 +28,13 @@ pub fn prepare(allocator: Allocator, io: std.Io, store: *Substrate, source_path:
     defer allocator.free(abs_path);
     const request = try assemblyRequest(allocator, abs_path, args);
     defer allocator.free(request);
-    const result = try std.fmt.allocPrint(allocator, "status: prepared\nsource: {s}\n", .{abs_path});
+    const result = try std.fmt.allocPrint(allocator, "source: {s}\n", .{abs_path});
     defer allocator.free(result);
-    const ids = try fragments.putAndChoose(store, assembly_target, request, result, std.Io.Clock.now(.real, io).toSeconds());
+    const ids = try fragments.putAndHead(store, assembly_target, request, result, std.Io.Clock.now(.real, io).toSeconds());
     return try allocator.dupe(u8, &ids.fragment);
 }
 
-pub fn advance(allocator: Allocator, io: std.Io, store: *Substrate, assembly_fragment: []const u8, settings: *const config.ConfigSettings) !Advance {
+pub fn advance(allocator: Allocator, io: std.Io, store: *Substrate, assembly_fragment: []const u8, settings: *const config.ConfigSettings) ![]u8 {
     const prepared = (try store.getFragment(assembly_fragment)) orelse return error.AssemblyFragmentNotFound;
     defer store.freeFragment(prepared);
     if (!std.mem.eql(u8, prepared.target, assembly_target)) return error.NotAssemblyFragment;
@@ -67,9 +47,8 @@ pub fn advance(allocator: Allocator, io: std.Io, store: *Substrate, assembly_fra
 
     const result = try runShape(allocator, io, store, source_path, args.items, settings);
     defer allocator.free(result);
-    const ids = try fragments.putAndChoose(store, assembly_target, prepared.request, result, std.Io.Clock.now(.real, io).toSeconds());
-    _ = ids.choice;
-    return .{ .complete = try allocator.dupe(u8, result) };
+    _ = try fragments.putAndHead(store, assembly_target, prepared.request, result, std.Io.Clock.now(.real, io).toSeconds());
+    return try allocator.dupe(u8, result);
 }
 
 fn runShape(allocator: Allocator, io: std.Io, store: *Substrate, source_path: []const u8, args: []const []const u8, settings: *const config.ConfigSettings) ![]u8 {
@@ -85,90 +64,76 @@ fn runShape(allocator: Allocator, io: std.Io, store: *Substrate, source_path: []
         return error.CircuitryShapeNotReady;
     }
 
-    const normalized_material = try circuitry.renderNormalizedDoc(allocator, &confirmation.system);
-    defer allocator.free(normalized_material);
-    _ = try fragments.put(store, "circuitry.normalize", bytes, normalized_material, std.Io.Clock.now(.real, io).toSeconds());
+    _ = try fragments.put(store, "circuitry.confirm", bytes, bytes, std.Io.Clock.now(.real, io).toSeconds());
 
     var state = State.init(allocator);
     defer state.deinit();
-    try collectInputs(allocator, &state, confirmation.system.takes, args);
+    try collectInputs(allocator, &state, confirmation.shape.takes, args);
 
-    for (confirmation.system.parts) |part| {
-        const part_material = try circuitry.renderNormalizedPartDoc(allocator, &confirmation.system, part.name);
-        defer allocator.free(part_material);
-        try runPart(allocator, io, store, settings, &state, part, part_material);
+    for (confirmation.shape.uses) |part| {
+        const part_yaml = try partMaterial(allocator, part);
+        defer allocator.free(part_yaml);
+        try runPart(allocator, io, store, settings, &state, part, part_yaml);
     }
-    return try shapeTextResult(allocator, &state, confirmation.system.gives);
+    return try shapeTextResult(allocator, &state, confirmation.shape.gives);
 }
 
 const State = struct {
     allocator: Allocator,
-    values: std.StringHashMap(Typed),
+    values: std.StringHashMap([]u8),
 
     fn init(allocator: Allocator) State {
-        return .{ .allocator = allocator, .values = std.StringHashMap(Typed).init(allocator) };
+        return .{ .allocator = allocator, .values = std.StringHashMap([]u8).init(allocator) };
     }
 
     fn deinit(self: *State) void {
         var it = self.values.iterator();
         while (it.next()) |entry| {
             self.allocator.free(entry.key_ptr.*);
-            entry.value_ptr.deinit(self.allocator);
+            self.allocator.free(entry.value_ptr.*);
         }
         self.values.deinit();
     }
 };
 
-const Typed = struct {
-    type_label: ?[]u8,
-    text: []u8,
+fn runPart(allocator: Allocator, io: std.Io, store: *Substrate, settings: *const config.ConfigSettings, state: *State, part: circuitry.Use, part_yaml: []const u8) anyerror!void {
+    if (part.shape) |shape_ref| return try runShapePart(allocator, io, store, settings, state, shape_ref, part, part_yaml);
 
-    fn deinit(self: *Typed, allocator: Allocator) void {
-        if (self.type_label) |label| allocator.free(label);
-        allocator.free(self.text);
-    }
-};
-
-fn runPart(allocator: Allocator, io: std.Io, store: *Substrate, settings: *const config.ConfigSettings, state: *State, part: circuitry.NormalizedPart, part_material: []const u8) anyerror!void {
-    if (part.shape) |shape_ref| return try runShapePart(allocator, io, store, settings, state, shape_ref, part, part_material);
-
-    const model_name = part.model orelse settings.defaultModel();
-    const preset = settings.modelPreset(model_name) orelse return error.ModelPresetNotFound;
-    const adapter_ref = preset.adapter orelse return error.ModelAdapterMissing;
-    const request = try adapterRequest(allocator, model_name, preset, state, part, part_material);
+    const run_ref = part.run orelse settings.defaultRun();
+    const request = try packageRequest(allocator, run_ref, part, part_yaml, state);
     defer allocator.free(request);
-    const choice_hex = fragments.choice(adapter_ref, request);
+    const head_hex = fragments.head(run_ref, request);
 
-    if (try fragments.chosen(store, &choice_hex)) |fragment_row| {
+    if (try fragments.headFragment(store, &head_hex)) |fragment_row| {
         defer store.freeFragment(fragment_row);
-        try applyFragmentResult(allocator, state, part, fragment_row.result);
+        try applyResult(allocator, state, part, fragment_row.result);
         return;
     }
 
-    const adapter_path = if (package.parseRef(adapter_ref)) |_| try package.resolveRef(allocator, store, adapter_ref) else |_| try allocator.dupe(u8, adapter_ref);
-    defer allocator.free(adapter_path);
-    const request_path = try tempFile(allocator, "adapter-request.yaml", request);
+    const program_path = if (package.parseRef(run_ref)) |_| try package.resolveRef(allocator, store, run_ref) else |_| try allocator.dupe(u8, run_ref);
+    defer allocator.free(program_path);
+    const request_path = try tempFile(allocator, "package-request.yaml", request);
     defer allocator.free(request_path);
 
-    const result = try proc.run(allocator, io, &.{ adapter_path, request_path }, null, 64 * 1024 * 1024);
+    const result = try proc.run(allocator, io, &.{ program_path, request_path }, null, 64 * 1024 * 1024);
     defer result.deinit(allocator);
     if (result.stderr.len > 0) try files.writeAllErr(result.stderr);
-    if (result.code != 0) return error.AdapterFailed;
+    if (result.code != 0) return error.PackageRunFailed;
 
-    try applyFragmentResult(allocator, state, part, result.stdout);
-    _ = try fragments.putAndChoose(store, adapter_ref, request, result.stdout, std.Io.Clock.now(.real, io).toSeconds());
+    try applyResult(allocator, state, part, result.stdout);
+    _ = try fragments.putAndHead(store, run_ref, request, result.stdout, std.Io.Clock.now(.real, io).toSeconds());
 }
 
-fn runShapePart(allocator: Allocator, io: std.Io, store: *Substrate, settings: *const config.ConfigSettings, parent: *State, shape_ref: []const u8, part: circuitry.NormalizedPart, part_material: []const u8) anyerror!void {
-    const request = try shapeRequest(allocator, parent, shape_ref, part, part_material);
+fn runShapePart(allocator: Allocator, io: std.Io, store: *Substrate, settings: *const config.ConfigSettings, parent: *State, shape_ref: []const u8, part: circuitry.Use, part_yaml: []const u8) anyerror!void {
+    const request = try shapeRequest(allocator, parent, shape_ref, part, part_yaml);
     defer allocator.free(request);
     const target = try std.fmt.allocPrint(allocator, "zinc.shape:{s}", .{shape_ref});
     defer allocator.free(target);
-    const choice_hex = fragments.choice(target, request);
+    const head_hex = fragments.head(target, request);
 
-    if (try fragments.chosen(store, &choice_hex)) |fragment_row| {
+    if (try fragments.headFragment(store, &head_hex)) |fragment_row| {
         defer store.freeFragment(fragment_row);
-        try applyFragmentResult(allocator, parent, part, fragment_row.result);
+        try applyResult(allocator, parent, part, fragment_row.result);
         return;
     }
 
@@ -182,160 +147,199 @@ fn runShapePart(allocator: Allocator, io: std.Io, store: *Substrate, settings: *
 
     var child = State.init(allocator);
     defer child.deinit();
-    try mapChildInputs(allocator, parent, &child, part, confirmation.system.takes);
+    try mapChildInputs(allocator, parent, &child, part, confirmation.shape.takes);
 
-    for (confirmation.system.parts) |child_part| {
-        const child_material = try circuitry.renderNormalizedPartDoc(allocator, &confirmation.system, child_part.name);
-        defer allocator.free(child_material);
-        try runPart(allocator, io, store, settings, &child, child_part, child_material);
+    for (confirmation.shape.uses) |child_part| {
+        const child_yaml = try partMaterial(allocator, child_part);
+        defer allocator.free(child_yaml);
+        try runPart(allocator, io, store, settings, &child, child_part, child_yaml);
     }
-    try mapChildOutputs(allocator, parent, &child, part, confirmation.system.gives);
+    try mapChildOutputs(allocator, parent, &child, part, confirmation.shape.gives);
 
-    const result = try shapeResult(allocator, &child, confirmation.system.gives);
+    const result = try shapeResult(allocator, &child, confirmation.shape.gives);
     defer allocator.free(result);
-    _ = try fragments.putAndChoose(store, target, request, result, std.Io.Clock.now(.real, io).toSeconds());
+    _ = try fragments.putAndHead(store, target, request, result, std.Io.Clock.now(.real, io).toSeconds());
 }
 
-fn mapChildInputs(allocator: Allocator, parent: *State, child: *State, part: circuitry.NormalizedPart, child_takes: []const circuitry.NormalizedValue) !void {
+fn mapChildInputs(allocator: Allocator, parent: *State, child: *State, part: circuitry.Use, child_takes: []const circuitry.Variable) !void {
     for (child_takes) |take| {
-        const parent_binding = bindingForLocal(part.takes, bare(take.name)) orelse return error.MissingShapeInputBinding;
-        const found = parent.values.get(parent_binding.value) orelse return error.MissingInputValue;
-        try child.values.put(try allocator.dupe(u8, take.name), .{ .type_label = if (found.type_label) |label| try allocator.dupe(u8, label) else null, .text = try allocator.dupe(u8, found.text) });
+        const parent_name = inputFor(part, take.name) orelse return error.MissingShapeInput;
+        const found = parent.values.get(parent_name) orelse return error.MissingInputValue;
+        try child.values.put(try allocator.dupe(u8, take.name), try allocator.dupe(u8, found));
     }
 }
 
-fn mapChildOutputs(allocator: Allocator, parent: *State, child: *State, part: circuitry.NormalizedPart, child_gives: []const circuitry.NormalizedValue) !void {
+fn mapChildOutputs(allocator: Allocator, parent: *State, child: *State, part: circuitry.Use, child_gives: []const circuitry.Variable) !void {
     for (child_gives) |give| {
-        const parent_binding = bindingForLocal(part.gives, bare(give.name)) orelse return error.MissingShapeOutputBinding;
+        const parent_name = outputFor(part, give.name) orelse return error.MissingShapeOutput;
         const found = child.values.get(give.name) orelse return error.MissingOutputValue;
-        try putTyped(allocator, parent, parent_binding.value, found);
+        try putValue(allocator, parent, parent_name, found);
     }
 }
 
-fn bindingForLocal(bindings: []const circuitry.NormalizedBinding, local: []const u8) ?circuitry.NormalizedBinding {
-    for (bindings) |binding| if (std.mem.eql(u8, binding.local orelse bare(binding.value), local)) return binding;
+fn inputFor(part: circuitry.Use, visible: []const u8) ?[]const u8 {
+    for (part.takes) |ref| if (std.mem.eql(u8, ref.visible orelse return null, visible)) return ref.local;
     return null;
 }
 
-fn adapterRequest(allocator: Allocator, model_name: []const u8, preset: config.ModelPreset, state: *State, part: circuitry.NormalizedPart, part_material: []const u8) ![]u8 {
+fn outputFor(part: circuitry.Use, visible: []const u8) ?[]const u8 {
+    for (part.gives) |ref| if (std.mem.eql(u8, ref.visible orelse return null, visible)) return ref.local;
+    return null;
+}
+
+fn packageRequest(allocator: Allocator, run_ref: []const u8, part: circuitry.Use, part_yaml: []const u8, state: *State) ![]u8 {
     var out: std.ArrayList(u8) = .empty;
     errdefer out.deinit(allocator);
-    try out.print(allocator, "model: {s}\npart: {s}\npart_material: |\n", .{ model_name, part.name });
-    var material_lines = std.mem.splitScalar(u8, part_material, '\n');
-    while (material_lines.next()) |line| try out.print(allocator, "  {s}\n", .{line});
-    try out.appendSlice(allocator, "params:\n");
-    if (preset.params) |params| try appendYaml(allocator, &out, params, 2);
-    try out.appendSlice(allocator, "instruction: |\n");
-    var lines = std.mem.splitScalar(u8, part.instructions orelse "", '\n');
-    while (lines.next()) |line| try out.print(allocator, "  {s}\n", .{line});
+    try out.print(allocator, "run: {s}\npart: {s}\npart_yaml: |\n", .{ run_ref, part.name });
+    try appendIndented(allocator, &out, part_yaml, 2);
     try out.appendSlice(allocator, "takes:\n");
     for (part.takes) |take| {
-        const local = take.local orelse bare(take.value);
-        const found = state.values.get(take.value) orelse return error.MissingInputValue;
-        try out.print(allocator, "  {s}: |\n", .{local});
-        var value_lines = std.mem.splitScalar(u8, found.text, '\n');
-        while (value_lines.next()) |line| try out.print(allocator, "    {s}\n", .{line});
+        const found = state.values.get(take.visible orelse return error.MissingInputValue) orelse return error.MissingInputValue;
+        try out.print(allocator, "  {s}: |\n", .{take.local});
+        try appendIndented(allocator, &out, found, 4);
     }
     try out.appendSlice(allocator, "gives:\n");
-    for (part.gives) |give| try out.print(allocator, "  {s}: {s}\n", .{ give.local orelse bare(give.value), give.type_label orelse "text" });
+    for (part.gives) |give| try out.print(allocator, "  {s}: |\n", .{give.local});
     return out.toOwnedSlice(allocator);
 }
 
-fn shapeRequest(allocator: Allocator, state: *State, shape_ref: []const u8, part: circuitry.NormalizedPart, part_material: []const u8) ![]u8 {
+fn shapeRequest(allocator: Allocator, state: *State, shape_ref: []const u8, part: circuitry.Use, part_yaml: []const u8) ![]u8 {
     var out: std.ArrayList(u8) = .empty;
     errdefer out.deinit(allocator);
-    try out.print(allocator, "shape: {s}\npart: {s}\npart_material: |\n", .{ shape_ref, part.name });
-    var material_lines = std.mem.splitScalar(u8, part_material, '\n');
-    while (material_lines.next()) |line| try out.print(allocator, "  {s}\n", .{line});
-    try out.appendSlice(allocator, "instruction: |\n");
-    var lines = std.mem.splitScalar(u8, part.instructions orelse "", '\n');
-    while (lines.next()) |line| try out.print(allocator, "  {s}\n", .{line});
+    try out.print(allocator, "shape: {s}\npart: {s}\npart_yaml: |\n", .{ shape_ref, part.name });
+    try appendIndented(allocator, &out, part_yaml, 2);
     try out.appendSlice(allocator, "takes:\n");
     for (part.takes) |take| {
-        const found = state.values.get(take.value) orelse return error.MissingInputValue;
-        try out.print(allocator, "  {s}: |\n", .{ take.local orelse bare(take.value) });
-        var value_lines = std.mem.splitScalar(u8, found.text, '\n');
-        while (value_lines.next()) |line| try out.print(allocator, "    {s}\n", .{line});
+        const found = state.values.get(take.visible orelse return error.MissingInputValue) orelse return error.MissingInputValue;
+        try out.print(allocator, "  {s}: |\n", .{take.local});
+        try appendIndented(allocator, &out, found, 4);
     }
     return out.toOwnedSlice(allocator);
 }
 
-fn applyFragmentResult(allocator: Allocator, state: *State, part: circuitry.NormalizedPart, bytes: []const u8) !void {
+fn applyResult(allocator: Allocator, state: *State, part: circuitry.Use, bytes: []const u8) !void {
     var arena = std.heap.ArenaAllocator.init(allocator);
     defer arena.deinit();
     const root = try serde.yaml.parse(arena.allocator(), bytes);
-    try applyAdapterResponse(allocator, state, part, &root);
-}
-
-fn applyAdapterResponse(allocator: Allocator, state: *State, part: circuitry.NormalizedPart, root: *const serde.yaml.Value) !void {
-    const gives = yamlGet(root, "gives") orelse return error.AdapterResponseMissingGives;
-    if (gives.* != .mapping) return error.AdapterResponseMissingGives;
+    const gives = yamlGet(&root, "gives") orelse return error.PackageResponseMissingGives;
+    if (gives.* != .mapping) return error.PackageResponseMissingGives;
     var it = gives.mapping.iterator();
     while (it.next()) |entry| {
-        const system = systemForLocal(part.gives, entry.key_ptr.*) orelse continue;
-        const out = try readTypedOutput(entry.value_ptr);
-        try putTypedText(allocator, state, system, out.type_label, out.text);
+        const system = outputFor(part, entry.key_ptr.*) orelse continue;
+        if (entry.value_ptr.* != .string) return error.InvalidPackageOutput;
+        try putValue(allocator, state, system, entry.value_ptr.string);
     }
 }
 
-const Output = struct { type_label: ?[]const u8, text: []const u8 };
-
-fn readTypedOutput(node: *const serde.yaml.Value) !Output {
-    if (node.* == .string) return .{ .type_label = null, .text = node.string };
-    if (node.* != .mapping) return error.InvalidAdapterOutput;
-    const value_node = yamlGet(node, "value") orelse return error.InvalidAdapterOutput;
-    if (value_node.* != .string) return error.InvalidAdapterOutput;
-    const type_node = yamlGet(node, "type");
-    return .{ .type_label = if (type_node) |t| if (t.* == .string) t.string else null else null, .text = value_node.string };
-}
-
-fn collectInputs(allocator: Allocator, state: *State, takes: []const circuitry.NormalizedValue, args: []const []const u8) !void {
+fn collectInputs(allocator: Allocator, state: *State, takes: []const circuitry.Variable, args: []const []const u8) !void {
     if (args.len != takes.len) return error.MissingRunInput;
     for (takes) |take| {
         const provided = findArg(args, take.name) orelse findArg(args, bare(take.name)) orelse return error.MissingRunInput;
-        try putTypedText(allocator, state, take.name, take.type_label, provided);
+        try putValue(allocator, state, take.name, provided);
     }
 }
 
-fn putTyped(allocator: Allocator, state: *State, name: []const u8, value: Typed) !void {
-    try putTypedText(allocator, state, name, value.type_label, value.text);
-}
-
-fn putTypedText(allocator: Allocator, state: *State, name: []const u8, type_label: ?[]const u8, text: []const u8) !void {
+fn putValue(allocator: Allocator, state: *State, name: []const u8, text: []const u8) !void {
     const key = try allocator.dupe(u8, name);
     errdefer allocator.free(key);
-    const value = Typed{ .type_label = if (type_label) |label| try allocator.dupe(u8, label) else null, .text = try allocator.dupe(u8, text) };
+    const value = try allocator.dupe(u8, text);
+    errdefer allocator.free(value);
     if (state.values.fetchRemove(name)) |old| {
         allocator.free(old.key);
-        var old_value = old.value;
-        old_value.deinit(allocator);
+        allocator.free(old.value);
     }
     try state.values.put(key, value);
 }
 
-fn shapeResult(allocator: Allocator, state: *State, gives: []const circuitry.NormalizedValue) ![]u8 {
+fn shapeResult(allocator: Allocator, state: *State, gives: []const circuitry.Variable) ![]u8 {
     var out: std.ArrayList(u8) = .empty;
     errdefer out.deinit(allocator);
     try out.appendSlice(allocator, "gives:\n");
     for (gives) |give| {
         const found = state.values.get(give.name) orelse return error.MissingOutputValue;
-        try out.print(allocator, "  {s}:\n    value: |\n", .{bare(give.name)});
-        var lines = std.mem.splitScalar(u8, found.text, '\n');
-        while (lines.next()) |line| try out.print(allocator, "      {s}\n", .{line});
-        if (found.type_label) |label| try out.print(allocator, "    type: {s}\n", .{label});
+        try out.print(allocator, "  {s}: |\n", .{bare(give.name)});
+        try appendIndented(allocator, &out, found, 4);
     }
     return out.toOwnedSlice(allocator);
 }
 
-fn shapeTextResult(allocator: Allocator, state: *State, gives: []const circuitry.NormalizedValue) ![]u8 {
+fn shapeTextResult(allocator: Allocator, state: *State, gives: []const circuitry.Variable) ![]u8 {
     var out: std.ArrayList(u8) = .empty;
     errdefer out.deinit(allocator);
     for (gives) |give| {
         const found = state.values.get(give.name) orelse return error.MissingOutputValue;
         if (out.items.len != 0) try out.append(allocator, '\n');
-        try out.appendSlice(allocator, found.text);
+        try out.appendSlice(allocator, found);
     }
     return out.toOwnedSlice(allocator);
+}
+
+fn partMaterial(allocator: Allocator, part: circuitry.Use) ![]u8 {
+    var out: std.ArrayList(u8) = .empty;
+    errdefer out.deinit(allocator);
+    if (part.shape) |shape_ref| try out.print(allocator, "shape: {s}\n", .{shape_ref});
+    if (part.run) |run_ref| try out.print(allocator, "run: {s}\n", .{run_ref});
+    try out.appendSlice(allocator, "takes:\n");
+    for (part.takes) |take| try out.print(allocator, "  {s}: {s}\n", .{ take.local, take.visible orelse take.local });
+    try out.appendSlice(allocator, "does: |\n");
+    if (part.instructions) |instructions| {
+        try appendIndented(allocator, &out, instructions, 2);
+    } else {
+        try out.appendSlice(allocator, "  \n");
+    }
+    try out.appendSlice(allocator, "gives:\n");
+    for (part.gives) |give| try out.print(allocator, "  {s}: {s}\n", .{ give.local, give.visible orelse give.local });
+    for (part.fields) |field| {
+        try out.print(allocator, "{s}: ", .{field.name});
+        try appendYamlValue(allocator, &out, field.value);
+    }
+    return out.toOwnedSlice(allocator);
+}
+
+fn appendIndented(allocator: Allocator, out: *std.ArrayList(u8), text: []const u8, spaces: usize) !void {
+    var lines = std.mem.splitScalar(u8, text, '\n');
+    var first = true;
+    while (lines.next()) |line| {
+        if (!first) try out.append(allocator, '\n');
+        first = false;
+        try out.appendNTimes(allocator, ' ', spaces);
+        try out.appendSlice(allocator, line);
+    }
+    try out.append(allocator, '\n');
+}
+
+fn appendYamlValue(allocator: Allocator, out: *std.ArrayList(u8), value: *const serde.yaml.Value) !void {
+    switch (value.*) {
+        .string => |s| try out.print(allocator, "{s}\n", .{s}),
+        .sequence => |items| {
+            try out.appendSlice(allocator, "[");
+            for (items, 0..) |item, i| {
+                if (i != 0) try out.appendSlice(allocator, ", ");
+                try appendYamlInline(allocator, out, &item);
+            }
+            try out.appendSlice(allocator, "]\n");
+        },
+        .mapping => |*map| {
+            try out.appendSlice(allocator, "{");
+            var it = map.iterator();
+            var first = true;
+            while (it.next()) |entry| {
+                if (!first) try out.appendSlice(allocator, ", ");
+                first = false;
+                try out.print(allocator, "{s}: ", .{entry.key_ptr.*});
+                try appendYamlInline(allocator, out, entry.value_ptr);
+            }
+            try out.appendSlice(allocator, "}\n");
+        },
+        else => try out.appendSlice(allocator, "null\n"),
+    }
+}
+
+fn appendYamlInline(allocator: Allocator, out: *std.ArrayList(u8), value: *const serde.yaml.Value) !void {
+    switch (value.*) {
+        .string => |s| try out.print(allocator, "{s}", .{s}),
+        else => try out.appendSlice(allocator, "..."),
+    }
 }
 
 fn assemblyRequest(allocator: Allocator, source_path: []const u8, args: []const []const u8) ![]u8 {
@@ -351,70 +355,46 @@ fn parseAssemblyRequest(allocator: Allocator, request: []const u8, source: *?[]c
     var lines = std.mem.splitScalar(u8, request, '\n');
     while (lines.next()) |line| {
         if (std.mem.startsWith(u8, line, "source: ")) {
-            source.* = line["source: ".len..];
+            source.* = try allocator.dupe(u8, line["source: ".len..]);
             in_args = false;
         } else if (std.mem.eql(u8, line, "args:")) {
             in_args = true;
         } else if (in_args and std.mem.startsWith(u8, line, "  - ")) {
-            try args.append(allocator, line["  - ".len..]);
+            try args.append(allocator, try allocator.dupe(u8, line["  - ".len..]));
         }
     }
 }
 
 fn findArg(args: []const []const u8, name: []const u8) ?[]const u8 {
-    for (args) |arg| {
-        const eq = std.mem.indexOfScalar(u8, arg, '=') orelse continue;
-        if (std.mem.eql(u8, arg[0..eq], name)) return arg[eq + 1 ..];
-    }
+    const wanted = std.fmt.allocPrint(std.heap.page_allocator, "{s}=", .{name}) catch return null;
+    defer std.heap.page_allocator.free(wanted);
+    for (args) |arg| if (std.mem.eql(u8, arg, wanted) or std.mem.eql(u8, arg, name)) return arg;
     return null;
 }
 
-fn systemForLocal(bindings: []const circuitry.NormalizedBinding, local: []const u8) ?[]const u8 {
-    for (bindings) |binding| if (std.mem.eql(u8, binding.local orelse bare(binding.value), local)) return binding.value;
-    return null;
-}
-
-fn bare(name: []const u8) []const u8 {
-    return if (std.mem.startsWith(u8, name, "$")) name[1..] else name;
-}
-
-fn tempFile(allocator: Allocator, name: []const u8, content: []const u8) ![]u8 {
-    const path = try layout.tempRunPath(allocator, name);
-    try files.write(path, content);
+fn tempFile(allocator: Allocator, name: []const u8, bytes: []const u8) ![]u8 {
+    const dir = try layout.globalPath(allocator, "tmp");
+    defer allocator.free(dir);
+    try files.mkdirP(dir);
+    var h = std.crypto.hash.sha2.Sha256.init(.{});
+    h.update(bytes);
+    var digest: [32]u8 = undefined;
+    h.final(&digest);
+    const suffix = std.fmt.bytesToHex(digest, .lower);
+    const path = try std.fmt.allocPrint(allocator, "{s}/{s}-{s}.yaml", .{ dir, name, suffix[0..16] });
+    try files.write(path, bytes);
     return path;
-}
-
-fn printProblems(problems: []const []const u8) !void {
-    try files.writeAllErr("Circuitry shape is not ready.\n");
-    for (problems) |problem| {
-        try files.writeAllErr("- ");
-        try files.writeAllErr(problem);
-        try files.writeAllErr("\n");
-    }
-}
-
-fn appendYaml(allocator: Allocator, out: *std.ArrayList(u8), node: *const serde.yaml.Value, indent: usize) !void {
-    if (node.* != .mapping) return;
-    var it = node.mapping.iterator();
-    while (it.next()) |entry| {
-        try out.appendNTimes(allocator, ' ', indent);
-        switch (entry.value_ptr.*) {
-            .string => |s| try out.print(allocator, "{s}: {s}\n", .{ entry.key_ptr.*, s }),
-            .integer => |i| try out.print(allocator, "{s}: {d}\n", .{ entry.key_ptr.*, i }),
-            .float => |f| try out.print(allocator, "{s}: {d}\n", .{ entry.key_ptr.*, f }),
-            .boolean => |b| try out.print(allocator, "{s}: {s}\n", .{ entry.key_ptr.*, if (b) "true" else "false" }),
-            .mapping => {
-                try out.print(allocator, "{s}:\n", .{entry.key_ptr.*});
-                try appendYaml(allocator, out, entry.value_ptr, indent + 2);
-            },
-            else => try out.print(allocator, "{s}:\n", .{entry.key_ptr.*}),
-        }
-    }
 }
 
 fn yamlGet(node: *const serde.yaml.Value, key: []const u8) ?*const serde.yaml.Value {
     if (node.* != .mapping) return null;
-    return node.mapping.getPtr(key);
+    var it = node.mapping.iterator();
+    while (it.next()) |entry| if (std.mem.eql(u8, entry.key_ptr.*, key)) return entry.value_ptr;
+    return null;
+}
+
+fn bare(name: []const u8) []const u8 {
+    return if (name.len > 0 and name[0] == '$') name[1..] else name;
 }
 
 fn absolute(allocator: Allocator, io: std.Io, path: []const u8) ![]u8 {
@@ -423,4 +403,12 @@ fn absolute(allocator: Allocator, io: std.Io, path: []const u8) ![]u8 {
     defer allocator.free(cwd_buf);
     const cwd_len = try std.process.currentPath(io, cwd_buf);
     return try std.fs.path.resolve(allocator, &.{ cwd_buf[0..cwd_len], path });
+}
+
+fn printProblems(problems: []const []const u8) !void {
+    for (problems) |problem| {
+        try files.writeAllErr("fix: ");
+        try files.writeAllErr(problem);
+        try files.writeAllErr("\n");
+    }
 }

@@ -1,4 +1,4 @@
-circuitry: "0.6.4"
+circuitry: "0.7.0"
 name: search web
 about: Compose package capabilities without Zinc owning their internals.
 

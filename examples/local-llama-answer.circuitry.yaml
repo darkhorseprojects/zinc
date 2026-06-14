@@ -1,13 +1,13 @@
-circuitry: "0.6.4"
+circuitry: "0.7.0"
 name: local llama answer
-about: Answer through the package-provided OpenAI Responses-shaped adapter.
+about: Answer through package software.
 
 takes:
-  $question: text
+  - $question
 
 uses:
   answer:
-    model: local-llama
+    run: openai-responses.software.responses
     takes:
       question: $question
     does: |
@@ -16,4 +16,4 @@ uses:
       answer: $answer
 
 gives:
-  $answer: text
+  - $answer
