@@ -85,11 +85,19 @@ fn runShape(allocator: Allocator, io: std.Io, store: *Substrate, source_path: []
         return error.CircuitryShapeNotReady;
     }
 
+    const normalized_material = try circuitry.renderNormalizedDoc(allocator, &confirmation.system);
+    defer allocator.free(normalized_material);
+    _ = try fragments.put(store, "circuitry.normalize", bytes, normalized_material, std.Io.Clock.now(.real, io).toSeconds());
+
     var state = State.init(allocator);
     defer state.deinit();
     try collectInputs(allocator, &state, confirmation.system.takes, args);
 
-    for (confirmation.system.parts) |part| try runPart(allocator, io, store, settings, &state, "", part);
+    for (confirmation.system.parts) |part| {
+        const part_material = try circuitry.renderNormalizedPartDoc(allocator, &confirmation.system, part.name);
+        defer allocator.free(part_material);
+        try runPart(allocator, io, store, settings, &state, part, part_material);
+    }
     return try shapeTextResult(allocator, &state, confirmation.system.gives);
 }
 
@@ -121,14 +129,13 @@ const Typed = struct {
     }
 };
 
-fn runPart(allocator: Allocator, io: std.Io, store: *Substrate, settings: *const config.ConfigSettings, state: *State, prefix: []const u8, part: circuitry.NormalizedPart) anyerror!void {
-    _ = prefix;
-    if (part.shape) |shape_ref| return try runShapePart(allocator, io, store, settings, state, shape_ref, part);
+fn runPart(allocator: Allocator, io: std.Io, store: *Substrate, settings: *const config.ConfigSettings, state: *State, part: circuitry.NormalizedPart, part_material: []const u8) anyerror!void {
+    if (part.shape) |shape_ref| return try runShapePart(allocator, io, store, settings, state, shape_ref, part, part_material);
 
     const model_name = part.model orelse settings.defaultModel();
     const preset = settings.modelPreset(model_name) orelse return error.ModelPresetNotFound;
     const adapter_ref = preset.adapter orelse return error.ModelAdapterMissing;
-    const request = try adapterRequest(allocator, model_name, preset, state, part);
+    const request = try adapterRequest(allocator, model_name, preset, state, part, part_material);
     defer allocator.free(request);
     const choice_hex = fragments.choice(adapter_ref, request);
 
@@ -152,8 +159,8 @@ fn runPart(allocator: Allocator, io: std.Io, store: *Substrate, settings: *const
     _ = try fragments.putAndChoose(store, adapter_ref, request, result.stdout, std.Io.Clock.now(.real, io).toSeconds());
 }
 
-fn runShapePart(allocator: Allocator, io: std.Io, store: *Substrate, settings: *const config.ConfigSettings, parent: *State, shape_ref: []const u8, part: circuitry.NormalizedPart) anyerror!void {
-    const request = try shapeRequest(allocator, parent, shape_ref, part);
+fn runShapePart(allocator: Allocator, io: std.Io, store: *Substrate, settings: *const config.ConfigSettings, parent: *State, shape_ref: []const u8, part: circuitry.NormalizedPart, part_material: []const u8) anyerror!void {
+    const request = try shapeRequest(allocator, parent, shape_ref, part, part_material);
     defer allocator.free(request);
     const target = try std.fmt.allocPrint(allocator, "zinc.shape:{s}", .{shape_ref});
     defer allocator.free(target);
@@ -177,7 +184,11 @@ fn runShapePart(allocator: Allocator, io: std.Io, store: *Substrate, settings: *
     defer child.deinit();
     try mapChildInputs(allocator, parent, &child, part, confirmation.system.takes);
 
-    for (confirmation.system.parts) |child_part| try runPart(allocator, io, store, settings, &child, "", child_part);
+    for (confirmation.system.parts) |child_part| {
+        const child_material = try circuitry.renderNormalizedPartDoc(allocator, &confirmation.system, child_part.name);
+        defer allocator.free(child_material);
+        try runPart(allocator, io, store, settings, &child, child_part, child_material);
+    }
     try mapChildOutputs(allocator, parent, &child, part, confirmation.system.gives);
 
     const result = try shapeResult(allocator, &child, confirmation.system.gives);
@@ -206,10 +217,12 @@ fn bindingForLocal(bindings: []const circuitry.NormalizedBinding, local: []const
     return null;
 }
 
-fn adapterRequest(allocator: Allocator, model_name: []const u8, preset: config.ModelPreset, state: *State, part: circuitry.NormalizedPart) ![]u8 {
+fn adapterRequest(allocator: Allocator, model_name: []const u8, preset: config.ModelPreset, state: *State, part: circuitry.NormalizedPart, part_material: []const u8) ![]u8 {
     var out: std.ArrayList(u8) = .empty;
     errdefer out.deinit(allocator);
-    try out.print(allocator, "model: {s}\npart: {s}\n", .{ model_name, part.name });
+    try out.print(allocator, "model: {s}\npart: {s}\npart_material: |\n", .{ model_name, part.name });
+    var material_lines = std.mem.splitScalar(u8, part_material, '\n');
+    while (material_lines.next()) |line| try out.print(allocator, "  {s}\n", .{line});
     try out.appendSlice(allocator, "params:\n");
     if (preset.params) |params| try appendYaml(allocator, &out, params, 2);
     try out.appendSlice(allocator, "instruction: |\n");
@@ -228,10 +241,13 @@ fn adapterRequest(allocator: Allocator, model_name: []const u8, preset: config.M
     return out.toOwnedSlice(allocator);
 }
 
-fn shapeRequest(allocator: Allocator, state: *State, shape_ref: []const u8, part: circuitry.NormalizedPart) ![]u8 {
+fn shapeRequest(allocator: Allocator, state: *State, shape_ref: []const u8, part: circuitry.NormalizedPart, part_material: []const u8) ![]u8 {
     var out: std.ArrayList(u8) = .empty;
     errdefer out.deinit(allocator);
-    try out.print(allocator, "shape: {s}\npart: {s}\ninstruction: |\n", .{ shape_ref, part.name });
+    try out.print(allocator, "shape: {s}\npart: {s}\npart_material: |\n", .{ shape_ref, part.name });
+    var material_lines = std.mem.splitScalar(u8, part_material, '\n');
+    while (material_lines.next()) |line| try out.print(allocator, "  {s}\n", .{line});
+    try out.appendSlice(allocator, "instruction: |\n");
     var lines = std.mem.splitScalar(u8, part.instructions orelse "", '\n');
     while (lines.next()) |line| try out.print(allocator, "  {s}\n", .{line});
     try out.appendSlice(allocator, "takes:\n");
