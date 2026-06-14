@@ -5,7 +5,7 @@
     .minimum_zig_version = "0.16.0",
     .dependencies = .{
         .circuitry = .{
-            .url = "https://github.com/darkhorseprojects/circuitry-zig/archive/refs/tags/v0.3.0.tar.gz",
+            .url = "https://github.com/darkhorseprojects/circuitry-zig/releases/download/v0.3.0/circuitry-zig-0.3.0.tar.gz",
             .hash = "circuitry-0.3.0-pvX_DWn-AAA9xYA597YFhyu_1AcLEPhSdaXiy50gb6M7",
         },
         .limbo = .{
