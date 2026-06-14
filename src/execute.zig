@@ -59,7 +59,7 @@ fn runShape(allocator: Allocator, io: std.Io, store: *Substrate, source_path: []
     defer loaded.deinit();
     var confirmation = try circuitry.confirm(allocator, &loaded);
     defer confirmation.deinit();
-    if (!confirmation.ready) {
+    if (!confirmation.confirmed) {
         try printProblems(confirmation.problems);
         return error.CircuitryShapeNotReady;
     }
@@ -143,7 +143,7 @@ fn runShapePart(allocator: Allocator, io: std.Io, store: *Substrate, settings: *
     defer loaded.deinit();
     var confirmation = try circuitry.confirm(allocator, &loaded);
     defer confirmation.deinit();
-    if (!confirmation.ready) return error.CircuitryShapeNotReady;
+    if (!confirmation.confirmed) return error.CircuitryShapeNotReady;
 
     var child = State.init(allocator);
     defer child.deinit();
