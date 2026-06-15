@@ -1,5 +1,5 @@
 <p align="center">
-  <img src="https://chaosdiscovery.s-ul.eu/qhFZZ3gm" alt="Zinc Banner" width="100%" />
+  <img src="https://chaosdiscovery.s-ul.eu/YkVy9rY5" alt="Zinc Banner" width="100%" />
 </p>
 
 [![Release](https://badgen.net/github/checks/darkhorseprojects/zinc/main/release.yml?label=Release&icon=github)](https://github.com/darkhorseprojects/zinc/actions/workflows/release.yml)
