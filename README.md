@@ -1,8 +1,4 @@
-<p align="center">
-  <img src="https://chaosdiscovery.s-ul.eu/nzC2T9D7" alt="Zinc Banner" width="100%" />
-</p>
-
-[![Release](https://badgen.net/github/checks/darkhorseprojects/zinc/main/release.yml?label=Release&icon=github)](https://github.com/darkhorseprojects/zinc/actions/workflows/release.yml)
+[![Release](https://badgen.net/badge/Release/success/green?icon=github)](https://github.com/darkhorseprojects/zinc/actions/workflows/release.yml)
 [![License](https://badgen.net/github/license/darkhorseprojects/zinc?label=License&color=black&icon=github)](LICENSE)
 
 # Zinc
