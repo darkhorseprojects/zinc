@@ -1,5 +1,26 @@
 const std = @import("std");
 
+fn tursoSdkLib(b: *std.Build) std.Build.LazyPath {
+    const cargo_cmd = b.addSystemCommand(&.{ "cargo", "build", "--release", "-p", "turso_sdk_kit" });
+    cargo_cmd.setCwd(b.path("../limbo-zig/third_party/limbo"));
+
+    const wf = b.addWriteFiles();
+    wf.step.dependOn(&cargo_cmd.step);
+    return wf.addCopyFile(b.path("../limbo-zig/third_party/limbo/target/release/libturso_sdk_kit.a"), "libturso_sdk_kit.a");
+}
+
+fn linkLimboSupport(mod: *std.Build.Module, b: *std.Build, sdk_lib: std.Build.LazyPath) void {
+    mod.addIncludePath(b.path("../limbo-zig/src"));
+    mod.addIncludePath(b.path("../limbo-zig/third_party/limbo/sdk-kit"));
+    mod.addCSourceFile(.{ .file = b.path("../limbo-zig/src/turso_shim.c"), .flags = &.{}, .language = .c });
+    mod.addObjectFile(sdk_lib);
+    mod.link_libc = true;
+    mod.linkSystemLibrary("pthread", .{});
+    mod.linkSystemLibrary("dl", .{});
+    mod.linkSystemLibrary("m", .{});
+    mod.linkSystemLibrary("unwind", .{});
+}
+
 pub fn build(b: *std.Build) void {
     const target = b.standardTargetOptions(.{});
     const optimize = b.standardOptimizeOption(.{});
@@ -20,13 +41,8 @@ pub fn build(b: *std.Build) void {
         .optimize = optimize,
     });
     circuitry_dep.addImport("serde", serde_dep.module("serde"));
-    const limbo_dep = b.createModule(.{
-        .root_source_file = b.path("../limbo-zig/src/lib.zig"),
-        .target = target,
-        .optimize = optimize,
-    });
-    limbo_dep.addIncludePath(b.path("../limbo-zig/include"));
-    const limbo_lib = b.path("../limbo-zig/lib/x86_64-linux/libturso_sqlite3.a");
+    const limbo_dep = b.createModule(.{ .root_source_file = b.path("../limbo-zig/src/lib.zig"), .target = target, .optimize = optimize });
+    const sdk_lib = tursoSdkLib(b);
 
     const exe_mod = b.createModule(.{
         .root_source_file = b.path("src/main.zig"),
@@ -41,9 +57,7 @@ pub fn build(b: *std.Build) void {
         .name = "zn",
         .root_module = exe_mod,
     });
-    exe.root_module.addObjectFile(limbo_lib);
-    exe.root_module.link_libc = true;
-    exe.root_module.linkSystemLibrary("unwind", .{});
+    linkLimboSupport(exe.root_module, b, sdk_lib);
     if (is_linux) {
         exe.use_llvm = true;
         exe.use_lld = true;
@@ -69,9 +83,7 @@ pub fn build(b: *std.Build) void {
     test_mod.addImport("limbo", limbo_dep);
     test_mod.addImport("serde", serde_dep.module("serde"));
     const tests = b.addTest(.{ .root_module = test_mod });
-    tests.root_module.addObjectFile(limbo_lib);
-    tests.root_module.link_libc = true;
-    tests.root_module.linkSystemLibrary("unwind", .{});
+    linkLimboSupport(tests.root_module, b, sdk_lib);
     if (is_linux) {
         tests.use_llvm = true;
         tests.use_lld = true;
