@@ -68,8 +68,6 @@ zn read zinc://packages/openai-responses/files/software/responses.py
 # Manage packages
 zn pkg install ./openai-responses --global
 zn pkg list
-zn pkg check openai-responses
-zn pkg update openai-responses
 zn pkg remove openai-responses
 
 # Maintain Zinc
@@ -84,16 +82,22 @@ A package is a directory with `zinc.pkg.yaml`.
 
 ```yaml
 name: openai-responses
-version: "0.3.3"
+version: "0.3.5"
 about: OpenAI Responses-shaped model package.
 
 source:
-  git: https://github.com/darkhorseprojects/darkhorseprojects-packages.git
-  ref: openai-responses-v0.3.3
+  uri: https://github.com/darkhorseprojects/darkhorseprojects-packages.git
+  ref: openai-responses-v0.3.5
   path: openai-responses
 
+interface:
+  request: context
+  output:
+    answer: gives.answer
+
 software:
-  responses: software/responses.py
+  responses:
+    python: software/responses.py
 
 shapes:
   short_answer: shapes/short-answer.circuitry.yaml
@@ -120,7 +124,7 @@ Example:
 
 ```yaml
 defaults:
-  run: openai-responses.software.responses
+  software: openai-responses.responses
 ```
 
 The value is a package reference. The selected package decides what it means.

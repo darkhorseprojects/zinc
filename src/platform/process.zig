@@ -4,6 +4,10 @@ const path_mod = @import("path.zig");
 
 const Allocator = std.mem.Allocator;
 
+extern fn write(fd: std.posix.fd_t, buf: [*]const u8, count: usize) callconv(.c) isize;
+
+pub const EnvPair = struct { key: []const u8, value: []const u8 };
+
 pub const Env = struct {
     path: ?[]const u8 = null,
     pathext: ?[]const u8 = null,
@@ -20,21 +24,71 @@ pub const Result = struct {
     }
 };
 
-pub fn run(allocator: Allocator, io: std.Io, argv: []const []const u8, cwd: ?[]const u8, max_capture_bytes: usize) !Result {
+pub fn run(allocator: Allocator, io: std.Io, argv: []const []const u8, cwd: ?[]const u8, env_pairs: []const EnvPair, max_capture_bytes: usize) !Result {
+    return runWithInput(allocator, io, argv, null, cwd, env_pairs, 0, max_capture_bytes);
+}
+
+pub fn runWithInput(allocator: Allocator, io: std.Io, argv: []const []const u8, stdin: ?[]const u8, cwd: ?[]const u8, env_pairs: []const EnvPair, timeout_seconds: u64, max_capture_bytes: usize) !Result {
     if (argv.len == 0) return error.MissingExecutable;
-    const child_cwd: std.process.Child.Cwd = if (cwd) |dir| .{ .path = dir } else .inherit;
-    const result = try std.process.run(allocator, io, .{
+
+    var env_map = std.process.Environ.Map.init(allocator);
+    defer env_map.deinit();
+    if (env_pairs.len != 0) {
+        for (env_pairs) |pair| try env_map.put(pair.key, pair.value);
+    }
+
+    var child = try std.process.spawn(io, .{
         .argv = argv,
-        .cwd = child_cwd,
-        .stdout_limit = .limited(max_capture_bytes),
-        .stderr_limit = .limited(max_capture_bytes),
+        .cwd = if (cwd) |dir| .{ .path = dir } else .inherit,
+        .environ_map = if (env_pairs.len == 0) null else &env_map,
+        .stdin = if (stdin) |_| .pipe else .ignore,
+        .stdout = .pipe,
+        .stderr = .pipe,
     });
-    errdefer allocator.free(result.stdout);
-    errdefer allocator.free(result.stderr);
+    errdefer child.kill(io);
+
+    if (stdin) |data| {
+        var written: usize = 0;
+        while (written < data.len) {
+            const n = write(child.stdin.?.handle, data[written..].ptr, data.len - written);
+            if (n <= 0) return error.WriteFailed;
+            written += @intCast(n);
+        }
+        std.Io.File.close(child.stdin.?, io);
+        child.stdin = null;
+    }
+
+    const buffer: [4096]u8 = undefined;
+    var multi_reader_buffer: std.Io.File.MultiReader.Buffer(2) = undefined;
+    var multi_reader: std.Io.File.MultiReader = undefined;
+    multi_reader.init(allocator, io, multi_reader_buffer.toStreams(), &.{ child.stdout.?, child.stderr.? });
+    defer multi_reader.deinit();
+
+    const stdout_reader = multi_reader.reader(0);
+    const stderr_reader = multi_reader.reader(1);
+
+    while (multi_reader.fill(buffer.len, if (timeout_seconds == 0) .none else .{ .duration = .{ .raw = std.Io.Duration.fromSeconds(@intCast(timeout_seconds)), .clock = .real } })) |_| {
+        if (max_capture_bytes != 0) {
+            if (stdout_reader.buffered().len > max_capture_bytes) return error.StreamTooLong;
+            if (stderr_reader.buffered().len > max_capture_bytes) return error.StreamTooLong;
+        }
+    } else |err| switch (err) {
+        error.EndOfStream => {},
+        else => |e| return e,
+    }
+
+    try multi_reader.checkAnyError();
+    const term = try child.wait(io);
+
+    const stdout_slice = try multi_reader.toOwnedSlice(0);
+    errdefer allocator.free(stdout_slice);
+    const stderr_slice = try multi_reader.toOwnedSlice(1);
+    errdefer allocator.free(stderr_slice);
+
     return .{
-        .stdout = result.stdout,
-        .stderr = result.stderr,
-        .code = switch (result.term) {
+        .stdout = stdout_slice,
+        .stderr = stderr_slice,
+        .code = switch (term) {
             .exited => |c| c,
             else => 255,
         },
@@ -42,7 +96,7 @@ pub fn run(allocator: Allocator, io: std.Io, argv: []const []const u8, cwd: ?[]c
 }
 
 pub fn pathEntries(allocator: Allocator, os: platform.OS, raw_path: []const u8) ![][]u8 {
-    var out: std.ArrayList([]u8) = std.ArrayList([]u8).init(allocator);
+    var out: std.ArrayList([]u8) = .empty;
     errdefer freeStringList(allocator, out.items);
     var it = std.mem.splitScalar(u8, raw_path, path_mod.listSeparator(os));
     while (it.next()) |entry| {
@@ -53,7 +107,7 @@ pub fn pathEntries(allocator: Allocator, os: platform.OS, raw_path: []const u8) 
 
 pub fn windowsExtensions(allocator: Allocator, raw: ?[]const u8) ![][]u8 {
     const text = raw orelse ".COM;.EXE;.BAT;.CMD;.PS1";
-    var out: std.ArrayList([]u8) = std.ArrayList([]u8).init(allocator);
+    var out: std.ArrayList([]u8) = .empty;
     errdefer freeStringList(allocator, out.items);
     var it = std.mem.splitScalar(u8, text, ';');
     while (it.next()) |entry| {

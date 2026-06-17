@@ -22,7 +22,8 @@ pub fn listSeparator(os: platform.OS) u8 {
 }
 
 pub fn joinDisplay(allocator: Allocator, os: platform.OS, paths: []const []const u8) ![]u8 {
-    var out: std.ArrayList(u8) = std.ArrayList(u8).init(allocator);
+    _ = allocator;
+    var out: std.ArrayList(u8) = .empty;
     errdefer out.deinit();
     const sep: []const u8 = switch (os) {
         .linux, .macos => "/",

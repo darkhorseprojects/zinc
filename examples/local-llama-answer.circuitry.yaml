@@ -1,4 +1,4 @@
-circuitry: "0.7.5"
+circuitry: "0.7.6"
 name: local llama answer
 about: Answer through package software.
 
@@ -7,7 +7,8 @@ takes:
 
 uses:
   answer:
-    run: openai-responses.software.responses
+    software: openai-responses.responses
+    model: local-llama
     takes:
       question: $question
     does: |

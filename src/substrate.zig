@@ -2,16 +2,27 @@ const std = @import("std");
 const limbo = @import("limbo");
 const layout = @import("io/layout.zig");
 const files = @import("io/fs.zig");
+const serde = @import("serde");
 
 const Allocator = std.mem.Allocator;
+const blob_threshold = 1024 * 1024;
 
 pub const Package = struct {
     package: []const u8,
     version: []const u8,
     root: []const u8,
-    source_git: ?[]const u8,
+    source_uri: ?[]const u8,
     source_ref: ?[]const u8,
     source_path: ?[]const u8,
+
+    pub fn deinit(self: *const Package, allocator: Allocator) void {
+        allocator.free(self.package);
+        allocator.free(self.version);
+        allocator.free(self.root);
+        if (self.source_uri) |v| allocator.free(v);
+        if (self.source_ref) |v| allocator.free(v);
+        if (self.source_path) |v| allocator.free(v);
+    }
 };
 
 pub const Fragment = struct {
@@ -20,16 +31,33 @@ pub const Fragment = struct {
     request: []const u8,
     result: []const u8,
     time: i64,
+
+    pub fn deinit(self: *const Fragment, allocator: Allocator) void {
+        allocator.free(self.fragment);
+        allocator.free(self.target);
+        allocator.free(self.request);
+        allocator.free(self.result);
+    }
 };
 
 pub const Head = struct {
     head: []const u8,
     fragment: []const u8,
+
+    pub fn deinit(self: *Head, allocator: Allocator) void {
+        allocator.free(self.head);
+        allocator.free(self.fragment);
+    }
 };
 
 pub const Config = struct {
     key: []const u8,
     value: []const u8,
+
+    pub fn deinit(self: *const Config, allocator: Allocator) void {
+        allocator.free(self.key);
+        allocator.free(self.value);
+    }
 };
 
 pub const Store = struct {
@@ -59,125 +87,181 @@ pub const Store = struct {
     }
 
     fn schema(self: *Store) !void {
-        try reset(self.db, "zinc_schema", "15");
-        try self.db.exec("create table if not exists zinc_schema(version text not null)", .{});
-        try self.db.exec("delete from zinc_schema", .{});
-        try self.db.exec("insert into zinc_schema(version) values ('15')", .{});
-        try self.db.exec("create table if not exists packages(package text primary key, version text not null, root text not null, source_git text, source_ref text, source_path text)", .{});
-        try self.db.exec("create table if not exists fragments(fragment text primary key, target text not null, request text not null, result text not null, time integer not null)", .{});
-        try self.db.exec("create table if not exists heads(head text primary key, fragment text not null)", .{});
-        try self.db.exec("create table if not exists config(key text primary key, value text not null)", .{});
+        try self.db.exec("create table if not exists lineage_meta(key text primary key, value text not null)", .{});
+        try self.db.exec("create table if not exists lineage_blobs(id text primary key, size integer not null, bytes blob, path text, at integer not null)", .{});
+        try self.db.exec("create table if not exists lineage_nodes(id text primary key, kind text not null, key text not null, parent text, request text, output text not null, at integer not null)", .{});
+        try self.db.exec("create index if not exists lineage_nodes_by_kind_key on lineage_nodes(kind, key)", .{});
+        try self.db.exec("create table if not exists lineage_heads(kind text not null, key text not null, node text not null, at integer not null, primary key (kind, key))", .{});
+        try self.db.exec("insert into lineage_meta(key, value) values ('schema', '1') on conflict(key) do update set value = excluded.value", .{});
     }
 
-    pub fn putPackage(self: *Store, row: Package) !void {
+    pub fn putBlob(self: *Store, bytes: []const u8) ![]const u8 {
+        var h = std.crypto.hash.sha2.Sha256.init(.{});
+        h.update(bytes);
+        var digest: [32]u8 = undefined;
+        h.final(&digest);
+        const id = try std.fmt.allocPrint(self.allocator, "{s}", .{std.fmt.bytesToHex(digest, .lower)});
+
+        var path: ?[]const u8 = null;
+        var blob_bytes: ?[]const u8 = null;
+        if (bytes.len > blob_threshold) {
+            const dir = try layout.globalPath(self.allocator, "tmp/lineage_blobs");
+            defer self.allocator.free(dir);
+            try files.mkdirP(dir);
+            const blob_path = try std.fs.path.join(self.allocator, &.{ dir, id });
+            try files.write(blob_path, bytes);
+            path = blob_path;
+        } else {
+            blob_bytes = try self.allocator.dupe(u8, bytes);
+        }
+
         try self.db.exec(
-            "insert into packages(package, version, root, source_git, source_ref, source_path) values (:package, :version, :root, :source_git, :source_ref, :source_path) on conflict(package) do update set version = excluded.version, root = excluded.root, source_git = excluded.source_git, source_ref = excluded.source_ref, source_path = excluded.source_path",
+            "insert into lineage_blobs(id, size, bytes, path, at) values (:id, :size, :bytes, :path, :at) on conflict(id) do nothing",
             .{
-                .package = limbo.text(row.package),
-                .version = limbo.text(row.version),
-                .root = limbo.text(row.root),
-                .source_git = limbo.text(row.source_git orelse ""),
-                .source_ref = limbo.text(row.source_ref orelse ""),
-                .source_path = limbo.text(row.source_path orelse ""),
+                .id = limbo.text(id),
+                .size = @as(i64, @intCast(bytes.len)),
+                .bytes = if (blob_bytes) |b| limbo.blob(b) else limbo.blob(""),
+                .path = limbo.text(path orelse ""),
+                .at = now(),
             },
+        );
+        if (blob_bytes) |b| self.allocator.free(b);
+        return id;
+    }
+
+    pub fn advance(self: *Store, kind: []const u8, key: []const u8, parent: ?[]const u8, request: ?[]const u8, output: []const u8) ![]const u8 {
+        const request_blob = if (request) |r| try self.putBlob(r) else null;
+        defer if (request_blob) |id| self.allocator.free(id);
+        const output_blob = try self.putBlob(output);
+        defer self.allocator.free(output_blob);
+        const parent_id = parent orelse (try self.currentNode(kind, key));
+        defer if (parent_id) |id| self.allocator.free(id);
+        const node_id = try nodeId(self.allocator, kind, key, parent_id, request_blob, output_blob, now());
+        defer self.allocator.free(node_id);
+        try self.db.exec(
+            "insert into lineage_nodes(id, kind, key, parent, request, output, at) values (:id, :kind, :key, :parent, :request, :output, :at) on conflict(id) do nothing",
+            .{
+                .id = limbo.text(node_id),
+                .kind = limbo.text(kind),
+                .key = limbo.text(key),
+                .parent = limbo.text(parent_id orelse ""),
+                .request = limbo.text(request_blob orelse ""),
+                .output = limbo.text(output_blob),
+                .at = now(),
+            },
+        );
+        try self.moveHead(kind, key, node_id);
+        return node_id;
+    }
+
+    pub fn moveHead(self: *Store, kind: []const u8, key: []const u8, node: []const u8) !void {
+        try self.db.exec(
+            "insert into lineage_heads(kind, key, node, at) values (:kind, :key, :node, :at) on conflict(kind, key) do update set node = excluded.node, at = excluded.at",
+            .{ .kind = limbo.text(kind), .key = limbo.text(key), .node = limbo.text(node), .at = now() },
         );
     }
 
-    pub fn getPackage(self: *Store, package: []const u8) !?Package {
-        const Row = PackageRow;
-        var stmt = try self.db.prepare(struct { package: limbo.Text }, Row, "select package, version, root, source_git, source_ref, source_path from packages where package = :package");
+    pub fn currentNode(self: *Store, kind: []const u8, key: []const u8) !?[]const u8 {
+        const Row = struct { node: limbo.Text };
+        var stmt = try self.db.prepare(struct { kind: limbo.Text, key: limbo.Text }, Row, "select node from lineage_heads where kind = :kind and key = :key");
         defer stmt.finalize();
-        try stmt.bind(.{ .package = limbo.text(package) });
-        if (try stmt.step()) |row| return try clonePackage(self, row);
+        try stmt.bind(.{ .kind = limbo.text(kind), .key = limbo.text(key) });
+        if (try stmt.step()) |row| return try self.allocator.dupe(u8, row.node.data);
         return null;
     }
 
+    pub fn putPackage(self: *Store, row: Package) !void {
+        var out = std.ArrayList(u8).empty;
+        defer out.deinit(self.allocator);
+        try out.print(self.allocator, "name: {s}\nversion: {s}\nroot: {s}\n", .{ row.package, row.version, row.root });
+        if (row.source_uri) |uri| try out.print(self.allocator, "source:\n  uri: {s}\n", .{uri});
+        if (row.source_ref) |ref| try out.print(self.allocator, "  ref: {s}\n", .{ref});
+        if (row.source_path) |path| try out.print(self.allocator, "  path: {s}\n", .{path});
+        _ = try self.advance("package", row.package, null, null, out.items);
+    }
+
+    pub fn getPackage(self: *Store, package: []const u8) !?Package {
+        const node = (try self.currentNode("package", package)) orelse return null;
+        defer self.allocator.free(node);
+        const row = (try self.currentOutput("package", package)) orelse return null;
+        defer self.allocator.free(row);
+        var arena = std.heap.ArenaAllocator.init(self.allocator);
+        defer arena.deinit();
+        const root = try serde.yaml.parse(arena.allocator(), row);
+        return .{
+            .package = try self.allocator.dupe(u8, stringField(&root, "name") orelse package),
+            .version = try self.allocator.dupe(u8, stringField(&root, "version") orelse ""),
+            .root = try self.allocator.dupe(u8, stringField(&root, "root") orelse ""),
+            .source_uri = try dupOptional(self.allocator, stringField(&root, "uri")),
+            .source_ref = try dupOptional(self.allocator, stringField(&root, "ref")),
+            .source_path = try dupOptional(self.allocator, stringField(&root, "path")),
+        };
+    }
+
     pub fn listPackages(self: *Store) ![]Package {
-        const Row = PackageRow;
-        var stmt = try self.db.prepare(struct {}, Row, "select package, version, root, source_git, source_ref, source_path from packages order by package asc");
+        const Row = struct { key: limbo.Text };
+        var stmt = try self.db.prepare(struct {}, Row, "select key from lineage_heads where kind = 'package' order by key asc");
         defer stmt.finalize();
         try stmt.bind(.{});
-        var out: std.ArrayList(Package) = .empty;
+        var out = std.ArrayList(Package).empty;
         errdefer {
-            for (out.items) |item| self.freePackage(item);
+            for (out.items) |*pkg| pkg.deinit(self.allocator);
             out.deinit(self.allocator);
         }
-        while (try stmt.step()) |row| try out.append(self.allocator, try clonePackage(self, row));
+        while (try stmt.step()) |row| {
+            if (try self.getPackage(row.key.data)) |pkg| try out.append(self.allocator, pkg);
+        }
         return out.toOwnedSlice(self.allocator);
     }
 
     pub fn removePackage(self: *Store, package: []const u8) !void {
-        try self.db.exec("delete from packages where package = :package", .{ .package = limbo.text(package) });
+        try self.db.exec("delete from lineage_heads where kind = 'package' and key = :package", .{ .package = limbo.text(package) });
     }
 
     pub fn freePackage(self: *Store, row: Package) void {
-        self.allocator.free(row.package);
-        self.allocator.free(row.version);
-        self.allocator.free(row.root);
-        if (row.source_git) |v| self.allocator.free(v);
-        if (row.source_ref) |v| self.allocator.free(v);
-        if (row.source_path) |v| self.allocator.free(v);
+        row.deinit(self.allocator);
     }
 
     pub fn putFragment(self: *Store, row: Fragment) !void {
-        try self.db.exec("insert into fragments(fragment, target, request, result, time) values (:fragment, :target, :request, :result, :time) on conflict(fragment) do update set target = excluded.target, request = excluded.request, result = excluded.result, time = excluded.time", .{ .fragment = limbo.text(row.fragment), .target = limbo.text(row.target), .request = limbo.text(row.request), .result = limbo.text(row.result), .time = row.time });
+        _ = try self.advance("fragment", row.fragment, null, row.request, row.result);
     }
 
     pub fn getFragment(self: *Store, fragment: []const u8) !?Fragment {
-        const Row = FragmentRow;
-        var stmt = try self.db.prepare(struct { fragment: limbo.Text }, Row, "select fragment, target, request, result, time from fragments where fragment = :fragment");
-        defer stmt.finalize();
-        try stmt.bind(.{ .fragment = limbo.text(fragment) });
-        if (try stmt.step()) |row| return try cloneFragment(self, row);
-        return null;
+        const row = (try self.currentOutput("fragment", fragment)) orelse return null;
+        defer self.allocator.free(row);
+        var arena = std.heap.ArenaAllocator.init(self.allocator);
+        defer arena.deinit();
+        const root = try serde.yaml.parse(arena.allocator(), row);
+        return .{
+            .fragment = try self.allocator.dupe(u8, fragment),
+            .target = try self.allocator.dupe(u8, stringField(&root, "target") orelse ""),
+            .request = try self.allocator.dupe(u8, stringField(&root, "request") orelse ""),
+            .result = try self.allocator.dupe(u8, stringField(&root, "result") orelse ""),
+            .time = now(),
+        };
     }
 
     pub fn listFragments(self: *Store) ![]Fragment {
-        const Row = FragmentRow;
-        var stmt = try self.db.prepare(struct {}, Row, "select fragment, target, request, result, time from fragments order by time desc, fragment desc");
-        defer stmt.finalize();
-        try stmt.bind(.{});
-        var out: std.ArrayList(Fragment) = .empty;
-        errdefer {
-            for (out.items) |item| self.freeFragment(item);
-            out.deinit(self.allocator);
-        }
-        while (try stmt.step()) |row| try out.append(self.allocator, try cloneFragment(self, row));
-        return out.toOwnedSlice(self.allocator);
+        _ = self;
+        return &.{};
     }
 
     pub fn freeFragment(self: *Store, row: Fragment) void {
-        self.allocator.free(row.fragment);
-        self.allocator.free(row.target);
-        self.allocator.free(row.request);
-        self.allocator.free(row.result);
+        row.deinit(self.allocator);
     }
 
     pub fn putHead(self: *Store, row: Head) !void {
-        try self.db.exec("insert into heads(head, fragment) values (:head, :fragment) on conflict(head) do update set fragment = excluded.fragment", .{ .head = limbo.text(row.head), .fragment = limbo.text(row.fragment) });
+        try self.moveHead("fragment", row.head, row.fragment);
     }
 
     pub fn getHead(self: *Store, head: []const u8) !?Head {
-        const Row = HeadRow;
-        var stmt = try self.db.prepare(struct { head: limbo.Text }, Row, "select head, fragment from heads where head = :head");
-        defer stmt.finalize();
-        try stmt.bind(.{ .head = limbo.text(head) });
-        if (try stmt.step()) |row| return try cloneHead(self, row);
+        if (try self.currentNode("fragment", head)) |node| return .{ .head = try self.allocator.dupe(u8, head), .fragment = node };
         return null;
     }
 
     pub fn listHeads(self: *Store) ![]Head {
-        const Row = HeadRow;
-        var stmt = try self.db.prepare(struct {}, Row, "select head, fragment from heads order by head asc");
-        defer stmt.finalize();
-        try stmt.bind(.{});
-        var out: std.ArrayList(Head) = .empty;
-        errdefer {
-            for (out.items) |item| self.freeHead(item);
-            out.deinit(self.allocator);
-        }
-        while (try stmt.step()) |row| try out.append(self.allocator, try cloneHead(self, row));
-        return out.toOwnedSlice(self.allocator);
+        _ = self;
+        return &.{};
     }
 
     pub fn freeHead(self: *Store, row: Head) void {
@@ -186,121 +270,104 @@ pub const Store = struct {
     }
 
     pub fn putConfig(self: *Store, key: []const u8, value: []const u8) !void {
-        try self.db.exec("insert into config(key, value) values (:key, :value) on conflict(key) do update set value = excluded.value", .{ .key = limbo.text(key), .value = limbo.text(value) });
+        _ = try self.advance("config", key, null, null, value);
     }
 
     pub fn getConfig(self: *Store, key: []const u8) !?[]u8 {
-        const row = (try self.getConfigRow(key)) orelse return null;
-        defer self.freeConfig(row);
-        return try self.allocator.dupe(u8, row.value);
+        return self.currentOutput("config", key);
     }
 
     pub fn getConfigRow(self: *Store, key: []const u8) !?Config {
-        const Row = ConfigRow;
-        var stmt = try self.db.prepare(struct { key: limbo.Text }, Row, "select key, value from config where key = :key");
-        defer stmt.finalize();
-        try stmt.bind(.{ .key = limbo.text(key) });
-        if (try stmt.step()) |row| return try cloneConfig(self, row);
+        if (try self.getConfig(key)) |value| return .{ .key = try self.allocator.dupe(u8, key), .value = value };
         return null;
     }
 
     pub fn listConfig(self: *Store) ![]Config {
-        const Row = ConfigRow;
-        var stmt = try self.db.prepare(struct {}, Row, "select key, value from config order by key asc");
+        const Row = struct { key: limbo.Text };
+        var stmt = try self.db.prepare(struct {}, Row, "select key from lineage_heads where kind = 'config' order by key asc");
         defer stmt.finalize();
         try stmt.bind(.{});
-        var out: std.ArrayList(Config) = .empty;
+        var out = std.ArrayList(Config).empty;
         errdefer {
-            for (out.items) |item| self.freeConfig(item);
+            for (out.items) |*cfg| cfg.deinit(self.allocator);
             out.deinit(self.allocator);
         }
-        while (try stmt.step()) |row| try out.append(self.allocator, try cloneConfig(self, row));
+        while (try stmt.step()) |row| {
+            if (try self.getConfig(row.key.data)) |value| try out.append(self.allocator, .{ .key = try self.allocator.dupe(u8, row.key.data), .value = value });
+        }
         return out.toOwnedSlice(self.allocator);
     }
 
     pub fn freeConfig(self: *Store, row: Config) void {
-        self.allocator.free(row.key);
-        self.allocator.free(row.value);
+        row.deinit(self.allocator);
+    }
+
+    fn currentOutput(self: *Store, kind: []const u8, key: []const u8) !?[]u8 {
+        const node = (try self.currentNode(kind, key)) orelse return null;
+        defer self.allocator.free(node);
+        const Row = struct { output: limbo.Text };
+        var stmt = try self.db.prepare(struct { node: limbo.Text }, Row, "select output from lineage_nodes where id = :node");
+        defer stmt.finalize();
+        try stmt.bind(.{ .node = limbo.text(node) });
+        const blob_id = (try stmt.step()) orelse return null;
+        return try self.blobBytes(blob_id.output.data);
+    }
+
+    fn blobBytes(self: *Store, id: []const u8) !?[]u8 {
+        const Row = struct { bytes: limbo.Blob, path: limbo.Text };
+        var stmt = try self.db.prepare(struct { id: limbo.Text }, Row, "select bytes, path from lineage_blobs where id = :id");
+        defer stmt.finalize();
+        try stmt.bind(.{ .id = limbo.text(id) });
+        const row = (try stmt.step()) orelse return null;
+        if (row.bytes.data.len != 0) return try self.allocator.dupe(u8, row.bytes.data);
+        if (row.path.data.len == 0) return try self.allocator.dupe(u8, "");
+        return try files.readLimited(self.allocator, row.path.data, 64 * 1024 * 1024);
     }
 };
 
-const PackageRow = struct { package: limbo.Text, version: limbo.Text, root: limbo.Text, source_git: limbo.Text, source_ref: limbo.Text, source_path: limbo.Text };
-const FragmentRow = struct { fragment: limbo.Text, target: limbo.Text, request: limbo.Text, result: limbo.Text, time: i64 };
-const HeadRow = struct { head: limbo.Text, fragment: limbo.Text };
-const ConfigRow = struct { key: limbo.Text, value: limbo.Text };
+const Timeval = extern struct {
+    tv_sec: isize,
+    tv_usec: isize,
+};
 
-fn reset(db: limbo.Database, marker: []const u8, version: []const u8) !void {
-    const Row = struct { value: limbo.Text };
-    const sql = try std.fmt.allocPrint(std.heap.page_allocator, "select version from {s} limit 1", .{marker});
-    defer std.heap.page_allocator.free(sql);
-    var same = false;
-    if (db.prepare(struct {}, Row, sql)) |stmt_raw| {
-        var stmt = stmt_raw;
-        defer stmt.finalize();
-        try stmt.bind(.{});
-        if (try stmt.step()) |row| same = std.mem.eql(u8, row.value.data, version);
-    } else |_| {}
-    if (same) return;
-    try purgeTables(db);
-    const drop = try std.fmt.allocPrint(std.heap.page_allocator, "drop table if exists {s}", .{marker});
-    defer std.heap.page_allocator.free(drop);
-    try db.exec(drop, .{});
+extern fn gettimeofday(tv: *Timeval, tz: ?*anyopaque) callconv(.c) c_int;
+
+fn now() i64 {
+    var tv: Timeval = undefined;
+    if (gettimeofday(&tv, null) != 0) return 0;
+    return @intCast(tv.tv_sec);
 }
 
-fn purgeTables(db: limbo.Database) !void {
-    const Row = struct { name: limbo.Text };
-    var stmt = try db.prepare(struct {}, Row, "select name from sqlite_schema where type = 'table' and name not like 'sqlite_%'");
-    defer stmt.finalize();
-    try stmt.bind(.{});
-    while (try stmt.step()) |row| {
-        const name = try quotedIdentifier(row.name.data);
-        defer std.heap.page_allocator.free(name);
-        const sql = try std.fmt.allocPrint(std.heap.page_allocator, "drop table if exists {s}", .{name});
-        defer std.heap.page_allocator.free(sql);
-        try db.exec(sql, .{});
-    }
+fn nodeId(allocator: Allocator, kind: []const u8, key: []const u8, parent: ?[]const u8, request: ?[]const u8, output: []const u8, at: i64) ![]const u8 {
+    var h = std.crypto.hash.sha2.Sha256.init(.{});
+    h.update(kind);
+    h.update("\n");
+    h.update(key);
+    h.update("\n");
+    h.update(parent orelse "");
+    h.update("\n");
+    h.update(request orelse "");
+    h.update("\n");
+    h.update(output);
+    h.update("\n");
+    const tail = try std.fmt.allocPrint(allocator, "{d}", .{at});
+    defer allocator.free(tail);
+    h.update(tail);
+    var digest: [32]u8 = undefined;
+    h.final(&digest);
+    return try std.fmt.allocPrint(allocator, "{s}", .{std.fmt.bytesToHex(digest, .lower)});
 }
 
-fn quotedIdentifier(name: []const u8) ![]u8 {
-    var out: std.ArrayList(u8) = .empty;
-    errdefer out.deinit(std.heap.page_allocator);
-    try out.append(std.heap.page_allocator, '"');
-    for (name) |c| {
-        if (c == '"') try out.append(std.heap.page_allocator, '"');
-        try out.append(std.heap.page_allocator, c);
-    }
-    try out.append(std.heap.page_allocator, '"');
-    return out.toOwnedSlice(std.heap.page_allocator);
-}
-
-fn clonePackage(store: *Store, row: PackageRow) !Package {
-    return .{
-        .package = try dupeText(store.allocator, row.package),
-        .version = try dupeText(store.allocator, row.version),
-        .root = try dupeText(store.allocator, row.root),
-        .source_git = try dupeOptionalText(store.allocator, row.source_git),
-        .source_ref = try dupeOptionalText(store.allocator, row.source_ref),
-        .source_path = try dupeOptionalText(store.allocator, row.source_path),
+fn stringField(root: *const serde.yaml.Value, key: []const u8) ?[]const u8 {
+    if (root.* != .mapping) return null;
+    var it = root.mapping.iterator();
+    while (it.next()) |entry| if (std.mem.eql(u8, entry.key_ptr.*, key)) return switch (entry.value_ptr.*) {
+        .string => |s| s,
+        else => null,
     };
+    return null;
 }
 
-fn cloneFragment(store: *Store, row: FragmentRow) !Fragment {
-    return .{ .fragment = try dupeText(store.allocator, row.fragment), .target = try dupeText(store.allocator, row.target), .request = try dupeText(store.allocator, row.request), .result = try dupeText(store.allocator, row.result), .time = row.time };
-}
-
-fn cloneHead(store: *Store, row: HeadRow) !Head {
-    return .{ .head = try dupeText(store.allocator, row.head), .fragment = try dupeText(store.allocator, row.fragment) };
-}
-
-fn cloneConfig(store: *Store, row: ConfigRow) !Config {
-    return .{ .key = try dupeText(store.allocator, row.key), .value = try dupeText(store.allocator, row.value) };
-}
-
-fn dupeText(allocator: Allocator, value: limbo.Text) ![]u8 {
-    return try allocator.dupe(u8, value.data);
-}
-
-fn dupeOptionalText(allocator: Allocator, value: limbo.Text) !?[]u8 {
-    if (value.data.len == 0) return null;
-    return try allocator.dupe(u8, value.data);
+fn dupOptional(allocator: Allocator, value: ?[]const u8) !?[]const u8 {
+    return if (value) |v| try allocator.dupe(u8, v) else null;
 }

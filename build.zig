@@ -13,27 +13,37 @@ pub fn build(b: *std.Build) void {
 
     const is_linux = target.result.os.tag == .linux;
 
-    const circuitry_dep = b.dependency("circuitry", .{ .target = target, .optimize = optimize });
-    const limbo_dep = b.dependency("limbo", .{
+    const serde_dep = b.dependency("serde", .{ .target = target, .optimize = optimize });
+    const circuitry_dep = b.createModule(.{
+        .root_source_file = b.path("../circuitry-zig/src/lib.zig"),
         .target = target,
         .optimize = optimize,
-        .sysroot = b.sysroot,
     });
-    const serde_dep = b.dependency("serde", .{ .target = target, .optimize = optimize });
+    circuitry_dep.addImport("serde", serde_dep.module("serde"));
+    const limbo_dep = b.createModule(.{
+        .root_source_file = b.path("../limbo-zig/src/lib.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+    limbo_dep.addIncludePath(b.path("../limbo-zig/include"));
+    const limbo_lib = b.path("../limbo-zig/lib/x86_64-linux/libturso_sqlite3.a");
 
     const exe_mod = b.createModule(.{
         .root_source_file = b.path("src/main.zig"),
         .target = target,
         .optimize = optimize,
     });
-    exe_mod.addImport("circuitry", circuitry_dep.module("circuitry"));
-    exe_mod.addImport("limbo", limbo_dep.module("limbo"));
+    exe_mod.addImport("circuitry", circuitry_dep);
+    exe_mod.addImport("limbo", limbo_dep);
     exe_mod.addImport("serde", serde_dep.module("serde"));
 
     const exe = b.addExecutable(.{
         .name = "zn",
         .root_module = exe_mod,
     });
+    exe.root_module.addObjectFile(limbo_lib);
+    exe.root_module.link_libc = true;
+    exe.root_module.linkSystemLibrary("unwind", .{});
     if (is_linux) {
         exe.use_llvm = true;
         exe.use_lld = true;
@@ -55,10 +65,13 @@ pub fn build(b: *std.Build) void {
         .target = target,
         .optimize = optimize,
     });
-    test_mod.addImport("circuitry", circuitry_dep.module("circuitry"));
-    test_mod.addImport("limbo", limbo_dep.module("limbo"));
+    test_mod.addImport("circuitry", circuitry_dep);
+    test_mod.addImport("limbo", limbo_dep);
     test_mod.addImport("serde", serde_dep.module("serde"));
     const tests = b.addTest(.{ .root_module = test_mod });
+    tests.root_module.addObjectFile(limbo_lib);
+    tests.root_module.link_libc = true;
+    tests.root_module.linkSystemLibrary("unwind", .{});
     if (is_linux) {
         tests.use_llvm = true;
         tests.use_lld = true;

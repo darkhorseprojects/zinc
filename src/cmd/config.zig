@@ -13,13 +13,13 @@ pub const ConfigSettings = struct {
         self.arena.deinit();
     }
 
-    pub fn defaultRun(self: *const ConfigSettings) []const u8 {
-        const root = self.root orelse return "openai-responses.software.responses";
-        if (root != .mapping) return "openai-responses.software.responses";
-        const defaults = root.mapping.getPtr("defaults") orelse return "openai-responses.software.responses";
-        if (defaults.* != .mapping) return "openai-responses.software.responses";
-        const run = defaults.mapping.getPtr("run") orelse return "openai-responses.software.responses";
-        return if (run.* == .string and run.string.len != 0) run.string else "openai-responses.software.responses";
+    pub fn defaultSoftware(self: *const ConfigSettings) []const u8 {
+        const root = self.root orelse return "openai-responses.responses";
+        if (root != .mapping) return "openai-responses.responses";
+        const defaults = root.mapping.getPtr("defaults") orelse return "openai-responses.responses";
+        if (defaults.* != .mapping) return "openai-responses.responses";
+        const software = defaults.mapping.getPtr("software") orelse return "openai-responses.responses";
+        return if (software.* == .string and software.string.len != 0) software.string else "openai-responses.responses";
     }
 };
 
@@ -53,7 +53,7 @@ pub fn runConfig(allocator: Allocator, store: anytype, args: []const []const u8)
     defer settings.deinit();
 
     try files.writeAllOut("Zinc config:\n");
-    try files.writeAllOut("  defaults.run: ");
-    try files.writeAllOut(settings.defaultRun());
+    try files.writeAllOut("  defaults.software: ");
+    try files.writeAllOut(settings.defaultSoftware());
     try files.writeAllOut("\n");
 }

@@ -7,7 +7,8 @@ const Allocator = std.mem.Allocator;
 
 pub fn runInspect(allocator: Allocator, store: *Substrate, target: []const u8) !void {
     if (std.mem.startsWith(u8, target, "zinc://packages/")) return inspectPackage(allocator, store, target["zinc://packages/".len..]);
-    if (std.mem.eql(u8, target, "zinc://packages")) return inspectPackages(allocator, store);
+    if (std.mem.startsWith(u8, target, "zinc://package/")) return inspectPackage(allocator, store, target["zinc://package/".len..]);
+    if (std.mem.eql(u8, target, "zinc://packages") or std.mem.eql(u8, target, "zinc://package")) return inspectPackages(allocator, store);
     if (std.mem.eql(u8, target, "zinc://fragments")) return inspectFragments(allocator, store);
     if (std.mem.eql(u8, target, "zinc://heads")) return inspectHeads(allocator, store);
     if (std.mem.eql(u8, target, "zinc://config")) return inspectConfig(allocator, store);
@@ -28,11 +29,13 @@ fn inspectPackage(allocator: Allocator, store: *Substrate, tail: []const u8) !vo
     try files.writeAllOut(pkg.version);
     try files.writeAllOut("\n  root: ");
     try files.writeAllOut(pkg.root);
-    if (pkg.source_git) |git| {
-        try files.writeAllOut("\n  source: ");
-        try files.writeAllOut(git);
-        try files.writeAllOut("@");
-        try files.writeAllOut(pkg.source_ref orelse "?");
+    if (pkg.source_uri) |uri| {
+        try files.writeAllOut("\n  source:");
+        try files.writeAllOut(uri);
+        if (pkg.source_ref) |ref| {
+            try files.writeAllOut("@");
+            try files.writeAllOut(ref);
+        }
     }
     try files.writeAllOut("\n");
     var manifest = package.Manifest.open(allocator, pkg.root) catch null;
@@ -43,10 +46,9 @@ fn inspectPackage(allocator: Allocator, store: *Substrate, tail: []const u8) !vo
             try files.writeAllOut(query["files/".len..]);
             try files.writeAllOut("\n");
         } else if (std.mem.startsWith(u8, query, "manifest/")) {
-            const node = try manifest.?.node(query["manifest/".len..]);
-            _ = node;
-            try files.writeAllOut("  manifest: ");
-            try files.writeAllOut(query["manifest/".len..]);
+            const manifest_bytes = try package.read(allocator, store, alias, query);
+            defer allocator.free(manifest_bytes);
+            try files.writeAllOut(manifest_bytes);
             try files.writeAllOut("\n");
         } else {
             const path = try package.resolve(allocator, store, alias, query);
