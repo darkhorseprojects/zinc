@@ -33,7 +33,7 @@ shape bytes -> confirmed shape -> package request -> package software -> result 
 ## Store
 
 ```text
-packages(package, version, root, source_git, source_ref, source_path)
+packages(package, version, root, source_uri, source_ref, source_path)
 fragments(fragment, target, request, result, time)
 heads(head, fragment)
 config(key, value)
@@ -82,12 +82,12 @@ A package is a directory with `zinc.pkg.yaml`.
 
 ```yaml
 name: openai-responses
-version: "0.3.5"
+version: "0.3.10"
 about: OpenAI Responses-shaped model package.
 
 source:
   uri: https://github.com/darkhorseprojects/darkhorseprojects-packages.git
-  ref: openai-responses-v0.3.5
+  ref: openai-responses-v0.3.10
   path: openai-responses
 
 interface:

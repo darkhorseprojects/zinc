@@ -176,22 +176,23 @@ fn packageRequest(allocator: Allocator, manifest: *const package.Manifest, softw
     _ = manifest;
     var out: std.ArrayList(u8) = .empty;
     errdefer out.deinit(allocator);
-    try out.print(allocator, "software: {s}\nfields:\n", .{software});
-    for (use.fields) |field| try appendHostField(allocator, &out, state, field.name, field.value);
-    try out.appendSlice(allocator, "part:\n");
-    try out.print(allocator, "  name: {s}\n", .{use.name});
-    try out.appendSlice(allocator, "  does: |\n");
+    try out.print(allocator, "software: {s}\n", .{software});
+    for (use.fields) |field| {
+        if (std.mem.eql(u8, field.name, "software")) continue;
+        try appendHostField(allocator, &out, state, field.name, field.value);
+    }
+    try out.appendSlice(allocator, "does: |\n");
     try exec_io.appendIndentedLines(allocator, &out, use.does);
-    try out.appendSlice(allocator, "  takes:\n");
+    try out.appendSlice(allocator, "takes:\n");
     for (use.takes) |take| {
         const value = state.get(bare(take.visible orelse take.local)) orelse return error.MissingUseInput;
-        try out.print(allocator, "    {s}: ", .{take.local});
+        try out.print(allocator, "  {s}: ", .{take.local});
         try exec_io.appendYamlInline(allocator, &out, &.{ .string = value });
         try out.appendSlice(allocator, "\n");
     }
-    try out.appendSlice(allocator, "  gives:\n");
+    try out.appendSlice(allocator, "gives:\n");
     for (use.gives) |give| {
-        try out.print(allocator, "    {s}: ", .{give.local});
+        try out.print(allocator, "  {s}: ", .{give.local});
         try exec_io.appendYamlInline(allocator, &out, &.{ .string = give.visible orelse give.local });
         try out.appendSlice(allocator, "\n");
     }
@@ -255,13 +256,15 @@ fn defaultSoftware(store: *Substrate) ![]const u8 {
 fn appendHostField(allocator: Allocator, out: *std.ArrayList(u8), state: *State, key: []const u8, value: *const serde.yaml.Value) !void {
     if (value.* == .string) {
         if (state.get(bare(value.string))) |resolved| {
-            try out.print(allocator, "  {s}: ", .{key});
+            try out.print(allocator, "{s}: ", .{key});
             try exec_io.appendYamlInline(allocator, out, &.{ .string = resolved });
             try out.appendSlice(allocator, "\n");
             return;
         }
     }
-    try exec_io.appendYamlEntry(allocator, out, key, value);
+    try out.print(allocator, "{s}: ", .{key});
+    try exec_io.appendYamlInline(allocator, out, value);
+    try out.appendSlice(allocator, "\n");
 }
 
 fn bare(name: []const u8) []const u8 {
