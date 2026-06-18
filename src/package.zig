@@ -22,7 +22,6 @@ pub const Manifest = struct {
     version: []const u8,
     about: []const u8,
     source: ?pkg_io.Source,
-    interface: pkg_io.Interface,
     links: []pkg_io.Link,
     root_path: []const u8,
     software: []pkg_io.Software,
@@ -43,7 +42,6 @@ pub const Manifest = struct {
         const parsed_version = try aa.dupe(u8, version);
         const about = try aa.dupe(u8, pkg_io.stringField(&root, "about") orelse "");
         const source = try pkg_io.parseSource(aa, pkg_io.valueField(&root, "source"));
-        const interface = try pkg_io.parseInterface(aa, pkg_io.valueField(&root, "interface"));
         const links = try pkg_io.parseLinks(aa, pkg_io.valueField(&root, "links"));
         const root_path = try aa.dupe(u8, package_root);
         const software = try pkg_io.parseSoftwareList(aa, pkg_io.valueField(&root, "software"));
@@ -55,7 +53,6 @@ pub const Manifest = struct {
             .version = parsed_version,
             .about = about,
             .source = source,
-            .interface = interface,
             .links = links,
             .root_path = root_path,
             .software = software,
@@ -96,7 +93,7 @@ pub const Manifest = struct {
 };
 
 pub const Source = pkg_io.Source;
-pub const Interface = pkg_io.Interface;
+pub const Gives = pkg_io.Gives;
 pub const OutputMapping = pkg_io.OutputMapping;
 pub const Software = pkg_io.Software;
 pub const ResolvedInvocation = pkg_io.ResolvedInvocation;

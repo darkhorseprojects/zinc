@@ -5,28 +5,39 @@ const proc = @import("../io/process.zig");
 const Allocator = std.mem.Allocator;
 
 pub const Source = struct { uri: []const u8, ref: ?[]const u8, path: ?[]const u8 };
-pub const Interface = struct {
-    request_all: bool,
-    output: []OutputMapping,
+pub const OutputMapping = struct { local: []const u8, selector: [][]const u8 };
+pub const Gives = union(enum) {
+    dynamic: [][]const u8,
+    mapping: []OutputMapping,
 
-    pub fn deinit(self: *Interface, allocator: Allocator) void {
-        for (self.output) |mapping| freeStrings(allocator, mapping.selector);
-        allocator.free(self.output);
+    pub fn deinit(self: *Gives, allocator: Allocator) void {
+        switch (self.*) {
+            .dynamic => |selector| freeStrings(allocator, selector),
+            .mapping => |mappings| {
+                for (mappings) |mapping| {
+                    allocator.free(mapping.local);
+                    freeStrings(allocator, mapping.selector);
+                }
+                allocator.free(mappings);
+            },
+        }
     }
 };
-pub const OutputMapping = struct { local: []const u8, selector: [][]const u8 };
 pub const Link = struct { package: []const u8, ref: ?[]const u8 };
 pub const Software = struct {
     allocator: Allocator,
     name: []const u8,
+    about: ?[]const u8,
     python: ?[]const u8,
     command: ?[]const u8,
     args: [][]const u8,
     cwd: ?[]const u8,
     env: []proc.EnvPair,
+    gives: Gives,
 
     pub fn deinit(self: *Software) void {
         self.allocator.free(self.name);
+        if (self.about) |about| self.allocator.free(about);
         if (self.python) |python| self.allocator.free(python);
         if (self.command) |command| self.allocator.free(command);
         freeStrings(self.allocator, self.args);
@@ -36,6 +47,7 @@ pub const Software = struct {
             self.allocator.free(pair.value);
         }
         self.allocator.free(self.env);
+        self.gives.deinit(self.allocator);
     }
 
     pub fn resolve(self: *const Software, package_root: []const u8) !ResolvedInvocation {
@@ -81,16 +93,6 @@ pub fn parseSource(allocator: Allocator, maybe: ?*const serde.yaml.Value) !?Sour
     };
 }
 
-pub fn parseInterface(allocator: Allocator, maybe: ?*const serde.yaml.Value) !Interface {
-    const v = maybe orelse return .{ .request_all = false, .output = try allocator.alloc(OutputMapping, 0) };
-    if (v.* != .mapping) return error.InvalidPackageInterface;
-    const request_all = if (valueField(v, "request")) |request|
-        request.* == .string and std.mem.eql(u8, request.string, "context")
-    else
-        false;
-    return .{ .request_all = request_all, .output = try parseOutputMappings(allocator, valueField(v, "output")) };
-}
-
 pub fn parseLinks(allocator: Allocator, maybe: ?*const serde.yaml.Value) ![]Link {
     const v = maybe orelse return &.{};
     if (v.* != .mapping) return error.InvalidPackageLinks;
@@ -125,31 +127,6 @@ pub fn parseLinks(allocator: Allocator, maybe: ?*const serde.yaml.Value) ![]Link
     return links;
 }
 
-fn parseOutputMappings(allocator: Allocator, maybe: ?*const serde.yaml.Value) ![]OutputMapping {
-    var out = std.ArrayList(OutputMapping).empty;
-    errdefer {
-        for (out.items) |mapping| {
-            allocator.free(mapping.local);
-            freeStrings(allocator, mapping.selector);
-        }
-        out.deinit(allocator);
-    }
-    const v = maybe orelse {
-        const owned = try out.toOwnedSlice(allocator);
-        out.deinit(allocator);
-        return owned;
-    };
-    if (v.* != .mapping) return error.InvalidOutputMappings;
-    var it = v.mapping.iterator();
-    while (it.next()) |entry| {
-        const selector = stringScalar(entry.value_ptr) orelse return error.InvalidOutputMapping;
-        try out.append(allocator, .{ .local = try allocator.dupe(u8, entry.key_ptr.*), .selector = try splitPath(allocator, selector) });
-    }
-    const owned = try out.toOwnedSlice(allocator);
-    out.deinit(allocator);
-    return owned;
-}
-
 pub fn parseSoftwareList(allocator: Allocator, maybe: ?*const serde.yaml.Value) ![]Software {
     var out = std.ArrayList(Software).empty;
     errdefer {
@@ -177,12 +154,44 @@ fn parseSoftware(allocator: Allocator, name: []const u8, raw: *const serde.yaml.
     return .{
         .allocator = allocator,
         .name = try allocator.dupe(u8, name),
+        .about = try stringDup(allocator, valueField(raw, "about")),
         .python = python,
         .command = command,
         .args = try stringSequence(allocator, valueField(raw, "args")),
         .cwd = try stringDup(allocator, valueField(raw, "cwd")),
         .env = try envPairs(allocator, valueField(raw, "env")),
+        .gives = try parseGives(allocator, valueField(raw, "gives")),
     };
+}
+
+fn parseGives(allocator: Allocator, maybe: ?*const serde.yaml.Value) !Gives {
+    const v = maybe orelse return error.SoftwareGivesMissing;
+    return switch (v.*) {
+        .string => |selector| .{ .dynamic = try splitPath(allocator, selector) },
+        .mapping => .{ .mapping = try parseOutputMappings(allocator, v) },
+        else => error.InvalidSoftwareGives,
+    };
+}
+
+fn parseOutputMappings(allocator: Allocator, maybe: ?*const serde.yaml.Value) ![]OutputMapping {
+    var out = std.ArrayList(OutputMapping).empty;
+    errdefer {
+        for (out.items) |mapping| {
+            allocator.free(mapping.local);
+            freeStrings(allocator, mapping.selector);
+        }
+        out.deinit(allocator);
+    }
+    const v = maybe orelse return error.InvalidOutputMappings;
+    if (v.* != .mapping) return error.InvalidOutputMappings;
+    var it = v.mapping.iterator();
+    while (it.next()) |entry| {
+        const selector = stringScalar(entry.value_ptr) orelse return error.InvalidOutputMapping;
+        try out.append(allocator, .{ .local = try allocator.dupe(u8, entry.key_ptr.*), .selector = try splitPath(allocator, selector) });
+    }
+    const owned = try out.toOwnedSlice(allocator);
+    out.deinit(allocator);
+    return owned;
 }
 
 pub fn splitPath(allocator: Allocator, raw: []const u8) ![][]const u8 {
@@ -285,19 +294,19 @@ pub fn nodeText(allocator: Allocator, node: *const serde.yaml.Value) ![]u8 {
 fn appendNodeText(allocator: Allocator, out: *std.ArrayList(u8), node: *const serde.yaml.Value, indent: usize) !void {
     switch (node.*) {
         .string => |s| try out.appendSlice(allocator, s),
-        .integer => try out.print(allocator, "{d}", .{node.integer}),
-        .float => try out.print(allocator, "{d}", .{node.float}),
-        .boolean => try out.appendSlice(allocator, if (node.boolean) "true" else "false"),
-        .sequence => {
-            for (node.sequence) |item| {
+        .integer => |i| try out.print(allocator, "{d}", .{i}),
+        .float => |f| try out.print(allocator, "{d}", .{f}),
+        .boolean => |b| try out.appendSlice(allocator, if (b) "true" else "false"),
+        .sequence => |items| {
+            for (items) |item| {
                 try indentOut(allocator, out, indent);
                 try out.appendSlice(allocator, "- ");
                 try appendNodeText(allocator, out, &item, indent + 2);
                 try out.appendSlice(allocator, "\n");
             }
         },
-        .mapping => {
-            var it = node.mapping.iterator();
+        .mapping => |*entries| {
+            var it = entries.iterator();
             while (it.next()) |entry| {
                 try indentOut(allocator, out, indent);
                 try out.print(allocator, "{s}: ", .{entry.key_ptr.*});

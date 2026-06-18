@@ -64,25 +64,22 @@ A package is a directory with `zinc.pkg.yaml`.
 
 ```yaml
 name: openai-responses
-version: "0.3.11"
+version: "0.3.12"
 about: OpenAI Responses model package.
 
 source:
   uri: https://github.com/darkhorseprojects/darkhorseprojects-packages.git
-  ref: openai-responses-v0.3.11
+  ref: openai-responses-v0.3.12
   path: openai-responses
 
 links:
-  unix-bash: "0.1.3"
-
-interface:
-  request: context
-  output:
-    answer: gives.answer
+  unix-bash: "0.1.4"
 
 software:
   responses:
+    about: Produce model text, reasoning text, and requested named outputs.
     python: software/responses.py
+    gives: gives
 
 shapes:
   short_answer: shapes/short-answer.circuitry.yaml

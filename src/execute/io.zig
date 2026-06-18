@@ -7,29 +7,12 @@ const Allocator = std.mem.Allocator;
 
 pub const LocalOutput = struct { name: []const u8, value: []const u8 };
 
-pub fn interpretOutput(allocator: Allocator, iface: *const package.Interface, stdout: []const u8) ![]LocalOutput {
-    if (iface.output.len != 0) {
-        var arena = std.heap.ArenaAllocator.init(allocator);
-        defer arena.deinit();
-        const root = try serde.yaml.parse(arena.allocator(), stdout);
-        var out = std.ArrayList(LocalOutput).empty;
-        errdefer {
-            for (out.items) |item| {
-                allocator.free(item.name);
-                allocator.free(item.value);
-            }
-            out.deinit(allocator);
-        }
-        for (iface.output) |mapping| {
-            const value = try selectPath(arena.allocator(), &root, mapping.selector);
-            try out.append(allocator, .{ .name = try allocator.dupe(u8, mapping.local), .value = try yamlScalarText(allocator, value) });
-        }
-        return out.toOwnedSlice(allocator);
-    }
+pub fn interpretOutput(allocator: Allocator, gives: package.Gives, requested: []const circuitry.VariableRef, stdout: []const u8) ![]LocalOutput {
+    var arena = std.heap.ArenaAllocator.init(allocator);
+    defer arena.deinit();
+    const aa = arena.allocator();
+    const root = try serde.yaml.parse(aa, stdout);
 
-    const root = try serde.yaml.parse(allocator, stdout);
-    const gives = valueField(&root, "gives") orelse return error.InvalidPackageOutput;
-    if (gives.* != .mapping) return error.InvalidPackageOutput;
     var out = std.ArrayList(LocalOutput).empty;
     errdefer {
         for (out.items) |item| {
@@ -38,9 +21,15 @@ pub fn interpretOutput(allocator: Allocator, iface: *const package.Interface, st
         }
         out.deinit(allocator);
     }
-    var it = gives.mapping.iterator();
-    while (it.next()) |entry| {
-        try out.append(allocator, .{ .name = try allocator.dupe(u8, entry.key_ptr.*), .value = try yamlScalarText(allocator, entry.value_ptr) });
+
+    for (requested) |request| {
+        const local = bare(request.local);
+        const selector = switch (gives) {
+            .dynamic => |root_path| try childPath(aa, root_path, local),
+            .mapping => |mappings| findMapping(mappings, local) orelse return error.InvalidPackageOutput,
+        };
+        const value = try selectPath(aa, &root, selector);
+        try out.append(allocator, .{ .name = try allocator.dupe(u8, local), .value = try yamlScalarText(allocator, value) });
     }
     return out.toOwnedSlice(allocator);
 }
@@ -183,21 +172,20 @@ pub fn selectPathText(allocator: Allocator, context: []const u8, path: [][]const
     return try yamlScalarText(allocator, value);
 }
 
-pub fn selectionText(allocator: Allocator, context: []const u8, selection: package.ContextSelection) ![]u8 {
-    return switch (selection) {
-        .all => try allocator.dupe(u8, context),
-        .path => |path| try selectPathText(allocator, context, path),
-        .map => |items| {
-            var out: std.ArrayList(u8) = .empty;
-            errdefer out.deinit(allocator);
-            for (items) |item| {
-                const value = try selectionText(allocator, context, item.selection);
-                try out.print(allocator, "{s}: |\n", .{item.name});
-                try appendIndented(allocator, &out, value);
-            }
-            return out.toOwnedSlice(allocator);
-        },
-    };
+fn findMapping(mappings: []const package.OutputMapping, local: []const u8) ?[][]const u8 {
+    for (mappings) |mapping| if (std.mem.eql(u8, mapping.local, local)) return mapping.selector;
+    return null;
+}
+
+fn childPath(allocator: Allocator, root: [][]const u8, child: []const u8) ![][]const u8 {
+    var out = try allocator.alloc([]const u8, root.len + 1);
+    @memcpy(out[0..root.len], root);
+    out[root.len] = child;
+    return out;
+}
+
+fn bare(name: []const u8) []const u8 {
+    return if (name.len > 0 and name[0] == '$') name[1..] else name;
 }
 
 fn selectPath(allocator: Allocator, root: *const serde.yaml.Value, path: [][]const u8) !*const serde.yaml.Value {

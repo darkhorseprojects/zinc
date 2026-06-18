@@ -132,17 +132,16 @@ fn runUse(allocator: Allocator, io: std.Io, store: *Substrate, state: *State, li
     const software = hostField(use.fields, "software") orelse (try defaultSoftware(allocator, io));
     var manifest = try loadManifest(allocator, store, software);
     defer manifest.deinit();
-    const request = try packageRequest(allocator, &manifest, software, use, state);
+    const request = try packageRequest(allocator, software, use, state);
     const invocation = manifest.softwareEntry(manifestName(software)) orelse return error.SoftwareNotFound;
     var resolved = try invocation.resolve(manifest.root_path);
     defer resolved.deinit();
 
-    const stdin = if (manifest.interface.request_all) request else &.{};
-    const result = try proc.runWithInput(allocator, io, resolved.argv, stdin, resolved.cwd, resolved.env, resolved.timeout, 64 * 1024 * 1024);
+    const result = try proc.runWithInput(allocator, io, resolved.argv, request, resolved.cwd, resolved.env, resolved.timeout, 64 * 1024 * 1024);
     defer result.deinit(allocator);
     if (result.stderr.len > 0) try files.writeAllErr(result.stderr);
 
-    const local = exec_io.interpretOutput(allocator, &manifest.interface, result.stdout) catch |err| return err;
+    const local = exec_io.interpretOutput(allocator, invocation.gives, use.gives, result.stdout) catch |err| return err;
     defer exec_io.freeLocal(local, allocator);
     applyLocal(allocator, state, use.gives, local) catch |err| return err;
 
@@ -174,8 +173,7 @@ fn runShapeInto(allocator: Allocator, io: std.Io, store: *Substrate, shape: circ
     for (shape.uses) |use| try runUse(allocator, io, store, state, &lineage, use);
 }
 
-fn packageRequest(allocator: Allocator, manifest: *const package.Manifest, software: []const u8, use: circuitry.Use, state: *State) ![]u8 {
-    _ = manifest;
+fn packageRequest(allocator: Allocator, software: []const u8, use: circuitry.Use, state: *State) ![]u8 {
     var out: std.ArrayList(u8) = .empty;
     errdefer out.deinit(allocator);
     try out.print(allocator, "software: {s}\n", .{software});
