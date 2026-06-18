@@ -3,20 +3,20 @@
 
 # Zinc
 
-Zinc stores package facts, exact work bytes, and current pointers.
+Zinc runs Circuitry shapes through package software and records the lineage.
 
-It is a small layer over Limbo. Circuitry confirms shape files, packages provide behavior, and Zinc records the bytes and package roots needed to inspect or replay work.
+Circuitry describes the shape. Packages provide behavior. Zinc connects them, stores exact request/result bytes, and moves heads to the latest node.
 
 ## At a glance
 
 | Area | Zinc responsibility |
 | --- | --- |
-| Packages | Record package name, version, root, and source facts. |
-| Shapes | Store raw Circuitry bytes and confirm shape facts with Circuitry. |
-| Fragments | Store target, request, result, and time as exact bytes. |
-| Heads | Point a target/request identity to its current fragment. |
+| Packages | Record package name, version, root, source facts, and soft links. |
+| Shapes | Parse Circuitry files and build package-facing context. |
+| Lineage | Store request/result bytes as blobs and immutable nodes. |
+| Heads | Point each kind/key pair to its current node. |
 | Config | Store opaque configuration values. |
-| Package software | Run package programs through a request-file boundary. |
+| Package software | Run the selected package command with selected context on stdin. |
 
 ## Run
 
@@ -24,32 +24,24 @@ It is a small layer over Limbo. Circuitry confirms shape files, packages provide
 zn run examples/local-llama-answer.circuitry.yaml question="What is Zinc?"
 ```
 
-A run reads a shape, confirms it, builds a package request, runs package software, stores the result bytes, and moves the matching head to the resulting fragment.
+A run reads a shape, confirms value flow with Circuitry, builds context for each package action, runs package software, stores output bytes, and advances the matching head.
 
 ```text
-shape bytes -> confirmed shape -> package request -> package software -> result bytes -> fragment -> head
+shape -> Circuitry facts -> package context -> package software -> output bytes -> node -> head
 ```
 
 ## Store
 
-```text
-packages(package, version, root, source_uri, source_ref, source_path)
-fragments(fragment, target, request, result, time)
-heads(head, fragment)
-config(key, value)
-```
-
-A head identifies a target and request:
+Zinc stores lineage in Limbo:
 
 ```text
-head = hash(target + request)
+lineage_blobs(id, size, bytes, path, at)
+lineage_nodes(id, kind, key, parent, request, output, at)
+lineage_heads(kind, key, node, at)
+lineage_meta(key, value)
 ```
 
-A fragment identifies a target, request, and result:
-
-```text
-fragment = hash(target + request + result)
-```
+Small blobs live in the database. Large blobs live under Zinc's blob directory and are referenced by hash.
 
 ## CLI
 
@@ -85,7 +77,7 @@ A package is a directory with `zinc.pkg.yaml`.
 ```yaml
 name: openai-responses
 version: "0.3.11"
-about: OpenAI Responses-shaped model package.
+about: OpenAI Responses model package.
 
 source:
   uri: https://github.com/darkhorseprojects/darkhorseprojects-packages.git
@@ -132,7 +124,7 @@ defaults:
   software: openai-responses.responses
 ```
 
-The value is a package reference. The selected package decides what it means.
+The value is a package ref. The selected package decides what it means.
 
 ## Read more
 
