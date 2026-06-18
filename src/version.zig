@@ -1,1 +1,1 @@
-pub const current = "v0.8.5";
+pub const current = "v0.8.6";
