@@ -13,8 +13,8 @@
             .hash = "circuitry-0.3.14-pvX_DT8DAQDI9EC3y043q_0-g0BogUfFtgaev_PqH5JB",
         },
         .limbo = .{
-            .url = "https://github.com/darkhorseprojects/limbo-zig/releases/download/v0.1.10/limbo-zig-0.1.10.tar.gz",
-            .hash = "limbo-0.1.10-maFSQ8K_Mzgr-sHizvX7oZHs8ZkPiCOCpf9-34fcP3JV",
+            .url = "https://github.com/darkhorseprojects/limbo-zig/releases/download/v0.1.11/limbo-zig-0.1.11.tar.gz",
+            .hash = "limbo-0.1.11-maFSQ0y_MzgeFxFsFM6WR1VohuzdDkhBhwnsF4VH-w5Q",
         },
     },
     .paths = .{
