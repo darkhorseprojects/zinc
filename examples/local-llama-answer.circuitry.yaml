@@ -1,20 +1,20 @@
-circuitry: "0.7.6"
+circuitry: "0.8.0"
 name: local llama answer
-about: Answer through package software.
+about: Answer through package surface.
 
-takes:
+in:
   - $question
 
-uses:
+steps:
   answer:
-    software: openai-responses.responses
+    surface: openai-responses.responses
     model: local-llama
-    takes:
+    in:
       question: $question
-    does: |
+    text: |
       Answer in one short sentence.
-    gives:
+    out:
       answer: $answer
 
-gives:
+out:
   - $answer

@@ -1,34 +1,34 @@
-circuitry: "0.7.6"
+circuitry: "0.8.0"
 name: parallel math
 
-takes:
+in:
   - $x
 
-uses:
+steps:
   double:
-    takes:
+    in:
       x: $x
-    does: |
+    text: |
       y = x * 2
-    gives:
+    out:
       y: $double
   triple:
-    takes:
+    in:
       x: $x
-    does: |
+    text: |
       y = x * 3
-    gives:
+    out:
       y: $triple
   total:
-    takes:
+    in:
       double: $double
       triple: $triple
-    does: |
+    text: |
       sum = double + triple
-    gives:
+    out:
       sum: $total
 
-gives:
+out:
   - $double
   - $triple
   - $total

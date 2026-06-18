@@ -1,24 +1,24 @@
-circuitry: "0.7.6"
+circuitry: "0.8.0"
 name: parallel shapes
 
-takes:
+in:
   $left_question: text
   $right_question: text
 
-uses:
+steps:
   left:
-    shape: openai-responses.shapes.short_answer
-    takes:
+    file: openai-responses.shapes.short_answer
+    in:
       question: $left_question
-    gives:
+    out:
       answer: $left_answer
   right:
-    shape: openai-responses.shapes.short_answer
-    takes:
+    file: openai-responses.shapes.short_answer
+    in:
       question: $right_question
-    gives:
+    out:
       answer: $right_answer
 
-gives:
+out:
   $left_answer: text
   $right_answer: text

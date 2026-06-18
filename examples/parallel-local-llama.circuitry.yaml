@@ -1,29 +1,29 @@
-circuitry: "0.7.6"
+circuitry: "0.8.0"
 name: parallel local llama
 
-takes:
+in:
   $topic: text
 
-uses:
+steps:
   define:
-    software: openai-responses.responses
+    surface: openai-responses.responses
     model: local-llama
-    takes:
+    in:
       topic: $topic
-    does: |
+    text: |
       Define the topic in one short sentence.
-    gives:
+    out:
       answer: $definition
   analogy:
-    software: openai-responses.responses
+    surface: openai-responses.responses
     model: local-llama
-    takes:
+    in:
       topic: $topic
-    does: |
+    text: |
       Give one short analogy for the topic.
-    gives:
+    out:
       answer: $analogy
 
-gives:
+out:
   $definition: text
   $analogy: text

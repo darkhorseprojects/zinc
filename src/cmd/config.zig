@@ -13,13 +13,13 @@ pub const ConfigSettings = struct {
         self.arena.deinit();
     }
 
-    pub fn defaultSoftware(self: *const ConfigSettings) []const u8 {
+    pub fn defaultSurface(self: *const ConfigSettings) []const u8 {
         const root = self.root orelse return "openai-responses.responses";
         if (root != .mapping) return "openai-responses.responses";
         const defaults = root.mapping.getPtr("defaults") orelse return "openai-responses.responses";
         if (defaults.* != .mapping) return "openai-responses.responses";
-        const software = defaults.mapping.getPtr("software") orelse return "openai-responses.responses";
-        return if (software.* == .string and software.string.len != 0) software.string else "openai-responses.responses";
+        const surface = defaults.mapping.getPtr("surface") orelse return "openai-responses.responses";
+        return if (surface.* == .string and surface.string.len != 0) surface.string else "openai-responses.responses";
     }
 };
 
@@ -53,7 +53,7 @@ pub fn runConfig(allocator: Allocator, store: anytype, args: []const []const u8)
     defer settings.deinit();
 
     try files.writeAllOut("Zinc config:\n");
-    try files.writeAllOut("  defaults.software: ");
-    try files.writeAllOut(settings.defaultSoftware());
+    try files.writeAllOut("  defaults.surface: ");
+    try files.writeAllOut(settings.defaultSurface());
     try files.writeAllOut("\n");
 }

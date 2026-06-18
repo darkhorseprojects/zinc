@@ -7,7 +7,7 @@ const Allocator = std.mem.Allocator;
 
 pub const LocalOutput = struct { name: []const u8, value: []const u8 };
 
-pub fn interpretOutput(allocator: Allocator, gives: package.Gives, requested: []const circuitry.VariableRef, stdout: []const u8) ![]LocalOutput {
+pub fn selectResponse(allocator: Allocator, response: package.Response, requested: []const circuitry.Binding, stdout: []const u8) ![]LocalOutput {
     var arena = std.heap.ArenaAllocator.init(allocator);
     defer arena.deinit();
     const aa = arena.allocator();
@@ -24,7 +24,7 @@ pub fn interpretOutput(allocator: Allocator, gives: package.Gives, requested: []
 
     for (requested) |request| {
         const local = bare(request.local);
-        const selector = switch (gives) {
+        const selector = switch (response) {
             .dynamic => |root_path| try childPath(aa, root_path, local),
             .mapping => |mappings| findMapping(mappings, local) orelse return error.InvalidPackageOutput,
         };
@@ -42,11 +42,11 @@ pub fn freeLocal(local: []LocalOutput, allocator: Allocator) void {
     allocator.free(local);
 }
 
-pub fn shapeTextResult(allocator: Allocator, state: anytype, gives: []const circuitry.Variable) ![]const u8 {
+pub fn shapeTextResult(allocator: Allocator, state: anytype, outputs: []const circuitry.Variable) ![]const u8 {
     var out: std.ArrayList(u8) = .empty;
     errdefer out.deinit(allocator);
-    for (gives) |give| {
-        const value = state.get(give.name) orelse return error.MissingUseOutput;
+    for (outputs) |give| {
+        const value = state.get(give.name) orelse return error.MissingStepOutput;
         try out.print(allocator, "{s}: |\n", .{give.name});
         try appendIndented(allocator, &out, value);
     }
@@ -61,8 +61,8 @@ pub fn lineageYaml(allocator: Allocator, nodes: []const []const u8) ![]const u8 
     return out.toOwnedSlice(allocator);
 }
 
-pub fn shapeKey(allocator: Allocator, use: circuitry.Use) ![]const u8 {
-    const joined = try joinInstructions(allocator, use.does) orelse "";
+pub fn shapeKey(allocator: Allocator, use: circuitry.Step) ![]const u8 {
+    const joined = try joinInstructions(allocator, use.text) orelse "";
     return try std.fmt.allocPrint(allocator, "{s}:{s}", .{ use.name, joined });
 }
 
@@ -172,7 +172,7 @@ pub fn selectPathText(allocator: Allocator, context: []const u8, path: [][]const
     return try yamlScalarText(allocator, value);
 }
 
-fn findMapping(mappings: []const package.OutputMapping, local: []const u8) ?[][]const u8 {
+fn findMapping(mappings: []const package.ResponseMapping, local: []const u8) ?[][]const u8 {
     for (mappings) |mapping| if (std.mem.eql(u8, mapping.local, local)) return mapping.selector;
     return null;
 }

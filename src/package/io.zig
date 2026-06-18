@@ -5,12 +5,12 @@ const proc = @import("../io/process.zig");
 const Allocator = std.mem.Allocator;
 
 pub const Source = struct { uri: []const u8, ref: ?[]const u8, path: ?[]const u8 };
-pub const OutputMapping = struct { local: []const u8, selector: [][]const u8 };
-pub const Gives = union(enum) {
+pub const ResponseMapping = struct { local: []const u8, selector: [][]const u8 };
+pub const Response = union(enum) {
     dynamic: [][]const u8,
-    mapping: []OutputMapping,
+    mapping: []ResponseMapping,
 
-    pub fn deinit(self: *Gives, allocator: Allocator) void {
+    pub fn deinit(self: *Response, allocator: Allocator) void {
         switch (self.*) {
             .dynamic => |selector| freeStrings(allocator, selector),
             .mapping => |mappings| {
@@ -23,8 +23,8 @@ pub const Gives = union(enum) {
         }
     }
 };
-pub const Link = struct { package: []const u8, ref: ?[]const u8 };
-pub const Software = struct {
+pub const Requirement = struct { package: []const u8, ref: ?[]const u8 };
+pub const Surface = struct {
     allocator: Allocator,
     name: []const u8,
     about: ?[]const u8,
@@ -33,9 +33,9 @@ pub const Software = struct {
     args: [][]const u8,
     cwd: ?[]const u8,
     env: []proc.EnvPair,
-    gives: Gives,
+    response: Response,
 
-    pub fn deinit(self: *Software) void {
+    pub fn deinit(self: *Surface) void {
         self.allocator.free(self.name);
         if (self.about) |about| self.allocator.free(about);
         if (self.python) |python| self.allocator.free(python);
@@ -47,10 +47,10 @@ pub const Software = struct {
             self.allocator.free(pair.value);
         }
         self.allocator.free(self.env);
-        self.gives.deinit(self.allocator);
+        self.response.deinit(self.allocator);
     }
 
-    pub fn resolve(self: *const Software, package_root: []const u8) !ResolvedInvocation {
+    pub fn resolve(self: *const Surface, package_root: []const u8) !ResolvedInvocation {
         var arena = std.heap.ArenaAllocator.init(std.heap.page_allocator);
         errdefer arena.deinit();
         const aa = arena.allocator();
@@ -93,21 +93,21 @@ pub fn parseSource(allocator: Allocator, maybe: ?*const serde.yaml.Value) !?Sour
     };
 }
 
-pub fn parseLinks(allocator: Allocator, maybe: ?*const serde.yaml.Value) ![]Link {
+pub fn parseRequirements(allocator: Allocator, maybe: ?*const serde.yaml.Value) ![]Requirement {
     const v = maybe orelse return &.{};
-    if (v.* != .mapping) return error.InvalidPackageLinks;
+    if (v.* != .mapping) return error.InvalidPackageRequirements;
 
     var count: usize = 0;
     var it = v.mapping.iterator();
     while (it.next()) |_| count += 1;
-    var links = try allocator.alloc(Link, count);
+    var requirements = try allocator.alloc(Requirement, count);
     var index: usize = 0;
     errdefer {
-        for (links[0..index]) |link| {
-            allocator.free(link.package);
-            if (link.ref) |ref| allocator.free(ref);
+        for (requirements[0..index]) |requirement| {
+            allocator.free(requirement.package);
+            if (requirement.ref) |ref| allocator.free(ref);
         }
-        allocator.free(links);
+        allocator.free(requirements);
     }
 
     it.reset();
@@ -115,22 +115,22 @@ pub fn parseLinks(allocator: Allocator, maybe: ?*const serde.yaml.Value) ![]Link
         const ref = switch (entry.value_ptr.*) {
             .string => |s| try allocator.dupe(u8, s),
             .mapping => blk: {
-                const ref_value = valueField(entry.value_ptr, "ref") orelse return error.InvalidPackageLink;
-                if (ref_value.* != .string) return error.InvalidPackageLink;
+                const ref_value = valueField(entry.value_ptr, "ref") orelse return error.InvalidPackageRequirement;
+                if (ref_value.* != .string) return error.InvalidPackageRequirement;
                 break :blk try allocator.dupe(u8, ref_value.string);
             },
-            else => return error.InvalidPackageLink,
+            else => return error.InvalidPackageRequirement,
         };
-        links[index] = .{ .package = try allocator.dupe(u8, entry.key_ptr.*), .ref = ref };
+        requirements[index] = .{ .package = try allocator.dupe(u8, entry.key_ptr.*), .ref = ref };
         index += 1;
     }
-    return links;
+    return requirements;
 }
 
-pub fn parseSoftwareList(allocator: Allocator, maybe: ?*const serde.yaml.Value) ![]Software {
-    var out = std.ArrayList(Software).empty;
+pub fn parseSurfaceList(allocator: Allocator, maybe: ?*const serde.yaml.Value) ![]Surface {
+    var out = std.ArrayList(Surface).empty;
     errdefer {
-        for (out.items) |*software| software.deinit();
+        for (out.items) |*surface| surface.deinit();
         out.deinit(allocator);
     }
     const v = maybe orelse {
@@ -138,19 +138,19 @@ pub fn parseSoftwareList(allocator: Allocator, maybe: ?*const serde.yaml.Value) 
         out.deinit(allocator);
         return owned;
     };
-    if (v.* != .mapping) return error.InvalidPackageSoftware;
+    if (v.* != .mapping) return error.InvalidPackageSurface;
     var it = v.mapping.iterator();
-    while (it.next()) |entry| try out.append(allocator, try parseSoftware(allocator, entry.key_ptr.*, entry.value_ptr));
+    while (it.next()) |entry| try out.append(allocator, try parseSurface(allocator, entry.key_ptr.*, entry.value_ptr));
     const owned = try out.toOwnedSlice(allocator);
     out.deinit(allocator);
     return owned;
 }
 
-fn parseSoftware(allocator: Allocator, name: []const u8, raw: *const serde.yaml.Value) !Software {
-    if (raw.* != .mapping) return error.InvalidPackageSoftware;
+fn parseSurface(allocator: Allocator, name: []const u8, raw: *const serde.yaml.Value) !Surface {
+    if (raw.* != .mapping) return error.InvalidPackageSurface;
     const python = try stringDup(allocator, valueField(raw, "python"));
     const command = try stringDup(allocator, valueField(raw, "command"));
-    if (python == null and command == null) return error.SoftwareRunMissing;
+    if (python == null and command == null) return error.SurfaceRunMissing;
     return .{
         .allocator = allocator,
         .name = try allocator.dupe(u8, name),
@@ -160,21 +160,21 @@ fn parseSoftware(allocator: Allocator, name: []const u8, raw: *const serde.yaml.
         .args = try stringSequence(allocator, valueField(raw, "args")),
         .cwd = try stringDup(allocator, valueField(raw, "cwd")),
         .env = try envPairs(allocator, valueField(raw, "env")),
-        .gives = try parseGives(allocator, valueField(raw, "gives")),
+        .response = try parseResponse(allocator, valueField(raw, "response")),
     };
 }
 
-fn parseGives(allocator: Allocator, maybe: ?*const serde.yaml.Value) !Gives {
-    const v = maybe orelse return error.SoftwareGivesMissing;
+fn parseResponse(allocator: Allocator, maybe: ?*const serde.yaml.Value) !Response {
+    const v = maybe orelse return error.SurfaceResponseMissing;
     return switch (v.*) {
         .string => |selector| .{ .dynamic = try splitPath(allocator, selector) },
-        .mapping => .{ .mapping = try parseOutputMappings(allocator, v) },
-        else => error.InvalidSoftwareGives,
+        .mapping => .{ .mapping = try parseResponseMappings(allocator, v) },
+        else => error.InvalidSurfaceResponse,
     };
 }
 
-fn parseOutputMappings(allocator: Allocator, maybe: ?*const serde.yaml.Value) ![]OutputMapping {
-    var out = std.ArrayList(OutputMapping).empty;
+fn parseResponseMappings(allocator: Allocator, maybe: ?*const serde.yaml.Value) ![]ResponseMapping {
+    var out = std.ArrayList(ResponseMapping).empty;
     errdefer {
         for (out.items) |mapping| {
             allocator.free(mapping.local);
@@ -182,11 +182,11 @@ fn parseOutputMappings(allocator: Allocator, maybe: ?*const serde.yaml.Value) ![
         }
         out.deinit(allocator);
     }
-    const v = maybe orelse return error.InvalidOutputMappings;
-    if (v.* != .mapping) return error.InvalidOutputMappings;
+    const v = maybe orelse return error.InvalidResponseMappings;
+    if (v.* != .mapping) return error.InvalidResponseMappings;
     var it = v.mapping.iterator();
     while (it.next()) |entry| {
-        const selector = stringScalar(entry.value_ptr) orelse return error.InvalidOutputMapping;
+        const selector = stringScalar(entry.value_ptr) orelse return error.InvalidResponseMapping;
         try out.append(allocator, .{ .local = try allocator.dupe(u8, entry.key_ptr.*), .selector = try splitPath(allocator, selector) });
     }
     const owned = try out.toOwnedSlice(allocator);

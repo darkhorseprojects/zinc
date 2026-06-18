@@ -32,8 +32,8 @@ pub fn runPkg(allocator: Allocator, io: std.Io, store: *Substrate, args: []const
         try files.writeAllErr("\n");
         return err;
     };
-    if (std.mem.eql(u8, cmd, "links")) return links(allocator, store, args[1..]) catch |err| {
-        try files.writeAllErr("pkg links failed: ");
+    if (std.mem.eql(u8, cmd, "requires")) return requirements(allocator, store, args[1..]) catch |err| {
+        try files.writeAllErr("pkg requirements failed: ");
         try files.writeAllErr(@errorName(err));
         try files.writeAllErr("\n");
         return err;
@@ -108,13 +108,13 @@ fn update(allocator: Allocator, io: std.Io, store: *Substrate, args: []const []c
     try package.update(allocator, io, store, selector orelse return usage(), scope, opts);
 }
 
-fn links(allocator: Allocator, store: *Substrate, args: []const []const u8) !void {
+fn requirements(allocator: Allocator, store: *Substrate, args: []const []const u8) !void {
     var selector: []const u8 = "all";
     var missing_only = false;
     for (args) |arg| {
         if (std.mem.eql(u8, arg, "--missing")) missing_only = true else if (std.mem.eql(u8, arg, "all")) selector = "all" else selector = arg;
     }
-    const rows = try package.listLinks(allocator, store, selector, missing_only);
+    const rows = try package.listRequirements(allocator, store, selector, missing_only);
     defer {
         for (rows) |row| row.deinit(allocator);
         allocator.free(rows);
@@ -145,6 +145,6 @@ fn links(allocator: Allocator, store: *Substrate, args: []const []const u8) !voi
 }
 
 fn usage() error{InvalidUsage} {
-    files.writeAllErr("usage: zn pkg <install|remove|list|update|links> [args]\n") catch {};
+    files.writeAllErr("usage: zn pkg <install|remove|list|update|requirements> [args]\n") catch {};
     return error.InvalidUsage;
 }

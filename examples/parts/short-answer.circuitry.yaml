@@ -1,18 +1,18 @@
-circuitry: "0.7.6"
+circuitry: "0.8.0"
 name: short answer part
 
-takes:
+in:
   $question: text
 
-uses:
+steps:
   answer:
     model: local-llama
-    takes:
+    in:
       question: $question
-    does: |
+    text: |
       Answer in one short sentence.
-    gives:
+    out:
       answer: $answer
 
-gives:
+out:
   $answer: text

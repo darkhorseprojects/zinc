@@ -1,32 +1,32 @@
-circuitry: "0.7.6"
+circuitry: "0.8.0"
 name: search web
 about: Compose package capabilities without Zinc owning their internals.
 
-takes:
+in:
   $query: text
   $current_date: date
 
-uses:
+steps:
   search:
-    shape: browser.search_web
-    takes:
+    file: browser.search_web
+    in:
       query: $query
       current_date: $current_date
-    gives:
+    out:
       sources: $sources
 
   answer:
-    software: openai-responses.responses
+    surface: openai-responses.responses
     model: fast
-    takes:
+    in:
       query: $query
       sources: $sources
-    does: |
+    text: |
       Answer from the sources with citations.
-    gives:
+    out:
       answer: $answer
       citations: $citations
 
-gives:
+out:
   $answer: text
   $citations: list

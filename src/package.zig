@@ -22,9 +22,9 @@ pub const Manifest = struct {
     version: []const u8,
     about: []const u8,
     source: ?pkg_io.Source,
-    links: []pkg_io.Link,
+    requirements: []pkg_io.Requirement,
     root_path: []const u8,
-    software: []pkg_io.Software,
+    surfaces: []pkg_io.Surface,
 
     pub fn open(allocator: Allocator, package_root: []const u8) !Manifest {
         var arena = std.heap.ArenaAllocator.init(allocator);
@@ -42,9 +42,9 @@ pub const Manifest = struct {
         const parsed_version = try aa.dupe(u8, version);
         const about = try aa.dupe(u8, pkg_io.stringField(&root, "about") orelse "");
         const source = try pkg_io.parseSource(aa, pkg_io.valueField(&root, "source"));
-        const links = try pkg_io.parseLinks(aa, pkg_io.valueField(&root, "links"));
+        const requirements = try pkg_io.parseRequirements(aa, pkg_io.valueField(&root, "requires"));
         const root_path = try aa.dupe(u8, package_root);
-        const software = try pkg_io.parseSoftwareList(aa, pkg_io.valueField(&root, "software"));
+        const surfaces = try pkg_io.parseSurfaceList(aa, pkg_io.valueField(&root, "surfaces"));
 
         return .{
             .arena = arena,
@@ -53,9 +53,9 @@ pub const Manifest = struct {
             .version = parsed_version,
             .about = about,
             .source = source,
-            .links = links,
+            .requirements = requirements,
             .root_path = root_path,
-            .software = software,
+            .surfaces = surfaces,
         };
     }
 
@@ -63,8 +63,8 @@ pub const Manifest = struct {
         self.arena.deinit();
     }
 
-    pub fn softwareEntry(self: *const Manifest, name: []const u8) ?*const pkg_io.Software {
-        for (self.software) |*entry| if (std.mem.eql(u8, entry.name, name)) return entry;
+    pub fn surfaceEntry(self: *const Manifest, name: []const u8) ?*const pkg_io.Surface {
+        for (self.surfaces) |*entry| if (std.mem.eql(u8, entry.name, name)) return entry;
         return null;
     }
 
@@ -93,11 +93,11 @@ pub const Manifest = struct {
 };
 
 pub const Source = pkg_io.Source;
-pub const Gives = pkg_io.Gives;
-pub const OutputMapping = pkg_io.OutputMapping;
-pub const Software = pkg_io.Software;
+pub const Response = pkg_io.Response;
+pub const ResponseMapping = pkg_io.ResponseMapping;
+pub const Surface = pkg_io.Surface;
 pub const ResolvedInvocation = pkg_io.ResolvedInvocation;
-pub const LinkStatus = struct {
+pub const RequirementStatus = struct {
     owner: []const u8,
     package: []const u8,
     ref: ?[]const u8,
@@ -105,7 +105,7 @@ pub const LinkStatus = struct {
     version: ?[]const u8,
     root: ?[]const u8,
 
-    pub fn deinit(self: *const LinkStatus, allocator: Allocator) void {
+    pub fn deinit(self: *const RequirementStatus, allocator: Allocator) void {
         allocator.free(self.owner);
         allocator.free(self.package);
         if (self.ref) |v| allocator.free(v);
@@ -148,19 +148,33 @@ pub fn read(allocator: Allocator, store: *Substrate, alias: []const u8, query: [
         const pkg = (try store.getPackage(alias)) orelse return error.PackageNotInstalled;
         defer store.freePackage(pkg);
         break :blk try std.fs.path.join(allocator, &.{ pkg.root, "zinc.pkg.yaml" });
+    } else if (std.mem.startsWith(u8, query, "files/")) blk: {
+        const rel_path = query["files/".len..];
+        try validatePackageFilePath(rel_path);
+        const pkg = (try store.getPackage(alias)) orelse return error.PackageNotInstalled;
+        defer store.freePackage(pkg);
+        break :blk try std.fs.path.join(allocator, &.{ pkg.root, rel_path });
     } else try resolve(allocator, store, alias, query);
     defer allocator.free(path);
     return try files.readLimited(allocator, path, 64 * 1024 * 1024);
 }
 
-pub fn resolveSoftwareInvocation(allocator: Allocator, store: *Substrate, software_ref: []const u8) !ResolvedInvocation {
-    const ref = try parseRef(software_ref);
+fn validatePackageFilePath(rel_path: []const u8) !void {
+    if (rel_path.len == 0 or std.fs.path.isAbsolute(rel_path)) return error.InvalidPackagePath;
+    var it = std.mem.tokenizeScalar(u8, rel_path, '/');
+    while (it.next()) |segment| {
+        if (std.mem.eql(u8, segment, ".") or std.mem.eql(u8, segment, "..")) return error.InvalidPackagePath;
+    }
+}
+
+pub fn resolveSurfaceInvocation(allocator: Allocator, store: *Substrate, surface_ref: []const u8) !ResolvedInvocation {
+    const ref = try parseRef(surface_ref);
     const pkg = (try store.getPackage(ref.alias)) orelse return error.PackageNotInstalled;
     defer store.freePackage(pkg);
     var manifest = try Manifest.open(allocator, pkg.root);
     defer manifest.deinit();
-    const software = manifest.softwareEntry(ref.path) orelse return error.SoftwareNotFound;
-    return software.resolve(pkg.root);
+    const surface = manifest.surfaceEntry(ref.path) orelse return error.SurfaceNotFound;
+    return surface.resolve(pkg.root);
 }
 
 pub fn install(allocator: Allocator, io: std.Io, store: *Substrate, source_root: []const u8, scope: Scope) !void {
@@ -199,7 +213,7 @@ pub fn update(allocator: Allocator, io: std.Io, store: *Substrate, selector: []c
     try updateInstalled(allocator, io, store, selector, scope, options);
 }
 
-pub fn listLinks(allocator: Allocator, store: *Substrate, selector: []const u8, missing_only: bool) ![]LinkStatus {
+pub fn listRequirements(allocator: Allocator, store: *Substrate, selector: []const u8, missing_only: bool) ![]RequirementStatus {
     const pkgs = try store.listPackages();
     defer {
         for (pkgs) |pkg| store.freePackage(pkg);
@@ -212,13 +226,13 @@ pub fn listLinks(allocator: Allocator, store: *Substrate, selector: []const u8, 
         {
             var manifest = Manifest.open(allocator, pkg.root) catch continue;
             defer manifest.deinit();
-            for (manifest.links) |link| {
-                if (try linkStatusCounts(store, link, missing_only)) count += 1;
+            for (manifest.requirements) |requirement| {
+                if (try requirementStatusCounts(store, requirement, missing_only)) count += 1;
             }
         }
     }
 
-    const rows = try allocator.alloc(LinkStatus, count);
+    const rows = try allocator.alloc(RequirementStatus, count);
     errdefer allocator.free(rows);
     var index: usize = 0;
     for (pkgs) |pkg| {
@@ -226,34 +240,34 @@ pub fn listLinks(allocator: Allocator, store: *Substrate, selector: []const u8, 
         {
             var manifest = Manifest.open(allocator, pkg.root) catch continue;
             defer manifest.deinit();
-            for (manifest.links) |link| {
-                if (try appendLinkStatus(allocator, store, rows, &index, pkg.package, link, missing_only)) {}
+            for (manifest.requirements) |requirement| {
+                if (try appendRequirementStatus(allocator, store, rows, &index, pkg.package, requirement, missing_only)) {}
             }
         }
     }
     return rows;
 }
 
-fn linkStatusCounts(store: *Substrate, link: pkg_io.Link, missing_only: bool) !bool {
-    const installed = try store.getPackage(link.package);
+fn requirementStatusCounts(store: *Substrate, requirement: pkg_io.Requirement, missing_only: bool) !bool {
+    const installed = try store.getPackage(requirement.package);
     defer if (installed) |row| store.freePackage(row);
     if (installed) |row| {
-        const matches = if (link.ref) |ref| std.mem.eql(u8, ref, row.version) else true;
+        const matches = if (requirement.ref) |ref| std.mem.eql(u8, ref, row.version) else true;
         return !missing_only or !matches;
     }
     return missing_only;
 }
 
-fn appendLinkStatus(allocator: Allocator, store: *Substrate, rows: []LinkStatus, index: *usize, owner: []const u8, link: pkg_io.Link, missing_only: bool) !bool {
-    const installed = try store.getPackage(link.package);
+fn appendRequirementStatus(allocator: Allocator, store: *Substrate, rows: []RequirementStatus, index: *usize, owner: []const u8, requirement: pkg_io.Requirement, missing_only: bool) !bool {
+    const installed = try store.getPackage(requirement.package);
     if (installed) |row| {
         defer store.freePackage(row);
-        const matches = if (link.ref) |ref| std.mem.eql(u8, ref, row.version) else true;
+        const matches = if (requirement.ref) |ref| std.mem.eql(u8, ref, row.version) else true;
         if (missing_only and matches) return false;
         rows[index.*] = .{
             .owner = try allocator.dupe(u8, owner),
-            .package = try allocator.dupe(u8, link.package),
-            .ref = if (link.ref) |ref| try allocator.dupe(u8, ref) else null,
+            .package = try allocator.dupe(u8, requirement.package),
+            .ref = if (requirement.ref) |ref| try allocator.dupe(u8, ref) else null,
             .installed = true,
             .version = try allocator.dupe(u8, row.version),
             .root = try allocator.dupe(u8, row.root),
@@ -262,8 +276,8 @@ fn appendLinkStatus(allocator: Allocator, store: *Substrate, rows: []LinkStatus,
         if (missing_only == false) return false;
         rows[index.*] = .{
             .owner = try allocator.dupe(u8, owner),
-            .package = try allocator.dupe(u8, link.package),
-            .ref = if (link.ref) |ref| try allocator.dupe(u8, ref) else null,
+            .package = try allocator.dupe(u8, requirement.package),
+            .ref = if (requirement.ref) |ref| try allocator.dupe(u8, ref) else null,
             .installed = false,
             .version = null,
             .root = null,

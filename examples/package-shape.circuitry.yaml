@@ -1,16 +1,16 @@
-circuitry: "0.7.6"
+circuitry: "0.8.0"
 name: package shape demo
 
-takes:
+in:
   $question: text
 
-uses:
+steps:
   answer:
-    shape: openai-responses.shapes.short_answer
-    takes:
+    file: openai-responses.shapes.short_answer
+    in:
       question: $question
-    gives:
+    out:
       answer: $answer
 
-gives:
+out:
   $answer: text

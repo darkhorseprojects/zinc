@@ -3,19 +3,19 @@
 
 # Zinc
 
-Zinc runs Circuitry shapes through package software and records lineage.
+Zinc runs Circuitry shapes through package surface and records lineage.
 
-Circuitry describes the shape. Packages provide behavior. Zinc connects them and stores the exact request/result bytes.
+Circuitry describes the shape. Packages provide behavior. Zinc connects them and stores the exact request/response bytes.
 
 ## At a glance
 
 | Area | Zinc responsibility |
 | --- | --- |
-| Packages | Record package name, version, root, source facts, and soft links. |
+| Packages | Record package name, version, root, source facts, and soft requires. |
 | Shapes | Parse Circuitry files and build package-facing context. |
-| Lineage | Store request/result bytes as blobs and immutable nodes. |
+| Lineage | Store request/response bytes as blobs and immutable nodes. |
 | Config | Store opaque configuration values. |
-| Package software | Run the selected package command with selected context on stdin. |
+| Package surface | Run the selected package command with selected context on stdin. |
 
 ## Run
 
@@ -23,10 +23,10 @@ Circuitry describes the shape. Packages provide behavior. Zinc connects them and
 zn run examples/local-llama-answer.circuitry.yaml question="What is Zinc?"
 ```
 
-A run reads a shape, confirms value flow with Circuitry, builds context for each package action, runs package software, and stores the package-facing request/result bytes.
+A run reads a shape, confirms value flow with Circuitry, builds context for each package action, runs package surface, and stores the package-facing request/response bytes.
 
 ```text
-shape -> Circuitry facts -> package context -> package software -> request/result bytes
+shape -> Circuitry facts -> package context -> package surface -> request/response bytes
 ```
 
 ## Store
@@ -42,13 +42,13 @@ zn inspect zinc://config
 
 # Read package facts and files
 zn read zinc://packages
-zn read zinc://packages/openai-responses/manifest/software/responses
-zn read zinc://packages/openai-responses/files/software/responses.py
+zn read zinc://packages/openai-responses/manifest/surfaces/responses
+zn read zinc://packages/openai-responses/files/surfaces/responses.py
 
 # Manage packages
 zn pkg install ./openai-responses --global
 zn pkg list
-zn pkg links
+zn pkg requires
 zn pkg update openai-responses --dry-run
 zn pkg remove openai-responses
 
@@ -64,22 +64,22 @@ A package is a directory with `zinc.pkg.yaml`.
 
 ```yaml
 name: openai-responses
-version: "0.3.12"
+version: "0.4.0"
 about: OpenAI Responses model package.
 
 source:
   uri: https://github.com/darkhorseprojects/darkhorseprojects-packages.git
-  ref: openai-responses-v0.3.12
+  ref: openai-responses-v0.4.0
   path: openai-responses
 
-links:
-  unix-bash: "0.1.4"
+requires:
+  unix-bash: "0.2.0"
 
-software:
+surfaces:
   responses:
     about: Produce model text, reasoning text, and requested named outputs.
-    python: software/responses.py
-    gives: gives
+    python: surfaces/responses.py
+    response: response
 
 shapes:
   short_answer: shapes/short-answer.circuitry.yaml
@@ -91,7 +91,7 @@ docs:
   readme: docs/README.md
 ```
 
-Zinc records package identity and reads manifest paths. Package software, settings, models, scripts, and documentation belong to the package.
+Zinc records package identity and reads manifest paths. Package surface, settings, models, scripts, and documentation belong to the package.
 
 ## Configuration
 
@@ -106,7 +106,7 @@ Example:
 
 ```yaml
 defaults:
-  software: openai-responses.responses
+  surface: openai-responses.responses
 ```
 
 The value is a package ref. The selected package decides what it means.
@@ -115,7 +115,7 @@ The value is a package ref. The selected package decides what it means.
 
 - [Architecture](https://github.com/darkhorseprojects/zinc/wiki/Architecture)
 - [Packages](https://github.com/darkhorseprojects/zinc/wiki/Packages)
-- [Package Software](https://github.com/darkhorseprojects/zinc/wiki/Package-Software)
+- [Package Surfaces](https://github.com/darkhorseprojects/zinc/wiki/Package-Surfaces)
 - [Executor](https://github.com/darkhorseprojects/zinc/wiki/Executor)
 
 ## Building

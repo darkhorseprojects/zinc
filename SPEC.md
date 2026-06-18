@@ -1,6 +1,6 @@
 # Zinc Specification
 
-Zinc resolves package software, sends it the selected Circuitry action request, records exact request/output bytes, and routes named outputs back into the run.
+Zinc resolves package surface, sends it the selected Circuitry action request, records exact request/response bytes, and routes named outputs back into the run.
 
 ## Package manifest
 
@@ -11,10 +11,10 @@ Required fields:
 ```yaml
 name: package-name
 version: "0.1.0"
-software:
+surfaces:
   surface:
-    python: software/run.py
-    gives: gives
+    python: surfaces/run.py
+    response: response
 ```
 
 Common optional fields:
@@ -25,7 +25,7 @@ source:
   uri: https://example/repo.git
   ref: package-v0.1.0
   path: package-name
-links:
+requires:
   other-package: "0.1.0"
 settings:
   defaults: settings/defaults.yaml
@@ -39,12 +39,12 @@ examples:
 
 Optional material sections are navigable package facts. Zinc may read them; packages own their meaning.
 
-## Software refs
+## Surface refs
 
-A software ref has this form:
+A surface ref has this form:
 
 ```text
-package.software
+package.surface
 ```
 
 Example:
@@ -54,28 +54,28 @@ openai-responses.responses
 unix-bash.bash
 ```
 
-The package part resolves an installed package. The software part selects an entry under `software` in that package manifest.
+The package part resolves an installed package. The surface part selects an entry under `surfaces` in that package manifest.
 
-## Software entries
+## Surface entries
 
-A software entry defines how Zinc runs one package-owned surface.
+A surface entry defines how Zinc runs one package-owned surface.
 
 ```yaml
-software:
+surfaces:
   responses:
     about: Produce model text, reasoning text, and requested named outputs.
-    python: software/responses.py
+    python: surfaces/responses.py
     args: []
     cwd: .
     env:
       NAME: value
-    gives: gives
+    response: response
 ```
 
 Exactly one runner is required today:
 
 ```yaml
-python: software/run.py
+python: surfaces/run.py
 ```
 
 or
@@ -88,46 +88,46 @@ command: executable
 
 ## Package request
 
-Zinc always sends the selected package request to software stdin.
+Zinc always sends the selected package request to surface stdin.
 
 The request is built from the Circuitry action and its host fields:
 
 ```yaml
-software: openai-responses.responses
+surface: openai-responses.responses
 model: local-llama
-does: |
+text: |
   Answer briefly.
-takes:
+in:
   question: "What is Zinc?"
-gives:
+out:
   answer: "$answer"
 ```
 
-Zinc does not declare this request shape in the package manifest. Circuitry owns the action shape. Zinc owns request construction. Package software owns interpretation.
+Zinc does not declare this request shape in the package manifest. Circuitry owns the action shape. Zinc owns request construction. Package surface owns interpretation.
 
-## Software output and `gives`
+## Surface output and `response`
 
-Package software writes YAML to stdout. The software entry's `gives` field tells Zinc how to select requested local outputs from that stdout.
+Package surface writes YAML to stdout. The surface entry's `response` field tells Zinc how to select requested local outputs from that stdout.
 
 Preferred dynamic form:
 
 ```yaml
-software:
+surfaces:
   bash:
-    python: software/run.py
-    gives: gives
+    python: surfaces/run.py
+    response: response
 ```
 
 This means requested local output `name` is selected from:
 
 ```text
-stdout.gives.name
+stdout.response.name
 ```
 
 Preferred stdout:
 
 ```yaml
-gives:
+response:
   output: |
     stdout text
   error: |
@@ -139,10 +139,10 @@ gives:
 Fixed selector form:
 
 ```yaml
-software:
+surfaces:
   thing:
     command: existing-program
-    gives:
+    out:
       answer: result.answer
       score: metrics.score
 ```
@@ -168,15 +168,15 @@ Zinc does not own package tests, scripts, model prompts, command policy, provide
 Zinc owns:
 
 - installed package records
-- software ref resolution
+- surface ref resolution
 - process invocation
 - package request construction
-- output selection from `software.<name>.gives`
+- response selection from `surfaces.<name>.response`
 - lineage recording
 
 Packages own:
 
-- software behavior
+- surface behavior
 - settings
 - docs
 - scripts

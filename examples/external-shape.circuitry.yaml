@@ -1,16 +1,16 @@
-circuitry: "0.7.6"
+circuitry: "0.8.0"
 name: external shape demo
 
-takes:
+in:
   $question: text
 
-uses:
+steps:
   answer:
-    shape: ./parts/short-answer.circuitry.yaml
-    takes:
+    file: ./parts/short-answer.circuitry.yaml
+    in:
       question: $question
-    gives:
+    out:
       answer: $answer
 
-gives:
+out:
   $answer: text

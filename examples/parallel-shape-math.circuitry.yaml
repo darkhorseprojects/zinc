@@ -1,32 +1,32 @@
-circuitry: "0.7.6"
+circuitry: "0.8.0"
 name: parallel shape math
 
-takes:
+in:
   - $x
 
-uses:
+steps:
   double:
-    shape: ./parts/double.circuitry.yaml
-    takes:
+    file: ./parts/double.circuitry.yaml
+    in:
       x: $x
-    gives:
+    out:
       y: $double
   triple:
-    shape: ./parts/triple.circuitry.yaml
-    takes:
+    file: ./parts/triple.circuitry.yaml
+    in:
       x: $x
-    gives:
+    out:
       y: $triple
   total:
-    takes:
+    in:
       double: $double
       triple: $triple
-    does: |
+    text: |
       sum = double + triple
-    gives:
+    out:
       sum: $total
 
-gives:
+out:
   - $double
   - $triple
   - $total
