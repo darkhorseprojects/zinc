@@ -85,13 +85,14 @@ const State = struct {
     }
 
     pub fn get(self: *State, name: []const u8) ?[]const u8 {
-        return self.values.get(name);
+        return self.values.get(bare(name));
     }
 
     fn set(self: *State, visible: []const u8, value: []const u8) !void {
+        const key = bare(visible);
         const copy = try self.allocator.dupe(u8, value);
-        if (self.values.fetchRemove(visible)) |old| self.allocator.free(old.value);
-        try self.values.put(visible, copy);
+        if (self.values.fetchRemove(key)) |old| self.allocator.free(old.value);
+        try self.values.put(key, copy);
     }
 
     fn deinit(self: *State) void {
