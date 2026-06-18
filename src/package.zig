@@ -82,7 +82,6 @@ pub const ContextMap = pkg_io.ContextMap;
 pub const OutputMapping = pkg_io.OutputMapping;
 pub const Software = pkg_io.Software;
 pub const ResolvedInvocation = pkg_io.ResolvedInvocation;
-pub const Lifecycle = enum { run, install, uninstall };
 
 pub fn parseRef(raw: []const u8) !Ref {
     if (std.mem.indexOfScalar(u8, raw, '/')) |_| return error.NotPackageRef;
@@ -123,8 +122,7 @@ pub fn read(allocator: Allocator, store: *Substrate, alias: []const u8, query: [
     return try files.readLimited(allocator, path, 64 * 1024 * 1024);
 }
 
-pub fn resolveSoftwareInvocation(allocator: Allocator, store: *Substrate, software_ref: []const u8, lifecycle: Lifecycle) !ResolvedInvocation {
-    _ = lifecycle;
+pub fn resolveSoftwareInvocation(allocator: Allocator, store: *Substrate, software_ref: []const u8) !ResolvedInvocation {
     const ref = try parseRef(software_ref);
     const pkg = (try store.getPackage(ref.alias)) orelse return error.PackageNotInstalled;
     defer store.freePackage(pkg);
