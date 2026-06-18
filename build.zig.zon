@@ -8,6 +8,14 @@
             .url = "git+https://github.com/OrlovEvgeny/serde.zig#875e1b680b02bfbc2f146ea3d3f91d724f86c500",
             .hash = "serde-1.0.1-1DszT_hrDQAURHcyOhR7wEKwqbF8FYl8vN26pKLLCkWn",
         },
+        .circuitry = .{
+            .url = "https://github.com/darkhorseprojects/circuitry-zig/releases/download/v0.3.14/circuitry-zig-0.3.14.tar.gz",
+            .hash = "circuitry-0.3.14-pvX_DT8DAQDI9EC3y043q_0-g0BogUfFtgaev_PqH5JB",
+        },
+        .limbo = .{
+            .url = "https://github.com/darkhorseprojects/limbo-zig/releases/download/v0.1.10/limbo-zig-0.1.10.tar.gz",
+            .hash = "limbo-0.1.10-maFSQ8K_Mzgr-sHizvX7oZHs8ZkPiCOCpf9-34fcP3JV",
+        },
     },
     .paths = .{
         "build.zig",
