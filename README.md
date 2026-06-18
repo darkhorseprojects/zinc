@@ -3,9 +3,9 @@
 
 # Zinc
 
-Zinc runs Circuitry shapes through package software and records the lineage.
+Zinc runs Circuitry shapes through package software and records lineage.
 
-Circuitry describes the shape. Packages provide behavior. Zinc connects them, stores exact request/result bytes, and moves heads to the latest node.
+Circuitry describes the shape. Packages provide behavior. Zinc connects them and stores the exact request/result bytes.
 
 ## At a glance
 
@@ -14,7 +14,6 @@ Circuitry describes the shape. Packages provide behavior. Zinc connects them, st
 | Packages | Record package name, version, root, source facts, and soft links. |
 | Shapes | Parse Circuitry files and build package-facing context. |
 | Lineage | Store request/result bytes as blobs and immutable nodes. |
-| Heads | Point each kind/key pair to its current node. |
 | Config | Store opaque configuration values. |
 | Package software | Run the selected package command with selected context on stdin. |
 
@@ -24,32 +23,21 @@ Circuitry describes the shape. Packages provide behavior. Zinc connects them, st
 zn run examples/local-llama-answer.circuitry.yaml question="What is Zinc?"
 ```
 
-A run reads a shape, confirms value flow with Circuitry, builds context for each package action, runs package software, stores output bytes, and advances the matching head.
+A run reads a shape, confirms value flow with Circuitry, builds context for each package action, runs package software, and stores the package-facing request/result bytes.
 
 ```text
-shape -> Circuitry facts -> package context -> package software -> output bytes -> node -> head
+shape -> Circuitry facts -> package context -> package software -> request/result bytes
 ```
 
 ## Store
 
-Zinc stores lineage in Limbo:
-
-```text
-lineage_blobs(id, size, bytes, path, at)
-lineage_nodes(id, kind, key, parent, request, output, at)
-lineage_heads(kind, key, node, at)
-lineage_meta(key, value)
-```
-
-Small blobs live in the database. Large blobs live under Zinc's blob directory and are referenced by hash.
+Zinc stores lineage in Limbo. Small request/result blobs live in the database. Large blobs live under Zinc's blob directory and are referenced by hash.
 
 ## CLI
 
 ```bash
 # Run and inspect
 zn run examples/compute-math.circuitry.yaml a=2 b=3
-zn inspect zinc://fragments
-zn inspect zinc://heads
 zn inspect zinc://config
 
 # Read package facts and files
@@ -129,7 +117,6 @@ The value is a package ref. The selected package decides what it means.
 ## Read more
 
 - [Architecture](https://github.com/darkhorseprojects/zinc/wiki/Architecture)
-- [Fragments and Heads](https://github.com/darkhorseprojects/zinc/wiki/Fragments-and-Heads)
 - [Packages](https://github.com/darkhorseprojects/zinc/wiki/Packages)
 - [Package Software](https://github.com/darkhorseprojects/zinc/wiki/Package-Software)
 - [Executor](https://github.com/darkhorseprojects/zinc/wiki/Executor)
