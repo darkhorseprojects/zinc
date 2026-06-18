@@ -4,6 +4,7 @@ const layout = @import("io/layout.zig");
 const files = @import("io/fs.zig");
 const serde = @import("serde");
 
+const builtin = @import("builtin");
 const Allocator = std.mem.Allocator;
 const blob_threshold = 1024 * 1024;
 
@@ -219,6 +220,12 @@ const Timeval = extern struct {
 extern fn gettimeofday(tv: *Timeval, tz: ?*anyopaque) callconv(.c) c_int;
 
 fn now() i64 {
+    if (builtin.target.os.tag == .windows) {
+        const epoch_ns = std.time.epoch.windows * std.time.ns_per_s;
+        const ns = @as(i96, std.os.windows.ntdll.RtlGetSystemTimePrecise()) * 100 + epoch_ns;
+        return @intCast(@divTrunc(ns, std.time.ns_per_s));
+    }
+
     var tv: Timeval = undefined;
     if (gettimeofday(&tv, null) != 0) return 0;
     return @intCast(tv.tv_sec);
