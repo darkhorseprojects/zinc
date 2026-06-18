@@ -68,6 +68,8 @@ zn read zinc://packages/openai-responses/files/software/responses.py
 # Manage packages
 zn pkg install ./openai-responses --global
 zn pkg list
+zn pkg links
+zn pkg update openai-responses --dry-run
 zn pkg remove openai-responses
 
 # Maintain Zinc
@@ -82,13 +84,16 @@ A package is a directory with `zinc.pkg.yaml`.
 
 ```yaml
 name: openai-responses
-version: "0.3.10"
+version: "0.3.11"
 about: OpenAI Responses-shaped model package.
 
 source:
   uri: https://github.com/darkhorseprojects/darkhorseprojects-packages.git
-  ref: openai-responses-v0.3.10
+  ref: openai-responses-v0.3.11
   path: openai-responses
+
+links:
+  unix-bash: "0.1.3"
 
 interface:
   request: context

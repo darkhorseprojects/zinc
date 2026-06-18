@@ -9,9 +9,6 @@ pub fn runInspect(allocator: Allocator, store: *Substrate, target: []const u8) !
     if (std.mem.startsWith(u8, target, "zinc://packages/")) return inspectPackage(allocator, store, target["zinc://packages/".len..]);
     if (std.mem.startsWith(u8, target, "zinc://package/")) return inspectPackage(allocator, store, target["zinc://package/".len..]);
     if (std.mem.eql(u8, target, "zinc://packages") or std.mem.eql(u8, target, "zinc://package")) return inspectPackages(allocator, store);
-    if (std.mem.eql(u8, target, "zinc://fragments")) return inspectFragments(allocator, store);
-    if (std.mem.eql(u8, target, "zinc://heads")) return inspectHeads(allocator, store);
-    if (std.mem.eql(u8, target, "zinc://config")) return inspectConfig(allocator, store);
     try files.writeAllOut("file: ");
     try files.writeAllOut(target);
     try files.writeAllOut("\n");
@@ -67,42 +64,6 @@ fn inspectPackages(allocator: Allocator, store: *Substrate) !void {
         allocator.free(rows);
     }
     for (rows) |row| try line3(row.package, row.version, row.root);
-}
-
-fn inspectFragments(allocator: Allocator, store: *Substrate) !void {
-    const rows = try store.listFragments();
-    defer {
-        for (rows) |row| store.freeFragment(row);
-        allocator.free(rows);
-    }
-    for (rows) |row| try line3(row.fragment, row.target, row.request);
-}
-
-fn inspectHeads(allocator: Allocator, store: *Substrate) !void {
-    const rows = try store.listHeads();
-    defer {
-        for (rows) |row| store.freeHead(row);
-        allocator.free(rows);
-    }
-    for (rows) |row| try line2(row.head, row.fragment);
-}
-
-fn inspectConfig(allocator: Allocator, store: *Substrate) !void {
-    const rows = try store.listConfig();
-    defer {
-        for (rows) |row| store.freeConfig(row);
-        allocator.free(rows);
-    }
-    for (rows) |row| try line2(row.key, row.value);
-}
-
-fn line2(a: []const u8, b: []const u8) !void {
-    try files.writeAllOut(a);
-    if (b.len > 0) {
-        try files.writeAllOut(" ");
-        try files.writeAllOut(b);
-    }
-    try files.writeAllOut("\n");
 }
 
 fn line3(a: []const u8, b: []const u8, c: []const u8) !void {

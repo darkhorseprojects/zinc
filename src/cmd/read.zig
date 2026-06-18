@@ -17,9 +17,7 @@ pub fn runRead(allocator: Allocator, store: *Substrate, target: []const u8) !voi
 fn readZinc(allocator: Allocator, store: *Substrate, uri: []const u8) ![]u8 {
     const body = uri["zinc://".len..];
     if (std.mem.startsWith(u8, body, "packages/")) return readPackage(allocator, store, body["packages/".len..]);
-    if (std.mem.startsWith(u8, body, "fragments/")) return readFragment(allocator, store, body["fragments/".len..]);
-    if (std.mem.startsWith(u8, body, "heads/")) return readHead(allocator, store, body["heads/".len..]);
-    if (std.mem.startsWith(u8, body, "config/")) return readConfig(allocator, store, body["config/".len..]);
+    if (std.mem.startsWith(u8, body, "package/")) return readPackage(allocator, store, body["package/".len..]);
     return error.UnknownZincUri;
 }
 
@@ -28,20 +26,4 @@ fn readPackage(allocator: Allocator, store: *Substrate, tail: []const u8) ![]u8 
     const alias = if (slash) |i| tail[0..i] else tail;
     const query = if (slash) |i| tail[i + 1 ..] else "manifest";
     return try package.read(allocator, store, alias, query);
-}
-
-fn readFragment(allocator: Allocator, store: *Substrate, id: []const u8) ![]u8 {
-    const row = (try store.getFragment(id)) orelse return error.FragmentNotFound;
-    defer store.freeFragment(row);
-    return try allocator.dupe(u8, row.result);
-}
-
-fn readHead(allocator: Allocator, store: *Substrate, id: []const u8) ![]u8 {
-    const row = (try store.getHead(id)) orelse return error.HeadNotFound;
-    defer store.freeHead(row);
-    return try std.fmt.allocPrint(allocator, "{s}\n", .{row.fragment});
-}
-
-fn readConfig(_: Allocator, store: *Substrate, key: []const u8) ![]u8 {
-    return (try store.getConfig(key)) orelse error.ConfigNotFound;
 }

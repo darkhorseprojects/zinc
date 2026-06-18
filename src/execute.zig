@@ -2,6 +2,8 @@ const std = @import("std");
 const serde = @import("serde");
 const circuitry = @import("circuitry");
 const files = @import("io/fs.zig");
+const layout = @import("io/layout.zig");
+const config_cmd = @import("cmd/config.zig");
 const package = @import("package.zig");
 const proc = @import("io/process.zig");
 const exec_io = @import("execute/io.zig");
@@ -126,16 +128,15 @@ fn runUse(allocator: Allocator, io: std.Io, store: *Substrate, state: *State, li
         return;
     }
 
-    const software = hostField(use.fields, "software") orelse (try defaultSoftware(store));
-    const manifest = try loadManifest(allocator, store, software);
+    const software = hostField(use.fields, "software") orelse (try defaultSoftware(allocator, io));
+    var manifest = try loadManifest(allocator, store, software);
     defer manifest.deinit();
     const request = try packageRequest(allocator, &manifest, software, use, state);
-    const selected = selectedRequest(allocator, &manifest.interface, request) catch |err| return err;
     const invocation = manifest.softwareEntry(manifestName(software)) orelse return error.SoftwareNotFound;
     var resolved = try invocation.resolve(manifest.root_path);
     defer resolved.deinit();
 
-    const stdin = if (manifest.interface.request != null) selected else null;
+    const stdin = if (manifest.interface.request_all) request else &.{};
     const result = try proc.runWithInput(allocator, io, resolved.argv, stdin, resolved.cwd, resolved.env, resolved.timeout, 64 * 1024 * 1024);
     defer result.deinit(allocator);
     if (result.stderr.len > 0) try files.writeAllErr(result.stderr);
@@ -198,25 +199,6 @@ fn packageRequest(allocator: Allocator, manifest: *const package.Manifest, softw
     }
     return out.toOwnedSlice(allocator);
 }
-
-fn selectedRequest(allocator: Allocator, iface: *const package.Interface, context: []const u8) ![]u8 {
-    const selection = iface.request orelse return try allocator.dupe(u8, "");
-    switch (selection) {
-        .all => return try allocator.dupe(u8, context),
-        .path => |path| return try exec_io.selectPathText(allocator, context, path),
-        .map => |items| {
-            var out: std.ArrayList(u8) = .empty;
-            errdefer out.deinit(allocator);
-            for (items) |item| {
-                const value = try exec_io.selectionText(allocator, context, item.selection);
-                try out.print(allocator, "{s}: |\n", .{item.name});
-                try exec_io.appendIndented(allocator, &out, value);
-            }
-            return out.toOwnedSlice(allocator);
-        },
-    }
-}
-
 fn applyLocal(allocator: Allocator, state: *State, gives: []const circuitry.VariableRef, local: []const exec_io.LocalOutput) !void {
     _ = allocator;
     for (gives) |give| {
@@ -248,9 +230,11 @@ fn hostField(fields: []const circuitry.HostField, key: []const u8) ?[]const u8 {
     return null;
 }
 
-fn defaultSoftware(store: *Substrate) ![]const u8 {
-    if (try store.getConfig("defaults.software")) |value| return value;
-    return error.DefaultSoftwareMissing;
+fn defaultSoftware(allocator: Allocator, io: std.Io) ![]const u8 {
+    _ = io;
+    var settings = try config_cmd.loadSettings(allocator);
+    defer settings.deinit();
+    return try allocator.dupe(u8, settings.defaultSoftware());
 }
 
 fn appendHostField(allocator: Allocator, out: *std.ArrayList(u8), state: *State, key: []const u8, value: *const serde.yaml.Value) !void {

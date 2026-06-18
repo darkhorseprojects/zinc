@@ -25,41 +25,6 @@ pub const Package = struct {
     }
 };
 
-pub const Fragment = struct {
-    fragment: []const u8,
-    target: []const u8,
-    request: []const u8,
-    result: []const u8,
-    time: i64,
-
-    pub fn deinit(self: *const Fragment, allocator: Allocator) void {
-        allocator.free(self.fragment);
-        allocator.free(self.target);
-        allocator.free(self.request);
-        allocator.free(self.result);
-    }
-};
-
-pub const Head = struct {
-    head: []const u8,
-    fragment: []const u8,
-
-    pub fn deinit(self: *Head, allocator: Allocator) void {
-        allocator.free(self.head);
-        allocator.free(self.fragment);
-    }
-};
-
-pub const Config = struct {
-    key: []const u8,
-    value: []const u8,
-
-    pub fn deinit(self: *const Config, allocator: Allocator) void {
-        allocator.free(self.key);
-        allocator.free(self.value);
-    }
-};
-
 pub const Store = struct {
     allocator: Allocator,
     db: limbo.Database,
@@ -188,13 +153,14 @@ pub const Store = struct {
         var arena = std.heap.ArenaAllocator.init(self.allocator);
         defer arena.deinit();
         const root = try serde.yaml.parse(arena.allocator(), row);
+        const source = valueField(&root, "source");
         return .{
             .package = try self.allocator.dupe(u8, stringField(&root, "name") orelse package),
             .version = try self.allocator.dupe(u8, stringField(&root, "version") orelse ""),
             .root = try self.allocator.dupe(u8, stringField(&root, "root") orelse ""),
-            .source_uri = try dupOptional(self.allocator, stringField(&root, "uri")),
-            .source_ref = try dupOptional(self.allocator, stringField(&root, "ref")),
-            .source_path = try dupOptional(self.allocator, stringField(&root, "path")),
+            .source_uri = try dupOptional(self.allocator, sourceField(source, "uri")),
+            .source_ref = try dupOptional(self.allocator, sourceField(source, "ref")),
+            .source_path = try dupOptional(self.allocator, sourceField(source, "path")),
         };
     }
 
@@ -219,86 +185,6 @@ pub const Store = struct {
     }
 
     pub fn freePackage(self: *Store, row: Package) void {
-        row.deinit(self.allocator);
-    }
-
-    pub fn putFragment(self: *Store, row: Fragment) !void {
-        _ = try self.advance("fragment", row.fragment, null, row.request, row.result);
-    }
-
-    pub fn getFragment(self: *Store, fragment: []const u8) !?Fragment {
-        const row = (try self.currentOutput("fragment", fragment)) orelse return null;
-        defer self.allocator.free(row);
-        var arena = std.heap.ArenaAllocator.init(self.allocator);
-        defer arena.deinit();
-        const root = try serde.yaml.parse(arena.allocator(), row);
-        return .{
-            .fragment = try self.allocator.dupe(u8, fragment),
-            .target = try self.allocator.dupe(u8, stringField(&root, "target") orelse ""),
-            .request = try self.allocator.dupe(u8, stringField(&root, "request") orelse ""),
-            .result = try self.allocator.dupe(u8, stringField(&root, "result") orelse ""),
-            .time = now(),
-        };
-    }
-
-    pub fn listFragments(self: *Store) ![]Fragment {
-        _ = self;
-        return &.{};
-    }
-
-    pub fn freeFragment(self: *Store, row: Fragment) void {
-        row.deinit(self.allocator);
-    }
-
-    pub fn putHead(self: *Store, row: Head) !void {
-        try self.moveHead("fragment", row.head, row.fragment);
-    }
-
-    pub fn getHead(self: *Store, head: []const u8) !?Head {
-        if (try self.currentNode("fragment", head)) |node| return .{ .head = try self.allocator.dupe(u8, head), .fragment = node };
-        return null;
-    }
-
-    pub fn listHeads(self: *Store) ![]Head {
-        _ = self;
-        return &.{};
-    }
-
-    pub fn freeHead(self: *Store, row: Head) void {
-        self.allocator.free(row.head);
-        self.allocator.free(row.fragment);
-    }
-
-    pub fn putConfig(self: *Store, key: []const u8, value: []const u8) !void {
-        _ = try self.advance("config", key, null, null, value);
-    }
-
-    pub fn getConfig(self: *Store, key: []const u8) !?[]u8 {
-        return self.currentOutput("config", key);
-    }
-
-    pub fn getConfigRow(self: *Store, key: []const u8) !?Config {
-        if (try self.getConfig(key)) |value| return .{ .key = try self.allocator.dupe(u8, key), .value = value };
-        return null;
-    }
-
-    pub fn listConfig(self: *Store) ![]Config {
-        const Row = struct { key: limbo.Text };
-        var stmt = try self.db.prepare(struct {}, Row, "select key from lineage_heads where kind = 'config' order by key asc");
-        defer stmt.finalize();
-        try stmt.bind(.{});
-        var out = std.ArrayList(Config).empty;
-        errdefer {
-            for (out.items) |*cfg| cfg.deinit(self.allocator);
-            out.deinit(self.allocator);
-        }
-        while (try stmt.step()) |row| {
-            if (try self.getConfig(row.key.data)) |value| try out.append(self.allocator, .{ .key = try self.allocator.dupe(u8, row.key.data), .value = value });
-        }
-        return out.toOwnedSlice(self.allocator);
-    }
-
-    pub fn freeConfig(self: *Store, row: Config) void {
         row.deinit(self.allocator);
     }
 
@@ -366,6 +252,19 @@ fn stringField(root: *const serde.yaml.Value, key: []const u8) ?[]const u8 {
         else => null,
     };
     return null;
+}
+
+fn valueField(root: *const serde.yaml.Value, key: []const u8) ?*const serde.yaml.Value {
+    if (root.* != .mapping) return null;
+    var it = root.mapping.iterator();
+    while (it.next()) |entry| if (std.mem.eql(u8, entry.key_ptr.*, key)) return entry.value_ptr;
+    return null;
+}
+
+fn sourceField(source: ?*const serde.yaml.Value, key: []const u8) ?[]const u8 {
+    const node = source orelse return null;
+    if (node.* != .mapping) return null;
+    return stringField(node, key);
 }
 
 fn dupOptional(allocator: Allocator, value: ?[]const u8) !?[]const u8 {
