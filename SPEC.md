@@ -1,6 +1,8 @@
 # Zinc Specification
 
-Zinc advances ready Circuitry value-boundary mappings by following explicit `surface` refs into package surfaces. It accepts Circuitry YAML files and Markdown files with YAML front matter, sends YAML requests, routes returned YAML fields into the active run, and records package/run history in Limbo.
+Zinc is the environment-native runtime for Circuitry shapes.
+
+Circuitry defines reusable YAML value boundaries. Zinc executes entries that explicitly name package surfaces. Packages own the surface behavior.
 
 ## Package manifest
 
@@ -9,14 +11,24 @@ name: package-name
 uri: git+https://example/repo.git@package-v0.1.0//package-name
 
 neighbors:
-  other-package: "0.1.0"
+  other-package: git+https://example/repo.git@other-package-v0.1.0//other-package
 
 surfaces:
   surface:
     python: surfaces/run.py
 ```
 
-Only `name`, `uri`, and `surfaces` are typed runtime fields. Optional material sections are navigable package facts; packages own their meaning. The package version is derived from the URI tag, so `version` is not a manifest field. `neighbors`, when present, is raw package-owned data exposed by `zn read`.
+Zinc types only:
+
+```text
+name
+uri
+surfaces
+```
+
+The package version comes from the URI tag. `version` is not a manifest field.
+
+`neighbors` is raw package-owned data. Zinc exposes it through `zn read`; it does not resolve or install from it.
 
 ## Surface refs
 
@@ -24,7 +36,7 @@ Only `name`, `uri`, and `surfaces` are typed runtime fields. Optional material s
 package.surface
 ```
 
-The package part resolves an installed package. The surface part selects an entry under `surfaces` in that package manifest.
+The package part resolves an installed package. The surface part selects a manifest surface.
 
 ## Surface entries
 
@@ -39,15 +51,29 @@ surfaces:
       NAME: value
 ```
 
-Exactly one runner is required today: `python` or `command`.
+A surface currently uses either `python` or `command`.
 
-## Circuitry and Zinc fields
+## Shape fields
 
-Circuitry owns the shape format, root `in`, root `out`, entry `in`, entry `out`, and `$value` references.
+Circuitry owns:
 
-Zinc owns host fields such as `surface` and `preserve`.
+```text
+circuitry
+name
+about
+root in / root out
+entry in / entry out
+$value references
+```
 
-A Zinc-executable entry is a Circuitry-discovered value-boundary mapping whose host fields include `surface`.
+Zinc owns host fields such as:
+
+```text
+surface
+preserve
+```
+
+All other host fields are passed to the package request unless Zinc explicitly defines them.
 
 ```yaml
 answer:
@@ -56,12 +82,9 @@ answer:
   model: local-llama
   in:
     question: $question
-    prompt: Answer briefly.
   out:
     answer: $answer
 ```
-
-`surface` is Zinc navigation to `package.surface`. `preserve` is Zinc storage policy. If `preserve` is absent, final top-level outputs are preserved and intermediate values are transient.
 
 ## Package request
 
@@ -72,12 +95,11 @@ surface: openai-responses.responses
 model: local-llama
 in:
   question: What is Zinc?
-  prompt: Answer briefly.
 out:
   answer: $answer
 ```
 
-Zinc recursively resolves `$value` references in host fields before sending the request. It does not type or interpret package fields beyond `surface` and `preserve`; packages own request meaning.
+Zinc recursively resolves `$value` references in host fields before sending the request.
 
 ## Package response
 
@@ -85,30 +107,29 @@ Package stdout is YAML with requested local names as top-level fields:
 
 ```yaml
 answer: |
-  Zinc advances package surfaces through Circuitry value flow.
-reasoning: |
-  ...
+  Zinc runs package surfaces from Circuitry value flow.
 ```
 
-Zinc maps only outputs requested by the Circuitry entry. Missing requested outputs fail the entry.
+Zinc maps only requested outputs. Missing requested outputs fail the entry.
 
-## Database
+## Run history
 
-Zinc stores package records and run history in Limbo.
+Zinc stores package records and run history in `~/.zinc/zinc.db`.
+
+Core history tables:
 
 ```text
-meta
-packages
-events
-packets
+runs(id, current, meta)
+steps(id, run, body)
+packets(id, step, bytes)
 ```
 
-`packages` records installed package roots and URIs. `events` records package surface invocations. `packets` stores the YAML requests, responses, and selected outputs referenced by those events.
+`runs.current` points at the current step. `steps.body` is YAML describing one ready wave. `packets.bytes` stores YAML request/response bytes.
 
 ## Boundary
 
-Circuitry owns shaped value flow.
-
-Zinc owns package installation records, URI resolution, `surface` navigation, process invocation, request construction, direct field selection, package packet limits, runtime parallelism, package updates, standalone binary updates, and event recording.
-
-Packages own behavior, settings, docs, scripts, examples, prompt construction, and response meaning.
+```text
+Circuitry = reusable YAML value boundaries
+Zinc     = environment-native execution, package records, run history
+Packages = extension surfaces and package-owned meaning
+```
