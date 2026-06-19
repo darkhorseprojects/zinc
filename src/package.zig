@@ -421,8 +421,11 @@ fn resolveSource(allocator: Allocator, io: std.Io, alias: []const u8, uri: []con
     const repo_dir = try std.fs.path.join(allocator, &.{ base, alias });
     errdefer _ = std.Io.Dir.cwd().deleteTree(io, repo_dir) catch {};
 
-    try runGit(allocator, io, &.{ "clone", "--depth", "1", parsed.repo, repo_dir }, null);
-    if (parsed.ref) |ref| try runGit(allocator, io, &.{ "-C", repo_dir, "checkout", ref }, null);
+    if (parsed.ref) |ref| {
+        try runGit(allocator, io, &.{ "clone", "--depth", "1", "--branch", ref, parsed.repo, repo_dir }, null);
+    } else {
+        try runGit(allocator, io, &.{ "clone", "--depth", "1", parsed.repo, repo_dir }, null);
+    }
     const root = if (parsed.path) |path| try std.fs.path.join(allocator, &.{ repo_dir, path }) else repo_dir;
     return .{ .root = root, .checkout = repo_dir, .moved = true };
 }
