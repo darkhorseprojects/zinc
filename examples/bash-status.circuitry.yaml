@@ -1,4 +1,4 @@
-circuitry: "0.8.1"
+circuitry: "0.8.2"
 name: bash status snapshot
 about: Ask the Bash package to report the current repository status.
 

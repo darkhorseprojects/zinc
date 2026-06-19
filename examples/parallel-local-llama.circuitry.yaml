@@ -1,4 +1,4 @@
-circuitry: "0.8.1"
+circuitry: "0.8.2"
 name: parallel local llama
 
 in:

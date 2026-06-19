@@ -59,34 +59,6 @@ const State = struct {
 };
 
 fn runEntry(allocator: Allocator, io: std.Io, store: *Substrate, state: *State, events: *std.ArrayList([]const u8), run_id: []const u8, advance: *usize, root_preserve: ?bool, entry: circuitry.Entry) anyerror!void {
-    if (entry.file) |file_ref| {
-        const path = if (std.mem.startsWith(u8, file_ref, "./")) try absolute(allocator, io, file_ref) else try package.resolve(allocator, store, "$root", file_ref);
-        defer allocator.free(path);
-        const bytes = try files.readLimited(allocator, path, 10 * 1024 * 1024);
-        defer allocator.free(bytes);
-        var arena = std.heap.ArenaAllocator.init(allocator);
-        defer arena.deinit();
-        const nested = try circuitry.parse(arena.allocator(), bytes);
-        var nested_state = State.init(allocator);
-        for (entry.inputs) |take| {
-            const visible = take.visible orelse take.local;
-            const input_value = state.get(visible) orelse return error.MissingStepInput;
-            try nested_state.set(take.local, input_value);
-        }
-        var nested_events = std.ArrayList([]const u8).empty;
-        defer nested_events.deinit(allocator);
-        const nested_run = try runId(allocator, nested.name);
-        defer allocator.free(nested_run);
-        var nested_advance: usize = 0;
-        const nested_preserve = preserveField(nested.fields);
-        for (nested.entries) |nested_entry| try runEntry(allocator, io, store, &nested_state, &nested_events, nested_run, &nested_advance, nested_preserve, nested_entry);
-        for (entry.outputs) |give| {
-            const output_value = nested_state.get(give.local) orelse return error.MissingStepOutput;
-            try state.set(give.visible orelse give.local, output_value);
-        }
-        return;
-    }
-
     const surface = hostField(entry.fields, "surface") orelse (try defaultSurface(allocator, io));
     defer if (hostField(entry.fields, "surface") == null) allocator.free(surface);
     var manifest = try loadManifest(allocator, store, surface);
@@ -180,14 +152,6 @@ fn appendHostField(allocator: Allocator, out: *std.ArrayList(u8), state: *State,
 }
 
 fn bare(name: []const u8) []const u8 { return if (name.len > 0 and name[0] == '$') name[1..] else name; }
-
-fn absolute(allocator: Allocator, io: std.Io, path: []const u8) ![]u8 {
-    if (std.fs.path.isAbsolute(path)) return try allocator.dupe(u8, path);
-    const cwd_buf = try allocator.alloc(u8, std.fs.max_path_bytes);
-    defer allocator.free(cwd_buf);
-    const cwd_len = try std.process.currentPath(io, cwd_buf);
-    return try std.fs.path.resolve(allocator, &.{ cwd_buf[0..cwd_len], path });
-}
 
 fn findArg(args: []const []const u8, name: []const u8) ?[]const u8 {
     const bare_name = bare(name);

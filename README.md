@@ -3,9 +3,9 @@
 
 # Zinc
 
-Zinc advances ready Circuitry surface mappings through package surfaces.
+Zinc advances ready Circuitry value-boundary mappings by following `surface` refs into package surfaces.
 
-Circuitry flattens grouped value boundaries. Packages expose surfaces and return YAML fields. Zinc keeps current values in memory, uses OS temp as cache, and records events/packets in Limbo.
+Circuitry knows the format, `in` / `out`, and `$value` references. Zinc owns `packages`, `surface`, `preserve`, package installation, execution, memory, cache, and history. Packages expose surfaces and return YAML fields.
 
 ## Run
 
@@ -14,7 +14,7 @@ zn run examples/bash-status.circuitry.yaml command="pwd"
 ```
 
 ```yaml
-circuitry: "0.8.1"
+circuitry: "0.8.2"
 name: bash status snapshot
 
 in:
@@ -34,15 +34,31 @@ out:
   - $exit
 ```
 
-## Store
+## Boundary
 
 ```text
-memory = current values
-cache  = OS temp
-DB     = what happened
+Circuitry = format + value boundaries
+surface   = Zinc navigation to package.surface
+packages  = Zinc package hints
+preserve  = Zinc storage policy
 ```
 
-The DB uses small tables for `meta`, `packages`, `events`, and `packets`. Current values stay in the runner; cached files stay in the OS temp area; recorded packets and events stay in the DB.
+Everything else in a shape is user grouping or host/package metadata.
+
+## Database
+
+Zinc keeps package records and run history in `~/.zinc/zinc.db`.
+
+The schema is intentionally small:
+
+```text
+meta
+packages
+events
+packets
+```
+
+`packages` records installed package roots and URIs. `events` records each package surface invocation. `packets` stores the YAML requests, responses, and selected outputs referenced by those events.
 
 ## CLI
 
