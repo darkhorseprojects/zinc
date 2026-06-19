@@ -1,17 +1,17 @@
-circuitry: "0.8.0"
+circuitry: "0.8.1"
 name: triple shape
 
 in:
-  $x: number
+  - $x
 
-steps:
+work:
   triple:
     in:
       x: $x
-    text: |
-      y = x * 3
+      prompt: |
+        y = x * 3
     out:
       y: $y
 
 out:
-  $y: number
+  - $y

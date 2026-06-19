@@ -4,26 +4,8 @@ const proc = @import("../io/process.zig");
 
 const Allocator = std.mem.Allocator;
 
-pub const Source = struct { uri: []const u8, ref: ?[]const u8, path: ?[]const u8 };
-pub const ResponseMapping = struct { local: []const u8, selector: [][]const u8 };
-pub const Response = union(enum) {
-    dynamic: [][]const u8,
-    mapping: []ResponseMapping,
-
-    pub fn deinit(self: *Response, allocator: Allocator) void {
-        switch (self.*) {
-            .dynamic => |selector| freeStrings(allocator, selector),
-            .mapping => |mappings| {
-                for (mappings) |mapping| {
-                    allocator.free(mapping.local);
-                    freeStrings(allocator, mapping.selector);
-                }
-                allocator.free(mappings);
-            },
-        }
-    }
-};
 pub const Requirement = struct { package: []const u8, ref: ?[]const u8 };
+
 pub const Surface = struct {
     allocator: Allocator,
     name: []const u8,
@@ -33,7 +15,6 @@ pub const Surface = struct {
     args: [][]const u8,
     cwd: ?[]const u8,
     env: []proc.EnvPair,
-    response: Response,
 
     pub fn deinit(self: *Surface) void {
         self.allocator.free(self.name);
@@ -47,7 +28,6 @@ pub const Surface = struct {
             self.allocator.free(pair.value);
         }
         self.allocator.free(self.env);
-        self.response.deinit(self.allocator);
     }
 
     pub fn resolve(self: *const Surface, package_root: []const u8) !ResolvedInvocation {
@@ -56,9 +36,9 @@ pub const Surface = struct {
         const aa = arena.allocator();
         var argv = std.ArrayList([]const u8).empty;
         if (self.python) |python| {
-            const source_path = try resolveCwd(aa, package_root, python);
+            const script_path = try resolveCwd(aa, package_root, python);
             try argv.append(aa, try aa.dupe(u8, "python3"));
-            try argv.append(aa, source_path);
+            try argv.append(aa, script_path);
         } else {
             try argv.append(aa, try aa.dupe(u8, self.command.?));
         }
@@ -69,6 +49,7 @@ pub const Surface = struct {
         return .{ .arena = arena, .argv = try argv.toOwnedSlice(aa), .stdin = null, .cwd = cwd, .env = try env.toOwnedSlice(aa), .timeout = 0 };
     }
 };
+
 pub const ResolvedInvocation = struct {
     arena: std.heap.ArenaAllocator,
     argv: [][]const u8,
@@ -77,26 +58,12 @@ pub const ResolvedInvocation = struct {
     env: []proc.EnvPair,
     timeout: u64,
 
-    pub fn deinit(self: *ResolvedInvocation) void {
-        self.arena.deinit();
-    }
+    pub fn deinit(self: *ResolvedInvocation) void { self.arena.deinit(); }
 };
-
-pub fn parseSource(allocator: Allocator, maybe: ?*const serde.yaml.Value) !?Source {
-    const v = maybe orelse return null;
-    if (v.* != .mapping) return error.InvalidPackageSource;
-    const uri = stringField(v, "uri") orelse return error.PackageSourceUriMissing;
-    return .{
-        .uri = try allocator.dupe(u8, uri),
-        .ref = try stringDup(allocator, valueField(v, "ref")),
-        .path = try stringDup(allocator, valueField(v, "path")),
-    };
-}
 
 pub fn parseRequirements(allocator: Allocator, maybe: ?*const serde.yaml.Value) ![]Requirement {
     const v = maybe orelse return &.{};
     if (v.* != .mapping) return error.InvalidPackageRequirements;
-
     var count: usize = 0;
     var it = v.mapping.iterator();
     while (it.next()) |_| count += 1;
@@ -109,7 +76,6 @@ pub fn parseRequirements(allocator: Allocator, maybe: ?*const serde.yaml.Value) 
         }
         allocator.free(requirements);
     }
-
     it.reset();
     while (it.next()) |entry| {
         const ref = switch (entry.value_ptr.*) {
@@ -133,17 +99,11 @@ pub fn parseSurfaceList(allocator: Allocator, maybe: ?*const serde.yaml.Value) !
         for (out.items) |*surface| surface.deinit();
         out.deinit(allocator);
     }
-    const v = maybe orelse {
-        const owned = try out.toOwnedSlice(allocator);
-        out.deinit(allocator);
-        return owned;
-    };
+    const v = maybe orelse return out.toOwnedSlice(allocator);
     if (v.* != .mapping) return error.InvalidPackageSurface;
     var it = v.mapping.iterator();
     while (it.next()) |entry| try out.append(allocator, try parseSurface(allocator, entry.key_ptr.*, entry.value_ptr));
-    const owned = try out.toOwnedSlice(allocator);
-    out.deinit(allocator);
-    return owned;
+    return out.toOwnedSlice(allocator);
 }
 
 fn parseSurface(allocator: Allocator, name: []const u8, raw: *const serde.yaml.Value) !Surface {
@@ -160,67 +120,20 @@ fn parseSurface(allocator: Allocator, name: []const u8, raw: *const serde.yaml.V
         .args = try stringSequence(allocator, valueField(raw, "args")),
         .cwd = try stringDup(allocator, valueField(raw, "cwd")),
         .env = try envPairs(allocator, valueField(raw, "env")),
-        .response = try parseResponse(allocator, valueField(raw, "response")),
     };
-}
-
-fn parseResponse(allocator: Allocator, maybe: ?*const serde.yaml.Value) !Response {
-    const v = maybe orelse return error.SurfaceResponseMissing;
-    return switch (v.*) {
-        .string => |selector| .{ .dynamic = try splitPath(allocator, selector) },
-        .mapping => .{ .mapping = try parseResponseMappings(allocator, v) },
-        else => error.InvalidSurfaceResponse,
-    };
-}
-
-fn parseResponseMappings(allocator: Allocator, maybe: ?*const serde.yaml.Value) ![]ResponseMapping {
-    var out = std.ArrayList(ResponseMapping).empty;
-    errdefer {
-        for (out.items) |mapping| {
-            allocator.free(mapping.local);
-            freeStrings(allocator, mapping.selector);
-        }
-        out.deinit(allocator);
-    }
-    const v = maybe orelse return error.InvalidResponseMappings;
-    if (v.* != .mapping) return error.InvalidResponseMappings;
-    var it = v.mapping.iterator();
-    while (it.next()) |entry| {
-        const selector = stringScalar(entry.value_ptr) orelse return error.InvalidResponseMapping;
-        try out.append(allocator, .{ .local = try allocator.dupe(u8, entry.key_ptr.*), .selector = try splitPath(allocator, selector) });
-    }
-    const owned = try out.toOwnedSlice(allocator);
-    out.deinit(allocator);
-    return owned;
-}
-
-pub fn splitPath(allocator: Allocator, raw: []const u8) ![][]const u8 {
-    var out = std.ArrayList([]const u8).empty;
-    errdefer out.deinit(allocator);
-    var it = std.mem.tokenizeScalar(u8, raw, '.');
-    while (it.next()) |part| try out.append(allocator, try allocator.dupe(u8, part));
-    const owned = try out.toOwnedSlice(allocator);
-    out.deinit(allocator);
-    return owned;
 }
 
 fn stringSequence(allocator: Allocator, maybe: ?*const serde.yaml.Value) ![][]const u8 {
     var out = std.ArrayList([]const u8).empty;
     errdefer out.deinit(allocator);
-    const v = maybe orelse {
-        const owned = try out.toOwnedSlice(allocator);
-        out.deinit(allocator);
-        return owned;
-    };
+    const v = maybe orelse return out.toOwnedSlice(allocator);
     if (v.* == .string) return try allocator.dupe([]const u8, &.{v.string});
     if (v.* != .sequence) return error.InvalidStringSequence;
     for (v.sequence) |item| {
         const s = stringScalar(&item) orelse return error.InvalidStringSequence;
         try out.append(allocator, try allocator.dupe(u8, s));
     }
-    const owned = try out.toOwnedSlice(allocator);
-    out.deinit(allocator);
-    return owned;
+    return out.toOwnedSlice(allocator);
 }
 
 fn envPairs(allocator: Allocator, maybe: ?*const serde.yaml.Value) ![]proc.EnvPair {
@@ -232,20 +145,14 @@ fn envPairs(allocator: Allocator, maybe: ?*const serde.yaml.Value) ![]proc.EnvPa
         }
         out.deinit(allocator);
     }
-    const v = maybe orelse {
-        const owned = try out.toOwnedSlice(allocator);
-        out.deinit(allocator);
-        return owned;
-    };
+    const v = maybe orelse return out.toOwnedSlice(allocator);
     if (v.* != .mapping) return error.InvalidEnv;
     var it = v.mapping.iterator();
     while (it.next()) |entry| {
         const raw_value = stringScalar(entry.value_ptr) orelse return error.InvalidEnv;
         try out.append(allocator, .{ .key = try allocator.dupe(u8, entry.key_ptr.*), .value = try allocator.dupe(u8, raw_value) });
     }
-    const owned = try out.toOwnedSlice(allocator);
-    out.deinit(allocator);
-    return owned;
+    return out.toOwnedSlice(allocator);
 }
 
 fn resolveCwd(allocator: Allocator, package_root: []const u8, cwd: []const u8) ![]const u8 {
@@ -265,15 +172,10 @@ pub fn valueField(node: *const serde.yaml.Value, key: []const u8) ?*const serde.
     return null;
 }
 
-pub fn stringField(node: *const serde.yaml.Value, key: []const u8) ?[]const u8 {
-    return stringScalar(valueField(node, key) orelse return null);
-}
+pub fn stringField(node: *const serde.yaml.Value, key: []const u8) ?[]const u8 { return stringScalar(valueField(node, key) orelse return null); }
 
 pub fn stringScalar(v: *const serde.yaml.Value) ?[]const u8 {
-    return switch (v.*) {
-        .string => |s| s,
-        else => null,
-    };
+    return switch (v.*) { .string => |s| s, else => null };
 }
 
 fn stringDup(allocator: Allocator, maybe: ?*const serde.yaml.Value) !?[]const u8 {
@@ -286,9 +188,7 @@ pub fn nodeText(allocator: Allocator, node: *const serde.yaml.Value) ![]u8 {
     var out = std.ArrayList(u8).empty;
     errdefer out.deinit(allocator);
     try appendNodeText(allocator, &out, node, 0);
-    const owned = try out.toOwnedSlice(allocator);
-    out.deinit(allocator);
-    return owned;
+    return out.toOwnedSlice(allocator);
 }
 
 fn appendNodeText(allocator: Allocator, out: *std.ArrayList(u8), node: *const serde.yaml.Value, indent: usize) !void {
@@ -297,13 +197,11 @@ fn appendNodeText(allocator: Allocator, out: *std.ArrayList(u8), node: *const se
         .integer => |i| try out.print(allocator, "{d}", .{i}),
         .float => |f| try out.print(allocator, "{d}", .{f}),
         .boolean => |b| try out.appendSlice(allocator, if (b) "true" else "false"),
-        .sequence => |items| {
-            for (items) |item| {
-                try indentOut(allocator, out, indent);
-                try out.appendSlice(allocator, "- ");
-                try appendNodeText(allocator, out, &item, indent + 2);
-                try out.appendSlice(allocator, "\n");
-            }
+        .sequence => |items| for (items) |item| {
+            try indentOut(allocator, out, indent);
+            try out.appendSlice(allocator, "- ");
+            try appendNodeText(allocator, out, &item, indent + 2);
+            try out.appendSlice(allocator, "\n");
         },
         .mapping => |*entries| {
             var it = entries.iterator();

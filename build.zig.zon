@@ -1,7 +1,7 @@
 .{
     .name = .zinc,
-    .version = "0.9.0",
-    .fingerprint = 0x4d05198031a1f081,
+    .version = "0.9.1",
+    .fingerprint = 0x4d05198031a1f082,
     .minimum_zig_version = "0.16.0",
     .dependencies = .{
         .serde = .{
@@ -9,8 +9,8 @@
             .hash = "serde-1.0.1-1DszT_hrDQAURHcyOhR7wEKwqbF8FYl8vN26pKLLCkWn",
         },
         .circuitry = .{
-            .url = "https://github.com/darkhorseprojects/circuitry-zig/releases/download/v0.4.0/circuitry-zig-0.4.0.tar.gz",
-            .hash = "circuitry-0.4.0-pvX_DUYDAQDmp8fkG-TDlncGQz2WqyTQOGteZ3jcEG9B",
+            .url = "https://github.com/darkhorseprojects/circuitry-zig/releases/download/v0.4.1/circuitry-zig-0.4.1.tar.gz",
+            .hash = "circuitry-0.4.1-p_X_DW33AAAa-6Abm8h2Pumrl4NgK-12R6Xyfpbu7kw3",
         },
         .limbo = .{
             .url = "https://github.com/darkhorseprojects/limbo-zig/releases/download/v0.1.11/limbo-zig-0.1.11.tar.gz",

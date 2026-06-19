@@ -21,7 +21,7 @@ pub const Manifest = struct {
     name: []const u8,
     version: []const u8,
     about: []const u8,
-    source: ?pkg_io.Source,
+    uri: []const u8,
     requirements: []pkg_io.Requirement,
     root_path: []const u8,
     surfaces: []pkg_io.Surface,
@@ -41,7 +41,7 @@ pub const Manifest = struct {
         const parsed_name = try aa.dupe(u8, name);
         const parsed_version = try aa.dupe(u8, version);
         const about = try aa.dupe(u8, pkg_io.stringField(&root, "about") orelse "");
-        const source = try pkg_io.parseSource(aa, pkg_io.valueField(&root, "source"));
+        const uri = try aa.dupe(u8, pkg_io.stringField(&root, "uri") orelse package_root);
         const requirements = try pkg_io.parseRequirements(aa, pkg_io.valueField(&root, "requires"));
         const root_path = try aa.dupe(u8, package_root);
         const surfaces = try pkg_io.parseSurfaceList(aa, pkg_io.valueField(&root, "surfaces"));
@@ -52,7 +52,7 @@ pub const Manifest = struct {
             .name = parsed_name,
             .version = parsed_version,
             .about = about,
-            .source = source,
+            .uri = uri,
             .requirements = requirements,
             .root_path = root_path,
             .surfaces = surfaces,
@@ -92,9 +92,6 @@ pub const Manifest = struct {
     }
 };
 
-pub const Source = pkg_io.Source;
-pub const Response = pkg_io.Response;
-pub const ResponseMapping = pkg_io.ResponseMapping;
 pub const Surface = pkg_io.Surface;
 pub const ResolvedInvocation = pkg_io.ResolvedInvocation;
 pub const RequirementStatus = struct {
@@ -301,40 +298,21 @@ fn updateInstalled(allocator: Allocator, io: std.Io, store: *Substrate, alias: [
     const pkg = (try store.getPackage(alias)) orelse return error.PackageNotInstalled;
     defer store.freePackage(pkg);
 
-    const source = pkg.source_uri orelse {
-        try files.writeAllOut("skipped ");
-        try files.writeAllOut(pkg.package);
-        try files.writeAllOut(" source metadata missing\n");
-        return;
-    };
-    const source_ref = options.requested_ref orelse pkg.source_ref orelse {
-        try files.writeAllOut("skipped ");
-        try files.writeAllOut(pkg.package);
-        try files.writeAllOut(" source ref missing\n");
-        return;
-    };
-    const source_path = pkg.source_path;
-
     if (options.dry_run) {
         try files.writeAllOut("would update ");
         try files.writeAllOut(pkg.package);
         try files.writeAllOut(" ");
         try files.writeAllOut(pkg.version);
         try files.writeAllOut(" from ");
-        try files.writeAllOut(source);
-        try files.writeAllOut("@");
-        try files.writeAllOut(source_ref);
-        if (source_path) |path| {
-            try files.writeAllOut("/");
-            try files.writeAllOut(path);
-        }
+        try files.writeAllOut(pkg.uri);
         try files.writeAllOut("\n");
         return;
     }
 
-    var resolved = try resolveSource(allocator, io, pkg.package, source, source_ref, source_path);
-    if (resolved.moved) {
-        defer _ = std.Io.Dir.cwd().deleteTree(io, resolved.root) catch {};
+    const resolved = try resolveSource(allocator, io, pkg.package, pkg.uri, options.requested_ref);
+    defer resolved.deinit(allocator);
+    errdefer {
+        if (resolved.checkout) |checkout| _ = std.Io.Dir.cwd().deleteTree(io, checkout) catch {};
     }
 
     var manifest = try Manifest.open(allocator, resolved.root);
@@ -373,7 +351,7 @@ fn updateInstalled(allocator: Allocator, io: std.Io, store: *Substrate, alias: [
 
     if (resolved.moved) {
         try replaceMoved(allocator, io, store, &manifest, target, resolved.root);
-        resolved.moved = true;
+        if (resolved.checkout) |checkout| _ = std.Io.Dir.cwd().deleteTree(io, checkout) catch {};
     } else {
         try replaceLocal(allocator, io, target, resolved.root);
         try putInstalled(allocator, store, &manifest, target);
@@ -388,32 +366,42 @@ fn updateInstalled(allocator: Allocator, io: std.Io, store: *Substrate, alias: [
     try files.writeAllOut("\n");
 }
 
-const ResolvedSource = struct { root: []const u8, moved: bool };
+const ResolvedSource = struct {
+    root: []const u8,
+    checkout: ?[]const u8,
+    moved: bool,
 
-fn resolveSource(allocator: Allocator, io: std.Io, alias: []const u8, uri: []const u8, ref: []const u8, path: ?[]const u8) !ResolvedSource {
-    if (!isRemote(uri)) {
-        const abs = try absolute(allocator, io, uri);
-        const root = if (path) |p| try std.fs.path.join(allocator, &.{ abs, p }) else abs;
-        return .{ .root = root, .moved = false };
+    fn deinit(self: ResolvedSource, allocator: Allocator) void {
+        if (self.checkout) |checkout| {
+            if (self.root.ptr != checkout.ptr) allocator.free(self.root);
+            allocator.free(checkout);
+        } else {
+            allocator.free(self.root);
+        }
+    }
+};
+
+fn resolveSource(allocator: Allocator, io: std.Io, alias: []const u8, uri: []const u8, override_ref: ?[]const u8) !ResolvedSource {
+    if (!std.mem.startsWith(u8, uri, "git+")) {
+        const local = if (std.mem.startsWith(u8, uri, "file://")) uri["file://".len..] else uri;
+        return .{ .root = try absolute(allocator, io, local), .checkout = null, .moved = false };
     }
 
+    const parsed = try parseGitUri(allocator, uri, override_ref);
+    defer parsed.deinit(allocator);
     const base = try layout.tempRunPath(allocator, "updates");
     defer allocator.free(base);
     try files.mkdirP(base);
-    const token = try allocator.dupe(u8, alias);
-    defer allocator.free(token);
-    const repo_dir = try std.fs.path.join(allocator, &.{ base, token });
+    const repo_dir = try std.fs.path.join(allocator, &.{ base, alias });
     errdefer _ = std.Io.Dir.cwd().deleteTree(io, repo_dir) catch {};
 
-    const clean_uri = if (std.mem.startsWith(u8, uri, "git+")) uri[4..] else uri;
-    try runGit(allocator, io, &.{ "clone", "--depth", "1", clean_uri, repo_dir }, null);
-    try runGit(allocator, io, &.{ "-C", repo_dir, "checkout", ref }, null);
-
-    const root = if (path) |p| try std.fs.path.join(allocator, &.{ repo_dir, p }) else repo_dir;
-    return .{ .root = root, .moved = true };
+    try runGit(allocator, io, &.{ "clone", "--depth", "1", parsed.repo, repo_dir }, null);
+    if (parsed.ref) |ref| try runGit(allocator, io, &.{ "-C", repo_dir, "checkout", ref }, null);
+    const root = if (parsed.path) |path| try std.fs.path.join(allocator, &.{ repo_dir, path }) else repo_dir;
+    return .{ .root = root, .checkout = repo_dir, .moved = true };
 }
 
-fn replaceMoved(allocator: Allocator, io: std.Io, store: *Substrate, manifest: *const Manifest, target: []const u8, source: []const u8) !void {
+fn replaceMoved(allocator: Allocator, io: std.Io, store: *Substrate, manifest: *const Manifest, target: []const u8, from: []const u8) !void {
     const package_dir = std.fs.path.dirname(target) orelse return error.InvalidPackagePath;
     try files.mkdirP(package_dir);
     const backup = try std.fmt.allocPrint(allocator, "{s}/{s}.previous", .{ package_dir, manifest.name });
@@ -423,40 +411,108 @@ fn replaceMoved(allocator: Allocator, io: std.Io, store: *Substrate, manifest: *
         error.FileNotFound => {},
         else => return err,
     };
-    std.Io.Dir.renameAbsolute(source, target, io) catch |err| {
-        _ = std.Io.Dir.renameAbsolute(backup, target, io) catch {};
-        return err;
+
+    var copied = false;
+    std.Io.Dir.renameAbsolute(from, target, io) catch |err| switch (err) {
+        error.CrossDevice => {
+            copyTreeAbsolute(allocator, io, from, target) catch |copy_err| {
+                restorePrevious(io, backup, target);
+                return copy_err;
+            };
+            copied = true;
+        },
+        else => {
+            restorePrevious(io, backup, target);
+            return err;
+        },
     };
     putInstalled(allocator, store, manifest, target) catch |err| {
-        _ = std.Io.Dir.renameAbsolute(target, source, io) catch {};
-        _ = std.Io.Dir.renameAbsolute(backup, target, io) catch {};
+        if (copied) {
+            _ = std.Io.Dir.cwd().deleteTree(io, target) catch {};
+        } else {
+            _ = std.Io.Dir.renameAbsolute(target, from, io) catch {};
+        }
+        restorePrevious(io, backup, target);
         return err;
     };
-    _ = std.Io.Dir.cwd().deleteTree(io, backup) catch {};
+    deletePrevious(io, backup);
 }
 
-fn replaceLocal(allocator: Allocator, io: std.Io, target: []const u8, source: []const u8) !void {
+fn copyTreeAbsolute(allocator: Allocator, io: std.Io, from: []const u8, target: []const u8) !void {
+    try std.Io.Dir.cwd().createDirPath(io, target);
+    var source = try std.Io.Dir.openDirAbsolute(io, from, .{ .iterate = true });
+    defer source.close(io);
+    var it = source.iterate();
+    while (try it.next(io)) |entry| {
+        const child_from = try std.fs.path.join(allocator, &.{ from, entry.name });
+        defer allocator.free(child_from);
+        const child_target = try std.fs.path.join(allocator, &.{ target, entry.name });
+        defer allocator.free(child_target);
+        switch (entry.kind) {
+            .directory => try copyTreeAbsolute(allocator, io, child_from, child_target),
+            .file => try std.Io.Dir.copyFileAbsolute(child_from, child_target, io, .{ .make_path = true, .replace = true }),
+            .sym_link => try copySymlinkAbsolute(io, child_from, child_target),
+            else => {},
+        }
+    }
+}
+
+fn copySymlinkAbsolute(io: std.Io, from: []const u8, target: []const u8) !void {
+    var buffer: [std.fs.max_path_bytes]u8 = undefined;
+    const len = try std.Io.Dir.readLinkAbsolute(io, from, &buffer);
+    _ = std.Io.Dir.deleteFileAbsolute(io, target) catch {};
+    try std.Io.Dir.symLinkAbsolute(io, buffer[0..len], target, .{});
+}
+
+fn restorePrevious(io: std.Io, backup: []const u8, target: []const u8) void {
+    _ = std.Io.Dir.renameAbsolute(backup, target, io) catch {};
+}
+
+fn deletePrevious(io: std.Io, backup: []const u8) void {
+    _ = std.Io.Dir.deleteFileAbsolute(io, backup) catch {
+        _ = std.Io.Dir.cwd().deleteTree(io, backup) catch {};
+    };
+}
+
+fn replaceLocal(allocator: Allocator, io: std.Io, target: []const u8, from: []const u8) !void {
     _ = allocator;
     const package_dir = std.fs.path.dirname(target) orelse return error.InvalidPackagePath;
     try files.mkdirP(package_dir);
     _ = std.Io.Dir.cwd().deleteTree(io, target) catch {};
-    try std.Io.Dir.symLinkAbsolute(io, source, target, .{ .is_directory = true });
+    try std.Io.Dir.symLinkAbsolute(io, from, target, .{ .is_directory = true });
 }
 
 fn putInstalled(allocator: Allocator, store: *Substrate, manifest: *const Manifest, target: []const u8) !void {
-    const source = manifest.source orelse Source{ .uri = target, .ref = null, .path = null };
-    const source_uri = try allocator.dupe(u8, source.uri);
-    const source_ref = if (source.ref) |ref| try allocator.dupe(u8, ref) else null;
-    const source_path = if (source.path) |path| try allocator.dupe(u8, path) else null;
-    store.putPackage(.{ .package = manifest.name, .version = manifest.version, .root = target, .source_uri = source_uri, .source_ref = source_ref, .source_path = source_path }) catch |err| {
-        if (source_ref) |ref| allocator.free(ref);
-        if (source_path) |path| allocator.free(path);
-        allocator.free(source_uri);
-        return err;
+    const uri = try allocator.dupe(u8, manifest.uri);
+    defer allocator.free(uri);
+    try store.putPackage(.{ .package = manifest.name, .version = manifest.version, .root = target, .uri = uri });
+}
+
+const ParsedGitUri = struct {
+    repo: []const u8,
+    ref: ?[]const u8,
+    path: ?[]const u8,
+
+    fn deinit(self: ParsedGitUri, allocator: Allocator) void {
+        allocator.free(self.repo);
+        if (self.ref) |ref| allocator.free(ref);
+        if (self.path) |path| allocator.free(path);
+    }
+};
+
+fn parseGitUri(allocator: Allocator, uri: []const u8, override_ref: ?[]const u8) !ParsedGitUri {
+    const body = uri["git+".len..];
+    const split = std.mem.lastIndexOf(u8, body, "//");
+    const repo_ref = if (split) |i| body[0..i] else body;
+    const path = if (split) |i| body[i + 2 ..] else null;
+    const at = std.mem.lastIndexOfScalar(u8, repo_ref, '@');
+    const repo = if (at) |i| repo_ref[0..i] else repo_ref;
+    const embedded_ref = if (at) |i| repo_ref[i + 1 ..] else null;
+    return .{
+        .repo = try allocator.dupe(u8, repo),
+        .ref = if (override_ref orelse embedded_ref) |ref| try allocator.dupe(u8, ref) else null,
+        .path = if (path) |p| try allocator.dupe(u8, p) else null,
     };
-    if (source_ref) |ref| allocator.free(ref);
-    if (source_path) |path| allocator.free(path);
-    allocator.free(source_uri);
 }
 
 fn runGit(allocator: Allocator, io: std.Io, args: []const []const u8, cwd: ?[]const u8) !void {

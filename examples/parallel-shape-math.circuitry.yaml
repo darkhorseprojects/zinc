@@ -1,10 +1,10 @@
-circuitry: "0.8.0"
+circuitry: "0.8.1"
 name: parallel shape math
 
 in:
   - $x
 
-steps:
+work:
   double:
     file: ./parts/double.circuitry.yaml
     in:
@@ -21,8 +21,8 @@ steps:
     in:
       double: $double
       triple: $triple
-    text: |
-      sum = double + triple
+      prompt: |
+        sum = double + triple
     out:
       sum: $total
 

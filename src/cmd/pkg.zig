@@ -68,14 +68,8 @@ fn list(allocator: Allocator, store: *Substrate) !void {
         try files.writeAllOut(pkg.version);
         try files.writeAllOut(" ");
         try files.writeAllOut(pkg.root);
-        if (pkg.source_uri) |uri| {
-            try files.writeAllOut(" ");
-            try files.writeAllOut(uri);
-            if (pkg.source_ref) |ref| {
-                try files.writeAllOut("@");
-                try files.writeAllOut(ref);
-            }
-        }
+        try files.writeAllOut(" ");
+        try files.writeAllOut(pkg.uri);
         try files.writeAllOut("\n");
     }
 }

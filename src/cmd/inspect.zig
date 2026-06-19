@@ -26,14 +26,8 @@ fn inspectPackage(allocator: Allocator, store: *Substrate, tail: []const u8) !vo
     try files.writeAllOut(pkg.version);
     try files.writeAllOut("\n  root: ");
     try files.writeAllOut(pkg.root);
-    if (pkg.source_uri) |uri| {
-        try files.writeAllOut("\n  source:");
-        try files.writeAllOut(uri);
-        if (pkg.source_ref) |ref| {
-            try files.writeAllOut("@");
-            try files.writeAllOut(ref);
-        }
-    }
+    try files.writeAllOut("\n  uri: ");
+    try files.writeAllOut(pkg.uri);
     try files.writeAllOut("\n");
     var manifest = package.Manifest.open(allocator, pkg.root) catch null;
     defer if (manifest) |*m| m.deinit();

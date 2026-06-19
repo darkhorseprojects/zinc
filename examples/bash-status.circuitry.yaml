@@ -1,11 +1,10 @@
-circuitry: "0.8.0"
+circuitry: "0.8.1"
 name: bash status snapshot
 about: Ask the Bash package to report the current repository status.
 
 in:
-  $command: text
-
-steps:
+  - $command
+work:
   status:
     surface: unix-bash.bash
     in:
@@ -16,5 +15,5 @@ steps:
       exit: $exit
 
 out:
-  $output: text
-  $exit: text
+  - $output
+  - $exit

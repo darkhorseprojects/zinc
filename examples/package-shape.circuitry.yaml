@@ -1,10 +1,9 @@
-circuitry: "0.8.0"
+circuitry: "0.8.1"
 name: package shape demo
 
 in:
-  $question: text
-
-steps:
+  - $question
+work:
   answer:
     file: openai-responses.shapes.short_answer
     in:
@@ -13,4 +12,4 @@ steps:
       answer: $answer
 
 out:
-  $answer: text
+  - $answer

@@ -1,18 +1,17 @@
-circuitry: "0.8.0"
+circuitry: "0.8.1"
 name: short answer part
 
 in:
-  $question: text
-
-steps:
+  - $question
+work:
   answer:
     model: local-llama
     in:
       question: $question
-    text: |
-      Answer in one short sentence.
+      prompt: |
+        Answer in one short sentence.
     out:
       answer: $answer
 
 out:
-  $answer: text
+  - $answer

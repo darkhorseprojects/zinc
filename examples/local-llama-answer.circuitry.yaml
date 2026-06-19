@@ -1,18 +1,18 @@
-circuitry: "0.8.0"
+circuitry: "0.8.1"
 name: local llama answer
 about: Answer through package surface.
 
 in:
   - $question
 
-steps:
+work:
   answer:
     surface: openai-responses.responses
     model: local-llama
     in:
       question: $question
-    text: |
-      Answer in one short sentence.
+      prompt: |
+        Answer in one short sentence.
     out:
       answer: $answer
 

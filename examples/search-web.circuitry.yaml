@@ -1,12 +1,12 @@
-circuitry: "0.8.0"
+circuitry: "0.8.1"
 name: search web
 about: Compose package capabilities without Zinc owning their internals.
 
 in:
-  $query: text
+  - $query
   $current_date: date
 
-steps:
+work:
   search:
     file: browser.search_web
     in:
@@ -21,12 +21,12 @@ steps:
     in:
       query: $query
       sources: $sources
-    text: |
-      Answer from the sources with citations.
+      prompt: |
+        Answer from the sources with citations.
     out:
       answer: $answer
       citations: $citations
 
 out:
-  $answer: text
+  - $answer
   $citations: list

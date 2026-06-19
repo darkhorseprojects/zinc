@@ -1,17 +1,16 @@
-circuitry: "0.8.0"
+circuitry: "0.8.1"
 name: parallel local llama
 
 in:
-  $topic: text
-
-steps:
+  - $topic
+work:
   define:
     surface: openai-responses.responses
     model: local-llama
     in:
       topic: $topic
-    text: |
-      Define the topic in one short sentence.
+      prompt: |
+        Define the topic in one short sentence.
     out:
       answer: $definition
   analogy:
@@ -19,11 +18,11 @@ steps:
     model: local-llama
     in:
       topic: $topic
-    text: |
-      Give one short analogy for the topic.
+      prompt: |
+        Give one short analogy for the topic.
     out:
       answer: $analogy
 
 out:
-  $definition: text
-  $analogy: text
+  - $definition
+  - $analogy

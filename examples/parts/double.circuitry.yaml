@@ -1,17 +1,17 @@
-circuitry: "0.8.0"
+circuitry: "0.8.1"
 name: double shape
 
 in:
-  $x: number
+  - $x
 
-steps:
+work:
   double:
     in:
       x: $x
-    text: |
-      y = x * 2
+      prompt: |
+        y = x * 2
     out:
       y: $y
 
 out:
-  $y: number
+  - $y

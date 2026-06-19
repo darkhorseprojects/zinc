@@ -1,185 +1,112 @@
 # Zinc Specification
 
-Zinc resolves package surface, sends it the selected Circuitry action request, records exact request/response bytes, and routes named outputs back into the run.
+Zinc advances ready Circuitry surface mappings, sends YAML requests to package surfaces, routes returned YAML fields into memory, and records events/packets in Limbo.
 
 ## Package manifest
-
-A package is a directory with `zinc.pkg.yaml`.
-
-Required fields:
 
 ```yaml
 name: package-name
 version: "0.1.0"
+uri: git+https://example/repo.git@package-v0.1.0//package-name
+
 surfaces:
   surface:
     python: surfaces/run.py
-    response: response
-```
-
-Common optional fields:
-
-```yaml
-about: Human-readable package description.
-source:
-  uri: https://example/repo.git
-  ref: package-v0.1.0
-  path: package-name
-requires:
-  other-package: "0.1.0"
-settings:
-  defaults: settings/defaults.yaml
-docs:
-  readme: docs/README.md
-scripts:
-  test: scripts/test
-examples:
-  request: examples/request.yaml
 ```
 
 Optional material sections are navigable package facts. Zinc may read them; packages own their meaning.
 
 ## Surface refs
 
-A surface ref has this form:
-
 ```text
 package.surface
-```
-
-Example:
-
-```text
-openai-responses.responses
-unix-bash.bash
 ```
 
 The package part resolves an installed package. The surface part selects an entry under `surfaces` in that package manifest.
 
 ## Surface entries
 
-A surface entry defines how Zinc runs one package-owned surface.
-
 ```yaml
 surfaces:
   responses:
-    about: Produce model text, reasoning text, and requested named outputs.
+    about: Produce model responses.
     python: surfaces/responses.py
     args: []
     cwd: .
     env:
       NAME: value
-    response: response
 ```
 
-Exactly one runner is required today:
+Exactly one runner is required today: `python` or `command`.
+
+## Circuitry mappings
+
+Zinc treats any Circuitry mapping with `surface` as executable.
 
 ```yaml
-python: surfaces/run.py
+answer:
+  surface: openai-responses.responses
+  preserve: true
+  model: local-llama
+  in:
+    question: $question
+    prompt: Answer briefly.
+  out:
+    answer: $answer
 ```
 
-or
-
-```yaml
-command: executable
-```
-
-`about`, `args`, `cwd`, and `env` are optional.
+`preserve` is Zinc policy. If absent, final top-level outputs are preserved and intermediate values are transient.
 
 ## Package request
 
-Zinc always sends the selected package request to surface stdin.
-
-The request is built from the Circuitry action and its host fields:
+Zinc sends YAML to stdin:
 
 ```yaml
 surface: openai-responses.responses
 model: local-llama
-text: |
-  Answer briefly.
 in:
-  question: "What is Zinc?"
+  question: What is Zinc?
+  prompt: Answer briefly.
 out:
-  answer: "$answer"
+  answer: $answer
 ```
 
-Zinc does not declare this request shape in the package manifest. Circuitry owns the action shape. Zinc owns request construction. Package surface owns interpretation.
+Zinc does not type or interpret package fields. Packages own request meaning.
 
-## Surface output and `response`
+## Package response
 
-Package surface writes YAML to stdout. The surface entry's `response` field tells Zinc how to select requested local outputs from that stdout.
-
-Preferred dynamic form:
+Package stdout is YAML with requested local names as top-level fields:
 
 ```yaml
-surfaces:
-  bash:
-    python: surfaces/run.py
-    response: response
+answer: |
+  Zinc advances package surfaces through Circuitry value flow.
+reasoning: |
+  ...
 ```
 
-This means requested local output `name` is selected from:
+Zinc maps only outputs requested by the Circuitry entry. Missing requested outputs fail the entry.
+
+## Store
 
 ```text
-stdout.response.name
+memory = current values
+cache  = OS temp
+DB     = what happened
 ```
 
-Preferred stdout:
+DB tables:
 
-```yaml
-response:
-  output: |
-    stdout text
-  error: |
-    stderr text
-  exit: |
-    0
+```text
+meta
+packages
+events
+packets
 ```
 
-Fixed selector form:
-
-```yaml
-surfaces:
-  thing:
-    command: existing-program
-    out:
-      answer: result.answer
-      score: metrics.score
-```
-
-This means requested local output `answer` is selected from `stdout.result.answer`.
-
-Zinc maps only outputs requested by the Circuitry action. Missing requested outputs fail the action.
-
-## Lineage
-
-For every executed package action, Zinc records:
-
-- the exact package request bytes
-- the exact package stdout bytes
-- the selected action identity
-
-Zinc does not reinterpret package-specific result meaning in lineage. Packages own output schemas; Circuitry owns routing names; Limbo stores immutable bytes/current state.
+Current values live in memory. Cache files live in the OS temp area. Recorded requests, responses, and outputs live in the DB.
 
 ## Boundary
 
-Zinc does not own package tests, scripts, model prompts, command policy, provider behavior, or documentation semantics.
+Zinc owns package installation records, URI resolution, process invocation, request construction, direct field selection, memory/cache/db policy, and event recording.
 
-Zinc owns:
-
-- installed package records
-- surface ref resolution
-- process invocation
-- package request construction
-- response selection from `surfaces.<name>.response`
-- lineage recording
-
-Packages own:
-
-- surface behavior
-- settings
-- docs
-- scripts
-- examples
-- prompt construction
-- output meaning
+Packages own behavior, settings, docs, scripts, examples, prompt construction, and response meaning.

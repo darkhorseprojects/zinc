@@ -1,17 +1,15 @@
 const std = @import("std");
 const serde = @import("serde");
 const circuitry = @import("circuitry");
-const package = @import("../package.zig");
 
 const Allocator = std.mem.Allocator;
 
 pub const LocalOutput = struct { name: []const u8, value: []const u8 };
 
-pub fn selectResponse(allocator: Allocator, response: package.Response, requested: []const circuitry.Binding, stdout: []const u8) ![]LocalOutput {
+pub fn selectFields(allocator: Allocator, requested: []const circuitry.Binding, stdout: []const u8) ![]LocalOutput {
     var arena = std.heap.ArenaAllocator.init(allocator);
     defer arena.deinit();
-    const aa = arena.allocator();
-    const root = try serde.yaml.parse(aa, stdout);
+    const root = try serde.yaml.parse(arena.allocator(), stdout);
 
     var out = std.ArrayList(LocalOutput).empty;
     errdefer {
@@ -24,11 +22,7 @@ pub fn selectResponse(allocator: Allocator, response: package.Response, requeste
 
     for (requested) |request| {
         const local = bare(request.local);
-        const selector = switch (response) {
-            .dynamic => |root_path| try childPath(aa, root_path, local),
-            .mapping => |mappings| findMapping(mappings, local) orelse return error.InvalidPackageOutput,
-        };
-        const value = try selectPath(aa, &root, selector);
+        const value = valueField(&root, local) orelse return error.InvalidPackageOutput;
         try out.append(allocator, .{ .name = try allocator.dupe(u8, local), .value = try yamlScalarText(allocator, value) });
     }
     return out.toOwnedSlice(allocator);
@@ -53,47 +47,35 @@ pub fn shapeTextResult(allocator: Allocator, state: anytype, outputs: []const ci
     return out.toOwnedSlice(allocator);
 }
 
-pub fn lineageYaml(allocator: Allocator, nodes: []const []const u8) ![]const u8 {
+pub fn eventsYaml(allocator: Allocator, events: []const []const u8) ![]const u8 {
     var out: std.ArrayList(u8) = .empty;
     errdefer out.deinit(allocator);
-    try out.appendSlice(allocator, "lineage:\n");
-    for (nodes) |node| try out.print(allocator, "  - {s}\n", .{node});
+    try out.appendSlice(allocator, "events:\n");
+    for (events) |event| try out.print(allocator, "  - {s}\n", .{event});
     return out.toOwnedSlice(allocator);
 }
 
-pub fn shapeKey(allocator: Allocator, use: circuitry.Step) ![]const u8 {
-    const joined = try joinInstructions(allocator, use.text) orelse "";
-    return try std.fmt.allocPrint(allocator, "{s}:{s}", .{ use.name, joined });
-}
-
-fn joinInstructions(allocator: Allocator, lines: [][]const u8) !?[]const u8 {
-    if (lines.len == 0) return null;
+pub fn outputsYaml(allocator: Allocator, outputs: []const circuitry.Binding, local: []const LocalOutput) ![]const u8 {
     var out: std.ArrayList(u8) = .empty;
     errdefer out.deinit(allocator);
-    for (lines, 0..) |line, i| {
-        if (i != 0) try out.append(allocator, '\n');
-        try out.appendSlice(allocator, line);
+    for (outputs) |give| {
+        const name = bare(give.local);
+        for (local) |item| {
+            if (std.mem.eql(u8, item.name, name)) {
+                try out.print(allocator, "{s}: |\n", .{name});
+                try appendIndented(allocator, &out, item.value);
+                break;
+            }
+        }
     }
-    const text = try out.toOwnedSlice(allocator);
-    return text;
+    return out.toOwnedSlice(allocator);
 }
 
-pub fn appendIndentedLines(allocator: Allocator, out: *std.ArrayList(u8), lines: [][]const u8) !void {
-    for (lines, 0..) |line, i| {
-        if (i != 0) try out.append(allocator, '\n');
-        try appendIndented(allocator, out, line);
-    }
-}
+pub fn entryKey(allocator: Allocator, entry: circuitry.Entry) ![]const u8 { return try allocator.dupe(u8, entry.path); }
 
 pub fn appendIndented(allocator: Allocator, out: *std.ArrayList(u8), value: []const u8) !void {
     var it = std.mem.splitScalar(u8, value, '\n');
     while (it.next()) |line| try out.print(allocator, "    {s}\n", .{line});
-}
-
-pub fn appendYamlEntry(allocator: Allocator, out: *std.ArrayList(u8), key: []const u8, value: *const serde.yaml.Value) !void {
-    try out.print(allocator, "  {s}: ", .{key});
-    try appendYamlInline(allocator, out, value);
-    try out.appendSlice(allocator, "\n");
 }
 
 pub fn appendYamlInline(allocator: Allocator, out: *std.ArrayList(u8), value: *const serde.yaml.Value) !void {
@@ -131,13 +113,7 @@ pub fn appendYamlInline(allocator: Allocator, out: *std.ArrayList(u8), value: *c
 }
 
 pub fn scalarText(value: *const serde.yaml.Value) ?[]const u8 {
-    return switch (value.*) {
-        .string => |s| s,
-        .integer => unreachable,
-        .float => unreachable,
-        .boolean => unreachable,
-        else => null,
-    };
+    return switch (value.*) { .string => |s| s, else => null };
 }
 
 pub fn yamlScalarText(allocator: Allocator, value: *const serde.yaml.Value) ![]u8 {
@@ -164,39 +140,7 @@ fn escapeYamlString(allocator: Allocator, value: []const u8) ![]u8 {
     return out.toOwnedSlice(allocator);
 }
 
-pub fn selectPathText(allocator: Allocator, context: []const u8, path: [][]const u8) ![]u8 {
-    var arena = std.heap.ArenaAllocator.init(allocator);
-    defer arena.deinit();
-    const root = try serde.yaml.parse(arena.allocator(), context);
-    const value = try selectPath(arena.allocator(), &root, path);
-    return try yamlScalarText(allocator, value);
-}
-
-fn findMapping(mappings: []const package.ResponseMapping, local: []const u8) ?[][]const u8 {
-    for (mappings) |mapping| if (std.mem.eql(u8, mapping.local, local)) return mapping.selector;
-    return null;
-}
-
-fn childPath(allocator: Allocator, root: [][]const u8, child: []const u8) ![][]const u8 {
-    var out = try allocator.alloc([]const u8, root.len + 1);
-    @memcpy(out[0..root.len], root);
-    out[root.len] = child;
-    return out;
-}
-
-fn bare(name: []const u8) []const u8 {
-    return if (name.len > 0 and name[0] == '$') name[1..] else name;
-}
-
-fn selectPath(allocator: Allocator, root: *const serde.yaml.Value, path: [][]const u8) !*const serde.yaml.Value {
-    _ = allocator;
-    var current = root;
-    for (path) |segment| {
-        if (current.* != .mapping) return error.InvalidContextSelection;
-        current = valueField(current, segment) orelse return error.InvalidContextSelection;
-    }
-    return current;
-}
+fn bare(name: []const u8) []const u8 { return if (name.len > 0 and name[0] == '$') name[1..] else name; }
 
 fn valueField(node: *const serde.yaml.Value, key: []const u8) ?*const serde.yaml.Value {
     if (node.* != .mapping) return null;

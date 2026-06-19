@@ -36,7 +36,9 @@ pub fn run(init: std.process.Init) !void {
         return;
     }
 
-    var store = try Store.open(allocator);
+    var settings = try cmd_config.loadSettings(allocator);
+    defer settings.deinit();
+    var store = try Store.open(allocator, settings.packetLimit());
     defer store.close();
 
     if (std.mem.eql(u8, cmd, "run")) {

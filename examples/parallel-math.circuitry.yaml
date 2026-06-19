@@ -1,30 +1,30 @@
-circuitry: "0.8.0"
+circuitry: "0.8.1"
 name: parallel math
 
 in:
   - $x
 
-steps:
+work:
   double:
     in:
       x: $x
-    text: |
-      y = x * 2
+      prompt: |
+        y = x * 2
     out:
       y: $double
   triple:
     in:
       x: $x
-    text: |
-      y = x * 3
+      prompt: |
+        y = x * 3
     out:
       y: $triple
   total:
     in:
       double: $double
       triple: $triple
-    text: |
-      sum = double + triple
+      prompt: |
+        sum = double + triple
     out:
       sum: $total
 

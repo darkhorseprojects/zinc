@@ -1,13 +1,13 @@
-circuitry: "0.8.0"
+circuitry: "0.8.1"
 name: explain compound interest
 about: Ask a capable model/package to explain the calculation from explicit inputs.
 
 in:
-  $principal: number
-  $rate: number
-  $years: number
+  - $principal
+  - $rate
+  - $years
 
-steps:
+work:
   explanation:
     surface: openai-responses.responses
     model: local-llama
@@ -15,10 +15,10 @@ steps:
       principal: $principal
       rate: $rate
       years: $years
-    text: |
-      Explain the compound-interest result for these inputs. Include the formula and final amount.
+      prompt: |
+        Explain the compound-interest result for these inputs. Include the formula and final amount.
     out:
       answer: $answer
 
 out:
-  $answer: text
+  - $answer
