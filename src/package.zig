@@ -22,7 +22,7 @@ pub const Manifest = struct {
     version: []const u8,
     about: []const u8,
     uri: []const u8,
-    requirements: []pkg_io.Requirement,
+    dependencies: []pkg_io.PackageDependency,
     root_path: []const u8,
     surfaces: []pkg_io.Surface,
 
@@ -42,7 +42,7 @@ pub const Manifest = struct {
         const parsed_version = try aa.dupe(u8, version);
         const about = try aa.dupe(u8, pkg_io.stringField(&root, "about") orelse "");
         const uri = try aa.dupe(u8, pkg_io.stringField(&root, "uri") orelse package_root);
-        const requirements = try pkg_io.parseRequirements(aa, pkg_io.valueField(&root, "requires"));
+        const dependencies = try pkg_io.parsePackageDependencies(aa, pkg_io.valueField(&root, "packages"));
         const root_path = try aa.dupe(u8, package_root);
         const surfaces = try pkg_io.parseSurfaceList(aa, pkg_io.valueField(&root, "surfaces"));
 
@@ -53,7 +53,7 @@ pub const Manifest = struct {
             .version = parsed_version,
             .about = about,
             .uri = uri,
-            .requirements = requirements,
+            .dependencies = dependencies,
             .root_path = root_path,
             .surfaces = surfaces,
         };
@@ -94,7 +94,7 @@ pub const Manifest = struct {
 
 pub const Surface = pkg_io.Surface;
 pub const ResolvedInvocation = pkg_io.ResolvedInvocation;
-pub const RequirementStatus = struct {
+pub const PackageStatus = struct {
     owner: []const u8,
     package: []const u8,
     ref: ?[]const u8,
@@ -102,7 +102,7 @@ pub const RequirementStatus = struct {
     version: ?[]const u8,
     root: ?[]const u8,
 
-    pub fn deinit(self: *const RequirementStatus, allocator: Allocator) void {
+    pub fn deinit(self: *const PackageStatus, allocator: Allocator) void {
         allocator.free(self.owner);
         allocator.free(self.package);
         if (self.ref) |v| allocator.free(v);
@@ -210,7 +210,7 @@ pub fn update(allocator: Allocator, io: std.Io, store: *Substrate, selector: []c
     try updateInstalled(allocator, io, store, selector, scope, options);
 }
 
-pub fn listRequirements(allocator: Allocator, store: *Substrate, selector: []const u8, missing_only: bool) ![]RequirementStatus {
+pub fn listPackageDependencies(allocator: Allocator, store: *Substrate, selector: []const u8, missing_only: bool) ![]PackageStatus {
     const pkgs = try store.listPackages();
     defer {
         for (pkgs) |pkg| store.freePackage(pkg);
@@ -223,13 +223,13 @@ pub fn listRequirements(allocator: Allocator, store: *Substrate, selector: []con
         {
             var manifest = Manifest.open(allocator, pkg.root) catch continue;
             defer manifest.deinit();
-            for (manifest.requirements) |requirement| {
-                if (try requirementStatusCounts(store, requirement, missing_only)) count += 1;
+            for (manifest.dependencies) |dependency| {
+                if (try dependencyStatusCounts(store, dependency, missing_only)) count += 1;
             }
         }
     }
 
-    const rows = try allocator.alloc(RequirementStatus, count);
+    const rows = try allocator.alloc(PackageStatus, count);
     errdefer allocator.free(rows);
     var index: usize = 0;
     for (pkgs) |pkg| {
@@ -237,34 +237,34 @@ pub fn listRequirements(allocator: Allocator, store: *Substrate, selector: []con
         {
             var manifest = Manifest.open(allocator, pkg.root) catch continue;
             defer manifest.deinit();
-            for (manifest.requirements) |requirement| {
-                if (try appendRequirementStatus(allocator, store, rows, &index, pkg.package, requirement, missing_only)) {}
+            for (manifest.dependencies) |dependency| {
+                if (try appendPackageStatus(allocator, store, rows, &index, pkg.package, dependency, missing_only)) {}
             }
         }
     }
     return rows;
 }
 
-fn requirementStatusCounts(store: *Substrate, requirement: pkg_io.Requirement, missing_only: bool) !bool {
-    const installed = try store.getPackage(requirement.package);
+fn dependencyStatusCounts(store: *Substrate, dependency: pkg_io.PackageDependency, missing_only: bool) !bool {
+    const installed = try store.getPackage(dependency.package);
     defer if (installed) |row| store.freePackage(row);
     if (installed) |row| {
-        const matches = if (requirement.ref) |ref| std.mem.eql(u8, ref, row.version) else true;
+        const matches = if (dependency.ref) |ref| std.mem.eql(u8, ref, row.version) else true;
         return !missing_only or !matches;
     }
     return missing_only;
 }
 
-fn appendRequirementStatus(allocator: Allocator, store: *Substrate, rows: []RequirementStatus, index: *usize, owner: []const u8, requirement: pkg_io.Requirement, missing_only: bool) !bool {
-    const installed = try store.getPackage(requirement.package);
+fn appendPackageStatus(allocator: Allocator, store: *Substrate, rows: []PackageStatus, index: *usize, owner: []const u8, dependency: pkg_io.PackageDependency, missing_only: bool) !bool {
+    const installed = try store.getPackage(dependency.package);
     if (installed) |row| {
         defer store.freePackage(row);
-        const matches = if (requirement.ref) |ref| std.mem.eql(u8, ref, row.version) else true;
+        const matches = if (dependency.ref) |ref| std.mem.eql(u8, ref, row.version) else true;
         if (missing_only and matches) return false;
         rows[index.*] = .{
             .owner = try allocator.dupe(u8, owner),
-            .package = try allocator.dupe(u8, requirement.package),
-            .ref = if (requirement.ref) |ref| try allocator.dupe(u8, ref) else null,
+            .package = try allocator.dupe(u8, dependency.package),
+            .ref = if (dependency.ref) |ref| try allocator.dupe(u8, ref) else null,
             .installed = true,
             .version = try allocator.dupe(u8, row.version),
             .root = try allocator.dupe(u8, row.root),
@@ -273,8 +273,8 @@ fn appendRequirementStatus(allocator: Allocator, store: *Substrate, rows: []Requ
         if (missing_only == false) return false;
         rows[index.*] = .{
             .owner = try allocator.dupe(u8, owner),
-            .package = try allocator.dupe(u8, requirement.package),
-            .ref = if (requirement.ref) |ref| try allocator.dupe(u8, ref) else null,
+            .package = try allocator.dupe(u8, dependency.package),
+            .ref = if (dependency.ref) |ref| try allocator.dupe(u8, ref) else null,
             .installed = false,
             .version = null,
             .root = null,

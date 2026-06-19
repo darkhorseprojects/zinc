@@ -68,7 +68,7 @@ zn read zinc://packages/openai-responses/manifest/surfaces/responses
 zn read zinc://packages/openai-responses/files/surfaces/responses.py
 zn pkg install ./openai-responses --global
 zn pkg list
-zn pkg requires
+zn pkg packages
 zn pkg update openai-responses --dry-run
 zn config
 zn update --check
@@ -80,12 +80,12 @@ A package is a directory with `zinc.pkg.yaml`.
 
 ```yaml
 name: openai-responses
-version: "0.4.1"
+version: "0.4.2"
 about: OpenAI Responses model package.
-uri: git+https://github.com/darkhorseprojects/darkhorseprojects-packages.git@openai-responses-v0.4.1//openai-responses
+uri: git+https://github.com/darkhorseprojects/darkhorseprojects-packages.git@openai-responses-v0.4.2//openai-responses
 
-requires:
-  unix-bash: "0.2.1"
+packages:
+  unix-bash: "0.2.2"
 
 surfaces:
   responses:
@@ -107,8 +107,8 @@ Zinc reads:
 Example:
 
 ```yaml
-defaults:
-  surface: openai-responses.responses
+store:
+  packet_limit: 1048576
 ```
 
 ## Building

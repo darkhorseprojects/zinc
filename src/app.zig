@@ -98,7 +98,7 @@ fn usage() !void {
         \\  run <shape>                   Run a Circuitry shape
         \\  read <uri-or-file>            Read a file or zinc:// reference
         \\  inspect <uri-or-file>         Inspect a shape, package, substrate, or reference
-        \\  pkg <subcommand> [args]       Manage packages (install, remove, list, update, requires)
+        \\  pkg <subcommand> [args]       Manage packages (install, remove, list, update, packages)
         \\  update                        Update the zn binary
         \\  config                        Manage configuration
         \\

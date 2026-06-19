@@ -2,7 +2,6 @@ const std = @import("std");
 const serde = @import("serde");
 const circuitry = @import("circuitry");
 const files = @import("io/fs.zig");
-const config_cmd = @import("cmd/config.zig");
 const package = @import("package.zig");
 const proc = @import("io/process.zig");
 const exec_io = @import("execute/io.zig");
@@ -59,8 +58,7 @@ const State = struct {
 };
 
 fn runEntry(allocator: Allocator, io: std.Io, store: *Substrate, state: *State, events: *std.ArrayList([]const u8), run_id: []const u8, advance: *usize, root_preserve: ?bool, entry: circuitry.Entry) anyerror!void {
-    const surface = hostField(entry.fields, "surface") orelse (try defaultSurface(allocator, io));
-    defer if (hostField(entry.fields, "surface") == null) allocator.free(surface);
+    const surface = hostField(entry.fields, "surface") orelse return error.SurfaceMissing;
     var manifest = try loadManifest(allocator, store, surface);
     defer manifest.deinit();
     const request = try surfaceRequest(allocator, surface, entry, state);
@@ -136,8 +134,6 @@ fn preserveField(fields: []const circuitry.HostField) ?bool {
     for (fields) |field| if (std.mem.eql(u8, field.name, "preserve")) return switch (field.value.*) { .boolean => |b| b, else => null };
     return null;
 }
-
-fn defaultSurface(allocator: Allocator, io: std.Io) ![]const u8 { _ = io; var settings = try config_cmd.loadSettings(allocator); defer settings.deinit(); return try allocator.dupe(u8, settings.defaultSurface()); }
 
 fn appendHostField(allocator: Allocator, out: *std.ArrayList(u8), state: *State, key: []const u8, value: *const serde.yaml.Value) !void {
     if (value.* == .string) if (state.get(bare(value.string))) |resolved| {
