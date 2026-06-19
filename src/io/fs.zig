@@ -57,3 +57,18 @@ pub fn readStdin(buffer: []u8) !usize {
     var reader = std.Io.File.stdin().readerStreaming(io_opt, &stdin_buffer);
     return reader.interface.readSliceShort(buffer);
 }
+
+pub fn readAllStdin(allocator: Allocator, limit: usize) ![]u8 {
+    var stdin_buffer: [1024]u8 = undefined;
+    var reader = std.Io.File.stdin().readerStreaming(io_opt, &stdin_buffer);
+    var out: std.ArrayList(u8) = .empty;
+    errdefer out.deinit(allocator);
+    var buffer: [4096]u8 = undefined;
+    while (true) {
+        const n = try reader.interface.readSliceShort(&buffer);
+        if (n == 0) break;
+        if (out.items.len + n > limit) return error.FileTooLarge;
+        try out.appendSlice(allocator, buffer[0..n]);
+    }
+    return out.toOwnedSlice(allocator);
+}

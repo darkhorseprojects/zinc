@@ -4,8 +4,6 @@ const proc = @import("../io/process.zig");
 
 const Allocator = std.mem.Allocator;
 
-pub const PackageNeighbor = struct { package: []const u8, ref: ?[]const u8 };
-
 pub const Surface = struct {
     allocator: Allocator,
     name: []const u8,
@@ -60,38 +58,6 @@ pub const ResolvedInvocation = struct {
 
     pub fn deinit(self: *ResolvedInvocation) void { self.arena.deinit(); }
 };
-
-pub fn parsePackageNeighbors(allocator: Allocator, maybe: ?*const serde.yaml.Value) ![]PackageNeighbor {
-    const v = maybe orelse return &.{};
-    if (v.* != .mapping) return error.InvalidManifestNeighbors;
-    var count: usize = 0;
-    var it = v.mapping.iterator();
-    while (it.next()) |_| count += 1;
-    var neighbors = try allocator.alloc(PackageNeighbor, count);
-    var index: usize = 0;
-    errdefer {
-        for (neighbors[0..index]) |neighbor| {
-            allocator.free(neighbor.package);
-            if (neighbor.ref) |ref| allocator.free(ref);
-        }
-        allocator.free(neighbors);
-    }
-    it.reset();
-    while (it.next()) |entry| {
-        const ref = switch (entry.value_ptr.*) {
-            .string => |s| try allocator.dupe(u8, s),
-            .mapping => blk: {
-                const ref_value = valueField(entry.value_ptr, "ref") orelse return error.InvalidManifestPackageNeighbor;
-                if (ref_value.* != .string) return error.InvalidManifestPackageNeighbor;
-                break :blk try allocator.dupe(u8, ref_value.string);
-            },
-            else => return error.InvalidManifestPackageNeighbor,
-        };
-        neighbors[index] = .{ .package = try allocator.dupe(u8, entry.key_ptr.*), .ref = ref };
-        index += 1;
-    }
-    return neighbors;
-}
 
 pub fn parseSurfaceList(allocator: Allocator, maybe: ?*const serde.yaml.Value) ![]Surface {
     var out = std.ArrayList(Surface).empty;

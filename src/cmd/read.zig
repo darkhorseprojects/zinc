@@ -16,6 +16,7 @@ pub fn runRead(allocator: Allocator, store: *Substrate, target: []const u8) !voi
 
 fn readZinc(allocator: Allocator, store: *Substrate, uri: []const u8) ![]u8 {
     const body = uri["zinc://".len..];
+    if (std.mem.eql(u8, body, "packages") or std.mem.eql(u8, body, "package")) return packageList(allocator, store);
     if (std.mem.startsWith(u8, body, "packages/")) return readPackage(allocator, store, body["packages/".len..]);
     if (std.mem.startsWith(u8, body, "package/")) return readPackage(allocator, store, body["package/".len..]);
     return error.UnknownZincUri;
@@ -26,4 +27,22 @@ fn readPackage(allocator: Allocator, store: *Substrate, tail: []const u8) ![]u8 
     const alias = if (slash) |i| tail[0..i] else tail;
     const query = if (slash) |i| tail[i + 1 ..] else "manifest";
     return try package.read(allocator, store, alias, query);
+}
+
+fn packageList(allocator: Allocator, store: *Substrate) ![]u8 {
+    const rows = try store.listPackages();
+    defer {
+        for (rows) |row| store.freePackage(row);
+        allocator.free(rows);
+    }
+    var out = std.ArrayList(u8).empty;
+    errdefer out.deinit(allocator);
+    try out.appendSlice(allocator, "packages:\n");
+    for (rows) |row| {
+        try out.print(allocator, "  {s}:\n", .{row.package});
+        try out.print(allocator, "    version: {s}\n", .{row.version});
+        try out.print(allocator, "    root: {s}\n", .{row.root});
+        try out.print(allocator, "    uri: {s}\n", .{row.uri});
+    }
+    return out.toOwnedSlice(allocator);
 }

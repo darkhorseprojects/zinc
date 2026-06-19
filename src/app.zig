@@ -2,7 +2,6 @@ const std = @import("std");
 const Store = @import("substrate.zig").Store;
 const cmd_run = @import("cmd/run.zig");
 const cmd_read = @import("cmd/read.zig");
-const cmd_inspect = @import("cmd/inspect.zig");
 const cmd_pkg = @import("cmd/pkg.zig");
 const cmd_config = @import("cmd/config.zig");
 const cmd_update = @import("cmd/update.zig");
@@ -42,17 +41,24 @@ pub fn run(init: std.process.Init) !void {
     defer store.close();
 
     if (std.mem.eql(u8, cmd, "run")) {
-        const shape = args.next() orelse {
-            try files.writeAllErr("Error: Missing shape path.\n");
-            try usage();
-            return error.InvalidUsage;
-        };
+        var report = false;
+        var shape: ?[]const u8 = null;
         var remaining: std.ArrayList([]const u8) = .empty;
         defer remaining.deinit(allocator);
         while (args.next()) |arg| {
-            try remaining.append(allocator, arg);
+            if (std.mem.eql(u8, arg, "--report")) {
+                report = true;
+            } else if (shape == null) {
+                shape = arg;
+            } else {
+                try remaining.append(allocator, arg);
+            }
         }
-        try cmd_run.run(allocator, init.io, &store, &settings, shape, remaining.items);
+        try cmd_run.run(allocator, init.io, &store, &settings, shape orelse {
+            try files.writeAllErr("Error: Missing shape path.\n");
+            try usage();
+            return error.InvalidUsage;
+        }, remaining.items, report);
     } else if (std.mem.eql(u8, cmd, "read")) {
         const target = args.next() orelse {
             try files.writeAllErr("Error: Missing target to read.\n");
@@ -60,13 +66,6 @@ pub fn run(init: std.process.Init) !void {
             return error.InvalidUsage;
         };
         try cmd_read.runRead(allocator, &store, target);
-    } else if (std.mem.eql(u8, cmd, "inspect")) {
-        const target = args.next() orelse {
-            try files.writeAllErr("Error: Missing target to inspect.\n");
-            try usage();
-            return error.InvalidUsage;
-        };
-        try cmd_inspect.runInspect(allocator, &store, target);
     } else if (std.mem.eql(u8, cmd, "pkg")) {
         var remaining: std.ArrayList([]const u8) = .empty;
         defer remaining.deinit(allocator);
@@ -95,10 +94,9 @@ fn usage() !void {
         \\Usage: zn <command> [args]
         \\
         \\Commands:
-        \\  run <shape>                   Run a Circuitry shape
-        \\  read <uri-or-file>            Read a file or zinc:// reference
-        \\  inspect <uri-or-file>         Inspect a shape, package, substrate, or reference
-        \\  pkg <subcommand> [args]       Manage packages (install, remove, list, update, neighbors)
+        \\  run [--report] <shape|zinc://|->  Run a Circuitry shape
+        \\  read <uri-or-file>                 Read a file or zinc:// reference
+        \\  pkg <subcommand> [args]            Manage packages (install, remove, list, update)
         \\  update                        Update the zn binary
         \\  config                        Manage configuration
         \\

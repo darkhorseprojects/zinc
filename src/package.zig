@@ -22,7 +22,6 @@ pub const Manifest = struct {
     version: []const u8,
     about: []const u8,
     uri: []const u8,
-    neighbors: []pkg_io.PackageNeighbor,
     root_path: []const u8,
     surfaces: []pkg_io.Surface,
 
@@ -41,7 +40,6 @@ pub const Manifest = struct {
         const about = try aa.dupe(u8, pkg_io.stringField(&root, "about") orelse "");
         const uri = try aa.dupe(u8, pkg_io.stringField(&root, "uri") orelse return error.PackageUriMissing);
         const version = try deriveVersion(aa, uri);
-        const neighbors = try pkg_io.parsePackageNeighbors(aa, pkg_io.valueField(&root, "neighbors"));
         const root_path = try aa.dupe(u8, package_root);
         const surfaces = try pkg_io.parseSurfaceList(aa, pkg_io.valueField(&root, "surfaces"));
 
@@ -52,7 +50,6 @@ pub const Manifest = struct {
             .version = version,
             .about = about,
             .uri = uri,
-            .neighbors = neighbors,
             .root_path = root_path,
             .surfaces = surfaces,
         };
@@ -93,23 +90,6 @@ pub const Manifest = struct {
 
 pub const Surface = pkg_io.Surface;
 pub const ResolvedInvocation = pkg_io.ResolvedInvocation;
-pub const PackageStatus = struct {
-    owner: []const u8,
-    package: []const u8,
-    ref: ?[]const u8,
-    installed: bool,
-    version: ?[]const u8,
-    root: ?[]const u8,
-
-    pub fn deinit(self: *const PackageStatus, allocator: Allocator) void {
-        allocator.free(self.owner);
-        allocator.free(self.package);
-        if (self.ref) |v| allocator.free(v);
-        if (self.version) |v| allocator.free(v);
-        if (self.root) |v| allocator.free(v);
-    }
-};
-
 pub fn parseRef(raw: []const u8) !Ref {
     if (std.mem.indexOfScalar(u8, raw, '/')) |_| return error.NotPackageRef;
     const dot = std.mem.indexOfScalar(u8, raw, '.') orelse return error.NotPackageRef;
@@ -207,80 +187,6 @@ pub fn update(allocator: Allocator, io: std.Io, store: *Substrate, selector: []c
         return;
     }
     try updateInstalled(allocator, io, store, selector, scope, options);
-}
-
-pub fn listPackageNeighbors(allocator: Allocator, store: *Substrate, selector: []const u8, missing_only: bool) ![]PackageStatus {
-    const pkgs = try store.listPackages();
-    defer {
-        for (pkgs) |pkg| store.freePackage(pkg);
-        allocator.free(pkgs);
-    }
-
-    var count: usize = 0;
-    for (pkgs) |pkg| {
-        if (!std.mem.eql(u8, selector, "all") and !std.mem.eql(u8, selector, pkg.package)) continue;
-        {
-            var manifest = Manifest.open(allocator, pkg.root) catch continue;
-            defer manifest.deinit();
-            for (manifest.neighbors) |neighbor| {
-                if (try neighborStatusCounts(store, neighbor, missing_only)) count += 1;
-            }
-        }
-    }
-
-    const rows = try allocator.alloc(PackageStatus, count);
-    errdefer allocator.free(rows);
-    var index: usize = 0;
-    for (pkgs) |pkg| {
-        if (!std.mem.eql(u8, selector, "all") and !std.mem.eql(u8, selector, pkg.package)) continue;
-        {
-            var manifest = Manifest.open(allocator, pkg.root) catch continue;
-            defer manifest.deinit();
-            for (manifest.neighbors) |neighbor| {
-                if (try appendNeighborStatus(allocator, store, rows, &index, pkg.package, neighbor, missing_only)) {}
-            }
-        }
-    }
-    return rows;
-}
-
-fn neighborStatusCounts(store: *Substrate, neighbor: pkg_io.PackageNeighbor, missing_only: bool) !bool {
-    const installed = try store.getPackage(neighbor.package);
-    defer if (installed) |row| store.freePackage(row);
-    if (installed) |row| {
-        const matches = if (neighbor.ref) |ref| std.mem.eql(u8, ref, row.version) else true;
-        return !missing_only or !matches;
-    }
-    return missing_only;
-}
-
-fn appendNeighborStatus(allocator: Allocator, store: *Substrate, rows: []PackageStatus, index: *usize, owner: []const u8, neighbor: pkg_io.PackageNeighbor, missing_only: bool) !bool {
-    const installed = try store.getPackage(neighbor.package);
-    if (installed) |row| {
-        defer store.freePackage(row);
-        const matches = if (neighbor.ref) |ref| std.mem.eql(u8, ref, row.version) else true;
-        if (missing_only and matches) return false;
-        rows[index.*] = .{
-            .owner = try allocator.dupe(u8, owner),
-            .package = try allocator.dupe(u8, neighbor.package),
-            .ref = if (neighbor.ref) |ref| try allocator.dupe(u8, ref) else null,
-            .installed = true,
-            .version = try allocator.dupe(u8, row.version),
-            .root = try allocator.dupe(u8, row.root),
-        };
-    } else {
-        if (missing_only == false) return false;
-        rows[index.*] = .{
-            .owner = try allocator.dupe(u8, owner),
-            .package = try allocator.dupe(u8, neighbor.package),
-            .ref = if (neighbor.ref) |ref| try allocator.dupe(u8, ref) else null,
-            .installed = false,
-            .version = null,
-            .root = null,
-        };
-    }
-    index.* += 1;
-    return true;
 }
 
 pub fn remove(allocator: Allocator, io: std.Io, store: *Substrate, alias: []const u8) !void {

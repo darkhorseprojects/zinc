@@ -32,12 +32,6 @@ pub fn runPkg(allocator: Allocator, io: std.Io, store: *Substrate, args: []const
         try files.writeAllErr("\n");
         return err;
     };
-    if (std.mem.eql(u8, cmd, "neighbors")) return neighbors(allocator, store, args[1..]) catch |err| {
-        try files.writeAllErr("pkg neighbors failed: ");
-        try files.writeAllErr(@errorName(err));
-        try files.writeAllErr("\n");
-        return err;
-    };
     return usage();
 }
 
@@ -102,43 +96,7 @@ fn update(allocator: Allocator, io: std.Io, store: *Substrate, args: []const []c
     try package.update(allocator, io, store, selector orelse return usage(), scope, opts);
 }
 
-fn neighbors(allocator: Allocator, store: *Substrate, args: []const []const u8) !void {
-    var selector: []const u8 = "all";
-    var missing_only = false;
-    for (args) |arg| {
-        if (std.mem.eql(u8, arg, "--missing")) missing_only = true else if (std.mem.eql(u8, arg, "all")) selector = "all" else selector = arg;
-    }
-    const rows = try package.listPackageNeighbors(allocator, store, selector, missing_only);
-    defer {
-        for (rows) |row| row.deinit(allocator);
-        allocator.free(rows);
-    }
-    for (rows) |row| {
-        try files.writeAllOut(row.owner);
-        try files.writeAllOut(" -> ");
-        try files.writeAllOut(row.package);
-        if (row.ref) |ref| {
-            try files.writeAllOut("@");
-            try files.writeAllOut(ref);
-        }
-        if (row.installed) {
-            try files.writeAllOut(" installed");
-            if (row.version) |version| {
-                try files.writeAllOut(" ");
-                try files.writeAllOut(version);
-            }
-            if (row.root) |root| {
-                try files.writeAllOut(" ");
-                try files.writeAllOut(root);
-            }
-        } else {
-            try files.writeAllOut(" missing");
-        }
-        try files.writeAllOut("\n");
-    }
-}
-
 fn usage() error{InvalidUsage} {
-    files.writeAllErr("usage: zn pkg <install|remove|list|update|neighbors> [args]\n") catch {};
+    files.writeAllErr("usage: zn pkg <install|remove|list|update> [args]\n") catch {};
     return error.InvalidUsage;
 }

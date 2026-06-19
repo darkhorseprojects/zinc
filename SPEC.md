@@ -16,7 +16,7 @@ surfaces:
     python: surfaces/run.py
 ```
 
-Optional material sections are navigable package facts. Zinc may read them; packages own their meaning. The package version is derived from the URI tag, so `version` is not a manifest field.
+Only `name`, `uri`, and `surfaces` are typed runtime fields. Optional material sections are navigable package facts; packages own their meaning. The package version is derived from the URI tag, so `version` is not a manifest field. `neighbors`, when present, is raw package-owned data exposed by `zn read`.
 
 ## Surface refs
 
@@ -77,7 +77,7 @@ out:
   answer: $answer
 ```
 
-Zinc does not type or interpret package fields. Packages own request meaning.
+Zinc recursively resolves `$value` references in host fields before sending the request. It does not type or interpret package fields beyond `surface` and `preserve`; packages own request meaning.
 
 ## Package response
 
@@ -109,6 +109,6 @@ packets
 
 Circuitry owns shaped value flow.
 
-Zinc owns package installation records, URI resolution, `surface` navigation, process invocation, request construction, direct field selection, package packet limits, runtime parallelism, and event recording.
+Zinc owns package installation records, URI resolution, `surface` navigation, process invocation, request construction, direct field selection, package packet limits, runtime parallelism, package updates, standalone binary updates, and event recording.
 
 Packages own behavior, settings, docs, scripts, examples, prompt construction, and response meaning.

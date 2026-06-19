@@ -3,97 +3,193 @@
 
 # Zinc
 
-Zinc is the host runtime for Circuitry shapes.
+Zinc is a programmable runtime for package-owned software.
 
-It does three things:
+It runs Circuitry shapes: YAML graphs whose executable entries name package surfaces. A surface can be anything a package owns: a model call, a shell command, a scraper, a compiler step, a chat loop, a data transform, or a local tool.
 
-1. read a Circuitry shape
-2. run package surfaces whose entries explicitly name `surface`
-3. record package installs and surface invocations in `~/.zinc/zinc.db`
+Zinc does not invent a tool API. It uses YAML.
 
-Circuitry stays YAML-shaped. Packages own behavior. Zinc owns execution, package navigation, package limits, runtime parallelism, and history.
-
-## Run a shape
+- Circuitry describes value flow.
+- Zinc resolves and runs explicit `surface` calls.
+- Packages own behavior, policy, prompts, settings, docs, and software.
+- Every package call receives YAML and returns YAML.
+- Zinc records package installs and run history.
 
 ```bash
-zn run examples/bash-status.circuitry.yaml command="pwd"
+zn run task.circuitry.yaml question="what changed?"
 ```
+
+## Why Zinc exists
+
+Most automation systems either hard-code tools into the host or hide execution behind a framework-specific object model.
+
+Zinc keeps the boundary small:
+
+```yaml
+surface: openai-responses.responses
+in:
+  question: What is Zinc?
+out:
+  answer: $answer
+```
+
+The host only knows how to run the named surface and route returned fields. The package decides what `question` means, what model to use, what policy applies, and what files or prompts are involved.
+
+That makes Zinc useful for:
+
+- model pipelines
+- shell-backed workflows
+- package-owned chat loops
+- local automation
+- reproducible experiments
+- composable project tools
+- inspectable AI/runtime history
+
+## A shape
 
 ```yaml
 circuitry: "0.8.2"
-name: bash status
+name: ask and check
 
 in:
-  - $command
+  - $question
 
-shell:
-  status:
-    surface: unix-bash.bash
-    in:
-      command: $command
-    out:
-      output: $output
-      exit: $exit
+answer:
+  surface: openai-responses.responses
+  model: local-llama
+  in:
+    question: $question
+  out:
+    answer: $answer
+
+check:
+  surface: unix-bash.bash
+  in:
+    command: "pwd"
+  out:
+    output: $cwd
+    exit: $exit
 
 out:
-  - $output
+  - $answer
+  - $cwd
   - $exit
 ```
 
-Zinc only executes entries with `surface`. Everything else is user grouping, package metadata, or host policy.
+Run it:
 
-## Markdown shapes
-
-`zn run` accepts both Circuitry YAML files and Markdown files with YAML front matter.
-
-```md
----
-circuitry: "0.8.2"
-name: bash status
-
-in:
-  - $command
-
-shell:
-  status:
-    surface: unix-bash.bash
-    in:
-      command: $command
-    out:
-      output: $output
-      exit: $exit
-
-out:
-  - $output
-  - $exit
----
-
-# Bash status
-
-Human notes can live here. Zinc ignores this body and runs only the front matter.
+```bash
+zn run ask.circuitry.yaml question="summarize this project"
 ```
 
-## Packages
+Zinc runs entries when their inputs are available. Independent entries can run in parallel according to `runtime.parallel`.
+
+## Package surfaces
 
 A package is a directory with `zinc.pkg.yaml`.
 
 ```yaml
-name: openai-responses
-about: OpenAI Responses model package.
-uri: git+https://github.com/darkhorseprojects/darkhorseprojects-packages.git@openai-responses-v0.4.4//openai-responses
-
-neighbors:
-  unix-bash: "0.2.4"
+name: unix-bash
+uri: git+https://github.com/darkhorseprojects/darkhorseprojects-packages.git@unix-bash-v0.2.4//unix-bash
 
 surfaces:
-  responses:
-    about: Produce model text and requested named outputs.
-    python: surfaces/responses.py
+  bash:
+    about: Run one Bash command through package policy.
+    python: surfaces/run.py
+
+settings:
+  defaults: settings/defaults.yaml
+  policy: settings/policy.yaml
+
+docs:
+  readme: docs/README.md
 ```
 
-The package version comes from the URI tag. Do not put `version` in the manifest.
+Zinc types only the runtime fields it needs:
 
-`neighbors` is inspection metadata only. Zinc never installs or updates neighbors automatically.
+```text
+name
+uri
+surfaces
+```
+
+Everything else is package-owned data and can be read through `zinc://`.
+
+```bash
+zn read zinc://packages/unix-bash/manifest/settings
+zn read zinc://packages/unix-bash/files/docs/README.md
+```
+
+## YAML is the protocol
+
+Zinc sends package surfaces YAML on stdin:
+
+```yaml
+surface: unix-bash.bash
+in:
+  command: pwd
+out:
+  output: $output
+  exit: $exit
+```
+
+The package writes YAML to stdout:
+
+```yaml
+output: |
+  /home/colin/dev/zinc
+exit: 0
+```
+
+Zinc selects only the fields requested by the shape.
+
+## Package-owned orchestration
+
+Because `zn run` accepts stdin and can emit structured reports, packages can generate and run shapes themselves.
+
+```bash
+cat generated.circuitry.yaml | zn run --report -
+```
+
+This is enough to build higher-level packages such as `zinc-chat` without adding chat or tool logic to Zinc core.
+
+A chat package can:
+
+1. read installed packages with `zn read zinc://packages`
+2. ask a model package for a YAML call plan
+3. validate that plan
+4. generate a temporary Circuitry graph
+5. run it with `zn run --report -`
+6. feed results back to the model
+7. return a final reply
+
+Zinc remains the runner. The package owns the loop.
+
+## Run sources
+
+```bash
+zn run file.circuitry.yaml
+zn run file.circuitry.md
+zn run zinc://packages/zinc-chat/files/shapes/chat.circuitry.yaml
+cat graph.circuitry.yaml | zn run -
+cat graph.circuitry.yaml | zn run --report -
+```
+
+Markdown files use YAML front matter as the runnable shape and leave the body for human notes.
+
+## Packages
+
+```bash
+zn pkg install ./unix-bash --global
+zn pkg list
+zn pkg update unix-bash --dry-run
+zn pkg update all --global --yes
+zn pkg remove unix-bash
+```
+
+`zn pkg update` uses the installed package URI. For git package URIs, Zinc checks matching package tags and updates only packages you explicitly ask it to update.
+
+`neighbors`, if present in a manifest, is raw package-owned metadata. Zinc exposes it through `zn read` but does not resolve, install, update, or order from it.
 
 ## Configuration
 
@@ -104,8 +200,6 @@ Zinc reads:
 ~/.zinc/config.yaml
 ```
 
-Example:
-
 ```yaml
 runtime:
   parallel: 4
@@ -115,35 +209,19 @@ packages:
     packet_limit: 1048576
   unix-bash:
     packet_limit: 262144
-  powershell:
-    packet_limit: 262144
 ```
 
-`runtime.parallel` limits concurrent surface invocations in one ready wave. `packages.<name>.packet_limit` controls stored packet tails for events from that package.
-
-## Package commands
-
-```bash
-zn pkg install ./openai-responses --global
-zn pkg list
-zn pkg neighbors
-zn pkg neighbors --missing
-zn pkg update openai-responses --dry-run
-zn pkg update all --global --yes
-```
-
-`zn pkg update` uses the installed package URI. For git package URIs, Zinc checks package tags, compares the installed version to the newest matching tag, and updates only the package you asked for.
-
-## Read package material
-
-```bash
-zn read zinc://packages/openai-responses/manifest/neighbors
-zn read zinc://packages/openai-responses/files/surfaces/responses.py
-```
+Missing config uses internal defaults. Malformed config fails loudly.
 
 ## History
 
-Zinc stores package records and run history in `~/.zinc/zinc.db`.
+Zinc stores package records and surface invocations in:
+
+```text
+~/.zinc/zinc.db
+```
+
+Tables:
 
 ```text
 meta
@@ -152,25 +230,74 @@ events
 packets
 ```
 
-- `packages` records installed package roots and source URIs.
-- `events` records package surface invocations.
-- `packets` stores YAML requests, responses, and selected outputs referenced by those events.
+The database is runtime history, not application state. Packages may read it, but Zinc does not turn history into chat memory, workflow state, or policy.
 
-## CLI
+## Updating Zinc
 
 ```bash
-zn run <shape.yaml-or-md> [name=value ...]
-zn read <uri-or-file>
-zn inspect <uri-or-file>
-zn pkg install <path-or-uri> [--global|--workspace]
-zn pkg remove <package>
-zn pkg list
-zn pkg neighbors [--missing]
-zn pkg update <package|all> [--global|--workspace] [--dry-run] [--yes]
-zn config
 zn update --check
 zn update
 ```
+
+Standalone installs can self-update.
+
+If Zinc is owned by a package manager, `zn update` refuses to replace the binary and prints the manager command instead, such as:
+
+```text
+Use: paru -Syu zinc
+Use: yay -Syu zinc
+Use: sudo pacman -Syu zinc
+Use: brew upgrade zinc
+Use: npm update -g @darkhorseprojects/zinc
+```
+
+## Boundary
+
+Zinc owns:
+
+```text
+shape loading
+package records
+surface resolution
+process invocation
+YAML request construction
+YAML field routing
+runtime parallelism
+packet limits
+run history
+package install/update
+standalone binary update
+```
+
+Packages own:
+
+```text
+behavior
+policy
+settings
+prompts
+docs
+software
+orchestration
+chat loops
+relationship semantics
+```
+
+Circuitry owns:
+
+```text
+YAML value boundaries
+root in / root out
+entry in / entry out
+$value references
+```
+
+## Learn more
+
+- [Zinc wiki](https://github.com/darkhorseprojects/zinc/wiki) — architecture, package surfaces, executor behavior, configuration, URI references, and package updates.
+- [Zinc specification](SPEC.md) — concise runtime contract and boundaries.
+- [Circuitry](https://github.com/darkhorseprojects/circuitry) — YAML value-boundary format used by Zinc shapes.
+- [Dark Horse Projects packages](https://github.com/darkhorseprojects/darkhorseprojects-packages) — package manifests, surfaces, docs, prompts, settings, and package-owned software.
 
 ## Build
 

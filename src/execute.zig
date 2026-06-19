@@ -209,18 +209,47 @@ fn preserveField(fields: []const circuitry.HostField) ?bool {
 }
 
 fn appendHostField(allocator: Allocator, out: *std.ArrayList(u8), state: *State, key: []const u8, value: *const serde.yaml.Value) !void {
-    if (value.* == .string) if (state.get(bare(value.string))) |resolved| {
-        try out.print(allocator, "{s}: ", .{key});
-        try exec_io.appendYamlInline(allocator, out, &.{ .string = resolved });
-        try out.appendSlice(allocator, "\n");
-        return;
-    };
     try out.print(allocator, "{s}: ", .{key});
-    try exec_io.appendYamlInline(allocator, out, value);
+    try appendResolvedYamlInline(allocator, out, state, value);
     try out.appendSlice(allocator, "\n");
 }
 
-fn markdownFrontMatter(allocator: Allocator, bytes: []const u8) ![]const u8 {
+fn appendResolvedYamlInline(allocator: Allocator, out: *std.ArrayList(u8), state: *State, value: *const serde.yaml.Value) !void {
+    switch (value.*) {
+        .string => |s| {
+            if (isVariableRef(s)) if (state.get(s)) |resolved| {
+                try exec_io.appendYamlInline(allocator, out, &.{ .string = resolved });
+                return;
+            };
+            try exec_io.appendYamlInline(allocator, out, value);
+        },
+        .sequence => |items| {
+            try out.appendSlice(allocator, "[");
+            for (items, 0..) |item, i| {
+                if (i != 0) try out.appendSlice(allocator, ", ");
+                try appendResolvedYamlInline(allocator, out, state, &item);
+            }
+            try out.appendSlice(allocator, "]");
+        },
+        .mapping => |*entries| {
+            try out.appendSlice(allocator, "{");
+            var first = true;
+            var it = entries.iterator();
+            while (it.next()) |entry| {
+                if (!first) try out.appendSlice(allocator, ", ");
+                first = false;
+                try out.print(allocator, "{s}: ", .{entry.key_ptr.*});
+                try appendResolvedYamlInline(allocator, out, state, entry.value_ptr);
+            }
+            try out.appendSlice(allocator, "}");
+        },
+        else => try exec_io.appendYamlInline(allocator, out, value),
+    }
+}
+
+fn isVariableRef(value: []const u8) bool { return value.len > 1 and value[0] == '$'; }
+
+pub fn markdownFrontMatter(allocator: Allocator, bytes: []const u8) ![]const u8 {
     if (!std.mem.startsWith(u8, bytes, "---\n") and !std.mem.startsWith(u8, bytes, "---\r\n")) return error.MarkdownFrontMatterMissing;
     const start: usize = if (std.mem.startsWith(u8, bytes, "---\r\n")) 5 else 4;
     var line_start = start;

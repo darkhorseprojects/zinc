@@ -3,6 +3,7 @@ const files = @import("../io/fs.zig");
 const layout = @import("../io/layout.zig");
 const platform = @import("../platform/mod.zig");
 const http = @import("../update/http.zig");
+const proc = @import("../io/process.zig");
 const version = @import("../version.zig");
 
 const Allocator = std.mem.Allocator;
@@ -19,6 +20,19 @@ const Options = struct {
 
 pub fn runUpdate(allocator: Allocator, io: std.Io, args: []const []const u8) !void {
     const opts = try parseArgs(args);
+    if (!opts.check) {
+        const exe_path = try std.process.executablePathAlloc(io, allocator);
+        defer allocator.free(exe_path);
+        if (try packageManagerOwner(allocator, io, exe_path)) |owner| {
+            defer owner.deinit(allocator);
+            try files.writeAllOut("Zinc is managed by ");
+            try files.writeAllOut(owner.manager);
+            try files.writeAllOut(".\nUse: ");
+            try files.writeAllOut(owner.command);
+            try files.writeAllOut("\n");
+            return error.PackageManagerOwned;
+        }
+    }
     if (!opts.check) try progress("resolve", 0, "checking target");
     const target_version = if (std.mem.eql(u8, opts.requested_version, "latest"))
         try latestVersion(allocator, io)
@@ -120,6 +134,138 @@ fn progress(label: []const u8, complete: usize, detail: []const u8) !void {
     try files.writeAllOut(if (complete == 0) "  0% " else "100% ");
     try files.writeAllOut(detail);
     try files.writeAllOut("\n");
+}
+
+const Owner = struct {
+    manager: []const u8,
+    command: []const u8,
+
+    fn deinit(self: Owner, allocator: Allocator) void {
+        allocator.free(self.manager);
+        allocator.free(self.command);
+    }
+};
+
+fn packageManagerOwner(allocator: Allocator, io: std.Io, exe_path: []const u8) !?Owner {
+    return switch (platform.currentOS()) {
+        .linux => try linuxOwner(allocator, io, exe_path),
+        .macos => try macosOwner(allocator, io, exe_path),
+        .windows => try windowsOwner(allocator, io, exe_path),
+    };
+}
+
+fn linuxOwner(allocator: Allocator, io: std.Io, exe_path: []const u8) !?Owner {
+    if (try pacmanOwner(allocator, io, exe_path)) |pkg| {
+        defer allocator.free(pkg);
+        const command = if (try commandAvailable(allocator, io, "paru"))
+            try std.fmt.allocPrint(allocator, "paru -Syu {s}", .{pkg})
+        else if (try commandAvailable(allocator, io, "yay"))
+            try std.fmt.allocPrint(allocator, "yay -Syu {s}", .{pkg})
+        else
+            try std.fmt.allocPrint(allocator, "sudo pacman -Syu {s}", .{pkg});
+        return .{ .manager = try allocator.dupe(u8, "pacman/AUR"), .command = command };
+    }
+    if (try dpkgOwner(allocator, io, exe_path)) |pkg| {
+        defer allocator.free(pkg);
+        return .{ .manager = try allocator.dupe(u8, "apt/dpkg"), .command = try std.fmt.allocPrint(allocator, "sudo apt update && sudo apt install --only-upgrade {s}", .{pkg}) };
+    }
+    if (try rpmOwner(allocator, io, exe_path)) |pkg| {
+        defer allocator.free(pkg);
+        const command = if (try commandAvailable(allocator, io, "dnf"))
+            try std.fmt.allocPrint(allocator, "sudo dnf upgrade {s}", .{pkg})
+        else if (try commandAvailable(allocator, io, "zypper"))
+            try std.fmt.allocPrint(allocator, "sudo zypper update {s}", .{pkg})
+        else
+            try std.fmt.allocPrint(allocator, "use your RPM package manager to update {s}", .{pkg});
+        const manager = if (try commandAvailable(allocator, io, "zypper")) "zypper/rpm" else "dnf/rpm";
+        return .{ .manager = try allocator.dupe(u8, manager), .command = command };
+    }
+    if (try npmOwner(allocator, io, exe_path)) |owner| return owner;
+    return null;
+}
+
+fn macosOwner(allocator: Allocator, io: std.Io, exe_path: []const u8) !?Owner {
+    if (try brewOwner(allocator, io, exe_path)) |owner| return owner;
+    if (try npmOwner(allocator, io, exe_path)) |owner| return owner;
+    return null;
+}
+
+fn windowsOwner(allocator: Allocator, io: std.Io, exe_path: []const u8) !?Owner {
+    _ = io;
+    const lower = try asciiLower(allocator, exe_path);
+    defer allocator.free(lower);
+    if (std.mem.indexOf(u8, lower, "scoop") != null) return .{ .manager = try allocator.dupe(u8, "Scoop"), .command = try allocator.dupe(u8, "scoop update zinc") };
+    if (std.mem.indexOf(u8, lower, "chocolatey") != null or std.mem.indexOf(u8, lower, "choco") != null) return .{ .manager = try allocator.dupe(u8, "Chocolatey"), .command = try allocator.dupe(u8, "choco upgrade zinc") };
+    if (std.mem.indexOf(u8, lower, "windowsapps") != null or std.mem.indexOf(u8, lower, "winget") != null) return .{ .manager = try allocator.dupe(u8, "winget"), .command = try allocator.dupe(u8, "winget upgrade zinc") };
+    return null;
+}
+
+fn pacmanOwner(allocator: Allocator, io: std.Io, exe_path: []const u8) !?[]u8 {
+    if (!try commandAvailable(allocator, io, "pacman")) return null;
+    const result = proc.run(allocator, io, &.{ "pacman", "-Qo", exe_path }, null, &.{}, max_text_bytes) catch return null;
+    defer result.deinit(allocator);
+    if (result.code != 0) return null;
+    const marker = " is owned by ";
+    const start = std.mem.indexOf(u8, result.stdout, marker) orelse return null;
+    const rest = result.stdout[start + marker.len ..];
+    return try firstWord(allocator, rest);
+}
+
+fn dpkgOwner(allocator: Allocator, io: std.Io, exe_path: []const u8) !?[]u8 {
+    if (!try commandAvailable(allocator, io, "dpkg")) return null;
+    const result = proc.run(allocator, io, &.{ "dpkg", "-S", exe_path }, null, &.{}, max_text_bytes) catch return null;
+    defer result.deinit(allocator);
+    if (result.code != 0) return null;
+    const colon = std.mem.indexOfScalar(u8, result.stdout, ':') orelse return null;
+    return try allocator.dupe(u8, std.mem.trim(u8, result.stdout[0..colon], " \t\r\n"));
+}
+
+fn rpmOwner(allocator: Allocator, io: std.Io, exe_path: []const u8) !?[]u8 {
+    if (!try commandAvailable(allocator, io, "rpm")) return null;
+    const result = proc.run(allocator, io, &.{ "rpm", "-qf", exe_path }, null, &.{}, max_text_bytes) catch return null;
+    defer result.deinit(allocator);
+    if (result.code != 0) return null;
+    return try firstWord(allocator, result.stdout);
+}
+
+fn brewOwner(allocator: Allocator, io: std.Io, exe_path: []const u8) !?Owner {
+    if (!try commandAvailable(allocator, io, "brew")) return null;
+    const result = proc.run(allocator, io, &.{ "brew", "--prefix", "zinc" }, null, &.{}, max_text_bytes) catch return null;
+    defer result.deinit(allocator);
+    if (result.code != 0) return null;
+    const prefix = std.mem.trim(u8, result.stdout, " \t\r\n");
+    if (!std.mem.startsWith(u8, exe_path, prefix)) return null;
+    return .{ .manager = try allocator.dupe(u8, "Homebrew"), .command = try allocator.dupe(u8, "brew upgrade zinc") };
+}
+
+fn npmOwner(allocator: Allocator, io: std.Io, exe_path: []const u8) !?Owner {
+    if (!try commandAvailable(allocator, io, "npm")) return null;
+    const result = proc.run(allocator, io, &.{ "npm", "prefix", "-g" }, null, &.{}, max_text_bytes) catch return null;
+    defer result.deinit(allocator);
+    if (result.code != 0) return null;
+    const prefix = std.mem.trim(u8, result.stdout, " \t\r\n");
+    if (!std.mem.startsWith(u8, exe_path, prefix)) return null;
+    return .{ .manager = try allocator.dupe(u8, "npm"), .command = try allocator.dupe(u8, "npm update -g @darkhorseprojects/zinc") };
+}
+
+fn commandAvailable(allocator: Allocator, io: std.Io, command: []const u8) !bool {
+    if (platform.currentOS() == .windows) return false;
+    const shell_command = try std.fmt.allocPrint(allocator, "command -v {s}", .{command});
+    defer allocator.free(shell_command);
+    const result = proc.run(allocator, io, &.{ "sh", "-c", shell_command }, null, &.{}, 32 * 1024) catch return false;
+    defer result.deinit(allocator);
+    return result.code == 0;
+}
+
+fn firstWord(allocator: Allocator, text: []const u8) !?[]u8 {
+    var it = std.mem.tokenizeAny(u8, text, " \t\r\n");
+    return if (it.next()) |word| try allocator.dupe(u8, word) else null;
+}
+
+fn asciiLower(allocator: Allocator, text: []const u8) ![]u8 {
+    const out = try allocator.dupe(u8, text);
+    for (out) |*ch| ch.* = std.ascii.toLower(ch.*);
+    return out;
 }
 
 fn parseArgs(args: []const []const u8) !Options {

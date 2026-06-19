@@ -39,17 +39,21 @@ pub fn loadSettings(allocator: Allocator) !ConfigSettings {
     var bytes: ?[]const u8 = null;
     if (try layout.workspacePath(allocator, "config.yaml")) |ws_path| {
         defer allocator.free(ws_path);
-        bytes = files.readLimited(arena_allocator, ws_path, 1024 * 1024) catch null;
+        bytes = try readOptionalConfig(arena_allocator, ws_path);
     }
 
     if (bytes == null) {
         const g_path = try layout.globalPath(allocator, "config.yaml");
         defer allocator.free(g_path);
-        bytes = files.readLimited(arena_allocator, g_path, 1024 * 1024) catch null;
+        bytes = try readOptionalConfig(arena_allocator, g_path);
     }
 
     var root: ?serde.yaml.Value = null;
-    if (bytes) |b| root = serde.yaml.parse(arena_allocator, b) catch null;
+    if (bytes) |b| {
+        const parsed = try serde.yaml.parse(arena_allocator, b);
+        try validateConfig(&parsed);
+        root = parsed;
+    }
 
     return .{ .arena = arena, .root = root };
 }
@@ -78,6 +82,29 @@ pub fn runConfig(allocator: Allocator, store: anytype, args: []const []const u8)
     }
 }
 
+fn readOptionalConfig(allocator: Allocator, path: []const u8) !?[]const u8 {
+    return files.readLimited(allocator, path, 1024 * 1024) catch |err| switch (err) {
+        error.FileNotFound => null,
+        else => err,
+    };
+}
+
+fn validateConfig(root: *const serde.yaml.Value) !void {
+    if (root.* != .mapping) return error.InvalidConfig;
+    if (root.mapping.getPtr("runtime")) |runtime| {
+        if (runtime.* != .mapping) return error.InvalidConfigRuntime;
+        if (runtime.mapping.getPtr("parallel")) |parallel| _ = positiveInteger(parallel) orelse return error.InvalidConfigRuntimeParallel;
+    }
+    if (root.mapping.getPtr("packages")) |packages| {
+        if (packages.* != .mapping) return error.InvalidConfigPackages;
+        var it = packages.mapping.iterator();
+        while (it.next()) |entry| {
+            if (entry.value_ptr.* != .mapping) return error.InvalidConfigPackage;
+            if (entry.value_ptr.mapping.getPtr("packet_limit")) |limit| _ = positiveInteger(limit) orelse return error.InvalidConfigPacketLimit;
+        }
+    }
+}
+
 fn mappingField(root: *const serde.yaml.Value, key: []const u8) ?*const serde.yaml.Value {
     if (root.* != .mapping) return null;
     const value = root.mapping.getPtr(key) orelse return null;
@@ -87,6 +114,10 @@ fn mappingField(root: *const serde.yaml.Value, key: []const u8) ?*const serde.ya
 fn positiveIntegerField(root: *const serde.yaml.Value, key: []const u8) ?usize {
     if (root.* != .mapping) return null;
     const value = root.mapping.getPtr(key) orelse return null;
+    return positiveInteger(value);
+}
+
+fn positiveInteger(value: *const serde.yaml.Value) ?usize {
     return switch (value.*) {
         .integer => |n| if (n > 0) @intCast(n) else null,
         else => null,
