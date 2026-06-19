@@ -6,14 +6,21 @@ const package = @import("package.zig");
 const proc = @import("io/process.zig");
 const exec_io = @import("execute/io.zig");
 const config = @import("cmd/config.zig");
-const Substrate = @import("substrate.zig").Store;
+const substrate = @import("substrate.zig");
+const Substrate = substrate.Store;
 
 const Allocator = std.mem.Allocator;
+
+pub const RunTarget = union(enum) {
+    fresh,
+    in_run: []const u8,
+    from_step: []const u8,
+};
 
 pub const Result = struct {
     arena: std.heap.ArenaAllocator,
     output: []const u8,
-    events: []const u8,
+    report: []const u8,
 
     pub fn deinit(self: *const Result) void { self.arena.deinit(); }
 };
@@ -33,7 +40,7 @@ const EntryJob = struct {
     }
 };
 
-pub fn runShape(allocator: Allocator, io: std.Io, store: *Substrate, settings: *const config.ConfigSettings, shape: circuitry.Shape, args: []const []const u8) !Result {
+pub fn runShape(allocator: Allocator, io: std.Io, store: *Substrate, settings: *const config.ConfigSettings, shape: circuitry.Shape, args: []const []const u8, target: RunTarget) !Result {
     var arena = std.heap.ArenaAllocator.init(allocator);
     errdefer arena.deinit();
     const aa = arena.allocator();
@@ -41,10 +48,21 @@ pub fn runShape(allocator: Allocator, io: std.Io, store: *Substrate, settings: *
     var state = State.init(aa);
     for (shape.inputs) |take| if (findArg(args, take.name)) |arg_value| try state.set(bare(take.name), arg_value);
 
-    var events = std.ArrayList([]const u8).empty;
-    errdefer events.deinit(aa);
-    const root_preserve = preserveField(shape.fields);
-    const run_id = try runId(aa, shape.name);
+    var steps = std.ArrayList([]const u8).empty;
+    errdefer steps.deinit(aa);
+    const run_id = switch (target) {
+        .fresh => blk: {
+            const run_meta = try runMeta(aa, shape.name);
+            break :blk try store.createRun(run_meta);
+        },
+        .in_run => |id| try allocator.dupe(u8, id),
+        .from_step => |step| try store.stepRun(step),
+    };
+    defer allocator.free(run_id);
+    const parent_step = switch (target) {
+        .from_step => |step| step,
+        else => null,
+    };
     const parallel = @max(settings.runtimeParallel(), 1);
     const completed = try aa.alloc(bool, shape.entries.len);
     for (completed) |*done| done.* = false;
@@ -81,6 +99,15 @@ pub fn runShape(allocator: Allocator, io: std.Io, store: *Substrate, settings: *
         }
 
         advance += 1;
+        var packets = std.ArrayList(substrate.StepPacket).empty;
+        defer packets.deinit(aa);
+        var calls = std.ArrayList(u8).empty;
+        defer calls.deinit(aa);
+        if (parent_step) |parent| {
+            try calls.print(aa, "parent: zinc://steps/{s}\nadvance: {d}\ncalls:\n", .{ parent, advance });
+        } else {
+            try calls.print(aa, "parent: null\nadvance: {d}\ncalls:\n", .{advance});
+        }
         for (jobs) |*job| {
             if (job.err) |err| return err;
             const result = job.result orelse return error.PackageRunMissing;
@@ -90,17 +117,28 @@ pub fn runShape(allocator: Allocator, io: std.Io, store: *Substrate, settings: *
             defer exec_io.freeLocal(local, aa);
             try applyLocal(&state, job.entry.outputs, local);
             const outputs_yaml = try exec_io.outputsYaml(aa, job.entry.outputs, local);
-            const preserve = preserveField(job.entry.fields) orelse root_preserve orelse false;
-            try store.recordEvent(run_id, advance, job.entry.path, job.surface, job.request, result.stdout, outputs_yaml, preserve, settings.packetLimit(surfacePackage(job.surface)));
-            try events.append(aa, try aa.dupe(u8, job.entry.path));
+            const request_packet = try store.packetId(job.request);
+            defer allocator.free(request_packet);
+            const response_packet = try store.packetId(result.stdout);
+            defer allocator.free(response_packet);
+            try packets.append(aa, .{ .id = try aa.dupe(u8, request_packet), .bytes = job.request });
+            try packets.append(aa, .{ .id = try aa.dupe(u8, response_packet), .bytes = result.stdout });
+            try calls.print(aa,
+                "  - path: {s}\n    surface: {s}\n    request: zinc://packets/{s}\n    response: zinc://packets/{s}\n    out: |\n",
+                .{ job.entry.path, job.surface, request_packet, response_packet },
+            );
+            try exec_io.appendIndentedBy(aa, &calls, outputs_yaml, 6);
             completed[job.index] = true;
             finished += 1;
         }
+        const step_id = try store.recordStep(run_id, parent_step, calls.items, packets.items);
+        defer allocator.free(step_id);
+        try steps.append(aa, try aa.dupe(u8, step_id));
     }
 
     const output = try exec_io.shapeTextResult(aa, &state, shape.outputs);
-    const event_bytes = try exec_io.eventsYaml(aa, events.items);
-    return .{ .arena = arena, .output = output, .events = event_bytes };
+    const report = try exec_io.stepsYaml(aa, run_id, steps.items);
+    return .{ .arena = arena, .output = output, .report = report };
 }
 
 pub fn readShape(allocator: Allocator, path: []const u8) ![]const u8 {
@@ -274,6 +312,6 @@ fn findArg(args: []const []const u8, name: []const u8) ?[]const u8 {
     return null;
 }
 
-fn runId(allocator: Allocator, name: []const u8) ![]const u8 {
-    return try std.fmt.allocPrint(allocator, "{s}", .{name});
+fn runMeta(allocator: Allocator, name: []const u8) ![]const u8 {
+    return try std.fmt.allocPrint(allocator, "name: {s}\n", .{name});
 }

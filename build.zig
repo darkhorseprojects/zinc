@@ -15,7 +15,7 @@ pub fn build(b: *std.Build) void {
 
     const serde_dep = b.dependency("serde", .{ .target = target, .optimize = optimize });
     const circuitry_dep = b.dependency("circuitry", .{ .target = target, .optimize = optimize });
-    const limbo_dep = b.dependency("limbo", .{ .target = target, .optimize = optimize });
+    const turso_dep = b.dependency("turso", .{ .target = target, .optimize = optimize });
 
     const exe_mod = b.createModule(.{
         .root_source_file = b.path("src/main.zig"),
@@ -23,7 +23,7 @@ pub fn build(b: *std.Build) void {
         .optimize = optimize,
     });
     exe_mod.addImport("circuitry", circuitry_dep.module("circuitry"));
-    exe_mod.addImport("limbo", limbo_dep.module("limbo"));
+    exe_mod.addImport("turso", turso_dep.module("turso"));
     exe_mod.addImport("serde", serde_dep.module("serde"));
 
     const exe = b.addExecutable(.{
@@ -52,7 +52,7 @@ pub fn build(b: *std.Build) void {
         .optimize = optimize,
     });
     test_mod.addImport("circuitry", circuitry_dep.module("circuitry"));
-    test_mod.addImport("limbo", limbo_dep.module("limbo"));
+    test_mod.addImport("turso", turso_dep.module("turso"));
     test_mod.addImport("serde", serde_dep.module("serde"));
     const tests = b.addTest(.{ .root_module = test_mod });
     if (is_linux) {

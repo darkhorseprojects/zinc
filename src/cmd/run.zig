@@ -14,12 +14,16 @@ pub fn run(allocator: Allocator, io: std.Io, store: *Substrate, settings: *const
     defer arena.deinit();
     const shape = try execute.parseShape(arena.allocator(), shape_bytes);
     if (report) {
-        writeReport(allocator, io, store, settings, shape, args) catch |err| {
+        const parsed = try parseRunArgs(allocator, args);
+        defer parsed.deinit(allocator);
+        writeReport(allocator, io, store, settings, shape, parsed.args, parsed.target) catch |err| {
             try writeErrorReport(allocator, err);
             return err;
         };
     } else {
-        const result = try execute.runShape(allocator, io, store, settings, shape, args);
+        const parsed = try parseRunArgs(allocator, args);
+        defer parsed.deinit(allocator);
+        const result = try execute.runShape(allocator, io, store, settings, shape, parsed.args, parsed.target);
         defer result.deinit();
         try execute.writeResult(result);
     }
@@ -59,19 +63,60 @@ fn isMarkdown(source: []const u8) bool {
     return std.mem.eql(u8, ext, ".md") or std.mem.eql(u8, ext, ".markdown");
 }
 
-fn writeReport(allocator: Allocator, io: std.Io, store: *Substrate, settings: *const config.ConfigSettings, shape: anytype, args: []const []const u8) !void {
-    const result = try execute.runShape(allocator, io, store, settings, shape, args);
+const ParsedRunArgs = struct {
+    args: []const []const u8,
+    target: execute.RunTarget,
+
+    fn deinit(self: ParsedRunArgs, allocator: Allocator) void { allocator.free(self.args); }
+};
+
+fn parseRunArgs(allocator: Allocator, args: []const []const u8) !ParsedRunArgs {
+    var target: execute.RunTarget = .fresh;
+    var rest = std.ArrayList([]const u8).empty;
+    errdefer rest.deinit(allocator);
+    var i: usize = 0;
+    while (i < args.len) : (i += 1) {
+        if ((std.mem.eql(u8, args[i], "in") or std.mem.eql(u8, args[i], "from")) and i + 1 < args.len) {
+            if (std.mem.eql(u8, args[i], "in")) {
+                target = .{ .in_run = parseRunUri(args[i + 1]) orelse return error.UnknownZincUri };
+            } else {
+                target = .{ .from_step = parseStepUri(args[i + 1]) orelse return error.UnknownZincUri };
+            }
+            i += 1;
+        } else {
+            try rest.append(allocator, args[i]);
+        }
+    }
+    return .{ .args = try rest.toOwnedSlice(allocator), .target = target };
+}
+
+fn parseRunUri(uri: []const u8) ?[]const u8 {
+    const prefix = "zinc://runs/";
+    if (!std.mem.startsWith(u8, uri, prefix)) return null;
+    const id = uri[prefix.len..];
+    return if (id.len == 0) null else id;
+}
+
+fn parseStepUri(uri: []const u8) ?[]const u8 {
+    const prefix = "zinc://steps/";
+    if (!std.mem.startsWith(u8, uri, prefix)) return null;
+    const id = uri[prefix.len..];
+    return if (id.len == 0) null else id;
+}
+
+fn writeReport(allocator: Allocator, io: std.Io, store: *Substrate, settings: *const config.ConfigSettings, shape: anytype, args: []const []const u8, target: execute.RunTarget) !void {
+    const result = try execute.runShape(allocator, io, store, settings, shape, args, target);
     defer result.deinit();
     try files.writeAllOut("ok: true\noutput:\n");
     try writeIndented(result.output, 2);
-    try files.writeAllOut(result.events);
+    try files.writeAllOut(result.report);
 }
 
 fn writeErrorReport(allocator: Allocator, err: anyerror) !void {
     _ = allocator;
     try files.writeAllOut("ok: false\nerror: ");
     try files.writeAllOut(@errorName(err));
-    try files.writeAllOut("\nstderr: \"\"\nevents: []\n");
+    try files.writeAllOut("\nstderr: \"\"\nsteps: []\n");
 }
 
 fn writeIndented(bytes: []const u8, indent: usize) !void {

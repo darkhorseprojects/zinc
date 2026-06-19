@@ -47,11 +47,11 @@ pub fn shapeTextResult(allocator: Allocator, state: anytype, outputs: []const ci
     return out.toOwnedSlice(allocator);
 }
 
-pub fn eventsYaml(allocator: Allocator, events: []const []const u8) ![]const u8 {
+pub fn stepsYaml(allocator: Allocator, run: []const u8, steps: []const []const u8) ![]const u8 {
     var out: std.ArrayList(u8) = .empty;
     errdefer out.deinit(allocator);
-    try out.appendSlice(allocator, "events:\n");
-    for (events) |event| try out.print(allocator, "  - {s}\n", .{event});
+    try out.print(allocator, "run: zinc://runs/{s}\nsteps:\n", .{run});
+    for (steps) |step| try out.print(allocator, "  - zinc://steps/{s}\n", .{step});
     return out.toOwnedSlice(allocator);
 }
 
@@ -74,8 +74,16 @@ pub fn outputsYaml(allocator: Allocator, outputs: []const circuitry.Binding, loc
 pub fn entryKey(allocator: Allocator, entry: circuitry.Entry) ![]const u8 { return try allocator.dupe(u8, entry.path); }
 
 pub fn appendIndented(allocator: Allocator, out: *std.ArrayList(u8), value: []const u8) !void {
+    try appendIndentedBy(allocator, out, value, 4);
+}
+
+pub fn appendIndentedBy(allocator: Allocator, out: *std.ArrayList(u8), value: []const u8, spaces: usize) !void {
     var it = std.mem.splitScalar(u8, value, '\n');
-    while (it.next()) |line| try out.print(allocator, "    {s}\n", .{line});
+    while (it.next()) |line| {
+        var i: usize = 0;
+        while (i < spaces) : (i += 1) try out.append(allocator, ' ');
+        try out.print(allocator, "{s}\n", .{line});
+    }
 }
 
 pub fn appendYamlInline(allocator: Allocator, out: *std.ArrayList(u8), value: *const serde.yaml.Value) !void {

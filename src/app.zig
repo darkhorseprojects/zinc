@@ -5,6 +5,7 @@ const cmd_read = @import("cmd/read.zig");
 const cmd_pkg = @import("cmd/pkg.zig");
 const cmd_config = @import("cmd/config.zig");
 const cmd_update = @import("cmd/update.zig");
+const cmd_set = @import("cmd/set.zig");
 const files = @import("io/fs.zig");
 
 pub fn run(init: std.process.Init) !void {
@@ -66,6 +67,11 @@ pub fn run(init: std.process.Init) !void {
             return error.InvalidUsage;
         };
         try cmd_read.runRead(allocator, &store, target);
+    } else if (std.mem.eql(u8, cmd, "set")) {
+        var remaining: std.ArrayList([]const u8) = .empty;
+        defer remaining.deinit(allocator);
+        while (args.next()) |arg| try remaining.append(allocator, arg);
+        try cmd_set.runSet(allocator, &store, remaining.items);
     } else if (std.mem.eql(u8, cmd, "pkg")) {
         var remaining: std.ArrayList([]const u8) = .empty;
         defer remaining.deinit(allocator);
@@ -96,6 +102,7 @@ fn usage() !void {
         \\Commands:
         \\  run [--report] <shape|zinc://|->  Run a Circuitry shape
         \\  read <uri-or-file>                 Read a file or zinc:// reference
+        \\  set <zinc-uri> <zinc-uri>           Set a Zinc runtime pointer
         \\  pkg <subcommand> [args]            Manage packages (install, remove, list, update)
         \\  update                        Update the zn binary
         \\  config                        Manage configuration
