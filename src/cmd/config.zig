@@ -4,6 +4,8 @@ const files = @import("../io/fs.zig");
 const layout = @import("../io/layout.zig");
 
 const Allocator = std.mem.Allocator;
+const default_packet_limit: usize = 1024 * 1024;
+const default_parallel: usize = 1;
 
 pub const ConfigSettings = struct {
     arena: std.heap.ArenaAllocator,
@@ -13,16 +15,19 @@ pub const ConfigSettings = struct {
         self.arena.deinit();
     }
 
-    pub fn packetLimit(self: *const ConfigSettings) usize {
-        const root = self.root orelse return 1024 * 1024;
-        if (root != .mapping) return 1024 * 1024;
-        const store = root.mapping.getPtr("store") orelse return 1024 * 1024;
-        if (store.* != .mapping) return 1024 * 1024;
-        const limit = store.mapping.getPtr("packet_limit") orelse return 1024 * 1024;
-        return switch (limit.*) {
-            .integer => |n| if (n > 0) @intCast(n) else 1024 * 1024,
-            else => 1024 * 1024,
-        };
+    pub fn packetLimit(self: *const ConfigSettings, package: []const u8) usize {
+        const packages = mappingField(self.rootValue() orelse return default_packet_limit, "packages") orelse return default_packet_limit;
+        const policy = mappingField(packages, package) orelse return default_packet_limit;
+        return positiveIntegerField(policy, "packet_limit") orelse default_packet_limit;
+    }
+
+    pub fn runtimeParallel(self: *const ConfigSettings) usize {
+        const runtime = mappingField(self.rootValue() orelse return default_parallel, "runtime") orelse return default_parallel;
+        return positiveIntegerField(runtime, "parallel") orelse default_parallel;
+    }
+
+    fn rootValue(self: *const ConfigSettings) ?*const serde.yaml.Value {
+        return if (self.root) |*root| root else null;
     }
 };
 
@@ -56,9 +61,39 @@ pub fn runConfig(allocator: Allocator, store: anytype, args: []const []const u8)
     defer settings.deinit();
 
     try files.writeAllOut("Zinc config:\n");
-    try files.writeAllOut("  store.packet_limit: ");
-    var buf: [32]u8 = undefined;
-    const text = try std.fmt.bufPrint(&buf, "{d}", .{settings.packetLimit()});
-    try files.writeAllOut(text);
+    try files.writeAllOut("  runtime.parallel: ");
+    try writeInt(settings.runtimeParallel());
     try files.writeAllOut("\n");
+
+    const root = settings.rootValue() orelse return;
+    const packages = mappingField(root, "packages") orelse return;
+    var it = packages.mapping.iterator();
+    while (it.next()) |entry| {
+        if (entry.value_ptr.* != .mapping) continue;
+        try files.writeAllOut("  packages.");
+        try files.writeAllOut(entry.key_ptr.*);
+        try files.writeAllOut(".packet_limit: ");
+        try writeInt(positiveIntegerField(entry.value_ptr, "packet_limit") orelse default_packet_limit);
+        try files.writeAllOut("\n");
+    }
+}
+
+fn mappingField(root: *const serde.yaml.Value, key: []const u8) ?*const serde.yaml.Value {
+    if (root.* != .mapping) return null;
+    const value = root.mapping.getPtr(key) orelse return null;
+    return if (value.* == .mapping) value else null;
+}
+
+fn positiveIntegerField(root: *const serde.yaml.Value, key: []const u8) ?usize {
+    if (root.* != .mapping) return null;
+    const value = root.mapping.getPtr(key) orelse return null;
+    return switch (value.*) {
+        .integer => |n| if (n > 0) @intCast(n) else null,
+        else => null,
+    };
+}
+
+fn writeInt(value: usize) !void {
+    var buf: [32]u8 = undefined;
+    try files.writeAllOut(try std.fmt.bufPrint(&buf, "{d}", .{value}));
 }

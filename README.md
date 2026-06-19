@@ -68,7 +68,7 @@ zn read zinc://packages/openai-responses/manifest/surfaces/responses
 zn read zinc://packages/openai-responses/files/surfaces/responses.py
 zn pkg install ./openai-responses --global
 zn pkg list
-zn pkg packages
+zn pkg neighbors
 zn pkg update openai-responses --dry-run
 zn config
 zn update --check
@@ -80,12 +80,12 @@ A package is a directory with `zinc.pkg.yaml`.
 
 ```yaml
 name: openai-responses
-version: "0.4.2"
+version: "0.4.3"
 about: OpenAI Responses model package.
-uri: git+https://github.com/darkhorseprojects/darkhorseprojects-packages.git@openai-responses-v0.4.2//openai-responses
+uri: git+https://github.com/darkhorseprojects/darkhorseprojects-packages.git@openai-responses-v0.4.3//openai-responses
 
-packages:
-  unix-bash: "0.2.2"
+neighbors:
+  unix-bash: "0.2.3"
 
 surfaces:
   responses:
@@ -94,6 +94,10 @@ surfaces:
 ```
 
 Package surfaces receive YAML on stdin and return YAML top-level fields on stdout.
+
+## Markdown shapes
+
+`zn run` accepts `.yaml` / `.yml` Circuitry files and `.md` / `.markdown` files with leading YAML front matter. For Markdown, Zinc extracts only the front matter and ignores the body.
 
 ## Configuration
 
@@ -107,8 +111,16 @@ Zinc reads:
 Example:
 
 ```yaml
-store:
-  packet_limit: 1048576
+runtime:
+  parallel: 4
+
+packages:
+  openai-responses:
+    packet_limit: 1048576
+  unix-bash:
+    packet_limit: 262144
+  powershell:
+    packet_limit: 262144
 ```
 
 ## Building

@@ -38,7 +38,7 @@ pub fn run(init: std.process.Init) !void {
 
     var settings = try cmd_config.loadSettings(allocator);
     defer settings.deinit();
-    var store = try Store.open(allocator, settings.packetLimit());
+    var store = try Store.open(allocator);
     defer store.close();
 
     if (std.mem.eql(u8, cmd, "run")) {
@@ -52,7 +52,7 @@ pub fn run(init: std.process.Init) !void {
         while (args.next()) |arg| {
             try remaining.append(allocator, arg);
         }
-        try cmd_run.run(allocator, init.io, &store, shape, remaining.items);
+        try cmd_run.run(allocator, init.io, &store, &settings, shape, remaining.items);
     } else if (std.mem.eql(u8, cmd, "read")) {
         const target = args.next() orelse {
             try files.writeAllErr("Error: Missing target to read.\n");
@@ -98,7 +98,7 @@ fn usage() !void {
         \\  run <shape>                   Run a Circuitry shape
         \\  read <uri-or-file>            Read a file or zinc:// reference
         \\  inspect <uri-or-file>         Inspect a shape, package, substrate, or reference
-        \\  pkg <subcommand> [args]       Manage packages (install, remove, list, update, packages)
+        \\  pkg <subcommand> [args]       Manage packages (install, remove, list, update, neighbors)
         \\  update                        Update the zn binary
         \\  config                        Manage configuration
         \\

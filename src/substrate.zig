@@ -23,9 +23,8 @@ pub const Package = struct {
 pub const Store = struct {
     allocator: Allocator,
     db: limbo.Database,
-    packet_limit: usize,
 
-    pub fn open(allocator: Allocator, packet_limit: usize) !Store {
+    pub fn open(allocator: Allocator) !Store {
         const global_dir = try layout.globalPath(allocator, "");
         defer allocator.free(global_dir);
         try files.mkdirP(global_dir);
@@ -37,7 +36,7 @@ pub const Store = struct {
 
         var db = try limbo.Database.open(.{ .path = path_z });
         errdefer db.close();
-        var store = Store{ .allocator = allocator, .db = db, .packet_limit = packet_limit };
+        var store = Store{ .allocator = allocator, .db = db };
         try store.schema();
         return store;
     }
@@ -52,7 +51,7 @@ pub const Store = struct {
         try self.db.exec("insert into meta(key, value) values ('schema', '2') on conflict(key) do update set value = excluded.value", .{});
     }
 
-    pub fn putPacket(self: *Store, bytes: []const u8, preserve: bool) ![]const u8 {
+    pub fn putPacket(self: *Store, bytes: []const u8, preserve: bool, packet_limit: usize) ![]const u8 {
         var h = std.crypto.hash.sha2.Sha256.init(.{});
         h.update(bytes);
         var digest: [32]u8 = undefined;
@@ -61,7 +60,7 @@ pub const Store = struct {
         errdefer self.allocator.free(sha);
         const id = try std.fmt.allocPrint(self.allocator, "packet:{s}", .{sha});
         errdefer self.allocator.free(id);
-        const limit = @max(self.packet_limit, 1);
+        const limit = @max(packet_limit, 1);
         const tail = if (bytes.len > limit) bytes[bytes.len - limit ..] else bytes;
         try self.db.exec(
             "insert into packets(id, size, sha256, bytes, tail, uri, preserve, at) values (:id, :size, :sha, :bytes, :tail, :uri, :preserve, :at) on conflict(id) do nothing",
@@ -80,10 +79,10 @@ pub const Store = struct {
         return id;
     }
 
-    pub fn recordEvent(self: *Store, run: []const u8, advance: usize, path: []const u8, surface: []const u8, request: ?[]const u8, response: []const u8, outputs: []const u8, preserve: bool) !void {
-        const request_packet = if (request) |r| try self.putPacket(r, preserve) else null;
+    pub fn recordEvent(self: *Store, run: []const u8, advance: usize, path: []const u8, surface: []const u8, request: ?[]const u8, response: []const u8, outputs: []const u8, preserve: bool, packet_limit: usize) !void {
+        const request_packet = if (request) |r| try self.putPacket(r, preserve, packet_limit) else null;
         defer if (request_packet) |id| self.allocator.free(id);
-        const response_packet = try self.putPacket(response, preserve);
+        const response_packet = try self.putPacket(response, preserve, packet_limit);
         defer self.allocator.free(response_packet);
         const event_id = try eventId(self.allocator, run, advance, path, surface, request_packet, response_packet, now());
         defer self.allocator.free(event_id);

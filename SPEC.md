@@ -9,6 +9,9 @@ name: package-name
 version: "0.1.0"
 uri: git+https://example/repo.git@package-v0.1.0//package-name
 
+neighbors:
+  other-package: "0.1.0"
+
 surfaces:
   surface:
     python: surfaces/run.py
@@ -43,7 +46,7 @@ Exactly one runner is required today: `python` or `command`.
 
 Circuitry owns the shape format, root `in`, root `out`, entry `in`, entry `out`, and `$value` references.
 
-Zinc owns host fields such as `packages`, `surface`, and `preserve`.
+Zinc owns host fields such as `surface` and `preserve`.
 
 A Zinc-executable entry is a Circuitry-discovered value-boundary mapping whose host fields include `surface`.
 
@@ -107,6 +110,6 @@ packets
 
 Circuitry owns shaped value flow.
 
-Zinc owns package installation records, URI resolution, `surface` navigation, process invocation, request construction, direct field selection, memory/cache/db policy, and event recording.
+Zinc owns package installation records, URI resolution, `surface` navigation, process invocation, request construction, direct field selection, package packet limits, runtime parallelism, and event recording.
 
 Packages own behavior, settings, docs, scripts, examples, prompt construction, and response meaning.

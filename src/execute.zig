@@ -5,6 +5,7 @@ const files = @import("io/fs.zig");
 const package = @import("package.zig");
 const proc = @import("io/process.zig");
 const exec_io = @import("execute/io.zig");
+const config = @import("cmd/config.zig");
 const Substrate = @import("substrate.zig").Store;
 
 const Allocator = std.mem.Allocator;
@@ -17,7 +18,22 @@ pub const Result = struct {
     pub fn deinit(self: *const Result) void { self.arena.deinit(); }
 };
 
-pub fn runShape(allocator: Allocator, io: std.Io, store: *Substrate, shape: circuitry.Shape, args: []const []const u8) !Result {
+const EntryJob = struct {
+    index: usize,
+    entry: circuitry.Entry,
+    surface: []const u8,
+    request: []const u8,
+    resolved: package.ResolvedInvocation,
+    result: ?proc.Result = null,
+    err: ?anyerror = null,
+
+    fn deinit(self: *EntryJob) void {
+        self.resolved.deinit();
+        if (self.result) |result| result.deinit(std.heap.page_allocator);
+    }
+};
+
+pub fn runShape(allocator: Allocator, io: std.Io, store: *Substrate, settings: *const config.ConfigSettings, shape: circuitry.Shape, args: []const []const u8) !Result {
     var arena = std.heap.ArenaAllocator.init(allocator);
     errdefer arena.deinit();
     const aa = arena.allocator();
@@ -29,9 +45,57 @@ pub fn runShape(allocator: Allocator, io: std.Io, store: *Substrate, shape: circ
     errdefer events.deinit(aa);
     const root_preserve = preserveField(shape.fields);
     const run_id = try runId(aa, shape.name);
+    const parallel = @max(settings.runtimeParallel(), 1);
+    const completed = try aa.alloc(bool, shape.entries.len);
+    for (completed) |*done| done.* = false;
+
+    var finished: usize = 0;
     var advance: usize = 0;
-    for (shape.entries) |entry| {
-        try runEntry(aa, io, store, &state, &events, run_id, &advance, root_preserve, entry);
+    while (finished < shape.entries.len) {
+        var selected = std.ArrayList(usize).empty;
+        defer selected.deinit(aa);
+        for (shape.entries, 0..) |entry, index| {
+            if (completed[index] or !entryReady(&state, entry)) continue;
+            try selected.append(aa, index);
+            if (selected.items.len == parallel) break;
+        }
+        if (selected.items.len == 0) return error.MissingStepInput;
+
+        const jobs = try aa.alloc(EntryJob, selected.items.len);
+        var prepared: usize = 0;
+        var jobs_deferred = false;
+        errdefer if (!jobs_deferred) for (jobs[0..prepared]) |*job| job.deinit();
+        for (selected.items, 0..) |entry_index, job_index| {
+            jobs[job_index] = try prepareEntry(aa, store, &state, entry_index, shape.entries[entry_index]);
+            prepared += 1;
+        }
+        jobs_deferred = true;
+        defer for (jobs) |*job| job.deinit();
+
+        if (jobs.len == 1) {
+            runJob(&jobs[0], io);
+        } else {
+            const threads = try aa.alloc(std.Thread, jobs.len);
+            for (jobs, 0..) |*job, index| threads[index] = try std.Thread.spawn(.{}, runJob, .{ job, io });
+            for (threads) |thread| thread.join();
+        }
+
+        advance += 1;
+        for (jobs) |*job| {
+            if (job.err) |err| return err;
+            const result = job.result orelse return error.PackageRunMissing;
+            if (result.stderr.len > 0) try files.writeAllErr(result.stderr);
+
+            const local = try exec_io.selectFields(aa, job.entry.outputs, result.stdout);
+            defer exec_io.freeLocal(local, aa);
+            try applyLocal(&state, job.entry.outputs, local);
+            const outputs_yaml = try exec_io.outputsYaml(aa, job.entry.outputs, local);
+            const preserve = preserveField(job.entry.fields) orelse root_preserve orelse false;
+            try store.recordEvent(run_id, advance, job.entry.path, job.surface, job.request, result.stdout, outputs_yaml, preserve, settings.packetLimit(surfacePackage(job.surface)));
+            try events.append(aa, try aa.dupe(u8, job.entry.path));
+            completed[job.index] = true;
+            finished += 1;
+        }
     }
 
     const output = try exec_io.shapeTextResult(aa, &state, shape.outputs);
@@ -39,7 +103,16 @@ pub fn runShape(allocator: Allocator, io: std.Io, store: *Substrate, shape: circ
     return .{ .arena = arena, .output = output, .events = event_bytes };
 }
 
-pub fn readShape(allocator: Allocator, path: []const u8) ![]const u8 { return try files.readLimited(allocator, path, 10 * 1024 * 1024); }
+pub fn readShape(allocator: Allocator, path: []const u8) ![]const u8 {
+    const bytes = try files.readLimited(allocator, path, 10 * 1024 * 1024);
+    const ext = std.fs.path.extension(path);
+    if (std.mem.eql(u8, ext, ".md") or std.mem.eql(u8, ext, ".markdown")) {
+        defer allocator.free(bytes);
+        return try markdownFrontMatter(allocator, bytes);
+    }
+    return bytes;
+}
+
 pub fn parseShape(allocator: Allocator, bytes: []const u8) !circuitry.Shape { return try circuitry.parse(allocator, bytes); }
 pub fn writeResult(result: Result) !void { try files.writeAllOut(result.output); }
 
@@ -57,29 +130,28 @@ const State = struct {
     }
 };
 
-fn runEntry(allocator: Allocator, io: std.Io, store: *Substrate, state: *State, events: *std.ArrayList([]const u8), run_id: []const u8, advance: *usize, root_preserve: ?bool, entry: circuitry.Entry) anyerror!void {
+fn entryReady(state: *State, entry: circuitry.Entry) bool {
+    for (entry.inputs) |take| {
+        if (state.get(bare(take.visible orelse take.local)) == null) return false;
+    }
+    return true;
+}
+
+fn prepareEntry(allocator: Allocator, store: *Substrate, state: *State, index: usize, entry: circuitry.Entry) !EntryJob {
     const surface = hostField(entry.fields, "surface") orelse return error.SurfaceMissing;
     var manifest = try loadManifest(allocator, store, surface);
     defer manifest.deinit();
     const request = try surfaceRequest(allocator, surface, entry, state);
-    defer allocator.free(request);
     const invocation = manifest.surfaceEntry(manifestName(surface)) orelse return error.SurfaceNotFound;
-    var resolved = try invocation.resolve(manifest.root_path);
-    defer resolved.deinit();
+    const resolved = try invocation.resolve(manifest.root_path);
+    return .{ .index = index, .entry = entry, .surface = surface, .request = request, .resolved = resolved };
+}
 
-    const result = try proc.runWithInput(allocator, io, resolved.argv, request, resolved.cwd, resolved.env, resolved.timeout, 64 * 1024 * 1024);
-    defer result.deinit(allocator);
-    if (result.stderr.len > 0) try files.writeAllErr(result.stderr);
-
-    const local = try exec_io.selectFields(allocator, entry.outputs, result.stdout);
-    defer exec_io.freeLocal(local, allocator);
-    try applyLocal(state, entry.outputs, local);
-    const outputs_yaml = try exec_io.outputsYaml(allocator, entry.outputs, local);
-    defer allocator.free(outputs_yaml);
-    const preserve = preserveField(entry.fields) orelse root_preserve orelse false;
-    advance.* += 1;
-    try store.recordEvent(run_id, advance.*, entry.path, surface, request, result.stdout, outputs_yaml, preserve);
-    try events.append(allocator, try allocator.dupe(u8, entry.path));
+fn runJob(job: *EntryJob, io: std.Io) void {
+    job.result = proc.runWithInput(std.heap.page_allocator, io, job.resolved.argv, job.request, job.resolved.cwd, job.resolved.env, job.resolved.timeout, 64 * 1024 * 1024) catch |err| {
+        job.err = err;
+        return;
+    };
 }
 
 fn surfaceRequest(allocator: Allocator, surface: []const u8, entry: circuitry.Entry, state: *State) ![]u8 {
@@ -124,6 +196,7 @@ fn loadManifest(allocator: Allocator, store: *Substrate, surface: []const u8) !p
 }
 
 fn manifestName(surface: []const u8) []const u8 { const dot = std.mem.indexOfScalar(u8, surface, '.') orelse return surface; return surface[dot + 1 ..]; }
+fn surfacePackage(surface: []const u8) []const u8 { const dot = std.mem.indexOfScalar(u8, surface, '.') orelse return surface; return surface[0..dot]; }
 
 fn hostField(fields: []const circuitry.HostField, key: []const u8) ?[]const u8 {
     for (fields) |field| if (std.mem.eql(u8, field.name, key)) return exec_io.scalarText(field.value);
@@ -145,6 +218,20 @@ fn appendHostField(allocator: Allocator, out: *std.ArrayList(u8), state: *State,
     try out.print(allocator, "{s}: ", .{key});
     try exec_io.appendYamlInline(allocator, out, value);
     try out.appendSlice(allocator, "\n");
+}
+
+fn markdownFrontMatter(allocator: Allocator, bytes: []const u8) ![]const u8 {
+    if (!std.mem.startsWith(u8, bytes, "---\n") and !std.mem.startsWith(u8, bytes, "---\r\n")) return error.MarkdownFrontMatterMissing;
+    const start: usize = if (std.mem.startsWith(u8, bytes, "---\r\n")) 5 else 4;
+    var line_start = start;
+    while (line_start <= bytes.len) {
+        const line_end = std.mem.indexOfScalarPos(u8, bytes, line_start, '\n') orelse bytes.len;
+        const line = std.mem.trim(u8, bytes[line_start..line_end], "\r");
+        if (std.mem.eql(u8, line, "---")) return try allocator.dupe(u8, bytes[start..line_start]);
+        if (line_end == bytes.len) break;
+        line_start = line_end + 1;
+    }
+    return error.MarkdownFrontMatterMissing;
 }
 
 fn bare(name: []const u8) []const u8 { return if (name.len > 0 and name[0] == '$') name[1..] else name; }

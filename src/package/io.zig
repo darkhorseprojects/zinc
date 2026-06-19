@@ -4,7 +4,7 @@ const proc = @import("../io/process.zig");
 
 const Allocator = std.mem.Allocator;
 
-pub const PackageDependency = struct { package: []const u8, ref: ?[]const u8 };
+pub const PackageNeighbor = struct { package: []const u8, ref: ?[]const u8 };
 
 pub const Surface = struct {
     allocator: Allocator,
@@ -61,36 +61,36 @@ pub const ResolvedInvocation = struct {
     pub fn deinit(self: *ResolvedInvocation) void { self.arena.deinit(); }
 };
 
-pub fn parsePackageDependencies(allocator: Allocator, maybe: ?*const serde.yaml.Value) ![]PackageDependency {
+pub fn parsePackageNeighbors(allocator: Allocator, maybe: ?*const serde.yaml.Value) ![]PackageNeighbor {
     const v = maybe orelse return &.{};
-    if (v.* != .mapping) return error.InvalidManifestPackages;
+    if (v.* != .mapping) return error.InvalidManifestNeighbors;
     var count: usize = 0;
     var it = v.mapping.iterator();
     while (it.next()) |_| count += 1;
-    var dependencies = try allocator.alloc(PackageDependency, count);
+    var neighbors = try allocator.alloc(PackageNeighbor, count);
     var index: usize = 0;
     errdefer {
-        for (dependencies[0..index]) |dependency| {
-            allocator.free(dependency.package);
-            if (dependency.ref) |ref| allocator.free(ref);
+        for (neighbors[0..index]) |neighbor| {
+            allocator.free(neighbor.package);
+            if (neighbor.ref) |ref| allocator.free(ref);
         }
-        allocator.free(dependencies);
+        allocator.free(neighbors);
     }
     it.reset();
     while (it.next()) |entry| {
         const ref = switch (entry.value_ptr.*) {
             .string => |s| try allocator.dupe(u8, s),
             .mapping => blk: {
-                const ref_value = valueField(entry.value_ptr, "ref") orelse return error.InvalidManifestPackageDependency;
-                if (ref_value.* != .string) return error.InvalidManifestPackageDependency;
+                const ref_value = valueField(entry.value_ptr, "ref") orelse return error.InvalidManifestPackageNeighbor;
+                if (ref_value.* != .string) return error.InvalidManifestPackageNeighbor;
                 break :blk try allocator.dupe(u8, ref_value.string);
             },
-            else => return error.InvalidManifestPackageDependency,
+            else => return error.InvalidManifestPackageNeighbor,
         };
-        dependencies[index] = .{ .package = try allocator.dupe(u8, entry.key_ptr.*), .ref = ref };
+        neighbors[index] = .{ .package = try allocator.dupe(u8, entry.key_ptr.*), .ref = ref };
         index += 1;
     }
-    return dependencies;
+    return neighbors;
 }
 
 pub fn parseSurfaceList(allocator: Allocator, maybe: ?*const serde.yaml.Value) ![]Surface {
