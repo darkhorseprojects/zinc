@@ -37,11 +37,10 @@ pub const Manifest = struct {
         if (root != .mapping) return error.InvalidPackageManifest;
 
         const name = pkg_io.stringField(&root, "name") orelse return error.PackageNameMissing;
-        const version = pkg_io.stringField(&root, "version") orelse return error.PackageVersionMissing;
         const parsed_name = try aa.dupe(u8, name);
-        const parsed_version = try aa.dupe(u8, version);
         const about = try aa.dupe(u8, pkg_io.stringField(&root, "about") orelse "");
-        const uri = try aa.dupe(u8, pkg_io.stringField(&root, "uri") orelse package_root);
+        const uri = try aa.dupe(u8, pkg_io.stringField(&root, "uri") orelse return error.PackageUriMissing);
+        const version = try deriveVersion(aa, uri);
         const neighbors = try pkg_io.parsePackageNeighbors(aa, pkg_io.valueField(&root, "neighbors"));
         const root_path = try aa.dupe(u8, package_root);
         const surfaces = try pkg_io.parseSurfaceList(aa, pkg_io.valueField(&root, "surfaces"));
@@ -50,7 +49,7 @@ pub const Manifest = struct {
             .arena = arena,
             .root = root,
             .name = parsed_name,
-            .version = parsed_version,
+            .version = version,
             .about = about,
             .uri = uri,
             .neighbors = neighbors,
@@ -298,18 +297,39 @@ fn updateInstalled(allocator: Allocator, io: std.Io, store: *Substrate, alias: [
     const pkg = (try store.getPackage(alias)) orelse return error.PackageNotInstalled;
     defer store.freePackage(pkg);
 
+    const latest_tag = if (std.mem.startsWith(u8, pkg.uri, "git+")) try latestGitTag(allocator, io, pkg.package, pkg.uri) else null;
+    defer if (latest_tag) |tag| allocator.free(tag);
+    const requested_ref = if (options.requested_ref) |ref| ref else if (options.requested_version) |wanted| try tagForVersion(allocator, pkg.package, wanted) else latest_tag;
+    defer if (options.requested_ref == null and options.requested_version != null and requested_ref != null) allocator.free(requested_ref.?);
+
     if (options.dry_run) {
         try files.writeAllOut("would update ");
         try files.writeAllOut(pkg.package);
         try files.writeAllOut(" ");
         try files.writeAllOut(pkg.version);
-        try files.writeAllOut(" from ");
-        try files.writeAllOut(pkg.uri);
-        try files.writeAllOut("\n");
+        if (latest_tag) |tag| {
+            const latest_version = try versionFromGitTag(allocator, tag);
+            defer allocator.free(latest_version);
+            if (std.mem.eql(u8, latest_version, pkg.version)) {
+                try files.writeAllOut(" up to date at ");
+                try files.writeAllOut(pkg.version);
+                try files.writeAllOut("\n");
+            } else {
+                try files.writeAllOut(" -> ");
+                try files.writeAllOut(latest_version);
+                try files.writeAllOut(" ");
+                try files.writeAllOut(tag);
+                try files.writeAllOut("\n");
+            }
+        } else {
+            try files.writeAllOut(" from ");
+            try files.writeAllOut(pkg.uri);
+            try files.writeAllOut("\n");
+        }
         return;
     }
 
-    const resolved = try resolveSource(allocator, io, pkg.package, pkg.uri, options.requested_ref);
+    const resolved = try resolveSource(allocator, io, pkg.package, pkg.uri, requested_ref);
     defer resolved.deinit(allocator);
     errdefer {
         if (resolved.checkout) |checkout| _ = std.Io.Dir.cwd().deleteTree(io, checkout) catch {};
@@ -363,7 +383,107 @@ fn updateInstalled(allocator: Allocator, io: std.Io, store: *Substrate, alias: [
     try files.writeAllOut(pkg.version);
     try files.writeAllOut(" -> ");
     try files.writeAllOut(manifest.version);
+    if (latest_tag) |tag| {
+        try files.writeAllOut(" ");
+        try files.writeAllOut(tag);
+    }
     try files.writeAllOut("\n");
+}
+
+fn deriveVersion(allocator: Allocator, uri: []const u8) ![]const u8 {
+    if (!std.mem.startsWith(u8, uri, "git+")) return try allocator.dupe(u8, "local");
+    const repo_ref = gitRepoRef(uri);
+    const tag_index = std.mem.lastIndexOfScalar(u8, repo_ref, '@') orelse return error.PackageVersionMissing;
+    return try versionFromGitTag(allocator, repo_ref[tag_index + 1 ..]);
+}
+
+fn gitRepoRef(uri: []const u8) []const u8 {
+    const body = uri["git+".len..];
+    const split = std.mem.lastIndexOf(u8, body, "//");
+    return if (split) |i| body[0..i] else body;
+}
+
+fn versionFromGitTag(allocator: Allocator, tag: []const u8) ![]const u8 {
+    if (std.mem.startsWith(u8, tag, "v")) return try allocator.dupe(u8, tag[1..]);
+    const marker = std.mem.lastIndexOf(u8, tag, "-v") orelse return error.PackageVersionMissing;
+    return try allocator.dupe(u8, tag[marker + 2 ..]);
+}
+
+fn tagForVersion(allocator: Allocator, package: []const u8, version: []const u8) ![]const u8 {
+    return try std.fmt.allocPrint(allocator, "{s}-v{s}", .{ package, version });
+}
+
+fn latestGitTag(allocator: Allocator, io: std.Io, package: []const u8, uri: []const u8) !?[]const u8 {
+    const parsed = try parseGitUri(allocator, uri, null);
+    defer parsed.deinit(allocator);
+
+    var argv = std.ArrayList([]const u8).empty;
+    defer argv.deinit(allocator);
+    try argv.append(allocator, "git");
+    try argv.append(allocator, "ls-remote");
+    try argv.append(allocator, "--tags");
+    try argv.append(allocator, "--refs");
+    try argv.append(allocator, parsed.repo);
+    const pattern = try std.fmt.allocPrint(allocator, "{s}-v*", .{package});
+    defer allocator.free(pattern);
+    const prefix = try std.fmt.allocPrint(allocator, "{s}-v", .{package});
+    defer allocator.free(prefix);
+    try argv.append(allocator, pattern);
+
+    const result = try proc.run(allocator, io, argv.items, null, &.{}, 2 * 1024 * 1024);
+    defer result.deinit(allocator);
+    if (result.code != 0) {
+        try files.writeAllErr(result.stderr);
+        return error.GitCommandFailed;
+    }
+
+    var tags = std.ArrayList([]const u8).empty;
+    errdefer {
+        for (tags.items) |tag| allocator.free(tag);
+        tags.deinit(allocator);
+    }
+
+    var lines = std.mem.splitScalar(u8, result.stdout, '\n');
+    while (lines.next()) |line| {
+        const trimmed = std.mem.trim(u8, line, " \t\r");
+        if (trimmed.len == 0) continue;
+        const tab = std.mem.indexOfScalar(u8, trimmed, '\t') orelse continue;
+        const ref = trimmed[tab + 1 ..];
+        const ref_prefix = "refs/tags/";
+        if (!std.mem.startsWith(u8, ref, ref_prefix)) continue;
+        const tag = ref[ref_prefix.len..];
+        if (!std.mem.startsWith(u8, tag, prefix)) continue;
+        try tags.append(allocator, try allocator.dupe(u8, tag));
+    }
+
+    if (tags.items.len == 0) return null;
+    std.mem.sort([]const u8, tags.items, {}, semverTagLessThan);
+    const owned = try tags.toOwnedSlice(allocator);
+    const latest = owned[owned.len - 1];
+    for (owned[0 .. owned.len - 1]) |tag| allocator.free(tag);
+    allocator.free(owned);
+    return latest;
+}
+
+const Semver = struct { major: u32, minor: u32, patch: u32 };
+
+fn semverTagLessThan(_: void, lhs: []const u8, rhs: []const u8) bool {
+    const l = semverRank(lhs);
+    const r = semverRank(rhs);
+    return l.major < r.major or (l.major == r.major and (l.minor < r.minor or (l.minor == r.minor and l.patch < r.patch)));
+}
+
+fn semverRank(tag: []const u8) Semver {
+    const version = if (std.mem.startsWith(u8, tag, "v")) tag[1..] else tag;
+    var index: usize = 0;
+    return .{ .major = parseSemverPart(version, &index), .minor = parseSemverPart(version, &index), .patch = parseSemverPart(version, &index) };
+}
+
+fn parseSemverPart(version: []const u8, index: *usize) u32 {
+    const start = index.*;
+    while (index.* < version.len and std.ascii.isDigit(version[index.*])) index.* += 1;
+    if (index.* < version.len and version[index.*] == '.') index.* += 1;
+    return std.fmt.parseInt(u32, version[start..index.*], 10) catch 0;
 }
 
 const ResolvedSource = struct {

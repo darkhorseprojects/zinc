@@ -1,12 +1,11 @@
 # Zinc Specification
 
-Zinc advances ready Circuitry value-boundary mappings by following `surface` refs into package surfaces. It sends YAML requests, routes returned YAML fields into the active run, and records package/run history in Limbo.
+Zinc advances ready Circuitry value-boundary mappings by following explicit `surface` refs into package surfaces. It accepts Circuitry YAML files and Markdown files with YAML front matter, sends YAML requests, routes returned YAML fields into the active run, and records package/run history in Limbo.
 
 ## Package manifest
 
 ```yaml
 name: package-name
-version: "0.1.0"
 uri: git+https://example/repo.git@package-v0.1.0//package-name
 
 neighbors:
@@ -17,7 +16,7 @@ surfaces:
     python: surfaces/run.py
 ```
 
-Optional material sections are navigable package facts. Zinc may read them; packages own their meaning.
+Optional material sections are navigable package facts. Zinc may read them; packages own their meaning. The package version is derived from the URI tag, so `version` is not a manifest field.
 
 ## Surface refs
 
