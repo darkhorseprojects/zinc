@@ -45,7 +45,7 @@ For normal conversation, explanations, or direct answers, do not call any tools.
 If you need to perform actions (like running bash commands or reading prior context), invoke the `circuitry` tool:
 
 **Tool Name**: `circuitry`  
-**Parameter**: `circuit` (string)  
+**Parameter**: `kdl` (string)  
 **Value** (KDL format, do not wrap in frontmatter dashes `---`):
 ```kdl
 circuitry "0.10.0"

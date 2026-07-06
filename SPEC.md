@@ -103,18 +103,18 @@ Packet rows normally store exact packet bytes. If a packet exceeds `packet-overf
 
 1. Zinc appends the latest user packet.
 2. Zinc updates the thread body.
-3. Zinc builds context from the Thread: raw tail (most recent `raw-context-bytes` of packet text), sequential head packet refs up to `raw-context-bytes`, and Fibonacci-spaced middle packet refs between them.
-4. Zinc seeds Circuitry state with `context`, `cwd`, `store`, `loop-dir`, and `python`.
+3. Zinc builds context from the Thread: raw tail (most recent `raw-context-bytes` of packet text), sequential head packet refs formatted as `- packet: ID [range: A:B]`, and Fibonacci-spaced middle packet refs between them.
+4. Zinc seeds Circuitry state with `context`, `cwd`, `loop-dir`, and `python`.
 5. Zinc calls Circuitry `advance()` on `turn.md`.
 6. Zinc records each advanced source entry without copying full source input into the transcript.
 7. `response` ends the continuation and becomes the assistant packet.
-8. `circuitry` is recorded, parsed, advanced, recorded, and then the turn continues with new context.
+8. `circuitry` KDL document is advanced, and the turn continues with new context.
 
 ## Default source processes
 
-`openai-responses.py` reads KDL stdin, calls the OpenAI Responses API, and writes KDL stdout containing `reasoning`, `response`, and/or `circuitry`.
+`openai-responses.py` reads KDL stdin (passing `context`, `cwd`, and `loop-dir`), requests chat completions using a native `circuitry(kdl)` tool definition, streams/accumulates both `content` and `reasoning_content`, and outputs the resulting text or KDL document.
 
-`shell.py` reads `cmd` and `cwd`, runs a platform shell, and writes `output`, `stderr`, `code`, and `shell`. Command nonzero exit code is data, not source-process failure.
+`shell.py` reads `cmd` and `cwd` from KDL stdin, runs a platform shell, and writes `output`, `stderr`, `code`, and `shell`. Command nonzero exit code is data, not source-process failure. It runs dependency-free directly under any system Python interpreter, verifying allowed command heads against `shell.kdl`.
 
 ## CLI
 

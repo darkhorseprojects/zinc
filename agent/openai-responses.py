@@ -117,12 +117,12 @@ def main() -> int:
                 "parameters": {
                     "type": "object",
                     "properties": {
-                        "circuit": {
+                        "kdl": {
                             "type": "string",
                             "description": "The KDL document string to run (e.g. circuitry '0.10.0' ...).",
                         },
                     },
-                    "required": ["circuit"],
+                    "required": ["kdl"],
                 },
             },
         }
@@ -196,8 +196,8 @@ run source="{loop_dir or '$loop-dir'}/shell.py" {{
         if tc["name"] == "circuitry":
             try:
                 args = json.loads(tc["arguments"]) if tc["arguments"] else {}
-                if circuit := args.get("circuit"):
-                    result["circuitry"] = clean_and_wrap_circuitry(circuit)
+                if kdl_val := args.get("kdl"):
+                    result["circuitry"] = clean_and_wrap_circuitry(kdl_val)
                     break
             except json.JSONDecodeError:
                 pass
