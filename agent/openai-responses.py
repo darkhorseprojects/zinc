@@ -35,7 +35,6 @@ def config_doc() -> kdl.Document:
 
 def client_for(config: kdl.Document) -> OpenAI:
     base_url = os.environ.get("OPENAI_BASE_URL") or first_arg(config, "base-url") or None
-    # api-key is optional for local endpoints — default to "local" if not set
     api_key = os.environ.get("OPENAI_API_KEY") or first_arg(config, "api-key") or "local"
     return OpenAI(api_key=api_key, base_url=base_url)
 
@@ -49,7 +48,6 @@ def model_for(config: kdl.Document) -> str:
 
 def inference_params(config: kdl.Document) -> dict[str, Any]:
     params: dict[str, Any] = {}
-    # Only pass params explicitly set in config — don't override server defaults
     if temp := first_arg(config, "temperature"):
         params["temperature"] = float(temp)
     if max_tok := first_arg(config, "max-tokens"):
@@ -91,28 +89,127 @@ def main() -> int:
     input_doc = kdl.parse(sys.stdin.read())
     config = config_doc()
 
-    # System prompt comes entirely from Circuitry — no hidden additions
     context = required_arg(input_doc, "context")
     instructions = required_arg(input_doc, "instructions")
+    cwd = first_arg(input_doc, "cwd")
+    loop_dir = first_arg(input_doc, "loop-dir")
+
+    system_instructions = instructions
+    if cwd or loop_dir:
+        meta = []
+        if cwd:
+            meta.append(f"cwd: {cwd}")
+        if loop_dir:
+            meta.append(f"loop-dir: {loop_dir}")
+        system_instructions = "Runtime Context:\n" + "\n".join(meta) + "\n\n" + instructions
 
     messages = [
-        {"role": "system", "content": instructions},
+        {"role": "system", "content": system_instructions},
         {"role": "user", "content": context},
+    ]
+
+    tools = [
+        {
+            "type": "function",
+            "function": {
+                "name": "circuitry",
+                "description": "Execute a Circuitry KDL document to run tool actions.",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "circuit": {
+                            "type": "string",
+                            "description": "The KDL document string to run (e.g. circuitry '0.10.0' ...).",
+                        },
+                    },
+                    "required": ["circuit"],
+                },
+            },
+        }
     ]
 
     stream = client_for(config).chat.completions.create(
         model=model_for(config),
         messages=messages,
+        tools=tools,
         stream=True,
         **inference_params(config),
     )
 
     text = ""
-    for chunk in stream:
-        if chunk.choices and chunk.choices[0].delta.content:
-            text += chunk.choices[0].delta.content
+    reasoning = ""
+    tool_calls_raw = {}  # index -> {name, arguments}
 
-    write_output(parse_structured_text(text))
+    for chunk in stream:
+        if not chunk.choices:
+            continue
+        delta = chunk.choices[0].delta
+        if hasattr(delta, "reasoning_content") and delta.reasoning_content:
+            reasoning += delta.reasoning_content
+        if delta.content:
+            text += delta.content
+        if delta.tool_calls:
+            for tc in delta.tool_calls:
+                idx = tc.index
+                if idx not in tool_calls_raw:
+                    tool_calls_raw[idx] = {"name": "", "arguments": ""}
+                if tc.function:
+                    if tc.function.name:
+                        tool_calls_raw[idx]["name"] = tc.function.name
+                    if tc.function.arguments:
+                        tool_calls_raw[idx]["arguments"] += tc.function.arguments
+
+    def is_valid_kdl(val: str) -> bool:
+        try:
+            kdl.parse(val)
+            return True
+        except Exception:
+            return False
+
+    def clean_and_wrap_circuitry(val: str) -> str:
+        val = val.strip()
+        if not val:
+            return ""
+        if (val.startswith("circuitry") or val.startswith("---")) and is_valid_kdl(val):
+            return val
+
+        # If it's invalid KDL, try to recover the command using regex
+        import re
+        cmd_match = re.search(r'cmd\s+"([^"]+)"', val)
+        cmd = cmd_match.group(1) if cmd_match else val
+
+        # Return a cleanly formatted, valid KDL block executing shell.py
+        # Quote paths to ensure they parse successfully in KDL
+        return f"""circuitry "0.10.0"
+input {{ cwd "{cwd or '$cwd'}" loop-dir "{loop_dir or '$loop-dir'}" }}
+run source="{loop_dir or '$loop-dir'}/shell.py" {{
+  in {{ cmd {json.dumps(cmd)} cwd "{cwd or '$cwd'}" }}
+}}"""
+
+    # Parse main response text
+    result = parse_structured_text(text)
+    if reasoning:
+        result["reasoning"] = reasoning
+
+    # Extract KDL code from circuitry tool call
+    for tc in tool_calls_raw.values():
+        if tc["name"] == "circuitry":
+            try:
+                args = json.loads(tc["arguments"]) if tc["arguments"] else {}
+                if circuit := args.get("circuit"):
+                    result["circuitry"] = clean_and_wrap_circuitry(circuit)
+                    break
+            except json.JSONDecodeError:
+                pass
+
+    # Apply auto-wrap to any manually returned circuitry key in JSON/text
+    if circuit := result.get("circuitry"):
+        result["circuitry"] = clean_and_wrap_circuitry(circuit)
+
+    if not result:
+        result["response"] = text.strip()
+
+    write_output(result)
     return 0
 
 

@@ -131,8 +131,8 @@ export function threadContext(
   const tail = ranges.slice(tailStartIndex);
 
   const parts: string[] = [];
-  if (headRanges.length) parts.push(contextRefSection("Head packet refs", headRanges, storePath));
-  if (middleRanges.length) parts.push(contextRefSection("Middle packet refs", middleRanges, storePath));
+  if (headRanges.length) parts.push(contextRefSection("Head packet refs", headRanges));
+  if (middleRanges.length) parts.push(contextRefSection("Middle packet refs", middleRanges));
   if (tail.length) parts.push(contextRawSection("Raw tail", tail, packets));
   return parts.filter(Boolean).join("\n\n");
 }
@@ -147,19 +147,20 @@ function contextRawRange(range: TextRange, packets: Record<string, Packet>) {
   return `<!-- packet=${range.packet.packet}${author} -->\n${rangeText(range.packet, packets)}`;
 }
 
-function contextRefSection(title: string, ranges: TextRange[], storePath: string) {
+function contextRefSection(title: string, ranges: TextRange[]) {
   if (!ranges.length) return "";
   const lines = [`# ${title}`];
   for (const range of ranges) {
     const packetRange = range.packet;
     const packet = packetRange.packet;
     const rangeArg = (packetRange.from !== undefined || packetRange.to !== undefined)
-      ? ` --range ${packetRange.from ?? ""}:${packetRange.to ?? ""}`
+      ? ` range: ${packetRange.from ?? ""}:${packetRange.to ?? ""}`
       : "";
-    lines.push(`zn packet read --store ${storePath} --packet ${packet}${rangeArg}`);
+    lines.push(`- packet: ${packet}${rangeArg}`);
   }
   return lines.join("\n");
 }
+
 
 
 export function threadLabel(body: ThreadBody, packets: Record<string, Packet>) {

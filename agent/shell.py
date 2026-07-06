@@ -1,19 +1,65 @@
 #!/usr/bin/env python3
+import json
 import platform
+import re
+import shlex
 import shutil
 import subprocess
 import sys
 from pathlib import Path
 
-import kdl
+HERE = Path(__file__).resolve().parent
 
 
-def first_arg(doc: kdl.Document, name: str) -> str:
-    for node in reversed(doc.nodes):
-        if node.name == name and node.args:
-            value = node.args[0]
-            return value if isinstance(value, str) else str(value)
-    return ""
+def parse_simple_kdl(text: str) -> dict[str, str]:
+    result = {}
+    try:
+        tokens = shlex.split(text)
+    except ValueError:
+        return result
+
+    # Standardize KDL parsing: extract cmd and cwd from the flattened tokens list.
+    # Handles both single-line and multi-line KDL inputs.
+    if len(tokens) >= 2 and tokens[0] == "cmd":
+        result["cmd"] = tokens[1]
+    if "cwd" in tokens:
+        idx = tokens.index("cwd")
+        if idx + 1 < len(tokens):
+            result["cwd"] = tokens[idx + 1]
+    return result
+
+
+def load_allowlist() -> set[str] | None:
+    config = HERE / "shell.kdl"
+    if not config.exists():
+        return None
+    allowed = set()
+    for line in config.read_text(encoding="utf8").splitlines():
+        line = line.strip()
+        if not line or line.startswith("//"):
+            continue
+        parts = line.split()
+        if parts:
+            allowed.add(parts[0])
+    return allowed
+
+
+def check_allowed(cmd: str, allowlist: set[str] | None) -> str | None:
+    if allowlist is None:
+        return "shell.kdl not found — all commands denied"
+    if not cmd.strip():
+        return "cmd is empty"
+    try:
+        tokens = shlex.split(cmd)
+    except ValueError as e:
+        return f"could not parse command: {e}"
+    if not tokens:
+        return "cmd is empty"
+    head = Path(tokens[0]).name
+    if head not in allowlist:
+        allowed = ", ".join(sorted(allowlist)) if allowlist else "(none)"
+        return f"command '{head}' is not in the allowlist. Allowed: {allowed}"
+    return None
 
 
 def shell_command(cmd: str) -> tuple[str, list[str], str]:
@@ -24,9 +70,11 @@ def shell_command(cmd: str) -> tuple[str, list[str], str]:
 
 
 def main() -> int:
-    doc = kdl.parse(sys.stdin.read())
-    cmd = first_arg(doc, "cmd")
-    cwd = first_arg(doc, "cwd")
+    stdin_data = sys.stdin.read()
+    parsed = parse_simple_kdl(stdin_data)
+
+    cmd = parsed.get("cmd")
+    cwd = parsed.get("cwd")
 
     if not cmd:
         raise SystemExit("cmd is required")
@@ -34,6 +82,11 @@ def main() -> int:
         raise SystemExit("cwd is required")
     if not Path(cwd).is_dir():
         raise SystemExit(f"cwd is not a directory: {cwd}")
+
+    allowlist = load_allowlist()
+    err = check_allowed(cmd, allowlist)
+    if err:
+        raise SystemExit(f"shell: {err}")
 
     executable, args, shell_name = shell_command(cmd)
     completed = subprocess.run(
@@ -44,13 +97,12 @@ def main() -> int:
         check=False,
     )
 
-    print(kdl.Document([
-        kdl.Node("cmd", args=[cmd]),
-        kdl.Node("output", args=[completed.stdout]),
-        kdl.Node("stderr", args=[completed.stderr]),
-        kdl.Node("code", args=[completed.returncode]),
-        kdl.Node("shell", args=[shell_name]),
-    ]), end="")
+    # Print output in valid KDL format directly
+    print(f"cmd {json.dumps(cmd)}")
+    print(f"output {json.dumps(completed.stdout)}")
+    print(f"stderr {json.dumps(completed.stderr)}")
+    print(f"code {completed.returncode}")
+    print(f"shell {json.dumps(shell_name)}")
     return 0
 
 

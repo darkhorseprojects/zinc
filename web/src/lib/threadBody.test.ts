@@ -57,7 +57,7 @@ describe("thread body", () => {
     ] }, packets, 14, "/tmp/zinc.db");
 
     expect(context).toContain("# Head packet refs");
-    expect(context).toContain("zn packet read --store /tmp/zinc.db --packet p1");
+    expect(context).toContain("- packet: p1");
     expect(context).not.toContain("<!-- packet=p1");
     expect(context).toContain("# Raw tail");
     expect(context).toContain("<!-- packet=p2 author=assistant -->\ntail-assistant");
@@ -76,15 +76,15 @@ describe("thread body", () => {
     const context = threadContext(body, pkts, 10, "/tmp/zinc.db");
 
     expect(context).toContain("# Head packet refs");
-    expect(context).toContain("zn packet read --store /tmp/zinc.db --packet p1");
+    expect(context).toContain("- packet: p1");
     expect(context).toContain("# Middle packet refs");
-    expect(context).toContain("zn packet read --store /tmp/zinc.db --packet p2");
-    expect(context).toContain("zn packet read --store /tmp/zinc.db --packet p3");
-    expect(context).toContain("zn packet read --store /tmp/zinc.db --packet p4");
-    expect(context).toContain("zn packet read --store /tmp/zinc.db --packet p6");
-    expect(context).toContain("zn packet read --store /tmp/zinc.db --packet p7");
+    expect(context).toContain("- packet: p2");
+    expect(context).toContain("- packet: p3");
+    expect(context).toContain("- packet: p4");
+    expect(context).toContain("- packet: p6");
+    expect(context).toContain("- packet: p7");
     // p5 is NOT at a Fibonacci offset (offsets 1,2,3,5 → pool[0,1,2,4] = p2,p3,p4,p6)
-    expect(context).not.toContain("--packet p5");
+    expect(context).not.toContain("- packet: p5");
     expect(context).toContain("# Raw tail");
     expect(context).toContain("<!-- packet=p8");
   });
@@ -99,7 +99,7 @@ describe("thread body", () => {
     const context = threadContext(body, packets, 10, "/tmp/zinc.db");
 
     expect(context).toContain("# Head packet refs");
-    expect(context).toContain("--range 2:8");
+    expect(context).toContain("- packet: p1 range: 2:8");
     expect(context).toContain("# Raw tail");
   });
 });
