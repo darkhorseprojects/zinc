@@ -176,9 +176,9 @@ export default function Home(props: { initial?: ThreadBootstrap }) {
     const reader = res.body.pipeThrough(new TextDecoderStream()).getReader();
 
     while (true) {
-      const chunk = await reader.read();
-      if (!("value" in chunk)) break;
-      buffer += chunk.value;
+      const { done, value } = await reader.read();
+      if (done) break;
+      buffer += value;
       const lines = buffer.split("\n");
       buffer = lines.pop() ?? "";
       for (const line of lines) if (line.trim()) applyFrame(JSON.parse(line));

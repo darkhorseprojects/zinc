@@ -121,21 +121,36 @@ export async function continueContext(
       });
 
       if (!turnAdvance.progressed) throw continuationError({ stage: "turn.advance", message: "Configured turn did not advance" });
-      for (const entry of turnAdvance.entries) await appendPacket(transcriptBlockMdx(sourceBlock(entry)));
+      for (const entry of turnAdvance.entries) {
+        if (entry.name === "respond") continue;
+        await appendPacket(transcriptBlockMdx(sourceBlock(entry)));
+      }
 
       const last = lastRecognizable(turnAdvance.entries);
       if (!last) throw continuationError({ stage: "turn.output", message: "Turn produced no response or circuitry" });
 
+      let lastReasoning = "";
+      for (const entry of turnAdvance.entries) {
+        if (isRecord(entry.output) && typeof entry.output.reasoning === "string" && entry.output.reasoning.trim()) {
+          lastReasoning = entry.output.reasoning;
+        }
+      }
+
       if (last.name === "response") {
         await appendDividerIfNeeded("assistant");
-        await appendPacket(`${String(last.value)}\n\n`, "assistant");
+        let packetText = "";
+        if (lastReasoning.trim()) {
+          packetText += `<Reasoning>\n${lastReasoning.trim()}\n</Reasoning>\n\n`;
+        }
+        packetText += `${String(last.value)}\n\n`;
+        await appendPacket(packetText, "assistant");
         return await commitBody();
       }
 
       if (last.name === "circuitry") {
         const circuitry = String(last.value ?? "").trim();
         if (!circuitry) throw continuationError({ stage: "turn.circuitry", message: "Circuitry output was empty" });
-        await appendPacket(transcriptBlockMdx({ kind: "source", status: "info", label: "circuitry", body: fenced("kdl", circuitry) }));
+        await appendPacket(transcriptBlockMdx(circuitryBlock(circuitry, turnCwd)));
         await runReturnedCircuitry(circuitry, turnCwd);
         await commitBody();
         continue;
@@ -189,12 +204,82 @@ export async function continueContext(
   }
 }
 
+function objectToKdl(obj: Record<string, unknown>, indent = 0): string {
+  const spaces = " ".repeat(indent);
+  return Object.entries(obj)
+    .map(([key, val]) => {
+      if (val === null || val === undefined) return "";
+      if (typeof val === "object") {
+        if (Array.isArray(val)) {
+          return `${spaces}${key} ${val.map(v => JSON.stringify(v)).join(" ")}`;
+        }
+        return `${spaces}${key} {\n${objectToKdl(val as Record<string, unknown>, indent + 2)}${spaces}}`;
+      }
+      return `${spaces}${key} ${JSON.stringify(val)}`;
+    })
+    .filter(Boolean)
+    .join("\n");
+}
+
 function sourceBlock(entry: AdvanceEntry) {
+  const output = entry.output;
+  if (isRecord(output) && "cmd" in output) {
+    return {
+      kind: "command" as const,
+      status: (output.code === 0 ? "ok" : "error") as "ok" | "error" | "pending" | "info",
+      label: entry.name,
+      command: String(output.cmd),
+      exit: typeof output.code === "number" ? output.code : null,
+      body: String(output.output || output.stderr || ""),
+    };
+  }
   return {
     kind: "source" as const,
     status: "ok" as const,
     label: entry.name,
-    body: fenced("json", JSON.stringify({ source: entry.source, output: entry.output, bindings: entry.bindings }, null, 2)),
+    body: fenced("kdl", objectToKdl({ source: entry.source, output: entry.output, bindings: entry.bindings })),
+  };
+}
+
+function circuitryBlock(circuitry: string, loopDir: string) {
+  try {
+    const doc = parse(circuitry);
+    const entries = Object.values(doc.definition.entries);
+    if (entries.length === 1) {
+      const entry = entries[0];
+      const source = entry.source;
+      const input = entry.in;
+
+      // Extract shell command execution
+      if (typeof source === "string" && source.endsWith("shell.py") && isRecord(input) && typeof input.cmd === "string") {
+        return {
+          kind: "command" as const,
+          status: "pending" as const,
+          label: "execute",
+          command: input.cmd,
+          body: "",
+        };
+      }
+
+      // Extract zn packet read execution
+      if (typeof source === "string" && source === "zn" && isRecord(input) && Array.isArray(input.args)) {
+        return {
+          kind: "command" as const,
+          status: "pending" as const,
+          label: "execute",
+          command: ["zn", ...input.args.map(String)].join(" "),
+          body: "",
+        };
+      }
+    }
+  } catch (e) {}
+
+  // Fallback: raw KDL block
+  return {
+    kind: "source" as const,
+    status: "info" as const,
+    label: "circuitry",
+    body: fenced("kdl", circuitry),
   };
 }
 
@@ -218,7 +303,7 @@ function isContinuationErrorData(value: unknown): value is ContinuationErrorData
 }
 
 function transcriptBlockMdx(input: {
-  kind: "source" | "error" | "note";
+  kind: "source" | "error" | "note" | "command";
   status: "ok" | "error" | "pending" | "info";
   label: string;
   body: string;

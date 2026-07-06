@@ -642,7 +642,14 @@ button {
 .thread-transcript-block[data-status="error"] .thread-transcript-body {
     color: rgb(252 165 165 / 0.9);
 }
-.thread-reasoning,
+.thread-reasoning {
+    margin: 0 0 1em;
+    padding-left: 1em;
+    border-left: 1px solid var(--accent);
+    color: var(--dim);
+    font-style: italic;
+    background: transparent;
+}
 .thread-mdx-fragment {
     padding: 12px 14px;
     border-left: 2px solid rgb(190 205 222 / 0.16);
