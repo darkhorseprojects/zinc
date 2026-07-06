@@ -5,6 +5,11 @@ import { handleThread } from "./routes/thread";
 import { handleThreads } from "./routes/threads";
 import { handleContinue } from "./routes/continue";
 import { handleContinueStream } from "./routes/continueStream";
+import { loadConfig } from "~/lib/config";
+import { addRecent } from "~/lib/stores";
+
+// Register the configured store on startup so the web UI can auto-load it.
+loadConfig().then((config) => addRecent({ path: config.store })).catch(() => {});
 
 const port = Number(process.env.PORT || process.env.ZINC_PORT || 5173);
 

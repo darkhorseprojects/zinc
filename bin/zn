@@ -104,11 +104,31 @@ def write_config(path: Path, store: Path, zinc_dir: Path, agent_dir: Path, *, ov
     blue(f"wrote {path}")
 
 
+def register_store(zinc_dir: Path, store: Path) -> None:
+    registry = zinc_dir / "registry.jsonl"
+    entry = json.dumps({"path": str(store), "name": store.stem, "meta": {}})
+    existing: list[str] = []
+    if registry.exists():
+        for line in registry.read_text(encoding="utf8").splitlines():
+            if not line.strip():
+                continue
+            try:
+                item = json.loads(line)
+                if item.get("path") == str(store):
+                    continue
+                existing.append(line)
+            except json.JSONDecodeError:
+                continue
+    registry.parent.mkdir(parents=True, exist_ok=True)
+    registry.write_text("\n".join([entry] + existing) + "\n", encoding="utf8")
+
+
 def initialize_home(zinc_dir: Path, store: Path, config: Path) -> None:
     init_db(store)
     agent_dir = zinc_dir / "agent"
     copy_agent_templates(agent_dir)
     write_config(config, store, zinc_dir, agent_dir)
+    register_store(zinc_dir, store)
     print(f"Edit agent files in {agent_dir}")
 
 
