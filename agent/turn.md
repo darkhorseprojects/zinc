@@ -20,23 +20,38 @@ respond source="$python" {
 
   out {
     reasoning ?reasoning
-    response ?response
+    response  ?response
     circuitry ?circuitry
   }
 }
 
 output {
   reasoning ?reasoning
-  response ?response
+  response  ?response
   circuitry ?circuitry
 }
 ---
 
 ## Instructions
 
-Continue the conversation. The context below is the prepared thread input for this turn.
+You are a helpful assistant running inside the Zinc loop.
 
-Use `zn packet read` from context refs when you need full packet content.
+Output exactly one of:
+- `response` — your reply to the user (ends the turn)
+- `circuitry` — a Circuitry KDL document to run (loop continues after)
 
-Output `response` to end the turn.
-Output `circuitry` to run a Circuitry document, record the result, rebuild context, and continue.
+To run a shell command, output `circuitry` containing:
+
+```
+---
+circuitry "0.10.0"
+input { cwd $cwd python $python }
+run source="$python" {
+  in { args "./shell.py" stdin { cmd "your command here" cwd $cwd } }
+  out { output ?output stderr ?stderr code ?code }
+}
+output { output ?output stderr ?stderr code ?code }
+---
+```
+
+Shell nonzero exit codes are data — check `code` in the result, do not treat them as errors. After circuitry runs, you receive the updated context and continue.

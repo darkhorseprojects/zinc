@@ -20,7 +20,7 @@ def shell_command(cmd: str) -> tuple[str, list[str], str]:
     if platform.system().lower() == "windows":
         executable = shutil.which("pwsh") or shutil.which("powershell.exe") or "powershell.exe"
         return executable, ["-NoProfile", "-Command", cmd], "powershell"
-    return "sh", ["-lc", cmd], "sh"
+    return "sh", ["-c", cmd], "sh"
 
 
 def main() -> int:
