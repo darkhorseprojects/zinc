@@ -35,6 +35,7 @@ def config_doc() -> kdl.Document:
 
 def client_for(config: kdl.Document) -> OpenAI:
     base_url = os.environ.get("OPENAI_BASE_URL") or first_arg(config, "base-url") or None
+    # api-key is optional for local endpoints — default to "local" if not set
     api_key = os.environ.get("OPENAI_API_KEY") or first_arg(config, "api-key") or "local"
     return OpenAI(api_key=api_key, base_url=base_url)
 
@@ -42,29 +43,20 @@ def client_for(config: kdl.Document) -> OpenAI:
 def model_for(config: kdl.Document) -> str:
     model = os.environ.get("ZINC_MODEL") or first_arg(config, "model")
     if not model:
-        raise SystemExit("model is required")
+        raise SystemExit("model is required — set it in openai-responses.kdl")
     return model
 
 
-def response_data(response: Any) -> dict[str, Any]:
-    if hasattr(response, "model_dump"):
-        return response.model_dump()
-    if isinstance(response, dict):
-        return response
-    raise RuntimeError("OpenAI response object cannot be normalized")
-
-
-def extract_text(value: Any) -> str:
-    if isinstance(value, str):
-        return value
-    if isinstance(value, list):
-        return "\n".join(text for item in value if (text := extract_text(item)))
-    if isinstance(value, dict):
-        for key in ("text", "content", "output_text"):
-            text = value.get(key)
-            if isinstance(text, str):
-                return text
-    return ""
+def inference_params(config: kdl.Document) -> dict[str, Any]:
+    params: dict[str, Any] = {}
+    # Only pass params explicitly set in config — don't override server defaults
+    if temp := first_arg(config, "temperature"):
+        params["temperature"] = float(temp)
+    if max_tok := first_arg(config, "max-tokens"):
+        params["max_tokens"] = int(max_tok)
+    if top_p := first_arg(config, "top-p"):
+        params["top_p"] = float(top_p)
+    return params
 
 
 def parse_structured_text(text: str) -> dict[str, str]:
@@ -88,43 +80,10 @@ def parse_structured_text(text: str) -> dict[str, str]:
     }
 
 
-def normalize(data: dict[str, Any]) -> dict[str, str]:
-    output = data.get("output")
-    items = output if isinstance(output, list) else []
-    texts: list[str] = []
-    reasoning: list[str] = []
-
-    for item in items:
-        if not isinstance(item, dict):
-            continue
-        if item.get("type") == "reasoning":
-            text = extract_text(item.get("summary")) or extract_text(item.get("content"))
-            if text:
-                reasoning.append(text)
-        elif item.get("type") == "message":
-            text = extract_text(item.get("content"))
-            if text:
-                texts.append(text)
-
-    output_text = data.get("output_text")
-    if isinstance(output_text, str) and output_text.strip():
-        texts.append(output_text.strip())
-
-    structured = parse_structured_text("\n".join(texts))
-    result: dict[str, str] = {}
-    if reasoning or structured.get("reasoning"):
-        result["reasoning"] = "\n".join(part for part in ["\n".join(reasoning), structured.get("reasoning", "")] if part)
-    if structured.get("circuitry"):
-        result["circuitry"] = structured["circuitry"]
-    if structured.get("response"):
-        result["response"] = structured["response"]
-    return result
-
-
 def write_output(values: dict[str, str]) -> None:
     nodes = [kdl.Node(name, args=[value]) for name, value in values.items() if value]
     if not nodes:
-        raise SystemExit("OpenAI Responses adapter produced no output")
+        raise SystemExit("OpenAI adapter produced no output")
     print(kdl.Document(nodes), end="")
 
 
@@ -132,25 +91,28 @@ def main() -> int:
     input_doc = kdl.parse(sys.stdin.read())
     config = config_doc()
 
+    # System prompt comes entirely from Circuitry — no hidden additions
     context = required_arg(input_doc, "context")
-    cwd = required_arg(input_doc, "cwd")
     instructions = required_arg(input_doc, "instructions")
-    store = first_arg(input_doc, "store")
-    loop_dir = first_arg(input_doc, "loop-dir")
 
-    system_instructions = "\n\n".join(part for part in [
-        instructions,
-        f"cwd: {cwd}",
-        f"store: {store}" if store else "",
-        f"loop-dir: {loop_dir}" if loop_dir else "",
-    ] if part)
+    messages = [
+        {"role": "system", "content": instructions},
+        {"role": "user", "content": context},
+    ]
 
-    response = client_for(config).responses.create(
+    stream = client_for(config).chat.completions.create(
         model=model_for(config),
-        instructions=system_instructions,
-        input=context,
+        messages=messages,
+        stream=True,
+        **inference_params(config),
     )
-    write_output(normalize(response_data(response)))
+
+    text = ""
+    for chunk in stream:
+        if chunk.choices and chunk.choices[0].delta.content:
+            text += chunk.choices[0].delta.content
+
+    write_output(parse_structured_text(text))
     return 0
 
 

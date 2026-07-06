@@ -107,7 +107,7 @@ export async function continueContext(
       const context = threadContext(currentBody, currentPackets, config.rawContextBytes, activeStore);
       const state: Record<string, unknown> = {
         context,
-        cwd: process.cwd(),
+        cwd: config.zincDir,
         store: activeStore,
         "loop-dir": turnCwd,
         python: config.python,
@@ -151,7 +151,7 @@ export async function continueContext(
       const returnedContext = threadContext(currentBody, currentPackets, config.rawContextBytes, activeStore);
       const returnedState: Record<string, unknown> = {
         context: returnedContext,
-        cwd: process.cwd(),
+        cwd: config.zincDir,
         store: activeStore,
         "loop-dir": cwd,
         python: config.python,
