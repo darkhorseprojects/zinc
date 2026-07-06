@@ -1,0 +1,2 @@
+base-url "https://api.openai.com/v1"
+model "gpt-5.1-codex-mini"

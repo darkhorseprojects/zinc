@@ -1,5 +1,10 @@
-zig-out/
-.zig-cache/
-zig-pkg/
+__pycache__/
+*.pyc
+.venv/
+.pytest_cache/
+node_modules/
+web/node_modules/
+web/dist/
 .zinc/
 .DS_Store
+*.db

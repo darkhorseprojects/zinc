@@ -1,0 +1,758 @@
+@import "tailwindcss";
+@plugin "@kobalte/tailwindcss";
+
+/* ─── Fonts ─────────────────────────────────────────────────────────── */
+@font-face {
+    font-family: "Zinc Menu";
+    src: url("/fonts/liberation-sans/LiberationSans-Regular.woff2")
+        format("woff2");
+    font-display: swap;
+}
+@font-face {
+    font-family: "Zinc Prose";
+    src: url("/fonts/eb-garamond/EBGaramond-Regular.woff2") format("woff2");
+    font-display: swap;
+}
+@font-face {
+    font-family: "Zinc Mono";
+    src: url("/fonts/commit-mono/CommitMono-Regular.woff2") format("woff2");
+    font-display: swap;
+}
+
+/* ─── Design Tokens (8 total) ────────────────────────────────────────── */
+:root {
+    --bg: #090d12;
+    --surface: #0e1520;
+    --text: #e4e9ef;
+    --dim: #73808d;
+    --accent: #5d8dff;
+    --line: rgb(190 205 222 / 0.06);
+    --glass-rgb: 14 21 32;
+    --glass-bg: rgb(var(--glass-rgb) / 0.34);
+    --glass-lit: color-mix(in srgb, rgb(var(--glass-rgb)) 70%, white 30%);
+    --inline:
+        inset 0 1px 0 rgb(190 210 240 / 0.16), inset 0 -1px 0 rgb(0 0 0 / 0.34),
+        inset 0 10px 14px -16px rgb(220 235 255 / 0.16),
+        inset 0 -10px 14px -16px rgb(0 0 0 / 0.38);
+    --outline: 1px solid rgb(6 9 14 / 0.96);
+}
+
+/* ─── Reset ──────────────────────────────────────────────────────────── */
+*,
+*::before,
+*::after {
+    box-sizing: border-box;
+}
+html,
+body,
+#app {
+    width: 100%;
+    height: 100%;
+    margin: 0;
+    overflow: hidden;
+    background: var(--bg);
+    color: var(--text);
+    font-family: "Zinc Menu", ui-sans-serif, system-ui, sans-serif;
+    -webkit-font-smoothing: antialiased;
+}
+button,
+input,
+textarea {
+    font: inherit;
+}
+button {
+    cursor: default;
+}
+
+/* ─── Liquid Glass SVG Distortion Filter ─────────────────────────────── */
+.liquid-glass-svg {
+    position: absolute;
+    width: 0;
+    height: 0;
+    border: 0;
+    padding: 0;
+    margin: 0;
+    overflow: hidden;
+    pointer-events: none;
+}
+
+/* ─── App Shell ──────────────────────────────────────────────────────── */
+.app-shell {
+    position: relative;
+    isolation: isolate;
+    height: 100svh;
+    overflow: hidden;
+    background: var(--bg);
+    display: flex;
+    flex-direction: column;
+}
+.app-bg {
+    position: absolute;
+    inset: 0;
+    background: var(--bg);
+    z-index: 0;
+    pointer-events: none;
+}
+
+/* ─── Top Bar ────────────────────────────────────────────────────────── */
+.top-zone {
+    position: relative;
+    z-index: 3;
+    flex-shrink: 0;
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 16px;
+    padding: max(16px, env(safe-area-inset-top)) 24px 10px;
+    background: transparent;
+}
+.breadcrumb-row {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    min-width: 0;
+}
+.breadcrumb-sep {
+    color: var(--dim);
+    opacity: 0.36;
+    font-size: 1.1rem;
+    line-height: 1;
+    padding-inline: 2px;
+    user-select: none;
+}
+.breadcrumb-dir {
+    max-width: 120px;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+    color: var(--dim);
+    font-family: "Zinc Mono", ui-monospace, monospace;
+    font-size: 0.72rem;
+    opacity: 0.72;
+}
+.top-controls {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+}
+
+/* ─── Nav Field Group (split trigger chrome) ─────────────────────────── */
+.nav-field-group {
+    position: relative;
+    display: inline-flex;
+    align-items: center;
+    width: max-content;
+    border: 1px solid transparent;
+    border-radius: 14px;
+    overflow: visible;
+    background: transparent;
+    box-shadow: none;
+}
+.nav-field-group:hover,
+.nav-field-group[data-expanded] {
+    border-color: rgb(6 9 14 / 0.96);
+    background:
+        linear-gradient(180deg, rgb(255 255 255 / 0.035) 0%, transparent 60%),
+        rgb(14 21 32);
+    box-shadow: var(--inline);
+}
+.nav-field-group > * {
+    flex: 0 0 auto;
+}
+
+.nav-field-label {
+    height: 42px;
+    display: inline-flex;
+    align-items: center;
+    gap: 8px;
+    padding-inline: 12px 10px;
+    border-radius: 14px 0 0 14px;
+    color: var(--dim);
+    background: transparent;
+    border: 0;
+    border-right: 1px solid transparent;
+}
+.nav-field-group:hover .nav-field-label,
+.nav-field-group[data-expanded] .nav-field-label {
+    border-right-color: var(--line);
+}
+.nav-field-label:hover {
+    color: var(--text);
+    background: rgb(71 85 105 / 0.18);
+}
+
+.nav-field-chevron {
+    height: 42px;
+    width: 32px;
+    padding: 0;
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    border-radius: 0 14px 14px 0;
+    border: 0;
+    color: var(--dim);
+    background: transparent;
+}
+.nav-field-chevron:hover,
+.nav-field-group[data-expanded] .nav-field-chevron {
+    color: var(--text);
+    background: rgb(71 85 105 / 0.18);
+}
+.nav-field-chevron-icon {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+}
+.nav-field-label-text {
+    font-size: 0.8rem;
+    line-height: 1;
+    white-space: nowrap;
+    max-width: 180px;
+    overflow: hidden;
+    text-overflow: ellipsis;
+}
+
+/* ─── Square Icon Buttons ────────────────────────────────────────────── */
+.nav-square-button {
+    width: 42px;
+    height: 42px;
+    padding: 0;
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    color: var(--dim);
+    border: 1px solid transparent;
+    border-radius: 14px;
+    background: transparent;
+    box-shadow: none;
+}
+.nav-square-button:hover:not(:disabled) {
+    color: var(--text);
+    border-color: rgb(6 9 14 / 0.96);
+    background:
+        linear-gradient(180deg, rgb(255 255 255 / 0.035) 0%, transparent 60%),
+        rgb(14 21 32);
+    box-shadow: var(--inline);
+}
+.nav-square-button:disabled {
+    cursor: default;
+    opacity: 0.36;
+}
+
+/* ─── Dropdown Menu ──────────────────────────────────────────────────── */
+.zinc-menu {
+    min-width: 180px;
+    max-height: 280px;
+    padding: 6px;
+    border: var(--outline);
+    border-radius: 14px;
+    background:
+        linear-gradient(180deg, rgb(255 255 255 / 0.035) 0%, transparent 60%),
+        rgb(14 21 32);
+    box-shadow: var(--inline);
+    overflow-y: auto;
+    scrollbar-width: none;
+    display: flex;
+    flex-direction: column;
+    gap: 2px;
+}
+.zinc-menu::-webkit-scrollbar {
+    display: none;
+}
+
+.nav-select-item {
+    position: relative;
+    width: 100%;
+    min-height: 34px;
+    padding: 0 10px;
+    display: grid;
+    grid-template-columns: 20px minmax(0, 1fr) 20px;
+    align-items: center;
+    border: 1px solid transparent;
+    border-radius: 10px;
+    color: var(--dim);
+    background: transparent;
+    font-family: "Zinc Menu", ui-sans-serif, system-ui, sans-serif;
+    font-size: 0.8rem;
+    line-height: 1.4;
+}
+.nav-select-item-icon {
+    grid-column: 1;
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    min-width: 20px;
+}
+.nav-select-item-label {
+    grid-column: 1 / -1;
+    justify-self: center;
+    max-width: calc(100% - 44px);
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+    text-align: center;
+    pointer-events: none;
+}
+.nav-select-item-icon + .nav-select-item-label {
+    grid-column: 2;
+    max-width: 100%;
+}
+.nav-select-item[data-icon-only] .nav-select-item-icon {
+    grid-column: 1 / -1;
+    justify-self: center;
+}
+.nav-select-item[data-icon-only] .nav-select-item-label {
+    display: none;
+}
+.nav-select-item[data-highlighted],
+.nav-select-item[data-selected] {
+    color: var(--text);
+    background: rgb(71 85 105 / 0.18);
+}
+.nav-select-item[data-selected] {
+    color: var(--text);
+}
+.nav-select-item[data-outlined] {
+    border-color: rgb(190 205 222 / 0.14);
+    color: color-mix(in srgb, var(--dim) 84%, transparent);
+}
+.nav-select-item:not(:first-child)[data-outlined] {
+    margin-top: 4px;
+}
+.nav-select-item[data-outlined][data-highlighted] {
+    border-color: rgb(190 205 222 / 0.22);
+}
+
+.nav-select-item:last-child {
+    margin-bottom: 2px;
+}
+
+/* ─── Global File Drop Overlay ──────────────────────────────────────── */
+.file-drop-overlay {
+    position: fixed;
+    inset: 0;
+    z-index: 1;
+    pointer-events: none;
+    overflow: hidden;
+    box-shadow: inset 0 0 32px
+        color-mix(in srgb, var(--accent) 22%, transparent);
+}
+
+/* ─── Thread Zone ──────────────────────────────────────────────────── */
+.thread-zone {
+    position: relative;
+    z-index: 2;
+    flex: 1 1 auto;
+    overflow-y: auto;
+    scroll-behavior: smooth;
+    padding: 30px 24px 210px;
+    scrollbar-width: none;
+    background: transparent;
+}
+.app-shell[data-drop-active="true"] .thread-zone {
+    mask-image: linear-gradient(
+        180deg,
+        transparent 0,
+        rgb(0 0 0 / 0.42) 34px,
+        #000 96px
+    );
+}
+.thread-zone::-webkit-scrollbar {
+    display: none;
+}
+.thread-column {
+    width: min(820px, calc(100% - 56px));
+    margin-inline: auto;
+    position: relative;
+}
+
+.run-status {
+    position: absolute;
+    top: 0;
+    left: 0;
+    right: 0;
+    font-family: "Zinc Mono", ui-monospace, monospace;
+    font-size: 0.78rem;
+    color: var(--dim);
+    margin: 0;
+    padding: 4px 0;
+}
+
+.empty-thread-hint {
+    min-height: 58svh;
+}
+
+/* ─── Prompt Dock ────────────────────────────────────────────────────── */
+.prompt-shell {
+    position: fixed;
+    left: 50%;
+    transform: translateX(-50%);
+    bottom: max(24px, env(safe-area-inset-bottom));
+    z-index: 40;
+    pointer-events: all;
+    width: min(820px, calc(100% - 48px));
+    min-height: 132px;
+    max-height: min(360px, calc(100svh - 80px));
+    overflow: hidden;
+    border-radius: 18px;
+    display: flex;
+    flex-direction: column;
+    gap: 12px;
+    padding: 20px 24px;
+    isolation: isolate;
+    border: 0;
+    background: transparent;
+    box-shadow: none;
+}
+.prompt-shell[data-glass-ready="true"] {
+    border: 0;
+    background: rgb(14 21 32 / 0.42);
+    box-shadow: var(--inline);
+    backdrop-filter: url(#prompt-glass-distortion);
+}
+
+.prompt-editor-container {
+    position: relative;
+    z-index: 1;
+}
+.prompt-editor-container,
+.prompt-editor-container * {
+    background: transparent !important;
+    background-color: transparent !important;
+}
+/* ─── Toasts ─────────────────────────────────────────────────────────── */
+.zinc-toast-region {
+    position: fixed;
+    right: 22px;
+    bottom: 22px;
+    z-index: 80;
+    width: min(360px, calc(100vw - 44px));
+    pointer-events: none;
+}
+.zinc-toast-list {
+    display: flex;
+    flex-direction: column;
+    gap: 10px;
+    margin: 0;
+    padding: 0;
+    list-style: none;
+}
+.zinc-toast {
+    display: flex;
+    align-items: flex-start;
+    gap: 12px;
+    padding: 13px 14px;
+    border: var(--outline);
+    border-radius: 16px;
+    background: rgb(14 21 32 / 0.88);
+    box-shadow: none;
+    color: var(--text);
+    pointer-events: auto;
+    min-width: 0;
+    max-width: 100%;
+}
+.zinc-toast-copy {
+    min-width: 0;
+    flex: 1;
+    overflow-wrap: anywhere;
+    word-break: break-word;
+}
+.zinc-toast-title {
+    font-family: "Zinc Mono", ui-monospace, monospace;
+    font-size: 0.78rem;
+    color: var(--text);
+}
+.zinc-toast-detail {
+    margin-top: 5px;
+    font-family: "Zinc Mono", ui-monospace, monospace;
+    font-size: 0.73rem;
+    line-height: 1.42;
+    color: var(--dim);
+    white-space: pre-wrap;
+}
+.zinc-toast-close {
+    border: 0;
+    padding: 0 2px;
+    background: transparent;
+    color: var(--dim);
+    font: inherit;
+    cursor: pointer;
+}
+
+/* ─── Empty Store State ──────────────────────────────────────────────── */
+.empty-store-state {
+    position: relative;
+    z-index: 2;
+    flex: 1 1 auto;
+    min-height: 0;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    justify-content: center;
+    gap: 18px;
+}
+
+/* ─── Spinner ────────────────────────────────────────────────────────── */
+.thinking-spinner {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+}
+
+/* ─── Empty Hint ─────────────────────────────────────────────────────── */
+.empty-hint {
+    text-align: center;
+    padding-block: 64px;
+    font-family: "Zinc Mono", ui-monospace, monospace;
+    font-size: 0.78rem;
+    color: var(--dim);
+    opacity: 0.5;
+}
+.empty-db-icon {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    color: rgb(228 233 239 / 0.34);
+}
+.empty-db-copy {
+    font-family: "Zinc Mono", ui-monospace, monospace;
+    font-size: 0.78rem;
+    letter-spacing: 0.01em;
+    color: rgb(228 233 239 / 0.42);
+}
+
+/* ─── Responsive ─────────────────────────────────────────────────────── */
+@media (max-width: 760px) {
+    .top-zone,
+    .thread-zone {
+        padding-inline: 12px;
+    }
+    .prompt-shell {
+        width: calc(100% - 24px);
+    }
+}
+
+/* ─── Thread Stack ─────────────────────────────────────────────────── */
+.thread-editor,
+.prompt-input {
+    font-family: "Zinc Prose", ui-serif, Georgia, serif;
+    font-size: clamp(1.12rem, 1rem + 0.6vw, 1.38rem);
+    line-height: 1.58;
+    color: var(--text);
+}
+.thread-editor {
+    min-height: 0;
+}
+.thread-lexical-root {
+    min-height: 0;
+    outline: none;
+    white-space: pre-wrap;
+}
+.thread-editor[data-busy="true"] .thread-lexical-root > *:last-child::after {
+    content: "";
+    display: inline-block;
+    width: 14px;
+    height: 14px;
+    background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 256 256' fill='%235d8dff'%3E%3Cpath d='M232,128a104,104,0,0,1-208,0c0-41,23.81-78.36,60.66-95.27a8,8,0,0,1,6.68,14.54C60.15,61.59,40,93.27,40,128a88,88,0,0,0,176,0c0-34.73-20.15-66.41-51.34-80.73a8,8,0,0,1,6.68-14.54C208.19,49.64,232,87,232,128Z'/%3E%3C/svg%3E");
+    background-size: contain;
+    background-repeat: no-repeat;
+    margin-left: 6px;
+    vertical-align: middle;
+    animation: cursor-spin 1.2s linear infinite;
+}
+@keyframes cursor-spin {
+    from {
+        transform: rotate(0deg);
+    }
+    to {
+        transform: rotate(360deg);
+    }
+}
+.thread-lexical-root p,
+.thread-lexical-root h1,
+.thread-lexical-root h2,
+.thread-lexical-root h3,
+.thread-lexical-root h4,
+.thread-lexical-root h5,
+.thread-lexical-root h6 {
+    margin: 0 0 0.7em;
+}
+.thread-lexical-root pre,
+.mdx-source-node {
+    padding: 14px 16px;
+    border: var(--outline);
+    border-radius: 16px;
+    background: rgb(14 21 32 / 0.46);
+    font-family: "Zinc Mono", ui-monospace, monospace;
+    font-size: 0.9rem;
+    white-space: pre-wrap;
+}
+.thread-component {
+    width: 100%;
+    margin-block: 10px;
+    color: var(--text);
+    line-height: inherit;
+}
+.thread-transcript-block {
+    margin-block: 1em;
+    padding: 2px 0 2px 14px;
+    border-left: 1px solid rgb(190 205 222 / 0.16);
+    color: rgb(222 232 242 / 0.88);
+}
+.thread-transcript-block[data-status="error"] {
+    border-left-color: rgb(248 113 113 / 0.58);
+}
+.thread-transcript-heading {
+    display: flex;
+    align-items: baseline;
+    gap: 10px;
+    font-family: "Zinc Mono", ui-monospace, monospace;
+    font-size: 0.72rem;
+    letter-spacing: 0.04em;
+    text-transform: uppercase;
+    color: rgb(228 233 239 / 0.48);
+}
+.thread-transcript-status {
+    color: rgb(115 128 141 / 0.84);
+}
+.thread-transcript-block[data-status="error"] .thread-transcript-status,
+.thread-transcript-block[data-status="error"] .thread-transcript-label {
+    color: rgb(248 113 113 / 0.9);
+}
+.thread-transcript-meta {
+    margin-top: 4px;
+    font-family: "Zinc Mono", ui-monospace, monospace;
+    font-size: 0.76rem;
+    line-height: 1.45;
+    color: rgb(115 128 141 / 0.88);
+    overflow-wrap: anywhere;
+}
+.thread-transcript-body {
+    margin: 8px 0 0;
+    padding: 0;
+    border: 0;
+    background: transparent;
+    font-family: "Zinc Mono", ui-monospace, monospace;
+    font-size: 0.86rem;
+    line-height: 1.48;
+    white-space: pre-wrap;
+    color: rgb(210 235 218 / 0.86);
+    overflow-wrap: anywhere;
+}
+.thread-transcript-block[data-status="error"] .thread-transcript-body {
+    color: rgb(252 165 165 / 0.9);
+}
+.thread-reasoning,
+.thread-mdx-fragment {
+    padding: 12px 14px;
+    border-left: 2px solid rgb(190 205 222 / 0.16);
+    color: rgb(228 233 239 / 0.84);
+    background: rgb(14 21 32 / 0.22);
+}
+.prompt-input {
+    position: relative;
+    z-index: 1;
+    min-height: 56px;
+    max-height: 260px;
+    overflow-y: auto;
+    outline: none;
+    scrollbar-width: none;
+    white-space: pre-wrap;
+}
+.prompt-input::-webkit-scrollbar {
+    display: none;
+}
+.prompt-input p {
+    margin: 0;
+}
+
+/* ─── Editor WYSIWYG Styling ────────────────────────────────────────── */
+.thread-lexical-root ul,
+.prompt-input ul,
+.thread-lexical-root ol,
+.prompt-input ol {
+    margin: 0 0 1em;
+    padding-left: 1.5em;
+}
+.thread-lexical-root ul,
+.prompt-input ul {
+    list-style-type: disc;
+}
+.thread-lexical-root ol,
+.prompt-input ol {
+    list-style-type: decimal;
+}
+.thread-lexical-root li,
+.prompt-input li {
+    margin: 0 0 0.3em;
+}
+.thread-lexical-root h1,
+.prompt-input h1 {
+    font-size: 1.8em;
+    font-weight: 700;
+    margin-top: 1.2em;
+    margin-bottom: 0.4em;
+    color: var(--text);
+}
+.thread-lexical-root h2,
+.prompt-input h2 {
+    font-size: 1.5em;
+    font-weight: 600;
+    margin-top: 1.2em;
+    margin-bottom: 0.4em;
+    color: var(--text);
+}
+.thread-lexical-root h3,
+.prompt-input h3 {
+    font-size: 1.25em;
+    font-weight: 600;
+    margin-top: 1.2em;
+    margin-bottom: 0.4em;
+    color: var(--text);
+}
+.thread-lexical-root a {
+    color: var(--accent);
+    text-decoration: underline;
+    cursor: pointer;
+}
+.thread-lexical-root hr,
+.thread-hr {
+    border: 0;
+    border-top: 1px solid rgb(255 255 255 / 0.08);
+    mix-blend-mode: difference;
+    margin-block: 2.2em;
+    width: 100%;
+}
+.thread-lexical-root blockquote {
+    margin: 0 0 1em;
+    padding-left: 1em;
+    border-left: 4px solid var(--accent);
+    color: var(--dim);
+    font-style: italic;
+}
+
+/* Save status indicator styling */
+.save-status-indicator {
+    font-family: "Zinc Menu", sans-serif;
+    font-size: 0.72rem;
+    font-weight: 500;
+    color: var(--dim);
+    margin-right: 12px;
+    display: inline-flex;
+    align-items: center;
+    align-self: center;
+    user-select: none;
+}
+
+/* Placeholder styling for the shared Lexical editor */
+.zinc-editor-placeholder {
+    position: absolute;
+    top: 0;
+    left: 0;
+    color: rgb(228 233 239 / 0.22);
+    font-family: "Zinc Prose", ui-serif, Georgia, serif;
+    font-size: clamp(1.12rem, 1rem + 0.6vw, 1.38rem);
+    line-height: 1.58;
+    pointer-events: none;
+    user-select: none;
+}
