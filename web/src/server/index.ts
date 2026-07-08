@@ -1,10 +1,5 @@
 import { serveStaticOrIndex } from "./static";
-import { handleBootstrap } from "./routes/bootstrap";
-import { handleStores } from "./routes/stores";
-import { handleThread } from "./routes/thread";
-import { handleThreads } from "./routes/threads";
-import { handleContinue } from "./routes/continue";
-import { handleContinueStream } from "./routes/continueStream";
+import { handleBootstrap, handleContinue, handleContinueStream, handleStores, handleThread, handleThreads } from "./routes";
 import { loadConfig } from "~/lib/config";
 import { addStore } from "~/lib/stores";
 

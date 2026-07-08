@@ -24,13 +24,13 @@ describe("Zinc thread transport guard", () => {
     expect(existsSync(resolve(root, `routes/api/run/stream.ts`))).toBe(false);
     expect(existsSync(resolve(root, "routes/api/document.ts"))).toBe(false);
     expect(existsSync(resolve(root, "routes/api/document/continue/stream.ts"))).toBe(false);
-    expect(existsSync(resolve(root, "server/routes/continueStream.ts"))).toBe(true);
+    expect(existsSync(resolve(root, "server/routes.ts"))).toBe(true);
   });
 
   it("does not reintroduce forbidden stream/event taxonomy in transport/runtime code", () => {
     const files = [
       resolve(root, "server/loop.ts"),
-      resolve(root, "server/routes/continueStream.ts"),
+      resolve(root, "server/routes.ts"),
     ];
     const haystack = files.map((file) => readFileSync(file, "utf8")).join("\n");
 
