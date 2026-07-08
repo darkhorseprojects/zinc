@@ -106,7 +106,7 @@ Packet rows normally store exact packet bytes. If a packet exceeds `packet-overf
 
 1. Zinc appends the latest user packet.
 2. Zinc updates the thread body.
-3. Zinc builds context from the Thread: raw tail (most recent `raw-context-bytes` of packet text), sequential head packet refs formatted as `- packet: ID [range: A:B]`, and Fibonacci-spaced middle packet refs between them.
+3. Zinc builds context from the Thread: raw tail (most recent `raw-context-bytes` of packet text), sequential head packet refs formatted as `- packet_id` or `- packet_id from:to`, and Fibonacci-spaced middle packet refs between them. Raw sections contain only packet text, not packet metadata.
 4. Zinc seeds Circuitry state with `context`, `completions`, `shell`, and `cwd`.
 5. Zinc calls Circuitry `advance()` on `turn.md`.
 6. Zinc records each advanced source entry without copying full source input into the transcript.

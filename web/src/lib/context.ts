@@ -68,20 +68,15 @@ function fibonacciMiddle(pool: TextRange[]): TextRange[] {
 
 function contextRawSection(title: string, ranges: TextRange[], packets: Record<string, Packet>) {
   if (!ranges.length) return "";
-  return [`# ${title}`, ...ranges.map((range) => contextRawRange(range, packets))].join("\n\n");
-}
-
-function contextRawRange(range: TextRange, packets: Record<string, Packet>) {
-  const author = range.packet.author ? ` author=${range.packet.author}` : "";
-  return `<!-- packet=${range.packet.packet}${author} -->\n${rangeText(range.packet, packets)}`;
+  return [`# ${title}`, ranges.map((range) => rangeText(range.packet, packets)).join("\n")].join("\n\n");
 }
 
 function contextRefSection(title: string, ranges: TextRange[]) {
   const lines = [`# ${title}`];
   for (const range of ranges) {
     const { packet, from, to } = range.packet;
-    const rangeArg = from !== undefined || to !== undefined ? ` range: ${from ?? ""}:${to ?? ""}` : "";
-    lines.push(`- packet: ${packet}${rangeArg}`);
+    const rangeArg = from !== undefined || to !== undefined ? ` ${from ?? ""}:${to ?? ""}` : "";
+    lines.push(`- ${packet}${rangeArg}`);
   }
   return lines.join("\n");
 }

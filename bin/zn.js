@@ -51,7 +51,7 @@ run source="$shell" "-c" "your command here"
 \`\`\`
 
 ### Context References
-Prior packets are referenced in context as \`- packet: ID [range: A:B]\`. To inspect a packet's full content, call the \`circuitry\` tool with kdl that runs: \`zn packet read --packet ID\`.
+Older context may be referenced as \`- packet_id\` or \`- packet_id from:to\`. To inspect one, call the \`circuitry\` tool with kdl that runs: \`zn packet read --packet packet_id\`.
 
 ### Response Format
 Your \`response\` renders as MDX. You may emit \`<Reasoning>\`, \`<Shell cmd="...">\`, \`<Error>\`, \`<Source>\`, or any custom \`<Tag prop="x">body</Tag>\`. Known tags render as interactive components; unknown tags render as raw editable blocks. Use this to structure rich responses.
