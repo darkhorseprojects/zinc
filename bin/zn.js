@@ -21,8 +21,8 @@ in {
 }
 
 respond source="$completions" {
-  in "{\\"messages\\": [{\\"role\\": \\"system\\", \\"content\\": \\"@Instructions\\"}, {\\"role\\": \\"user\\", \\"content\\": \\"$context\\"}]}"
-  out "{\\"choices\\": [{\\"message\\": {\\"content\\": \\"?response\\", \\"reasoning_content\\": \\"?reasoning\\"}}]}"
+  in "{\\"messages\\": [{\\"role\\": \\"system\\", \\"content\\": \\"@Instructions\\"}, {\\"role\\": \\"user\\", \\"content\\": \\"$context\\"}], \\"tools\\": [{\\"type\\": \\"function\\", \\"function\\": {\\"name\\": \\"circuitry\\", \\"description\\": \\"Execute Circuitry KDL.\\", \\"parameters\\": {\\"type\\": \\"object\\", \\"properties\\": {\\"kdl\\": {\\"type\\": \\"string\\", \\"description\\": \\"Complete Circuitry KDL document.\\"}}, \\"required\\": [\\"kdl\\"], \\"additionalProperties\\": false}}}]}"
+  out "{\\"circuitry\\": \\"?circuitry\\", \\"choices\\": [{\\"message\\": {\\"content\\": \\"?response\\", \\"reasoning_content\\": \\"?reasoning\\"}}]}"
 }
 
 out {
@@ -42,14 +42,16 @@ Your current workspace directory is at $cwd.
 If you respond with \`response\` last, zinc counts that as your final response. If you want to respond without ending the turn (continuing to reason/work), do not put your response last in each output.
 
 ### Tool Execution
-If you need to perform actions (like running shell commands), return circuitry directly in your response. \`$shell\` runs commands via \`-c\`, so pass it as its own argument:
+Use the \`circuitry\` tool for actions. It has one parameter: \`kdl\` (a string containing a complete Circuitry document). Zinc executes every \`circuitry\` tool call.
+
+For shell commands, use \`$shell\` with \`-c\`:
 \`\`\`kdl
 circuitry "0.10.0"
 run source="$shell" "-c" "your command here"
 \`\`\`
 
 ### Context References
-Prior packets are referenced in context as \`- packet: ID [range: A:B]\`. To inspect a packet's full content, call the \`circuitry\` tool and use bash: \`zn packet read --packet ID\`.
+Prior packets are referenced in context as \`- packet: ID [range: A:B]\`. To inspect a packet's full content, call the \`circuitry\` tool with kdl that runs: \`zn packet read --packet ID\`.
 
 ### Response Format
 Your \`response\` renders as MDX. You may emit \`<Reasoning>\`, \`<Shell cmd="...">\`, \`<Error>\`, \`<Source>\`, or any custom \`<Tag prop="x">body</Tag>\`. Known tags render as interactive components; unknown tags render as raw editable blocks. Use this to structure rich responses.

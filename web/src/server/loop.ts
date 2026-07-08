@@ -116,10 +116,12 @@ export async function continueContext(
         return await commitBody();
       }
 
-      const circuitry = outcome.circuitry.trim();
-      if (!circuitry) throw continuationError({ stage: "turn.circuitry", message: "Circuitry output was empty" });
-      await appendPacket(sourceMdx({ status: "info", label: "circuitry", body: fenced("kdl", circuitry) }));
-      await runReturnedCircuitry(circuitry, turnCwd);
+      const circuitries = outcome.circuitry.map((kdl) => kdl.trim()).filter(Boolean);
+      if (!circuitries.length) throw continuationError({ stage: "turn.circuitry", message: "Circuitry output was empty" });
+      for (const circuitry of circuitries) {
+        await appendPacket(sourceMdx({ status: "info", label: "circuitry", body: fenced("kdl", circuitry) }));
+        await runReturnedCircuitry(circuitry, turnCwd);
+      }
       await commitBody();
     }
 
@@ -144,13 +146,13 @@ export async function continueContext(
   }
 }
 
-type TerminalOutcome = { kind: "response"; response: string; reasoning: string } | { kind: "circuitry"; circuitry: string };
+type TerminalOutcome = { kind: "response"; response: string; reasoning: string } | { kind: "circuitry"; circuitry: string[] };
 
 /** Only the *last* advanced entry's bindings decide the outcome: `response` ends the turn, `circuitry` continues it, anything else (reasoning only) keeps looping. */
 function terminalBinding(last: AdvanceEntry | undefined): TerminalOutcome | null {
   const bindings = last && isRecord(last.bindings) ? last.bindings : {};
   if (bindings.response !== undefined) return { kind: "response", response: String(bindings.response), reasoning: bindings.reasoning !== undefined ? String(bindings.reasoning) : "" };
-  if (bindings.circuitry !== undefined) return { kind: "circuitry", circuitry: String(bindings.circuitry) };
+  if (bindings.circuitry !== undefined) return { kind: "circuitry", circuitry: (Array.isArray(bindings.circuitry) ? bindings.circuitry : [bindings.circuitry]).map(String) };
   return null;
 }
 

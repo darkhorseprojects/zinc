@@ -55,6 +55,17 @@ const RETURN_RESPONSE = `#!/usr/bin/env bun
 console.log('response "ok"');
 `;
 
+const RETURN_TWO_COMMANDS = `#!/usr/bin/env bun
+if ((process.argv[2] ?? "").includes("second")) {
+  console.log('response "done"');
+} else {
+  for (const cmd of ["echo first", "echo second"]) {
+    const kdl = 'circuitry "0.10.0"\\nrun source="$shell" "-c" "' + cmd + '"\\n';
+    console.log('circuitry ' + JSON.stringify(kdl));
+  }
+}
+`;
+
 describe("continueContext allowlist policy", () => {
   it("gates the configured shell's command head, not the shell binary itself", async () => {
     const { store } = await fixture(RETURN_SHELL_COMMAND("git status"), ["git"]);
@@ -68,6 +79,14 @@ describe("continueContext allowlist policy", () => {
     const thread = await createThread_(store);
     const result = await continueContext({ threadId: thread.id, input: "go" }, store);
     expect(result.mdx).toContain("command 'rm' is not in the allowlist");
+  });
+
+  it("runs multiple returned circuitry documents from one turn", async () => {
+    const { store } = await fixture(RETURN_TWO_COMMANDS, ["echo"]);
+    const thread = await createThread_(store);
+    const result = await continueContext({ threadId: thread.id, input: "go" }, store);
+    expect(result.mdx).toContain("first");
+    expect(result.mdx).toContain("second");
   });
 
   it("does not gate the turn's own declared source, even though it is not on the allowlist", async () => {
