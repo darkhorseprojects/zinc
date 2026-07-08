@@ -6,8 +6,10 @@ import { PromptDock } from "~/thread/DraftDock";
 import { TopBar } from "~/shell/TopBar";
 import databaseSvg from "@phosphor-icons/core/assets/duotone/database-duotone.svg?raw";
 import { describeError, showSystemToast } from "~/ui/toast";
+import { installDropController, droppedStorePath, droppedText } from "~/thread/dropController";
+import { normalizePacket, normalizeThreadView } from "~/thread/packetCodec";
 import type { StoreRef } from "~/lib/stores";
-import type { ThreadListItem, ThreadView, Packet } from "~/lib/types";
+import type { ThreadListItem, ThreadView } from "~/lib/types";
 
 export type ThreadBootstrap = {
   stores: StoreRef[];
@@ -452,100 +454,3 @@ function threadTitle(thread: ThreadView) {
 function threadHasContent(mdx: string) {
   return mdx.trim().length > 0;
 }
-
-function continuationToast(error: any) {
-  if (error && typeof error === "object") {
-    const stage = typeof error.stage === "string" ? error.stage : "continuation";
-    const message = typeof error.message === "string" ? error.message : JSON.stringify(error);
-    const detail = [
-      stage,
-      message,
-      typeof error.detail === "string" ? error.detail : "",
-      typeof error.stderr === "string" && error.stderr ? `stderr:\n${error.stderr}` : "",
-    ].filter(Boolean).join("\n\n");
-    return { title: `Continuation failed: ${stage}`, detail };
-  }
-  return { title: "Continuation failed", detail: String(error) };
-}
-
-function normalizeThreadView(raw: any): ThreadView {
-  return { ...raw, packets: normalizePackets(raw.packets ?? {}) };
-}
-
-function normalizePackets(raw: Record<string, any>) {
-  return Object.fromEntries(Object.entries(raw).map(([id, packet]) => [id, normalizePacket(packet)]));
-}
-
-function normalizePacket(raw: any): Packet {
-  return { ...raw, bytes: decodeBytes(raw.bytes) };
-}
-
-function decodeBytes(value: any): Uint8Array {
-  if (value instanceof Uint8Array) return value;
-  if (typeof value === "string") return Uint8Array.from(atob(value), (char) => char.charCodeAt(0));
-  if (Array.isArray(value)) return new Uint8Array(value);
-  if (value?.type === "Buffer" && Array.isArray(value.data)) return new Uint8Array(value.data);
-  if (value && typeof value === "object") {
-    const keys = Object.keys(value).filter((key) => /^\d+$/.test(key)).sort((a, b) => Number(a) - Number(b));
-    return new Uint8Array(keys.map((key) => Number(value[key])));
-  }
-  return new Uint8Array();
-}
-
-function installDropController(options: { active: (active: boolean) => void; drop: (data: DataTransfer) => void | Promise<void> }) {
-  let depth = 0;
-  const enter = (event: DragEvent) => { if (!event.dataTransfer) return; claimDropEvent(event); depth++; options.active(true); };
-  const over = (event: DragEvent) => { if (!event.dataTransfer) return; claimDropEvent(event); event.dataTransfer.dropEffect = "copy"; options.active(true); };
-  const leave = (event: DragEvent) => { if (!event.dataTransfer) return; event.stopPropagation(); depth = Math.max(0, depth - 1); if (depth === 0 || !event.relatedTarget) options.active(false); };
-  const drop = (event: DragEvent) => { if (!event.dataTransfer) return; claimDropEvent(event); depth = 0; options.active(false); void options.drop(event.dataTransfer); };
-  for (const target of dropTargets()) {
-    target.addEventListener("dragenter", enter as EventListener, true);
-    target.addEventListener("dragover", over as EventListener, true);
-    target.addEventListener("dragleave", leave as EventListener, true);
-    target.addEventListener("drop", drop as EventListener, true);
-  }
-  return () => {
-    for (const target of dropTargets()) {
-      target.removeEventListener("dragenter", enter as EventListener, true);
-      target.removeEventListener("dragover", over as EventListener, true);
-      target.removeEventListener("dragleave", leave as EventListener, true);
-      target.removeEventListener("drop", drop as EventListener, true);
-    }
-  };
-}
-
-function claimDropEvent(event: DragEvent) { event.preventDefault(); event.stopPropagation(); }
-function dropTargets(): EventTarget[] { return [window, document, document.documentElement, document.body].filter(Boolean); }
-function droppedStorePath(data: DataTransfer) {
-  const uriPath = fileUrlPath(data.getData("text/uri-list"));
-  if (uriPath && isDatabasePath(uriPath)) return uriPath;
-  const textPath = absolutePath(data.getData("text/plain"));
-  if (textPath && isDatabasePath(textPath)) return textPath;
-  for (const file of Array.from(data.files)) {
-    const exposedPath = absolutePath((file as any).path) || absolutePath((file as any).webkitRelativePath);
-    if (exposedPath && isDatabasePath(exposedPath)) return exposedPath;
-  }
-  return null;
-}
-async function droppedText(data: DataTransfer | null) {
-  if (!data) return "";
-  const uriPath = fileUrlPath(data.getData("text/uri-list")) || fileUrlPath(data.getData("text/plain"));
-  if (uriPath) return dirname(uriPath);
-  const files = [...data.files];
-  if (!files.length) return "";
-  const labels = await Promise.all(files.map(async (file) => droppedFileLabel(file)));
-  return labels.filter(Boolean).join("\n");
-}
-async function droppedFileLabel(file: File) {
-  const exposedPath = absolutePath((file as any).path) || absolutePath((file as any).webkitRelativePath);
-  if (exposedPath) return dirname(exposedPath);
-  if (file.type.startsWith("text/") || /\.(md|markdown|kdl|txt|json|ts|tsx|js|jsx)$/i.test(file.name)) {
-    const text = await file.text().catch(() => "");
-    if (text.trim()) return [`${file.name}:`, "", text].join("\n");
-  }
-  return file.name;
-}
-function fileUrlPath(value: string) { const first = value.split(/\r?\n/).find((line) => line && !line.startsWith("#")); return first?.startsWith("file://") ? decodeURIComponent(new URL(first).pathname) : null; }
-function dirname(path: string) { const index = path.lastIndexOf("/"); return index > 0 ? path.slice(0, index) : path; }
-function absolutePath(value: unknown) { return typeof value === "string" && value.startsWith("/") ? value : null; }
-function isDatabasePath(path: string) { return /\.(db|sqlite|sqlite3)$/i.test(path); }
