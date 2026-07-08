@@ -1,5 +1,6 @@
 #!/usr/bin/env bun
-import { Database } from "bun:sqlite";
+import { connect } from "@tursodatabase/database";
+import { parse as parseKdl } from "kdljs";
 import { dirname, join, resolve } from "node:path";
 import { existsSync, mkdirSync, readFileSync, writeFileSync, unlinkSync, openSync, rmSync } from "node:fs";
 import { spawn } from "node:child_process";
@@ -7,6 +8,7 @@ import { homedir } from "node:os";
 
 const ROOT = resolve(dirname(Bun.main), "..");
 const WEB = join(ROOT, "web");
+const DEFAULT_SHELL = process.platform === "win32" ? "pwsh" : "sh";
 
 const DEFAULT_TURN_MD = `---
 circuitry "0.10.0"
@@ -36,11 +38,14 @@ You are a friendly agent here to help with the user's request.
 Your current workspace directory is at $cwd.
 
 ### Tool Execution
-If you need to perform actions (like running bash commands), return returned circuitry directly in your response:
+If you need to perform actions (like running shell commands), return circuitry directly in your response:
 \`\`\`kdl
 circuitry "0.10.0"
-run source="$shell" "your command here"
+run source="$shell" "-c" "your command here"
 \`\`\`
+
+### Response Format
+Your \`response\` renders as MDX. You may emit \`<Reasoning>\`, \`<Shell cmd="...">\`, \`<Error>\`, \`<Source>\`, or any custom \`<Tag prop="x">body</Tag>\`. Known tags render as interactive components; unknown tags render as raw blocks. Use this to structure rich responses.
 `;
 
 const DEFAULT_CONFIG_KDL = (storePath, turnPath, zincDir) => `store "${storePath}"
@@ -50,7 +55,7 @@ raw-context-bytes 8192
 packet-overflow-bytes 65536
 
 completions-url "http://127.0.0.1:30000/v1/chat/completions"
-shell "bun"
+shell "${DEFAULT_SHELL}"
 
 allowlist {
   git
@@ -77,14 +82,23 @@ function resolvePath(p, base) {
   return resolve(base, expanded);
 }
 
-function initDb(dbPath) {
+async function initDb(dbPath) {
   mkdirSync(dirname(dbPath), { recursive: true });
-  const db = new Database(dbPath);
-  db.run("create table if not exists meta (key text primary key, value text not null)");
-  db.run("create table if not exists packets (id text primary key, parent text, at integer not null, bytes blob not null)");
-  db.run("create table if not exists threads (id text primary key, title text, body text not null, updated integer not null)");
-  db.run("insert or replace into meta (key, value) values ('schema_version', '1')");
+  const db = await connect(dbPath);
+  await (await db.prepare("create table if not exists meta (key text primary key, value text not null)")).run();
+  await (await db.prepare("create table if not exists packets (id text primary key, parent text, at integer not null, bytes blob not null)")).run();
+  await (await db.prepare("create table if not exists threads (id text primary key, title text, body text not null, updated integer not null)")).run();
+  await (await db.prepare("insert or replace into meta (key, value) values ('schema_version', '1')")).run();
   db.close();
+}
+
+function nodeToValue(node) {
+  const children = node.children ?? [];
+  if (children.length) return Object.fromEntries(children.map((child) => [child.name, nodeToValue(child)]));
+  const args = node.values ?? [];
+  if (args.length === 0) return true;
+  if (args.length === 1) return String(args[0]);
+  return args.map(String);
 }
 
 function parseConfig(configPath) {
@@ -93,28 +107,21 @@ function parseConfig(configPath) {
     process.exit(1);
   }
   const base = dirname(configPath);
-  const text = readFileSync(configPath, "utf8");
-  const values = {};
-  for (const rawLine of text.split("\n")) {
-    const line = rawLine.trim();
-    if (!line || line.startsWith("//") || line.endsWith("{") || line === "}") continue;
-    const parts = line.split(/\s+/, 2);
-    if (parts.length === 2) {
-      // Remove surrounding quotes if present
-      let val = parts[1];
-      if (val.startsWith('"') && val.endsWith('"')) val = val.slice(1, -1);
-      values[parts[0]] = val;
-    }
+  const parsed = parseKdl(readFileSync(configPath, "utf8"));
+  if (parsed.errors?.length) {
+    console.error(`config KDL parse error: ${parsed.errors.map((e) => e.message).join(", ")}`);
+    process.exit(1);
   }
+  const values = Object.fromEntries((parsed.output ?? []).map((node) => [node.name, nodeToValue(node)]));
+  const zincDir = resolvePath(String(values["zinc-dir"] ?? base), base);
 
-  const zincDir = resolvePath(values["zinc-dir"] || base, base);
   return {
     config: configPath,
-    store: resolvePath(values.store || "zinc.db", base),
-    turn: resolvePath(values.turn || "turn.md", base),
+    store: resolvePath(String(values.store ?? "zinc.db"), base),
+    turn: resolvePath(String(values.turn ?? "turn.md"), base),
     zincDir,
-    web_pid: join(zincDir, "web.pid"),
-    web_log: join(zincDir, "web.log"),
+    webPid: join(zincDir, "web.pid"),
+    webLog: join(zincDir, "web.log"),
   };
 }
 
@@ -125,6 +132,17 @@ function processRunning(pid) {
   } catch {
     return false;
   }
+}
+
+async function storesJsonlPath(zincDir) {
+  return join(zincDir, "stores.jsonl");
+}
+
+async function readStores(zincDir) {
+  const path = await storesJsonlPath(zincDir);
+  if (!existsSync(path)) return [];
+  const lines = readFileSync(path, "utf8").split(/\r?\n/).filter((line) => line.trim());
+  return lines.map((line) => JSON.parse(line));
 }
 
 async function main() {
@@ -172,7 +190,7 @@ async function main() {
     const dbPath = join(home, "zinc.db");
 
     mkdirSync(home, { recursive: true });
-    initDb(dbPath);
+    await initDb(dbPath);
     console.log(`initialized db: ${dbPath}`);
 
     if (!existsSync(turnPath)) {
@@ -192,8 +210,8 @@ async function main() {
   const config = parseConfig(configPath);
 
   if (cmd === "up") {
-    if (existsSync(config.web_pid)) {
-      const pid = parseInt(readFileSync(config.web_pid, "utf8").trim(), 10);
+    if (existsSync(config.webPid)) {
+      const pid = parseInt(readFileSync(config.webPid, "utf8").trim(), 10);
       if (processRunning(pid)) {
         console.log(`zinc web already running pid=${pid}`);
         return;
@@ -201,7 +219,7 @@ async function main() {
     }
 
     mkdirSync(config.zincDir, { recursive: true });
-    const logFd = openSync(config.web_log, "a");
+    const logFd = openSync(config.webLog, "a");
     const proc = spawn("bun", [join(WEB, "dist", "server", "index.js")], {
       cwd: WEB,
       env: { ...process.env, ZINC_CONFIG: config.config },
@@ -210,18 +228,18 @@ async function main() {
     });
     proc.unref();
 
-    writeFileSync(config.web_pid, String(proc.pid), "utf8");
+    writeFileSync(config.webPid, String(proc.pid), "utf8");
     console.log(`started zinc web pid=${proc.pid}`);
-    console.log(`logs: ${config.web_log}`);
+    console.log(`logs: ${config.webLog}`);
     return;
   }
 
   if (cmd === "down") {
-    if (!existsSync(config.web_pid)) {
+    if (!existsSync(config.webPid)) {
       console.log("zinc web is not running");
       return;
     }
-    const pid = parseInt(readFileSync(config.web_pid, "utf8").trim(), 10);
+    const pid = parseInt(readFileSync(config.webPid, "utf8").trim(), 10);
     if (processRunning(pid)) {
       process.kill(pid, "SIGTERM");
       let stopped = false;
@@ -230,20 +248,22 @@ async function main() {
           stopped = true;
           break;
         }
-        await new Promise(r => setTimeout(r, 100));
+        await new Promise((r) => setTimeout(r, 100));
       }
       if (!stopped) process.kill(pid, "SIGKILL");
       console.log(`stopped zinc web pid=${pid}`);
     } else {
       console.log("zinc web is not running");
     }
-    try { unlinkSync(config.web_pid); } catch {}
+    try {
+      unlinkSync(config.webPid);
+    } catch {}
     return;
   }
 
   if (cmd === "status") {
-    if (existsSync(config.web_pid)) {
-      const pid = parseInt(readFileSync(config.web_pid, "utf8").trim(), 10);
+    if (existsSync(config.webPid)) {
+      const pid = parseInt(readFileSync(config.webPid, "utf8").trim(), 10);
       if (processRunning(pid)) {
         console.log(`running pid=${pid}`);
         return;
@@ -254,13 +274,19 @@ async function main() {
   }
 
   if (cmd === "logs") {
-    if (!existsSync(config.web_log)) {
-      console.log(`no log file: ${config.web_log}`);
+    if (!existsSync(config.webLog)) {
+      console.log(`no log file: ${config.webLog}`);
       return;
     }
-    const text = readFileSync(config.web_log, "utf8");
+    const text = readFileSync(config.webLog, "utf8");
     const lines = text.split("\n");
     console.log(lines.slice(-200).join("\n"));
+    return;
+  }
+
+  if (cmd === "stores") {
+    const stores = await readStores(config.zincDir);
+    for (const store of stores) console.log(`${store.path}\t${store.name || ""}`);
     return;
   }
 
@@ -276,25 +302,23 @@ async function main() {
       process.exit(1);
     }
     const packet = args[pktIdx + 1];
-    const db = new Database(config.store);
-    const row = db.query("select bytes from packets where id = $id").get({ $id: packet });
+    const db = await connect(config.store);
+    const row = await (await db.prepare("select bytes from packets where id = ?")).get(packet);
     db.close();
     if (!row) {
       console.error(`packet not found: ${packet}`);
       process.exit(1);
     }
-    process.stdout.write(row.bytes);
+    process.stdout.write(Buffer.from(row.bytes));
     return;
   }
 
   if (cmd === "thread") {
     const sub = args.shift();
-    const db = new Database(config.store);
+    const db = await connect(config.store);
     if (sub === "list") {
-      const rows = db.query("select id, title, updated from threads order by updated desc").all();
-      for (const row of rows) {
-        console.log(`${row.id}\t${row.title || ""}\t${row.updated}`);
-      }
+      const rows = await (await db.prepare("select id, title, updated from threads order by updated desc")).all();
+      for (const row of rows) console.log(`${row.id}\t${row.title || ""}\t${row.updated}`);
     } else if (sub === "read") {
       const thrIdx = args.indexOf("--thread");
       if (thrIdx === -1 || !args[thrIdx + 1]) {
@@ -303,7 +327,7 @@ async function main() {
         process.exit(1);
       }
       const thread = args[thrIdx + 1];
-      const row = db.query("select body from threads where id = $id").get({ $id: thread });
+      const row = await (await db.prepare("select body from threads where id = ?")).get(thread);
       if (!row) {
         console.error(`thread not found: ${thread}`);
         db.close();
@@ -320,7 +344,7 @@ async function main() {
   }
 
   if (cmd === "help") {
-    console.log("zn init|here|clean|up|down|logs|status|packet|thread");
+    console.log("zn init|here|clean|up|down|logs|status|stores|packet|thread");
     return;
   }
 
@@ -328,7 +352,7 @@ async function main() {
   process.exit(1);
 }
 
-main().catch(err => {
+main().catch((err) => {
   console.error(err);
   process.exit(1);
 });

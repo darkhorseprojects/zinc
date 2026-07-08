@@ -1,11 +1,10 @@
-import { getStores, type StoreRef } from "~/lib/stores";
+import { listStores, type StoreRef } from "~/lib/stores";
 import { listThreads, loadThread } from "~/lib/db";
 import type { ThreadBootstrap } from "~/thread/ThreadPage";
 
 export async function readThreadBootstrap(storeParam?: string, threadParam?: string): Promise<ThreadBootstrap> {
-  const registry = await getStores();
-  const stores = uniqueStores([...(registry.recent || []), ...(registry.saved || [])]);
-  const store = storeParam ? refForPath(storeParam) : stores[0] ?? null;
+  const stores = await listStores();
+  const store = storeParam ? stores.find((s) => s.path === storeParam) ?? refForPath(storeParam) : stores[0] ?? null;
   if (!store) return { stores, store: null, threads: [], active: null };
 
   const threads = await listThreads(store.path);
@@ -19,7 +18,7 @@ export function stringParam(value: unknown) {
 }
 
 function refForPath(path: string): StoreRef {
-  return { path, name: path, meta: {} };
+  return { path, name: path };
 }
 
 function uniqueStores(values: StoreRef[]) {

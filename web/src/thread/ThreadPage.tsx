@@ -82,7 +82,7 @@ export default function Home(props: { initial?: ThreadBootstrap }) {
 
   function refForPath(path: string): StoreRef {
     const name = path.split(/[/\\]/).pop() || path;
-    return { path, name, meta: {} };
+    return { path, name };
   }
 
   function hydrateFromUrl(knownStores = stores()) {
@@ -372,7 +372,7 @@ export default function Home(props: { initial?: ThreadBootstrap }) {
     await fetch("/api/stores", {
       method: "POST",
       headers: { "content-type": "application/json" },
-      body: JSON.stringify({ op: "recent", storePath: next.path, storeName: next.name }),
+      body: JSON.stringify({ op: "add", storePath: next.path, storeName: next.name }),
     });
     await loadStores();
   }

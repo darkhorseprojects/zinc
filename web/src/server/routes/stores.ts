@@ -1,23 +1,16 @@
-import { addRecent, getStores, saveStore, unsaveStore } from "~/lib/stores";
+import { addStore, listStores, removeStore } from "~/lib/stores";
 import { jsonBody, jsonError, methodNotAllowed } from "../http";
 
 export async function handleStores(request: Request) {
   try {
-    if (request.method === "GET") return Response.json(await getStores());
+    if (request.method === "GET") return Response.json({ stores: await listStores() });
     if (request.method !== "POST") return methodNotAllowed();
 
     const body = await jsonBody(request);
-    const { op, storePath, storeName, meta } = body as any;
+    const { op, storePath, storeName } = body as any;
 
-    if (op === "recent" || op === "markRecent") {
-      return Response.json(await addRecent({ path: storePath, name: storeName, meta }));
-    }
-    if (op === "save" || op === "pinStore") {
-      return Response.json(await saveStore({ path: storePath, name: storeName, meta }));
-    }
-    if (op === "unsave" || op === "unpinStore") {
-      return Response.json(await unsaveStore(storePath));
-    }
+    if (op === "add") return Response.json({ stores: await addStore({ path: storePath, name: storeName }) });
+    if (op === "remove") return Response.json({ stores: await removeStore(storePath) });
 
     return Response.json({ error: `Invalid store op: ${op}` }, { status: 400 });
   } catch (error) {
