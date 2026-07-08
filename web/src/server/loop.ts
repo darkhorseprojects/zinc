@@ -116,6 +116,13 @@ export async function continueContext(
         return await commitBody();
       }
 
+      if (outcome.kind === "continue") {
+        await appendDividerIfNeeded("assistant");
+        await appendPacket(responseMdx(outcome), "assistant");
+        await commitBody();
+        continue;
+      }
+
       const circuitries = outcome.circuitry.map((kdl) => kdl.trim()).filter(Boolean);
       if (!circuitries.length) throw continuationError({ stage: "turn.circuitry", message: "Circuitry output was empty" });
       for (const circuitry of circuitries) {
@@ -146,13 +153,18 @@ export async function continueContext(
   }
 }
 
-type TerminalOutcome = { kind: "response"; response: string; reasoning: string } | { kind: "circuitry"; circuitry: string[] };
+type TerminalOutcome =
+  | { kind: "response"; response: string; reasoning: string }
+  | { kind: "circuitry"; circuitry: string[] }
+  | { kind: "continue"; response: string; reasoning: string };
 
-/** Only the *last* advanced entry's bindings decide the outcome: `response` ends the turn, `circuitry` continues it, anything else (reasoning only) keeps looping. */
+/** Only the last terminal binding in the source output decides: `response` stops; `circuitry` and `reasoning` continue. */
 function terminalBinding(last: AdvanceEntry | undefined): TerminalOutcome | null {
   const bindings = last && isRecord(last.bindings) ? last.bindings : {};
-  if (bindings.response !== undefined) return { kind: "response", response: String(bindings.response), reasoning: bindings.reasoning !== undefined ? String(bindings.reasoning) : "" };
-  if (bindings.circuitry !== undefined) return { kind: "circuitry", circuitry: (Array.isArray(bindings.circuitry) ? bindings.circuitry : [bindings.circuitry]).map(String) };
+  const terminal = last?.bindingOrder.filter((name) => name === "reasoning" || name === "response" || name === "circuitry").at(-1);
+  if (terminal === "response") return { kind: "response", response: String(bindings.response), reasoning: bindings.reasoning !== undefined ? String(bindings.reasoning) : "" };
+  if (terminal === "circuitry") return { kind: "circuitry", circuitry: (Array.isArray(bindings.circuitry) ? bindings.circuitry : [bindings.circuitry]).map(String) };
+  if (terminal === "reasoning") return { kind: "continue", response: bindings.response !== undefined ? String(bindings.response) : "", reasoning: String(bindings.reasoning) };
   return null;
 }
 

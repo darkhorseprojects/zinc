@@ -110,7 +110,7 @@ Packet rows normally store exact packet bytes. If a packet exceeds `packet-overf
 4. Zinc seeds Circuitry state with `context`, `completions`, `shell`, and `cwd`.
 5. Zinc calls Circuitry `advance()` on `turn.md`.
 6. Zinc records each advanced source entry without copying full source input into the transcript.
-7. Only the *last* entry advanced in a step decides the outcome: `response` ends the continuation and becomes the assistant packet; `circuitry` is advanced and the turn continues with new context; anything else (reasoning only) loops again.
+7. Only the last terminal binding from the *last* entry advanced in a step decides the outcome: `response` ends the continuation and becomes the assistant packet; `circuitry` is advanced and the turn continues with new context; `reasoning` records an interim packet and loops again. The `out {}` declaration order is irrelevant.
 
 ## Default turn
 

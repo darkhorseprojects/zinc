@@ -11,7 +11,7 @@ afterEach(async () => {
   await Promise.all(roots.splice(0).map((path) => rm(path, { recursive: true, force: true })));
 });
 
-async function fixture(respondScript: string, allowlist: string[]) {
+async function fixture(respondScript: string, allowlist: string[], out = "reasoning ?reasoning; response ?response; circuitry ?circuitry") {
   const root = await mkdtemp(join(tmpdir(), "zinc-loop-test-"));
   roots.push(root);
 
@@ -25,10 +25,10 @@ circuitry "0.10.0"
 in { context $context; cwd $cwd }
 
 respond source="./respond.js" "$context" {
-  out { response ?response; circuitry ?circuitry }
+  out { ${out} }
 }
 
-out { response ?response; circuitry ?circuitry }
+out { ${out} }
 ---
 ## Instructions
 n/a
@@ -66,6 +66,24 @@ if ((process.argv[2] ?? "").includes("second")) {
 }
 `;
 
+const RETURN_RESPONSE_THEN_CIRCUITRY = `#!/usr/bin/env bun
+if ((process.argv[2] ?? "").includes("tool-output")) {
+  console.log('response "done"');
+} else {
+  console.log('response "checking"');
+  const kdl = 'circuitry "0.10.0"\\nrun source="$shell" "-c" "echo tool-output"\\n';
+  console.log('circuitry ' + JSON.stringify(kdl));
+}
+`;
+
+const RETURN_REASONING_THEN_RESPONSE = `#!/usr/bin/env bun
+if ((process.argv[2] ?? "").includes("thinking")) {
+  console.log('response "done"');
+} else {
+  console.log('reasoning "thinking"');
+}
+`;
+
 describe("continueContext allowlist policy", () => {
   it("gates the configured shell's command head, not the shell binary itself", async () => {
     const { store } = await fixture(RETURN_SHELL_COMMAND("git status"), ["git"]);
@@ -87,6 +105,24 @@ describe("continueContext allowlist policy", () => {
     const result = await continueContext({ threadId: thread.id, input: "go" }, store);
     expect(result.mdx).toContain("first");
     expect(result.mdx).toContain("second");
+  });
+
+  it("continues when circuitry is the last terminal output, regardless of out declaration order", async () => {
+    for (const out of ["reasoning ?reasoning; response ?response; circuitry ?circuitry", "circuitry ?circuitry; response ?response; reasoning ?reasoning"]) {
+      const { store } = await fixture(RETURN_RESPONSE_THEN_CIRCUITRY, ["echo"], out);
+      const thread = await createThread_(store);
+      const result = await continueContext({ threadId: thread.id, input: "go" }, store);
+      expect(result.mdx).toContain("tool-output");
+      expect(result.mdx).toContain("done");
+    }
+  });
+
+  it("continues after reasoning-only output", async () => {
+    const { store } = await fixture(RETURN_REASONING_THEN_RESPONSE, []);
+    const thread = await createThread_(store);
+    const result = await continueContext({ threadId: thread.id, input: "go" }, store);
+    expect(result.mdx).toContain("thinking");
+    expect(result.mdx).toContain("done");
   });
 
   it("does not gate the turn's own declared source, even though it is not on the allowlist", async () => {

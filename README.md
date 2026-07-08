@@ -77,7 +77,7 @@ respond source="$completions" {
 out { reasoning ?reasoning; response ?response; circuitry ?circuitry }
 ```
 
-`$completions` is Circuitry's built-in HTTP/SSE source support — no sidecar script. Only the *last* entry advanced in a step decides the outcome: `response` ends the turn, `circuitry` is returned Circuitry that Zinc records, advances, and continues from; reasoning-only steps keep looping.
+`$completions` is Circuitry's built-in HTTP/SSE source support — no sidecar script. Only the last terminal binding from the *last* entry advanced in a step decides the outcome: `response` ends the turn, `circuitry` is returned Circuitry that Zinc records, advances, and continues from; reasoning-only steps keep looping. The `out {}` declaration order does not matter.
 
 ## Boundaries
 
