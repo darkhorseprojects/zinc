@@ -1,4 +1,4 @@
-import type { ContinueRequest } from "~/server/runtime/continueContext";
+import type { ContinueRequest } from "~/server/loop";
 
 export function normalizeContinueBody(body: any): ContinueRequest | null {
   const threadId = typeof body.threadId === "string" ? body.threadId : "";

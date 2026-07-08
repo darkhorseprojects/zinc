@@ -5,7 +5,6 @@ import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { defaultZincHome } from "./config";
 import { decodeThreadBodyBytes, emptyThreadBody, encodeThreadBody, threadText, threadPacketIds, threadLabel } from "./threadBody";
-import { editThreadBody } from "./editThreadBody";
 import type { Thread, ThreadBody, ThreadView, Packet, ThreadListItem } from "./types";
 
 const encoder = new TextEncoder();
@@ -200,6 +199,7 @@ export async function loadThreadFromDb(db: Db, threadId: string): Promise<Thread
   };
 }
 
+/** Commits the whole edited mdx as one new immutable packet; the thread body becomes a single range pointing at it. Prior packets are untouched. */
 export async function commitThreadMdx(
   db: Db,
   threadId: string,
@@ -210,17 +210,12 @@ export async function commitThreadMdx(
   const current = await loadThreadFromDb(db, threadId);
   if (current.revision !== baseRevision) throw new ConflictError(current.revision);
 
-  const oldText = threadText(current.body, current.packets);
-  if (oldText.mdx === mdx) return current;
+  const oldMdx = threadText(current.body, current.packets).mdx;
+  if (oldMdx === mdx) return current;
 
-  let parent: string | null = null;
-  const nextBody = await editThreadBody(oldText, mdx, async (bytes) => {
-    const packet = await addPacket(db, { parent, bytes }, options);
-    parent = packet.id;
-    return packet;
-  });
-
-  await updateThreadBody(db, threadId, nextBody);
+  const parent = current.body.ranges.at(-1)?.packet ?? null;
+  const packet = await addPacket(db, { parent, bytes: mdx }, options);
+  await updateThreadBody(db, threadId, { ranges: [{ packet: packet.id }] });
   return await loadThreadFromDb(db, threadId);
 }
 

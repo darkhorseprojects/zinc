@@ -29,7 +29,7 @@ describe("Zinc thread transport guard", () => {
 
   it("does not reintroduce forbidden stream/event taxonomy in transport/runtime code", () => {
     const files = [
-      resolve(root, "server/runtime/continueContext.ts"),
+      resolve(root, "server/loop.ts"),
       resolve(root, "server/routes/continueStream.ts"),
     ];
     const haystack = files.map((file) => readFileSync(file, "utf8")).join("\n");

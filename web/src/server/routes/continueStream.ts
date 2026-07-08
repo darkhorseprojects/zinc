@@ -1,6 +1,6 @@
 import { activeStore } from "~/lib/config";
 import { packetToWire, threadViewToWire, type ContinueEvent } from "~/lib/wire";
-import { continuationErrorData, continueContext } from "~/server/runtime/continueContext";
+import { continuationErrorData, continueContext } from "~/server/loop";
 import { jsonBody, methodNotAllowed } from "../http";
 import { normalizeContinueBody } from "./continueRequest";
 
