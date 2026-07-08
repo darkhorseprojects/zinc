@@ -15,17 +15,17 @@ Context = prepared loop input built from a Thread
 
 ## Install
 
-The installer manages package files, the bundled web app, and the default Python source-process environment.
+Bun/TypeScript throughout. No Python runtime, no virtual environment, no dependency install step for the turn itself.
 
 ```bash
-python3 bin/install.py
+bun bin/install.js
 ```
 
-It installs `zn`, builds/copies the web app, copies editable agent templates, creates `agent/.venv`, installs `agent/requirements.txt`, and rewrites default `.py` shebangs to the venv Python.
+It installs root and web dependencies, builds the web app, installs `zn`, and copies the built assets into `~/.local/lib/zinc`.
 
 ## Editable Zinc home
 
-`zn init` creates a user-editable Zinc home and store/config only:
+`zn init` creates a user-editable Zinc home and store/config:
 
 ```text
 Linux:   ${XDG_CONFIG_HOME:-~/.config}/zinc
@@ -38,13 +38,8 @@ Layout:
 ```text
 config.kdl
 zinc.db
-agent/
-  turn.md
-  openai-responses.py
-  openai-responses.kdl
-  shell.py
-  requirements.txt
-  .venv/
+stores.jsonl
+turn.md
 ```
 
 `zn here` creates project-local store/config in `./.zinc/`.
@@ -53,49 +48,40 @@ agent/
 
 ```kdl
 store "/path/to/zinc.db"
-turn "/path/to/agent/turn.md"
+turn "/path/to/turn.md"
 zinc-dir "/path/to/zinc-home"
-agent-dir "/path/to/zinc-home/agent"
-python "/path/to/zinc-home/agent/.venv/bin/python"
 raw-context-bytes 8192
 packet-overflow-bytes 65536
+completions-url "https://api.openai.com/v1/chat/completions"
+shell "sh"
+
+allowlist {
+  git
+  ls
+  grep
+}
 ```
 
-`packet-overflow-bytes`: packets larger than this limit are stored outside the store database; the DB row keeps a tail and a pointer. `raw-context-bytes`: byte budget for raw tail content and head packet refs in assembled context.
+`shell` is the executable seeded into the turn as `$shell` (default `sh`, `pwsh` on Windows). `allowlist` gates only calls to `$shell` via returned circuitry — nested blocks flatten to permitted command heads; empty/absent permits everything. `packet-overflow-bytes`: packets larger than this limit are stored outside the store database; the DB row keeps a tail and a pointer. `raw-context-bytes`: byte budget for raw tail content and head packet refs in assembled context.
 
-`zn up`, `zn down`, `zn logs`, and `zn status` manage the bundled Zinc web app. Runtime state lives beside the config as `web.pid` and `web.log`.
-
-## Agent files
-
-The default Zinc agent directory is a Circuitry turn plus executable source processes.
-
-```text
-turn.md                 configured Circuitry turn
-openai-responses.py     OpenAI Responses source process
-openai-responses.kdl    adapter config
-shell.py                optional shell source process
-requirements.txt        Python deps installed by the installer
-```
+`zn up`, `zn down`, `zn logs`, and `zn status` manage the bundled Zinc web app. Runtime state lives beside the config as `web.pid` and `web.log`. `stores.jsonl` beside the config tracks known store files (path + name), not a database.
 
 ## Turn
 
 ```kdl
-respond source="$python" {
-  in {
-    args "./openai-responses.py"
-    stdin { context $context; cwd $cwd; store $store; loop-dir $loop-dir; instructions @Instructions }
-  }
-  out { reasoning ?reasoning; response ?response; circuitry ?circuitry }
+respond source="$completions" {
+  in "{\"messages\": [{\"role\": \"system\", \"content\": \"@Instructions\"}, {\"role\": \"user\", \"content\": \"$context\"}]}"
+  out "{\"choices\": [{\"message\": {\"content\": \"?response\", \"reasoning_content\": \"?reasoning\"}}]}"
 }
+
+out { reasoning ?reasoning; response ?response; circuitry ?circuitry }
 ```
 
-`response` ends the turn. `circuitry` is returned Circuitry: Zinc records it, advances it, records the result, builds updated context, and continues.
+`$completions` is Circuitry's built-in HTTP/SSE source support — no sidecar script. Only the *last* entry advanced in a step decides the outcome: `response` ends the turn, `circuitry` is returned Circuitry that Zinc records, advances, and continues from; reasoning-only steps keep looping.
 
 ## Boundaries
 
-Configured Circuitry runs as the current OS user. Source processes read their own config. OS permissions decide what they can access.
-
-The OpenAI adapter does not run shell commands. It only turns OpenAI Responses output into KDL stdout. Other source processes, including `shell.py`, are Circuitry entries.
+Configured Circuitry runs as the current OS user. Source processes read their own config. OS permissions decide what they can access. The only host-level interception is the shell allowlist described above; everything else Circuitry names, Zinc runs.
 
 ## CLI
 
@@ -106,7 +92,8 @@ zn up
 zn down
 zn logs [--lines 200]
 zn status
-zn packet read --store /tmp/zinc.db --packet pkt_...
-zn thread list --store /tmp/zinc.db
-zn thread read --store /tmp/zinc.db --thread thr_...
+zn stores
+zn packet read --packet pkt_...
+zn thread list
+zn thread read --thread thr_...
 ```

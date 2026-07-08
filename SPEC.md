@@ -6,14 +6,14 @@ Zinc is a replaceable local host around Circuitry turns.
 
 ```text
 Circuitry = source entries, source processes, KDL in/out, and stepping
-Zinc      = packets, threads, context building, editable agent files, bundled web lifecycle, observation
+Zinc      = packets, threads, context building, editable turn, bundled web lifecycle, observation
 ```
 
-Source entries use `in`/`out` templates to declare input requirements and output bindings. All source processes receive resolved KDL directly on stdin.
+Source entries use `in`/`out` templates to declare input requirements and output bindings. Object `in` serializes to KDL on stdin; string `in` sends raw bytes with `$`/`@` refs substituted inline. Captured stdout is coerced (JSON, then whichever of KDL/YAML the text's shape actually matches, else raw text).
 
 If a source process needs execution or more information, it returns `circuitry`; Zinc records it, advances it through Circuitry, builds new context, and continues.
 
-Configured Circuitry runs as the current OS user.
+Configured Circuitry runs as the current OS user. The only host-level interception is a policy gate on the configured `$shell`: returned-circuitry calls whose source resolves to `$shell` have their command head checked against `allowlist` before spawning. Every other source — the turn's own declared sources, HTTP endpoints, nested Circuitry documents — passes through untouched.
 
 ## Packet, Thread, Context
 
@@ -41,17 +41,18 @@ byteLength byte count
 
 `Context` is not an object in code. It is the string passed to Circuitry as `state.context`.
 
+Editing a thread's mdx (autosave, or a turn appending its response) stores the entire new text as one new immutable packet and rewrites the thread body to a single range pointing at it. Older packets stay in the store, unreferenced by the current body, but never mutated.
+
 ## Install
 
-`bin/install.py` manages package installation and default runtime setup:
+`bin/install.js` manages package installation and default runtime setup:
 
-- checks required programs
+- checks Bun is installed
+- installs root and web dependencies
 - builds and copies the bundled web app
 - installs the `zn` executable
-- copies default editable agent templates
-- creates `agent/.venv`
-- installs `agent/requirements.txt`
-- rewrites default `.py` shebangs to the venv Python
+
+No Python, no virtual environment, no shebang rewriting.
 
 ## Zinc home
 
@@ -68,25 +69,21 @@ Project-local `zn here` uses `./.zinc`.
 ```text
 config.kdl
 zinc.db
-agent/
-  turn.md
-  openai-responses.py
-  openai-responses.kdl
-  shell.py
-  requirements.txt
-  .venv/
+stores.jsonl
+turn.md
 ```
 
 ## Config
 
 ```kdl
 store "~/.config/zinc/zinc.db"
-turn "~/.config/zinc/agent/turn.md"
+turn "~/.config/zinc/turn.md"
 zinc-dir "~/.config/zinc"
-agent-dir "~/.config/zinc/agent"
-python "~/.config/zinc/agent/.venv/bin/python"
 raw-context-bytes 8192
 packet-overflow-bytes 65536
+completions-url "https://api.openai.com/v1/chat/completions"
+shell "sh"
+allowlist { git ls grep }
 ```
 
 ## Store schema
@@ -97,41 +94,44 @@ create table packets (id text primary key, parent text, at integer not null, byt
 create table threads (id text primary key, title text, body text not null, updated integer not null);
 ```
 
-`schema_version` in `meta` is `1`.
+`schema_version` in `meta` is `1`. The store engine is `@tursodatabase/database` everywhere — the CLI, the web server, and any tooling that opens a store file all use the same driver.
 
 Packet rows normally store exact packet bytes. If a packet exceeds `packet-overflow-bytes`, Zinc writes the exact bytes to an OS temp file and stores an overflow marker in `packets.bytes`. The marker contains the file path, original byte size, and tail bytes. `zn packet read` and web store reads resolve the marker and return the exact original packet bytes.
+
+## Known stores
+
+`stores.jsonl` beside the config is a flat, append-only list of `{"path","name"}` lines — not a database, just the set of store files the CLI and web UI know about. `zn stores` lists it; the web UI's store switcher reads/writes it via `/api/stores`.
 
 ## Continuation
 
 1. Zinc appends the latest user packet.
 2. Zinc updates the thread body.
 3. Zinc builds context from the Thread: raw tail (most recent `raw-context-bytes` of packet text), sequential head packet refs formatted as `- packet: ID [range: A:B]`, and Fibonacci-spaced middle packet refs between them.
-4. Zinc seeds Circuitry state with `context`, `cwd`, `loop-dir`, and `python`.
+4. Zinc seeds Circuitry state with `context`, `completions`, `shell`, and `cwd`.
 5. Zinc calls Circuitry `advance()` on `turn.md`.
 6. Zinc records each advanced source entry without copying full source input into the transcript.
-7. `response` ends the continuation and becomes the assistant packet.
-8. `circuitry` KDL document is advanced, and the turn continues with new context.
+7. Only the *last* entry advanced in a step decides the outcome: `response` ends the continuation and becomes the assistant packet; `circuitry` is advanced and the turn continues with new context; anything else (reasoning only) loops again.
 
-## Default source processes
+## Default turn
 
-`openai-responses.py` reads KDL stdin (passing `context`, `cwd`, and `loop-dir`), requests chat completions using a native `circuitry(kdl)` tool definition, streams/accumulates both `content` and `reasoning_content`, and outputs the resulting text or KDL document.
-
-`shell.py` reads `cmd` and `cwd` from KDL stdin, runs a platform shell, and writes `output`, `stderr`, `code`, and `shell`. Command nonzero exit code is data, not source-process failure. It runs dependency-free directly under any system Python interpreter, verifying allowed command heads against `shell.kdl`.
+The default turn's one real source entry is `respond source="$completions"` — Circuitry's built-in HTTP/SSE support, not a script. It streams `content`/`reasoning_content` from a standard chat-completions response and binds `response`/`reasoning`. There is no default source process for shell execution either: the model returns circuitry naming `$shell` directly (`run source="$shell" "-c" "cmd"`), and Circuitry spawns it like any other executable.
 
 ## CLI
 
 ```bash
-zn init [--home DIR] [--store PATH] [--config PATH]
+zn init [--config PATH]
 zn here
 zn up
 zn down
 zn logs [--lines N]
 zn status
-zn packet read --store STORE --packet PACKET [--range START:END]
-zn thread list --store STORE
-zn thread read --store STORE --thread THREAD
+zn stores
+zn packet read --packet PACKET [--config PATH]
+zn thread list [--config PATH]
+zn thread read --thread THREAD [--config PATH]
+zn clean [--global] [--all]
 ```
 
-`zn init` and `zn here` initialize store/config/home. They do not install Python dependencies.
+`zn init` and `zn here` initialize store/config/home. They do not install anything.
 
 `zn up`, `zn down`, `zn logs`, and `zn status` manage the bundled Zinc web app for the active config using `web.pid` and `web.log`.
