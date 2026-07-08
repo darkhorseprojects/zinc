@@ -7,6 +7,5 @@ export function normalizeContinueBody(body: any): ContinueRequest | null {
     threadId,
     input: typeof body.draft === "string" ? body.draft : typeof body.input === "string" ? body.input : "",
     ...(typeof body.baseRevision === "string" ? { baseRevision: body.baseRevision } : {}),
-    ...(typeof body.mdx === "string" ? { mdx: body.mdx } : {}),
   };
 }

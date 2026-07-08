@@ -11,6 +11,9 @@ export type ZincConfig = {
   python: string;
   rawContextBytes: number;
   packetOverflowBytes: number;
+  completionsUrl: string;
+  shell: string;
+  allowlist: string[];
 };
 
 type KdlNode = {
@@ -27,6 +30,12 @@ export async function loadConfig(): Promise<ZincConfig> {
   const base = dirname(CONFIG_PATH);
   const zincDir = expandPath(requiredString(parsed["zinc-dir"] ?? parsed.zincDir, "zinc-dir"), base);
   const agentDir = expandPath(stringValue(parsed["agent-dir"] ?? parsed.agentDir) || join(zincDir, "agent"), base);
+  const completionsUrl = stringValue(parsed["completions-url"] ?? parsed.completionsUrl) || "http://127.0.0.1:30000/v1/chat/completions";
+  const shell = stringValue(parsed.shell) || "bun";
+  const allowlistRaw = parsed.allowlist;
+  const allowlist = Array.isArray(allowlistRaw)
+    ? allowlistRaw
+    : (typeof allowlistRaw === "string" && allowlistRaw.trim() ? [allowlistRaw] : []);
 
   return {
     store: expandPath(requiredString(parsed.store, "store"), base),
@@ -36,6 +45,9 @@ export async function loadConfig(): Promise<ZincConfig> {
     python: expandPath(stringValue(parsed.python) || join(agentDir, process.platform === "win32" ? ".venv/Scripts/python.exe" : ".venv/bin/python"), base),
     rawContextBytes: positiveInteger(parsed["raw-context-bytes"] ?? parsed.rawContextBytes, 8192),
     packetOverflowBytes: positiveInteger(parsed["packet-overflow-bytes"] ?? parsed.packetOverflowBytes, 65536),
+    completionsUrl,
+    shell,
+    allowlist,
   };
 }
 
@@ -59,8 +71,23 @@ export function defaultZincHome() {
 function parseConfigKdl(text: string): Record<string, unknown> {
   const doc = parseKdl(text) as { nodes: KdlNode[] };
   const result: Record<string, unknown> = {};
-  for (const node of doc.nodes) result[node.getName()] = nodeToValue(node);
+  for (const node of doc.nodes) {
+    if (node.getName() === "allowlist") {
+      result["allowlist"] = collectLeafNames(node);
+    } else {
+      result[node.getName()] = nodeToValue(node);
+    }
+  }
   return result;
+}
+
+function collectLeafNames(node: KdlNode): string[] {
+  if (node.children?.nodes?.length) {
+    return node.children.nodes.flatMap(collectLeafNames);
+  }
+  const name = node.getName();
+  // Filter out any KDL boolean values or empty strings that could arise
+  return name && name !== "true" && name !== "false" ? [name] : [];
 }
 
 function nodeToValue(node: KdlNode): unknown {

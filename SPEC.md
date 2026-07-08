@@ -5,9 +5,11 @@ Zinc is a replaceable local host around Circuitry turns.
 ## Boundaries
 
 ```text
-Circuitry = source entries, source processes, KDL input/output, and stepping
+Circuitry = source entries, source processes, KDL in/out, and stepping
 Zinc      = packets, threads, context building, editable agent files, bundled web lifecycle, observation
 ```
+
+Source entries use `in`/`out` templates to declare input requirements and output bindings. All source processes receive resolved KDL directly on stdin.
 
 If a source process needs execution or more information, it returns `circuitry`; Zinc records it, advances it through Circuitry, builds new context, and continues.
 

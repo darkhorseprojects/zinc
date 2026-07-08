@@ -1,59 +1,41 @@
 ---
 circuitry "0.10.0"
 
-input {
+in {
   context $context
+  completions $completions
+  shell $shell
   cwd $cwd
-  store $store
-  loop-dir $loop-dir
-  python $python
 }
 
-respond source="$python" {
-  in {
-    args "./openai-responses.py"
-    stdin {
-      context      $context
-      cwd          $cwd
-      loop-dir     $loop-dir
-      instructions @Instructions
-    }
-  }
-
-  out {
-    reasoning ?reasoning
-    response  ?response
-    circuitry ?circuitry
-  }
+respond source="$completions" {
+  in "{\"messages\": [{\"role\": \"system\", \"content\": \"@Instructions\"}, {\"role\": \"user\", \"content\": \"$context\"}]}"
+  out "{\"choices\": [{\"message\": {\"content\": \"?response\", \"reasoning_content\": \"?reasoning\"}}]}"
 }
 
-output {
+out {
   reasoning ?reasoning
   response  ?response
-  circuitry ?circuitry
 }
 ---
 
 ## Instructions
 
-You are an agent executing in the Zinc loop to address the user's request.
+You are a friendly and honest assistant here to help the user.
 
-### Conversational Response
-For normal conversation, explanations, or direct answers, do not call any tools. Just reply directly with plain text (ends the turn).
+Your current workspace directory is at $cwd.
+
+### How the loop works
+If you respond with `response` last, zinc counts that as your final response. If you want to respond without ending the turn (continuing to reason/work), do not put your response last in each output.
 
 ### Tool Execution
-If you need to perform actions (like running bash commands or reading prior context), invoke the `circuitry` tool:
-
-**Tool Name**: `circuitry`  
-**Parameter**: `kdl` (string)  
-**Value** (KDL format, do not wrap in frontmatter dashes `---`):
+If you need to perform actions (like running bash commands), return returned circuitry directly in your response:
 ```kdl
 circuitry "0.10.0"
-input { cwd "$cwd" loop-dir "$loop-dir" }
-run source="$loop-dir/shell.py" {
-  in { cmd "your command here" cwd "$cwd" }
-}
+run source="$shell" "your command here"
 ```
 
 ### Context References
-Prior packets are referenced in context as `- packet: ID [range: A:B]`. To inspect a packet's full content, call the `circuitry` tool running `zn packet read --packet ID`.
+Prior packets are referenced in context as `- packet: ID [range: A:B]`. To inspect a packet's full content, call the `circuitry` tool and use bash: `zn packet read --packet ID`.
+
+Navigate the conversation and read prior context before responding. Trace the tail of useful information. Feel the structure and pacing.

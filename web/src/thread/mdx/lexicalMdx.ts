@@ -38,18 +38,23 @@ import { LinkNode, $createLinkNode, $isLinkNode } from "@lexical/link";
 import {
   $createMdxSourceNode,
   $createReasoningNode,
-  $createTranscriptBlockNode,
+  $createCommandNode,
+  $createErrorNode,
+  $createSourceNode,
   $isMdxSourceNode,
   $isReasoningNode,
-  $isTranscriptBlockNode,
+  $isCommandNode,
+  $isErrorNode,
+  $isSourceNode,
   MdxSourceNode,
   ReasoningNode,
-  TranscriptBlockNode,
+  CommandNode,
+  ErrorNode,
+  SourceNode,
   HorizontalRuleNode,
   $createHorizontalRuleNode,
   $isHorizontalRuleNode,
   type ComponentStatus,
-  type TranscriptBlockKind,
 } from "~/thread/nodes";
 import { parseMdx, sourceForNode, type MdastNode, type MdastRoot } from "./parseMdx";
 import { serializeMdastChildren, serializeMdastNode, serializeMdx } from "./serializeMdx";
@@ -60,7 +65,9 @@ export const zincLexicalNodes = [
   CodeNode,
   MdxSourceNode,
   ReasoningNode,
-  TranscriptBlockNode,
+  CommandNode,
+  ErrorNode,
+  SourceNode,
   ListNode,
   ListItemNode,
   LinkNode,
@@ -98,7 +105,9 @@ export function exportLexicalToMdx(editor: LexicalEditor): string {
 function lexicalNodeToSource(node: LexicalNode): string | null {
   if ($isMdxSourceNode(node)) return node.getSource().trimEnd();
   if ($isReasoningNode(node)) return `<Reasoning>\n${node.getText().trimEnd()}\n</Reasoning>`;
-  if ($isTranscriptBlockNode(node)) return transcriptBlockToMdx(node);
+  if ($isCommandNode(node)) return commandToMdx(node);
+  if ($isErrorNode(node)) return errorToMdx(node);
+  if ($isSourceNode(node)) return sourceToMdx(node);
   const children = lexicalNodeToMdast(node);
   if (!children.length) return null;
   return serializeMdx({ type: "root", children });
@@ -282,34 +291,99 @@ function textNodeToMdast(textNode: TextNode): MdastNode[] {
 
 function mdxComponentToLexical(node: MdastNode, source: string): LexicalNode {
   if (node.name === "Reasoning") return $createReasoningNode(serializeMdastChildren(node).trim());
-  if (node.name === "TranscriptBlock") {
-    return $createTranscriptBlockNode({
-      kind: transcriptKindAttribute(node, "kind"),
+  if (node.name === "Command") {
+    return $createCommandNode({
+      cmd: stringAttribute(node, "cmd"),
+      exit: nullableNumberAttribute(node, "exit"),
       status: statusAttribute(node, "status"),
       label: stringAttribute(node, "label"),
-      command: stringAttribute(node, "command"),
-      stage: stringAttribute(node, "stage"),
-      exit: nullableNumberAttribute(node, "exit"),
       body: componentBody(node),
+    });
+  }
+  if (node.name === "Error") {
+    return $createErrorNode({
+      stage: stringAttribute(node, "stage"),
+      status: statusAttribute(node, "status"),
+      label: stringAttribute(node, "label"),
+      body: componentBody(node),
+    });
+  }
+  if (node.name === "Source") {
+    return $createSourceNode({
+      status: statusAttribute(node, "status"),
+      label: stringAttribute(node, "label"),
+      body: componentBody(node),
+    });
+  }
+  // Backward compatibility: map old TranscriptBlock to new nodes based on kind
+  if (node.name === "TranscriptBlock") {
+    const kind = attributeValue(node, "kind");
+    const status = statusAttribute(node, "status");
+    const label = stringAttribute(node, "label");
+    const body = componentBody(node);
+
+    if (kind === "command") {
+      return $createCommandNode({
+        cmd: stringAttribute(node, "command"),
+        exit: nullableNumberAttribute(node, "exit"),
+        status,
+        label,
+        body,
+      });
+    }
+    if (kind === "error") {
+      return $createErrorNode({
+        stage: stringAttribute(node, "stage"),
+        status,
+        label,
+        body,
+      });
+    }
+    return $createSourceNode({
+      status,
+      label,
+      body,
     });
   }
   return $createMdxSourceNode(sourceForNode(source, node) ?? serializeMdastNode(node));
 }
 
-function transcriptBlockToMdx(node: TranscriptBlockNode): string {
+function commandToMdx(node: CommandNode): string {
   const attributes = [
-    `kind=${JSON.stringify(node.getBlockKind())}`,
+    `cmd=${JSON.stringify(node.getCmd())}`,
+    node.getExit() !== null ? `exit={${node.getExit()}}` : "",
     `status=${JSON.stringify(node.getStatus())}`,
     node.getLabel() ? `label=${JSON.stringify(node.getLabel())}` : "",
-    node.getCommand() ? `command=${JSON.stringify(node.getCommand())}` : "",
-    node.getStage() ? `stage=${JSON.stringify(node.getStage())}` : "",
-    node.getExit() !== null ? `exit={${node.getExit()}}` : "",
   ].filter(Boolean).join(" ");
-
   return [
-    `<TranscriptBlock ${attributes}>`,
+    `<Command ${attributes}>`,
     node.getBody().trimEnd(),
-    `</TranscriptBlock>`,
+    `</Command>`,
+  ].join("\n");
+}
+
+function errorToMdx(node: ErrorNode): string {
+  const attributes = [
+    node.getStage() ? `stage=${JSON.stringify(node.getStage())}` : "",
+    `status=${JSON.stringify(node.getStatus())}`,
+    node.getLabel() ? `label=${JSON.stringify(node.getLabel())}` : "",
+  ].filter(Boolean).join(" ");
+  return [
+    `<Error ${attributes}>`,
+    node.getBody().trimEnd(),
+    `</Error>`,
+  ].join("\n");
+}
+
+function sourceToMdx(node: SourceNode): string {
+  const attributes = [
+    `status=${JSON.stringify(node.getStatus())}`,
+    node.getLabel() ? `label=${JSON.stringify(node.getLabel())}` : "",
+  ].filter(Boolean).join(" ");
+  return [
+    `<Source ${attributes}>`,
+    node.getBody().trimEnd(),
+    `</Source>`,
   ].join("\n");
 }
 
@@ -337,11 +411,6 @@ function nullableNumberAttribute(node: MdastNode, name: string): number | null {
 function statusAttribute(node: MdastNode, name: string): ComponentStatus {
   const value = attributeValue(node, name);
   return value === "ok" || value === "error" || value === "pending" || value === "info" ? value : "pending";
-}
-
-function transcriptKindAttribute(node: MdastNode, name: string): TranscriptBlockKind {
-  const value = attributeValue(node, name);
-  return value === "command" || value === "source" || value === "error" || value === "note" ? value : "note";
 }
 
 function attributeValue(node: MdastNode, name: string): unknown {

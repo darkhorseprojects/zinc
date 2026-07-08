@@ -4,6 +4,7 @@ import { parse, advance, type AdvanceEntry } from "@darkhorseprojects/circuitry"
 import { readFile } from "node:fs/promises";
 import { dirname } from "node:path";
 import { getZincConfig } from "~/lib/config";
+import type { ComponentStatus } from "~/thread/nodes";
 import type { ThreadBody, Packet } from "~/lib/types";
 
 export type ContinueRequest = {
@@ -107,57 +108,132 @@ export async function continueContext(
       const context = threadContext(currentBody, currentPackets, config.rawContextBytes, activeStore);
       const state: Record<string, unknown> = {
         context,
+        shell: config.shell,
+        completions: config.completionsUrl,
         cwd: config.zincDir,
-        store: activeStore,
-        "loop-dir": turnCwd,
-        python: config.python,
       };
 
       const turnAdvance = await advance(turn.definition, state, turnTracker, {
         cwd: turnCwd,
+        env: {
+          ...process.env,
+          COMPLETIONS_URL: config.completionsUrl,
+          ALLOWLIST: config.allowlist.join(" "),
+        },
         onOutput: async event => {
           if (onFrame) await onFrame({ output: { entry: event.entry, stream: event.stream, text: event.chunk.toString("utf8") } });
         },
+        runSource: async (source, input, runOptions) => {
+          if (source === config.shell || source === "$shell") {
+            const cmd = typeof input === "string" ? input : (isRecord(input) && typeof input.cmd === "string" ? input.cmd : "");
+            if (!cmd) throw new Error("Command is empty");
+
+            const allowlist = config.allowlist;
+            const head = cmd.trim().split(/\s+/)[0];
+            if (allowlist.length && !allowlist.includes(head)) {
+              return {
+                stdout: "",
+                stderr: `command '${head}' is not in the allowlist. Allowed: ${allowlist.join(", ")}`,
+                code: 1,
+              };
+            }
+
+            const spawnCmd = config.shell;
+            const spawnArgs: string[] = [];
+            if (spawnCmd === "bun") {
+              spawnArgs.push("run", "-e", `import { $ } from 'bun'; const r = await $\`sh -c \${process.env.CMD}\`.quiet().nothrow(); console.log(JSON.stringify({ stdout: r.stdout.toString(), stderr: r.stderr.toString(), code: r.exitCode }));`);
+            } else if (spawnCmd === "bash" || spawnCmd === "sh") {
+              spawnArgs.push("-c", cmd);
+            } else if (spawnCmd.includes("powershell") || spawnCmd.includes("pwsh")) {
+              spawnArgs.push("-NoProfile", "-Command", cmd);
+            } else {
+              spawnArgs.push("-c", cmd);
+            }
+
+            const procEnv = { ...process.env, ...runOptions.env, CMD: cmd };
+            const { spawn } = await import("node:child_process");
+            const child = spawn(spawnCmd, spawnArgs, { cwd: runOptions.cwd, env: procEnv });
+
+            const stdoutBufs: Buffer[] = [];
+            const stderrBufs: Buffer[] = [];
+
+            child.stdout.on("data", (chunk: Buffer) => stdoutBufs.push(chunk));
+            child.stderr.on("data", (chunk: Buffer) => stderrBufs.push(chunk));
+
+            const exitCode = await new Promise<number | null>((resolveExit, reject) => {
+              child.on("error", reject);
+              child.on("close", resolveExit);
+            });
+
+            const stdoutStr = Buffer.concat(stdoutBufs).toString("utf8");
+            const stderrStr = Buffer.concat(stderrBufs).toString("utf8");
+
+            if (spawnCmd === "bun") {
+              try {
+                return JSON.parse(stdoutStr.trim());
+              } catch {}
+            }
+
+            return {
+              stdout: stdoutStr,
+              stderr: stderrStr,
+              code: exitCode ?? 0,
+            };
+          }
+          return undefined;
+        }
       });
 
       if (!turnAdvance.progressed) throw continuationError({ stage: "turn.advance", message: "Configured turn did not advance" });
       for (const entry of turnAdvance.entries) {
-        if (entry.name === "respond") continue;
-        await appendPacket(transcriptBlockMdx(sourceBlock(entry)));
+        if (entry.name === "respond" || entry.source === config.completionsUrl) continue;
+        await appendPacket(sourceBlock(entry));
       }
 
-      const last = lastRecognizable(turnAdvance.entries);
-      if (!last) throw continuationError({ stage: "turn.output", message: "Turn produced no response or circuitry" });
-
       let lastReasoning = "";
+      let lastResponse = "";
+      let lastCircuitry = "";
+      let lastOutcome: "reasoning" | "response" | "circuitry" | null = null;
+
       for (const entry of turnAdvance.entries) {
-        if (isRecord(entry.output) && typeof entry.output.reasoning === "string" && entry.output.reasoning.trim()) {
-          lastReasoning = entry.output.reasoning;
+        if (isRecord(entry.bindings)) {
+          if (entry.bindings.reasoning !== undefined) {
+            lastReasoning = String(entry.bindings.reasoning);
+            if (lastOutcome === null) lastOutcome = "reasoning";
+          }
+          if (entry.bindings.response !== undefined) {
+            lastResponse = String(entry.bindings.response);
+            lastOutcome = "response";
+          }
+          if (entry.bindings.circuitry !== undefined) {
+            lastCircuitry = String(entry.bindings.circuitry);
+            lastOutcome = "circuitry";
+          }
         }
       }
 
-      if (last.name === "response") {
+      if (!lastOutcome) throw continuationError({ stage: "turn.output", message: "Turn produced no response or circuitry" });
+
+      if (lastOutcome === "response" || lastOutcome === "reasoning") {
         await appendDividerIfNeeded("assistant");
         let packetText = "";
         if (lastReasoning.trim()) {
           packetText += `<Reasoning>\n${lastReasoning.trim()}\n</Reasoning>\n\n`;
         }
-        packetText += `${String(last.value)}\n\n`;
+        if (lastOutcome === "response") {
+          packetText += `${lastResponse}\n\n`;
+        }
         await appendPacket(packetText, "assistant");
         return await commitBody();
       }
 
-      if (last.name === "circuitry") {
-        const circuitry = String(last.value ?? "").trim();
+      if (lastOutcome === "circuitry") {
+        const circuitry = lastCircuitry.trim();
         if (!circuitry) throw continuationError({ stage: "turn.circuitry", message: "Circuitry output was empty" });
-        await appendPacket(transcriptBlockMdx(circuitryBlock(circuitry, turnCwd)));
+        await appendPacket(circuitryBlock(circuitry, turnCwd, config.shell));
         await runReturnedCircuitry(circuitry, turnCwd);
         await commitBody();
         continue;
-      }
-
-      if (last.name === "reasoning") {
-        throw continuationError({ stage: "turn.output", message: "Turn ended with reasoning but no response or circuitry" });
       }
     }
 
@@ -166,23 +242,77 @@ export async function continueContext(
       const returnedContext = threadContext(currentBody, currentPackets, config.rawContextBytes, activeStore);
       const returnedState: Record<string, unknown> = {
         context: returnedContext,
+        shell: config.shell,
+        completions: config.completionsUrl,
         cwd: config.zincDir,
-        store: activeStore,
-        "loop-dir": cwd,
-        python: config.python,
       };
       const tracker = new Map<string, unknown>();
       let advanced = false;
       while (true) {
         const result = await advance(returned.definition, returnedState, tracker, {
           cwd,
+          env: {
+            ...process.env,
+            COMPLETIONS_URL: config.completionsUrl,
+            ALLOWLIST: config.allowlist.join(" "),
+          },
           onOutput: async event => {
             if (onFrame) await onFrame({ output: { entry: event.entry, stream: event.stream, text: event.chunk.toString("utf8") } });
           },
+          runSource: async (source, input, runOptions) => {
+            if (source === config.shell || source === "$shell") {
+              const cmd = typeof input === "string" ? input : (isRecord(input) && typeof input.cmd === "string" ? input.cmd : "");
+              if (!cmd) throw new Error("Command is empty");
+              const allowlist = config.allowlist;
+              const head = cmd.trim().split(/\s+/)[0];
+              if (allowlist.length && !allowlist.includes(head)) {
+                return {
+                  stdout: "",
+                  stderr: `command '${head}' is not in the allowlist. Allowed: ${allowlist.join(", ")}`,
+                  code: 1,
+                };
+              }
+              const spawnCmd = config.shell;
+              const spawnArgs: string[] = [];
+              if (spawnCmd === "bun") {
+                spawnArgs.push("run", "-e", `import { $ } from 'bun'; const r = await $\`sh -c \${process.env.CMD}\`.quiet().nothrow(); console.log(JSON.stringify({ stdout: r.stdout.toString(), stderr: r.stderr.toString(), code: r.exitCode }));`);
+              } else if (spawnCmd === "bash" || spawnCmd === "sh") {
+                spawnArgs.push("-c", cmd);
+              } else if (spawnCmd.includes("powershell") || spawnCmd.includes("pwsh")) {
+                spawnArgs.push("-NoProfile", "-Command", cmd);
+              } else {
+                spawnArgs.push("-c", cmd);
+              }
+              const procEnv = { ...process.env, ...runOptions.env, CMD: cmd };
+              const { spawn } = await import("node:child_process");
+              const child = spawn(spawnCmd, spawnArgs, { cwd: runOptions.cwd, env: procEnv });
+              const stdoutBufs: Buffer[] = [];
+              const stderrBufs: Buffer[] = [];
+              child.stdout.on("data", (chunk: Buffer) => stdoutBufs.push(chunk));
+              child.stderr.on("data", (chunk: Buffer) => stderrBufs.push(chunk));
+              const exitCode = await new Promise<number | null>((resolveExit, reject) => {
+                child.on("error", reject);
+                child.on("close", resolveExit);
+              });
+              const stdoutStr = Buffer.concat(stdoutBufs).toString("utf8");
+              const stderrStr = Buffer.concat(stderrBufs).toString("utf8");
+              if (spawnCmd === "bun") {
+                try {
+                  return JSON.parse(stdoutStr.trim());
+                } catch {}
+              }
+              return {
+                stdout: stdoutStr,
+                stderr: stderrStr,
+                code: exitCode ?? 0,
+              };
+            }
+            return undefined;
+          }
         });
         if (!result.progressed) break;
         advanced = true;
-        for (const entry of result.entries) await appendPacket(transcriptBlockMdx(sourceBlock(entry)));
+        for (const entry of result.entries) await appendPacket(sourceBlock(entry));
       }
       if (!advanced) throw continuationError({ stage: "circuitry.advance", message: "Returned Circuitry did not advance", command: circuitry });
     }
@@ -193,7 +323,7 @@ export async function continueContext(
     const parent = current.body.ranges.at(-1)?.packet ?? null;
     const packet = await addPacket(db, {
       parent,
-      bytes: transcriptBlockMdx({ kind: "error", status: "error", label: data.stage.split(".")[0] || "system", stage: data.stage, command: data.command, exit: data.exitCode, body: errorBody(data) }),
+      bytes: errorMdx({ stage: data.stage, status: "error", label: data.stage.split(".")[0] || "system", body: errorBody(data) }),
     }, { packetOverflowBytes: config.packetOverflowBytes });
     const body: ThreadBody = { ranges: [...current.body.ranges, { packet: packet.id, author: "system" as const }] };
     const bodyPacket = await addPacket(db, { parent: packet.id, bytes: encodeThreadBody(body) }, { packetOverflowBytes: config.packetOverflowBytes });
@@ -221,27 +351,27 @@ function objectToKdl(obj: Record<string, unknown>, indent = 0): string {
     .join("\n");
 }
 
-function sourceBlock(entry: AdvanceEntry) {
+function sourceBlock(entry: AdvanceEntry): string {
   const output = entry.output;
-  if (isRecord(output) && "cmd" in output) {
-    return {
-      kind: "command" as const,
-      status: (output.code === 0 ? "ok" : "error") as "ok" | "error" | "pending" | "info",
+  if (isRecord(output) && ("code" in output || "exit" in output) && ("stdout" in output || "stderr" in output)) {
+    const cmd = typeof entry.input === "string" ? entry.input : (isRecord(entry.input) && typeof entry.input.cmd === "string" ? entry.input.cmd : entry.name);
+    const code = typeof output.code === "number" ? output.code : (typeof output.exit === "number" ? output.exit : 0);
+    return commandMdx({
+      cmd,
+      exit: code,
+      status: code === 0 ? "ok" : "error",
       label: entry.name,
-      command: String(output.cmd),
-      exit: typeof output.code === "number" ? output.code : null,
-      body: String(output.output || output.stderr || ""),
-    };
+      body: String(output.stdout || output.stderr || ""),
+    });
   }
-  return {
-    kind: "source" as const,
-    status: "ok" as const,
+  return sourceMdx({
+    status: "ok",
     label: entry.name,
     body: fenced("kdl", objectToKdl({ source: entry.source, output: entry.output, bindings: entry.bindings })),
-  };
+  });
 }
 
-function circuitryBlock(circuitry: string, loopDir: string) {
+function circuitryBlock(circuitry: string, loopDir: string, configShell?: string): string {
   try {
     const doc = parse(circuitry);
     const entries = Object.values(doc.definition.entries);
@@ -251,75 +381,84 @@ function circuitryBlock(circuitry: string, loopDir: string) {
       const input = entry.in;
 
       // Extract shell command execution
-      if (typeof source === "string" && source.endsWith("shell.py") && isRecord(input) && typeof input.cmd === "string") {
-        return {
-          kind: "command" as const,
-          status: "pending" as const,
+      if (typeof source === "string" && (source === "$shell" || source === configShell) && (typeof input === "string" || (isRecord(input) && typeof input.cmd === "string"))) {
+        const cmd = typeof input === "string" ? input : String(input.cmd);
+        return commandMdx({
+          cmd,
+          exit: null,
+          status: "pending",
           label: "execute",
-          command: input.cmd,
           body: "",
-        };
+        });
       }
 
       // Extract zn packet read execution
       if (typeof source === "string" && source === "zn" && isRecord(input) && Array.isArray(input.args)) {
-        return {
-          kind: "command" as const,
-          status: "pending" as const,
+        return commandMdx({
+          cmd: ["zn", ...input.args.map(String)].join(" "),
+          exit: null,
+          status: "pending",
           label: "execute",
-          command: ["zn", ...input.args.map(String)].join(" "),
           body: "",
-        };
+        });
       }
     }
   } catch (e) {}
 
   // Fallback: raw KDL block
-  return {
-    kind: "source" as const,
-    status: "info" as const,
+  return sourceMdx({
+    status: "info",
     label: "circuitry",
     body: fenced("kdl", circuitry),
-  };
+  });
 }
 
-function lastRecognizable(entries: AdvanceEntry[]) {
-  let last: { name: "reasoning" | "response" | "circuitry"; value: unknown } | null = null;
-  for (const entry of entries) {
-    if (isRecord(entry.output)) {
-      for (const [name, value] of Object.entries(entry.output)) {
-        if (name === "reasoning" || name === "response" || name === "circuitry") last = { name, value };
-      }
-    }
-    for (const [name, value] of Object.entries(entry.bindings)) {
-      if (name === "reasoning" || name === "response" || name === "circuitry") last = { name, value };
-    }
-  }
-  return last;
-}
+
 
 function isContinuationErrorData(value: unknown): value is ContinuationErrorData {
   return typeof value === "object" && value !== null && typeof (value as ContinuationErrorData).stage === "string" && typeof (value as ContinuationErrorData).message === "string";
 }
 
-function transcriptBlockMdx(input: {
-  kind: "source" | "error" | "note" | "command";
-  status: "ok" | "error" | "pending" | "info";
+function commandMdx(input: {
+  cmd: string;
+  exit: number | null;
+  status: ComponentStatus;
   label: string;
   body: string;
-  command?: string;
-  stage?: string;
-  exit?: number | null;
 }) {
   const attributes = [
-    `kind=${JSON.stringify(input.kind)}`,
+    `cmd=${JSON.stringify(input.cmd)}`,
+    input.exit !== null ? `exit={${input.exit}}` : "",
     `status=${JSON.stringify(input.status)}`,
-    `label=${JSON.stringify(input.label)}`,
-    input.command ? `command=${JSON.stringify(input.command)}` : "",
-    input.stage ? `stage=${JSON.stringify(input.stage)}` : "",
-    input.exit !== undefined && input.exit !== null ? `exit={${input.exit}}` : "",
+    input.label ? `label=${JSON.stringify(input.label)}` : "",
   ].filter(Boolean).join(" ");
-  return `${[`<TranscriptBlock ${attributes}>`, input.body.trimEnd(), `</TranscriptBlock>`].join("\n")}\n\n`;
+  return `${[`<Command ${attributes}>`, input.body.trimEnd(), `</Command>`].join("\n")}\n\n`;
+}
+
+function errorMdx(input: {
+  stage: string;
+  status: ComponentStatus;
+  label: string;
+  body: string;
+}) {
+  const attributes = [
+    input.stage ? `stage=${JSON.stringify(input.stage)}` : "",
+    `status=${JSON.stringify(input.status)}`,
+    input.label ? `label=${JSON.stringify(input.label)}` : "",
+  ].filter(Boolean).join(" ");
+  return `${[`<Error ${attributes}>`, input.body.trimEnd(), `</Error>`].join("\n")}\n\n`;
+}
+
+function sourceMdx(input: {
+  status: ComponentStatus;
+  label: string;
+  body: string;
+}) {
+  const attributes = [
+    `status=${JSON.stringify(input.status)}`,
+    input.label ? `label=${JSON.stringify(input.label)}` : "",
+  ].filter(Boolean).join(" ");
+  return `${[`<Source ${attributes}>`, input.body.trimEnd(), `</Source>`].join("\n")}\n\n`;
 }
 
 function fenced(language: string, body: string) {

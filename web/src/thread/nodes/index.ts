@@ -1,16 +1,22 @@
 export { MdxSourceNode, $createMdxSourceNode, $isMdxSourceNode, type MdxSourceDecorator } from "./MdxSourceNode";
 export {
   ReasoningNode,
-  TranscriptBlockNode,
+  CommandNode,
+  ErrorNode,
+  SourceNode,
   $createReasoningNode,
-  $createTranscriptBlockNode,
+  $createCommandNode,
+  $createErrorNode,
+  $createSourceNode,
   $isReasoningNode,
-  $isTranscriptBlockNode,
+  $isCommandNode,
+  $isErrorNode,
+  $isSourceNode,
   type ComponentStatus,
   type ReasoningDecorator,
+  type CommandDecorator,
+  type ErrorDecorator,
+  type SourceDecorator,
   type ThreadComponentDecorator,
-  type TranscriptBlockDecorator,
-  type TranscriptBlockInput,
-  type TranscriptBlockKind,
 } from "./ThreadComponentNodes";
 export { HorizontalRuleNode, $createHorizontalRuleNode, $isHorizontalRuleNode } from "./HorizontalRuleNode";

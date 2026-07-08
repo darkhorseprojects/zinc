@@ -67,7 +67,12 @@ async function writeRegistry(stores: StoreRef[]) {
 }
 
 async function readStores(): Promise<StoresData> {
+  const config = await loadConfig();
   const stores = await readRegistry();
+  const defaultStore = ref(config.store);
+  if (!stores.some((s) => s.path === defaultStore.path)) {
+    stores.unshift(defaultStore);
+  }
   return { saved: stores, recent: stores, aliases: {} };
 }
 

@@ -39,11 +39,33 @@ describe("Lexical MDX pipeline", () => {
     expect(exportLexicalToMdx(lexical)).toBe(source);
   });
 
-  it("imports and exports TranscriptBlock as a known component node", () => {
+  it("imports and exports Command as a known component node", () => {
     const lexical = editor();
-    const source = `<TranscriptBlock kind="source" status="ok" label="respond" command="bun test" exit={0}>\npassed\n</TranscriptBlock>`;
+    const source = `<Command cmd="bun test" exit={0} status="ok" label="respond">\npassed\n</Command>`;
     importMdxToLexical(lexical, source);
     expect(exportLexicalToMdx(lexical)).toBe(source);
+  });
+
+  it("imports and exports Error as a known component node", () => {
+    const lexical = editor();
+    const source = `<Error stage="turn.advance" status="error" label="system">\nfailed\n</Error>`;
+    importMdxToLexical(lexical, source);
+    expect(exportLexicalToMdx(lexical)).toBe(source);
+  });
+
+  it("imports and exports Source as a known component node", () => {
+    const lexical = editor();
+    const source = `<Source status="info" label="circuitry">\nKDL code\n</Source>`;
+    importMdxToLexical(lexical, source);
+    expect(exportLexicalToMdx(lexical)).toBe(source);
+  });
+
+  it("parses old TranscriptBlock nodes transparently for backward compatibility", () => {
+    const lexical = editor();
+    const oldSource = `<TranscriptBlock kind="command" status="ok" label="run" command="ls" exit={0}>\npassed\n</TranscriptBlock>`;
+    importMdxToLexical(lexical, oldSource);
+    // Should be exported as the new Command node format
+    expect(exportLexicalToMdx(lexical)).toBe(`<Command cmd="ls" exit={0} status="ok" label="run">\npassed\n</Command>`);
   });
 
   it("preserves unknown MDX source as an exact top-level slice", () => {

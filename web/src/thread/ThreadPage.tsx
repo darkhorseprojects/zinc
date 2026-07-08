@@ -342,10 +342,9 @@ export default function Home(props: { initial?: ThreadBootstrap }) {
 
     setBusy(true);
     try {
-      await flushSave();
-      const mdx = threadHandle ? await threadHandle.snapshotMdx() : "";
-      const baseRevision = threadHandle ? threadHandle.baseRevision() : undefined;
-      const next = await continueThreadStream({ threadId: base.id, baseRevision, mdx, draft: text }, currentStore.path);
+      const savedThread = await flushSave();
+      const baseRevision = savedThread?.revision ?? (threadHandle ? threadHandle.baseRevision() : undefined);
+      const next = await continueThreadStream({ threadId: base.id, baseRevision, draft: text }, currentStore.path);
       if (next) {
         writeSourceUrl(currentStore.path, next.id);
         await loadThreads(currentStore.path);
@@ -420,21 +419,17 @@ export default function Home(props: { initial?: ThreadBootstrap }) {
         <main class="thread-zone">
           <div class="thread-column">
             <Show when={active()} fallback={<div class="empty-thread-hint" />}>
-              {(view) => (
-                <>
-                  <ZincEditor
-                    mdx={view().mdx}
-                    baseRevision={view().revision}
-                    editable={!busy()}
-                    busy={busy()}
-                    bind={(handle) => { threadHandle = handle; }}
-                    onDirtyChange={(dirty) => {
-                      setEditorDirty(dirty);
-                      if (dirty) triggerAutosave();
-                    }}
-                  />
-                </>
-              )}
+              <ZincEditor
+                mdx={active()?.mdx ?? ""}
+                baseRevision={active()?.revision ?? ""}
+                editable={!busy()}
+                busy={busy()}
+                bind={(handle) => { threadHandle = handle; }}
+                onDirtyChange={(dirty) => {
+                  setEditorDirty(dirty);
+                  if (dirty) triggerAutosave();
+                }}
+              />
             </Show>
           </div>
         </main>

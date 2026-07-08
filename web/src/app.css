@@ -642,6 +642,44 @@ button {
 .thread-transcript-block[data-status="error"] .thread-transcript-body {
     color: rgb(252 165 165 / 0.9);
 }
+.edit-cmd-input,
+.edit-body-textarea,
+.edit-reasoning-textarea {
+    background: transparent;
+    border: none;
+    outline: none;
+    resize: none;
+    font-family: inherit;
+    font-size: inherit;
+    color: inherit;
+    width: 100%;
+    padding: 0;
+    margin: 0;
+    overflow: hidden;
+}
+.edit-cmd-input {
+    font-family: "Zinc Mono", ui-monospace, monospace;
+    font-size: 0.72rem;
+    color: var(--accent);
+    text-transform: none;
+    letter-spacing: normal;
+    flex: 1;
+}
+.edit-body-textarea {
+    margin-top: 8px;
+    font-family: "Zinc Mono", ui-monospace, monospace;
+    font-size: 0.86rem;
+    line-height: 1.48;
+    color: rgb(210 235 218 / 0.86);
+}
+.thread-transcript-block[data-status="error"] .edit-body-textarea {
+    color: rgb(252 165 165 / 0.9);
+}
+.edit-reasoning-textarea {
+    font-family: "Zinc Prose", ui-serif, Georgia, serif;
+    font-style: italic;
+    color: var(--dim);
+}
 .thread-reasoning {
     margin: 0 0 1em;
     padding-left: 1em;
