@@ -16,7 +16,7 @@ import {
   type RangeSelection,
 } from "lexical";
 import { onCleanup, onMount } from "solid-js";
-import { useLexicalEditor } from "../LexicalEditorProvider";
+import { useLexicalEditor } from "./LexicalEditorProvider";
 
 export function PromptBackspaceResetPlugin(props: { enabled: boolean }) {
   const editor = useLexicalEditor();
