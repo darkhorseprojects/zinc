@@ -15,13 +15,16 @@ export type ZincConfig = {
   allowlist: string[];
 };
 
-const CONFIG_PATH = process.env.ZINC_CONFIG || join(defaultZincHome(), "config.kdl");
+export function configPath() {
+  return process.env.ZINC_CONFIG || join(defaultZincHome(), "config.kdl");
+}
 
 export async function loadConfig(): Promise<ZincConfig> {
-  const raw = await readFile(CONFIG_PATH, "utf8");
+  const path = configPath();
+  const raw = await readFile(path, "utf8");
   const nodes = parseConfigNodes(raw);
   const values = Object.fromEntries(nodes.map((node) => [node.name, nodeToValue(node)]));
-  const base = dirname(CONFIG_PATH);
+  const base = dirname(path);
   const zincDir = expandPath(requiredString(values["zinc-dir"], "zinc-dir"), base);
   const agentDir = expandPath(stringValue(values["agent-dir"]) || join(zincDir, "agent"), base);
   const allowlistNode = nodes.find((node) => node.name === "allowlist");
