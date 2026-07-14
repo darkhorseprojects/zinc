@@ -1,369 +1,109 @@
-#!/usr/bin/env bun
-import { connect } from "@tursodatabase/database";
-import { parse as parseKdl } from "kdljs";
-import { dirname, join, resolve } from "node:path";
-import { existsSync, mkdirSync, readFileSync, writeFileSync, unlinkSync, openSync, rmSync } from "node:fs";
+#!/usr/bin/env edge
 import { spawn } from "node:child_process";
-import { homedir } from "node:os";
+import { closeSync, cpSync, existsSync, mkdirSync, openSync, readFileSync, rmSync, rmdirSync, unlinkSync, writeFileSync } from "node:fs";
+import { dirname, isAbsolute, join, relative, resolve } from "node:path";
+import { fileURLToPath } from "node:url";
+import { defaultConfigPath, loadConfig } from "../dist/config.js";
+import { readPacket } from "../dist/packet.js";
+import { Registry, Store } from "../dist/store.js";
 
-const ROOT = resolve(dirname(Bun.main), "..");
-const WEB = join(ROOT, "web");
-const DEFAULT_SHELL = process.platform === "win32" ? "pwsh" : "sh";
+const root = resolve(dirname(fileURLToPath(import.meta.url)), "..");
+class CliError extends Error { constructor(message, usage) { super(message); this.usage = usage; } }
 
-const DEFAULT_TURN_MD = `---
-circuitry "0.10.0"
-
-in {
-  context $context
-  completions $completions
-  shell $shell
-  cwd $cwd
+async function main(args = process.argv.slice(2)) {
+  args = [...args]; const command = args.shift() ?? "help";
+  if (command === "help") { none(args, "usage: zn help"); return help(); }
+  if (command === "clean") return clean(args);
+  const selected = option(args, "--config");
+  if (command === "init" || command === "here") return initialize(command, args, selected);
+  if (!["up", "down", "status", "logs", "stores", "packet", "thread"].includes(command)) throw new CliError(`unknown command: ${command}`);
+  const path = resolve(selected ?? defaultConfigPath()), config = await loadConfig(path), state = dirname(path);
+  if (command === "up") return up(config, state, path, args);
+  if (command === "down") return down(state, args);
+  if (command === "status") return status(config, state, path, args);
+  if (command === "logs") return logs(state, args);
+  if (command === "stores") return stores(config, state, args);
+  if (command === "packet") return packet(config, state, args);
+  return threads(config, state, args);
 }
 
-respond source="$completions" {
-  in "{\\"messages\\": [{\\"role\\": \\"system\\", \\"content\\": \\"@Instructions\\"}, {\\"role\\": \\"user\\", \\"content\\": \\"$context\\"}], \\"tools\\": [{\\"type\\": \\"function\\", \\"function\\": {\\"name\\": \\"circuitry\\", \\"description\\": \\"Execute Circuitry KDL.\\", \\"parameters\\": {\\"type\\": \\"object\\", \\"properties\\": {\\"kdl\\": {\\"type\\": \\"string\\", \\"description\\": \\"Complete Circuitry KDL document.\\"}}, \\"required\\": [\\"kdl\\"], \\"additionalProperties\\": false}}}]}"
-  out "{\\"circuitry\\": \\"?circuitry\\", \\"choices\\": [{\\"message\\": {\\"content\\": \\"?response\\", \\"reasoning_content\\": \\"?reasoning\\"}}]}"
+async function initialize(command, args, selected) {
+  none(args, `usage: zn ${command}${command === "init" ? " [--config PATH]" : ""}`);
+  if (command === "here" && selected) throw new CliError("--config is not valid with zn here");
+  const path = resolve(command === "here" ? join(".zinc", "config.kdl") : selected ?? defaultConfigPath()), state = dirname(path), turn = join(state, "turn.md"), theme = join(state, "theme.kdl"), store = join(state, "zinc.db");
+  mkdirSync(state, { recursive: true });
+  if (!existsSync(turn)) writeFileSync(turn, readFileSync(join(root, "agent", "turn.md")));
+  if (!existsSync(theme)) writeFileSync(theme, readFileSync(join(root, "defaults", "theme.kdl")));
+  const definitions = join(state, "definitions"); if (!existsSync(definitions)) cpSync(join(root, "agent", "definitions"), definitions, { recursive: true });
+  if (!existsSync(path)) writeFileSync(path, configText());
+  const opened = await Store.open({ path: store, packets: join(state, "packets"), overflowBytes: 65536 }); await opened.close();
+  line("initialized", store); line("config", path);
 }
 
-out {
-  reasoning ?reasoning
-  response  ?response
-  circuitry ?circuitry
-}
----
-
-## Instructions
-
-You are a friendly and honest assistant here to help the user.
-
-Your current workspace directory is at $cwd.
-
-### How the loop works
-If you respond with \`response\` last, zinc counts that as your final response. If you want to respond without ending the turn (continuing to reason/work), do not put your response last in each output.
-
-### Tool Execution
-Use the \`circuitry\` tool for actions. It has one parameter: \`kdl\` (a string containing a complete Circuitry document). Zinc executes every \`circuitry\` tool call.
-
-For shell commands, use \`$shell\` with \`-c\`:
-\`\`\`kdl
-circuitry "0.10.0"
-run source="$shell" "-c" "your command here"
-\`\`\`
-
-### Context References
-Older context may be referenced as \`- packet_id\` or \`- packet_id from:to\`. To inspect one, call the \`circuitry\` tool with kdl that runs: \`zn packet read --packet packet_id\`.
-
-### Response Format
-Your \`response\` renders as MDX. You may emit \`<Reasoning>\`, \`<Shell cmd="...">\`, \`<Error>\`, \`<Source>\`, or any custom \`<Tag prop="x">body</Tag>\`. Known tags render as interactive components; unknown tags render as raw editable blocks. Use this to structure rich responses.
-
-Navigate the conversation and read prior context before responding. Trace the tail of useful information. Feel the structure and pacing.
-`;
-
-const DEFAULT_CONFIG_KDL = (storePath, turnPath, zincDir) => `store "${storePath}"
-turn "${turnPath}"
-zinc-dir "${zincDir}"
-raw-context-bytes 8192
-packet-overflow-bytes 65536
-
-completions-url "http://127.0.0.1:30000/v1/chat/completions"
-shell "${DEFAULT_SHELL}"
-
-allowlist {
-  git
-  ls
-  grep
-  zn
-  npm
-  danger {
-    rm
-    mv
-  }
-}
-`;
-
-function defaultZincHome() {
-  if (process.env.ZINC_HOME) return resolve(process.env.ZINC_HOME);
-  if (process.platform === "win32") return join(process.env.APPDATA || homedir(), "Zinc");
-  if (process.platform === "darwin") return join(homedir(), "Library", "Application Support", "Zinc");
-  return join(process.env.XDG_CONFIG_HOME ?? join(homedir(), ".config"), "zinc");
-}
-
-function resolvePath(p, base) {
-  const expanded = p.replace(/^~(?=$|\/)/, homedir());
-  return resolve(base, expanded);
-}
-
-async function initDb(dbPath) {
-  mkdirSync(dirname(dbPath), { recursive: true });
-  const db = await connect(dbPath);
-  await (await db.prepare("create table if not exists meta (key text primary key, value text not null)")).run();
-  await (await db.prepare("create table if not exists packets (id text primary key, parent text, at integer not null, bytes blob not null)")).run();
-  await (await db.prepare("create table if not exists threads (id text primary key, title text, body text not null, updated integer not null)")).run();
-  await (await db.prepare("insert or replace into meta (key, value) values ('schema_version', '1')")).run();
-  db.close();
-}
-
-function nodeToValue(node) {
-  const children = node.children ?? [];
-  if (children.length) return Object.fromEntries(children.map((child) => [child.name, nodeToValue(child)]));
-  const args = node.values ?? [];
-  if (args.length === 0) return true;
-  if (args.length === 1) return String(args[0]);
-  return args.map(String);
-}
-
-function parseConfig(configPath) {
-  if (!existsSync(configPath)) {
-    console.error(`config not found: ${configPath}`);
-    process.exit(1);
-  }
-  const base = dirname(configPath);
-  const parsed = parseKdl(readFileSync(configPath, "utf8"));
-  if (parsed.errors?.length) {
-    console.error(`config KDL parse error: ${parsed.errors.map((e) => e.message).join(", ")}`);
-    process.exit(1);
-  }
-  const values = Object.fromEntries((parsed.output ?? []).map((node) => [node.name, nodeToValue(node)]));
-  const zincDir = resolvePath(String(values["zinc-dir"] ?? base), base);
-
-  return {
-    config: configPath,
-    store: resolvePath(String(values.store ?? "zinc.db"), base),
-    turn: resolvePath(String(values.turn ?? "turn.md"), base),
-    zincDir,
-    webPid: join(zincDir, "web.pid"),
-    webLog: join(zincDir, "web.log"),
-  };
-}
-
-function processRunning(pid) {
+async function clean(args) {
+  let here = flag(args, "--here");
+  const user = flag(args, "--user"), thread = option(args, "--thread"), packet = option(args, "--packet");
+  const usage = "usage: zn clean [--here | --user | --thread ID | --packet ID]";
+  none(args, usage);
+  if (!here && !user && !thread && !packet) here = true;
+  if (Number(here) + Number(user) + Number(Boolean(thread)) + Number(Boolean(packet)) !== 1) throw new CliError("zn clean requires exactly one target", usage);
+  const path = resolve(here ? join(".zinc", "config.kdl") : defaultConfigPath()), state = dirname(path);
+  await down(state, []);
+  if (here || user) return cleanConfig(path, state);
+  const config = await loadConfig(path), store = await Store.open({ path: config.store, packets: join(state, "packets"), overflowBytes: config.packetOverflowBytes });
   try {
-    process.kill(pid, 0);
-    return true;
-  } catch {
-    return false;
-  }
+    if (thread) { const packets = await store.cleanThread(thread); rows([["deleted thread", thread], ["collected packets", String(packets)]]); }
+    else { await store.cleanPacket(packet); line("deleted packet", packet); }
+  } finally { await store.close(); }
 }
 
-async function storesJsonlPath(zincDir) {
-  return join(zincDir, "stores.jsonl");
+async function cleanConfig(path, state) {
+  if (!existsSync(path) && !existsSync(state)) return line("not found", state);
+  const config = existsSync(path) ? await loadConfig(path) : null;
+  const targets = [path, join(state, "stores.jsonl"), join(state, "definitions"), join(state, "web.log"), join(state, "web.pid")];
+  const turn = config?.turn ?? join(state, "turn.md"), theme = config?.theme ?? join(state, "theme.kdl");
+  if (inside(state, turn)) targets.push(turn);
+  if (inside(state, theme)) targets.push(theme);
+  const store = config?.store ?? join(state, "zinc.db");
+  if (inside(state, store)) targets.push(store, `${store}-wal`, `${store}-shm`, join(state, "packets"));
+  for (const target of targets) rmSync(target, { recursive: true, force: true });
+  try { rmdirSync(state); } catch (error) { if (error?.code !== "ENOTEMPTY" && error?.code !== "ENOENT") throw error; }
+  line("deleted config", state);
 }
-
-async function readStores(zincDir) {
-  const path = await storesJsonlPath(zincDir);
-  if (!existsSync(path)) return [];
-  const lines = readFileSync(path, "utf8").split(/\r?\n/).filter((line) => line.trim());
-  return lines.map((line) => JSON.parse(line));
+async function up(config, state, path, args) {
+  none(args, "usage: zn up [--config PATH]"); const pidFile = join(state, "web.pid"), logFile = join(state, "web.log"), existing = pid(pidFile);
+  if (existing && running(existing)) return line("already running", String(existing));
+  if (existsSync(pidFile)) unlinkSync(pidFile); mkdirSync(state, { recursive: true });
+  const log = openSync(logFile, "a"); let child;
+  try { child = spawn("edge", [join(root, "dist", "server.js")], { cwd: root, env: { ...process.env, ZINC_CONFIG: path }, detached: true, stdio: ["ignore", log, log] }); }
+  finally { closeSync(log); }
+  child.unref(); writeFileSync(pidFile, String(child.pid));
+  rows([["status", "running"], ["pid", String(child.pid)], ["url", `${config.url.includes(":") ? `[${config.url}]` : config.url}:${config.port}`], ["config", path], ["store", config.store], ["log", logFile]]);
 }
-
-async function main() {
-  const args = [...process.argv.slice(2)];
-  const cmd = args.shift() || "help";
-
-  if (cmd === "clean") {
-    const isGlobal = args.includes("--global");
-    const isAll = args.includes("--all");
-
-    const deletePath = (p) => {
-      if (existsSync(p)) {
-        rmSync(p, { recursive: true, force: true });
-        console.log(`deleted: ${p}`);
-      }
-    };
-
-    if (isAll) {
-      deletePath(resolve(".zinc"));
-      deletePath(defaultZincHome());
-      deletePath(join(homedir(), ".local", "lib", "zinc"));
-      deletePath(join(homedir(), ".local", "bin", "zn"));
-      console.log("uninstalled zinc fully");
-      return;
-    }
-
-    if (isGlobal) {
-      deletePath(defaultZincHome());
-      return;
-    }
-
-    const localZinc = resolve(".zinc");
-    if (existsSync(localZinc)) {
-      deletePath(localZinc);
-    } else {
-      console.log("No local .zinc folder found. Use zn clean --global to clean user config.");
-    }
-    return;
-  }
-
-  if (cmd === "init" || cmd === "here") {
-    const home = cmd === "here" ? resolve(".zinc") : defaultZincHome();
-    const configPath = join(home, "config.kdl");
-    const turnPath = join(home, "turn.md");
-    const dbPath = join(home, "zinc.db");
-
-    mkdirSync(home, { recursive: true });
-    await initDb(dbPath);
-    console.log(`initialized db: ${dbPath}`);
-
-    if (!existsSync(turnPath)) {
-      writeFileSync(turnPath, DEFAULT_TURN_MD, "utf8");
-      console.log(`wrote turn template: ${turnPath}`);
-    }
-    if (!existsSync(configPath)) {
-      writeFileSync(configPath, DEFAULT_CONFIG_KDL("zinc.db", "turn.md", "."), "utf8");
-      console.log(`wrote config: ${configPath}`);
-    }
-    console.log(`Edit config in ${home}`);
-    return;
-  }
-
-  const configArg = args.includes("--config") ? args[args.indexOf("--config") + 1] : null;
-  const configPath = configArg ? resolve(configArg) : join(defaultZincHome(), "config.kdl");
-  const config = parseConfig(configPath);
-
-  if (cmd === "up") {
-    if (existsSync(config.webPid)) {
-      const pid = parseInt(readFileSync(config.webPid, "utf8").trim(), 10);
-      if (processRunning(pid)) {
-        console.log(`zinc web already running pid=${pid}`);
-        return;
-      }
-    }
-
-    mkdirSync(config.zincDir, { recursive: true });
-    const logFd = openSync(config.webLog, "a");
-    const proc = spawn("bun", [join(WEB, "dist", "server", "index.js")], {
-      cwd: WEB,
-      env: { ...process.env, ZINC_CONFIG: config.config },
-      detached: true,
-      stdio: ["ignore", logFd, logFd],
-    });
-    proc.unref();
-
-    writeFileSync(config.webPid, String(proc.pid), "utf8");
-    console.log(`started zinc web pid=${proc.pid}`);
-    console.log(`logs: ${config.webLog}`);
-    return;
-  }
-
-  if (cmd === "down") {
-    if (!existsSync(config.webPid)) {
-      console.log("zinc web is not running");
-      return;
-    }
-    const pid = parseInt(readFileSync(config.webPid, "utf8").trim(), 10);
-    if (processRunning(pid)) {
-      process.kill(pid, "SIGTERM");
-      let stopped = false;
-      for (let i = 0; i < 30; i++) {
-        if (!processRunning(pid)) {
-          stopped = true;
-          break;
-        }
-        await new Promise((r) => setTimeout(r, 100));
-      }
-      if (!stopped) process.kill(pid, "SIGKILL");
-      console.log(`stopped zinc web pid=${pid}`);
-    } else {
-      console.log("zinc web is not running");
-    }
-    try {
-      unlinkSync(config.webPid);
-    } catch {}
-    return;
-  }
-
-  if (cmd === "status") {
-    if (existsSync(config.webPid)) {
-      const pid = parseInt(readFileSync(config.webPid, "utf8").trim(), 10);
-      if (processRunning(pid)) {
-        console.log(`running pid=${pid}`);
-        return;
-      }
-    }
-    console.log("stopped");
-    return;
-  }
-
-  if (cmd === "logs") {
-    if (!existsSync(config.webLog)) {
-      console.log(`no log file: ${config.webLog}`);
-      return;
-    }
-    const text = readFileSync(config.webLog, "utf8");
-    const lines = text.split("\n");
-    console.log(lines.slice(-200).join("\n"));
-    return;
-  }
-
-  if (cmd === "stores") {
-    const stores = await readStores(config.zincDir);
-    for (const store of stores) console.log(`${store.path}\t${store.name || ""}`);
-    return;
-  }
-
-  if (cmd === "packet") {
-    const sub = args.shift();
-    if (sub !== "read") {
-      console.error("usage: zn packet read --packet ID");
-      process.exit(1);
-    }
-    const pktIdx = args.indexOf("--packet");
-    if (pktIdx === -1 || !args[pktIdx + 1]) {
-      console.error("--packet is required");
-      process.exit(1);
-    }
-    const packet = args[pktIdx + 1];
-    const db = await connect(config.store);
-    const row = await (await db.prepare("select bytes from packets where id = ?")).get(packet);
-    db.close();
-    if (!row) {
-      console.error(`packet not found: ${packet}`);
-      process.exit(1);
-    }
-    process.stdout.write(Buffer.from(row.bytes));
-    return;
-  }
-
-  if (cmd === "thread") {
-    const sub = args.shift();
-    const db = await connect(config.store);
-    if (sub === "list") {
-      const rows = await (await db.prepare("select id, title, updated from threads order by updated desc")).all();
-      for (const row of rows) console.log(`${row.id}\t${row.title || ""}\t${row.updated}`);
-    } else if (sub === "read") {
-      const thrIdx = args.indexOf("--thread");
-      if (thrIdx === -1 || !args[thrIdx + 1]) {
-        console.error("--thread is required");
-        db.close();
-        process.exit(1);
-      }
-      const thread = args[thrIdx + 1];
-      const row = await (await db.prepare("select body from threads where id = ?")).get(thread);
-      if (!row) {
-        console.error(`thread not found: ${thread}`);
-        db.close();
-        process.exit(1);
-      }
-      console.log(row.body);
-    } else {
-      console.error("usage: zn thread list|read");
-      db.close();
-      process.exit(1);
-    }
-    db.close();
-    return;
-  }
-
-  if (cmd === "help") {
-    console.log("zn init|here|clean|up|down|logs|status|stores|packet|thread");
-    return;
-  }
-
-  console.error(`unknown command: ${cmd}`);
-  process.exit(1);
+async function down(state, args) {
+  none(args, "usage: zn down [--config PATH]"); const file = join(state, "web.pid"), value = pid(file);
+  if (!value || !running(value)) { if (existsSync(file)) unlinkSync(file); return line("stopped"); }
+  process.kill(value, "SIGTERM"); for (let count = 0; count < 30 && running(value); count++) await new Promise((resolve) => setTimeout(resolve, 100));
+  if (running(value)) process.kill(value, "SIGKILL"); if (existsSync(file)) unlinkSync(file); line("stopped", String(value));
 }
+function status(config, state, path, args) { none(args, "usage: zn status [--config PATH]"); const value = pid(join(state, "web.pid")); rows([["status", value && running(value) ? "running" : "stopped"], ...(value && running(value) ? [["pid", String(value)]] : []), ["config", path], ["store", config.store]]); }
+function logs(state, args) { const requested = option(args, "--lines"), count = requested ? positive(requested, "--lines") : 200; none(args, "usage: zn logs [--lines N]"); const file = join(state, "web.log"); if (!existsSync(file)) return line("no log file", file); const source = readFileSync(file, "utf8"), trailing = source.endsWith("\n"); const value = (trailing ? source.slice(0, -1) : source).split("\n").slice(-count).join("\n"); process.stdout.write(value + (trailing && value ? "\n" : "")); }
+async function stores(config, state, args) { none(args, "usage: zn stores"); const registry = await Registry.open(join(state, "stores.jsonl"), config.store); print(["PATH", "NAME"], registry.list().map((value) => [value.path, value.name])); }
+async function packet(config, state, args) { const usage = "usage: zn packet read --packet ID [--from N] [--to N]"; if (args.shift() !== "read") throw new CliError(usage); const id = option(args, "--packet"), rawFrom = option(args, "--from"), rawTo = option(args, "--to"); none(args, usage); if (!id) throw new CliError("--packet is required"); const from = rawFrom === null ? undefined : nonnegative(rawFrom, "--from"), to = rawTo === null ? undefined : nonnegative(rawTo, "--to"); if (to !== undefined && to <= (from ?? 0)) throw new CliError("--to must be greater than --from"); process.stdout.write(await readPacket(config.store, join(state, "packets"), id, from, to)); }
+async function threads(config, state, args) { if (args.shift() !== "list") throw new CliError("usage: zn thread list"); none(args, "usage: zn thread list"); const store = await Store.open({ path: config.store, packets: join(state, "packets"), overflowBytes: config.packetOverflowBytes }); try { print(["ID", "UPDATED"], (await store.list()).map((value) => [value.id, String(value.updated)])); } finally { await store.close(); } }
 
-main().catch((err) => {
-  console.error(err);
-  process.exit(1);
-});
+function configText() { return `store "zinc.db"\nturn "turn.md"\ntheme "theme.kdl"\n\nurl "localhost"\nport 5173\nauthor "anonymous"\n\ncompletions-url "http://127.0.0.1:30000/v1/chat/completions"\nparallel 4\ncontext-tokens 32768\ncompact-at 80\nraw-context-bytes 8192\npacket-overflow-bytes 65536\nshell "${process.platform === "win32" ? "pwsh" : "sh"}"\n\nallowlist {\n  git\n  rg\n  find\n  zn\n}\n`; }
+function option(args, name) { const index = args.indexOf(name); if (index < 0) return null; if (args.indexOf(name, index + 1) >= 0) throw new CliError(`${name} may only be specified once`); const value = args[index + 1]; if (!value || value.startsWith("--")) throw new CliError(`${name} requires a value`); args.splice(index, 2); return value; }
+function flag(args, name) { const index = args.indexOf(name); if (index < 0) return false; if (args.indexOf(name, index + 1) >= 0) throw new CliError(`${name} may only be specified once`); args.splice(index, 1); return true; }
+function inside(directory, path) { const value = relative(directory, path); return value === "" || !value.startsWith("..") && !isAbsolute(value); }
+function none(args, usage) { if (args.length) throw new CliError(`unexpected argument: ${args[0]}`, usage); }
+function positive(value, name) { const number = Number(value); if (!Number.isInteger(number) || number <= 0) throw new CliError(`${name} must be a positive integer`); return number; }
+function nonnegative(value, name) { const number = Number(value); if (!Number.isInteger(number) || number < 0) throw new CliError(`${name} must be a non-negative integer`); return number; }
+function pid(path) { if (!existsSync(path)) return null; const value = Number(readFileSync(path, "utf8").trim()); return Number.isInteger(value) && value > 0 ? value : null; }
+function running(value) { try { process.kill(value, 0); return true; } catch { return false; } }
+function line(label, value = "") { process.stdout.write(`${label}${value ? `: ${value}` : ""}\n`); }
+function rows(values) { if (!process.stdout.isTTY) return values.forEach(([key, value]) => process.stdout.write(`${key}: ${value}\n`)); const width = Math.max(...values.map(([key]) => key.length)); values.forEach(([key, value]) => process.stdout.write(`  ${key.padEnd(width)}  ${value}\n`)); }
+function print(headings, values) { if (!process.stdout.isTTY) return values.forEach((row) => process.stdout.write(`${row.join("\t")}\n`)); const widths = headings.map((heading, index) => Math.max(heading.length, ...values.map((row) => row[index].length))); process.stdout.write(`${headings.map((heading, index) => heading.padEnd(widths[index])).join("  ")}\n`); values.forEach((row) => process.stdout.write(`${row.map((value, index) => value.padEnd(widths[index])).join("  ")}\n`)); }
+function help() { process.stdout.write("Zinc\n\n  init | here\n  clean [--here | --user | --thread ID | --packet ID]\n  up | down | status | logs\n  stores | thread list | packet read\n"); }
+
+main().catch((error) => { process.stderr.write(`error: ${error instanceof Error ? error.message : String(error)}\n`); if (error instanceof CliError && error.usage) process.stderr.write(`${error.usage}\n`); process.exitCode = 1; });

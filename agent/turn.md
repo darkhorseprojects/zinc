@@ -1,47 +1,89 @@
 ---
-circuitry "0.10.0"
-
 in {
   context $context
-  completions $completions
+  thread $thread
+  packets $packets
+  compact-candidates $compact-candidates
+  event $event
+  completions-url $completions-url
   shell $shell
   cwd $cwd
+  allowlist $allowlist
+  definitions $definitions
+  available-definitions $available-definitions
+  token-limit $token-limit
+  compact-at $compact-at
+  prompt-tokens $prompt-tokens
+  completion-tokens $completion-tokens
+  tokens-left $tokens-left
+  session-tokens $session-tokens
 }
 
-respond source="$completions" {
-  in "{\"messages\": [{\"role\": \"system\", \"content\": \"@Instructions\"}, {\"role\": \"user\", \"content\": \"$context\"}], \"tools\": [{\"type\": \"function\", \"function\": {\"name\": \"circuitry\", \"description\": \"Execute Circuitry KDL.\", \"parameters\": {\"type\": \"object\", \"properties\": {\"kdl\": {\"type\": \"string\", \"description\": \"Complete Circuitry KDL document.\"}}, \"required\": [\"kdl\"], \"additionalProperties\": false}}}]}"
-  out "{\"circuitry\": \"?circuitry\", \"choices\": [{\"message\": {\"content\": \"?response\", \"reasoning_content\": \"?reasoning\"}}]}"
+respond source="$completions-url" {
+  (json)in #"""
+  {
+    "stream": true,
+    "stream_options": { "include_usage": true },
+    "messages": [
+      { "role": "system", "content": "@Instructions" },
+      { "role": "system", "content": "Workspace: $cwd\nShell: $shell\nAllowed commands: $allowlist\nDefinitions directory: $definitions\nTurn event: $event\nContext capacity: $tokens-left of $token-limit tokens remain. Session usage: $session-tokens tokens.\n\nAvailable Circuitry definitions:\n$available-definitions" },
+      { "role": "system", "content": "@Circuitry" },
+      { "role": "system", "content": "$context" }
+    ],
+    "tools": [{
+      "type": "function",
+      "function": {
+        "name": "circuitry",
+        "description": "Execute a complete Circuitry dataflow. Root inputs include context, thread, packets, event, definitions, provider and token bindings. Sources may be identity, HTTP, processes, or nested .md/.kdl definitions. Every decoded document is data and EOF completes a source.",
+        "parameters": {
+          "type": "object",
+          "properties": { "kdl": { "type": "string", "description": "A complete Circuitry document." } },
+          "required": ["kdl"],
+          "additionalProperties": false
+        }
+      }
+    }]
+  }
+  """#
+
+  (json)out #"""
+  {
+    "choices": [{
+      "delta": {
+        "reasoning_content": "?reasoning",
+        "content": "?response",
+        "tool_calls": [{ "index": "?call", "function": { "arguments": { "kdl": "?circuitry" } } }]
+      }
+    }],
+    "usage": {
+      "prompt_tokens": "?prompt-tokens",
+      "completion_tokens": "?completion-tokens",
+      "total_tokens": "?used-tokens"
+    }
+  }
+  """#
 }
 
 out {
   reasoning ?reasoning
-  response  ?response
+  response ?response
   circuitry ?circuitry
+  prompt-tokens ?prompt-tokens
+  completion-tokens ?completion-tokens
+  used-tokens ?used-tokens
 }
 ---
 
 ## Instructions
 
-You are a friendly and honest assistant here to help the user.
+Perform only the operation named by the supplied turn event. A `respond` event means complete the current request normally. Any other event exposes its required definition in the available-definition list; invoke that definition exactly as documented and expose its result without a user-facing response.
 
-Your current workspace directory is at $cwd.
+Continue authorized implementation and verification. Ask only when a required decision is missing or an unapproved destructive action would be necessary.
 
-### How the loop works
-If you respond with `response` last, zinc counts that as your final response. If you want to respond without ending the turn (continuing to reason/work), do not put your response last in each output.
+Older visual and context material is available through the normal `packets` input. Inspect that binding through Circuitry when needed. Read exact content through the allowed shell with `zn packet read --packet ID` or `zn packet read --packet ID --from N --to N`; ranges are zero-based and half-open.
 
-### Tool Execution
-Use the `circuitry` tool for actions. It has one parameter: `kdl` (a string containing a complete Circuitry document). Zinc executes every `circuitry` tool call.
+## Circuitry
 
-For shell commands, use `$shell` with `-c`:
-```kdl
-circuitry "0.10.0"
-run source="$shell" "-c" "your command here"
-```
+Circuitry describes dataflow through bindings. Ready entries run in declaration-order generations, independent entries may run concurrently, and nested `.md` or `.kdl` sources call reusable definitions. Sources may be identity, HTTP, processes, or nested Circuitry. Ports explicitly use KDL, JSON, text, or bytes. Every decoded source document is data; EOF or process exit completes the source. Import required values through root `in` and expose useful results through root `out`.
 
-### Context References
-Older context may be referenced as `- packet_id` or `- packet_id from:to`. To inspect one, call the `circuitry` tool with kdl that runs: `zn packet read --packet packet_id`.
-
-### Response Format
-Your `response` renders as MDX. You may emit `<Reasoning>`, `<Shell cmd="...">`, `<Error>`, `<Source>`, or any custom `<Tag prop="x">body</Tag>`. Known tags render as interactive components; unknown tags render as raw editable blocks. Use this to structure rich responses.
-
-Navigate the conversation and read prior context before responding. Trace the tail of useful information. Feel the structure and pacing.
+A final root `response` completes an ordinary turn. Root `definition` creates a reusable definition with a filename-safe `name` and complete KDL-fronted Markdown `document` containing `Description` and `Use` sections. A packet-read action returns root `packet`, optional `from` and `to`, and `content`.

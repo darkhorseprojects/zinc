@@ -2,88 +2,43 @@ name: Release
 
 on:
   push:
-    tags:
-      - "v*.*.*"
+    tags: ["v*.*.*"]
 
 permissions:
   contents: write
 
 jobs:
-  package:
+  release:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-
-      - uses: oven-sh/setup-bun@v2
         with:
-          bun-version: latest
-
-      - uses: actions/setup-python@v5
+          path: zinc
+      - uses: actions/checkout@v4
         with:
-          python-version: "3.12"
-
-      - name: Install web dependencies
-        working-directory: web
-        run: bun install --frozen-lockfile
-
-      - name: Test web
-        working-directory: web
-        run: bun run test
-
-      - name: Typecheck web
-        working-directory: web
-        run: bun run typecheck
-
-      - name: Build web
-        working-directory: web
-        run: bun run build
-
-      - name: Smoke install, shell source process, and web
-        run: |
-          tmp="$(mktemp -d)"
-          ZINC_HOME="$tmp/home" ZINC_INSTALL_DIR="$tmp/install" ZINC_BIN_DIR="$tmp/bin" python3 bin/install.py
-          ZINC_HOME="$tmp/home" "$tmp/bin/zn" init --store "$tmp/home/zinc.db" --config "$tmp/home/config.kdl"
-          printf 'cmd "printf hi"\ncwd "%s"\n' "$PWD" | "$tmp/home/agent/shell.py" | grep 'output "hi"'
-          ZINC_HOME="$tmp/home" "$tmp/bin/zn" up
-          sleep 2
-          port="$(grep -o 'http://127\.0\.0\.1:[0-9]*' "$tmp/home/web.log" | tail -1 | sed 's/.*://')"
-          curl -fsS "http://127.0.0.1:${port}/" >/dev/null
-          ZINC_HOME="$tmp/home" "$tmp/bin/zn" down
-
-      - name: Package Zinc
+          repository: darkhorseprojects/circuitry
+          ref: v0.10.0
+          path: circuitry
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: |
+            circuitry/package-lock.json
+            zinc/package-lock.json
+      - run: curl -fsSL https://edgejs.org/install | bash
+      - run: echo "$HOME/.edgejs/bin" >> "$GITHUB_PATH"
+      - run: npm ci && npm run verify
+        working-directory: circuitry
+      - run: npm ci && npm run check
+        working-directory: zinc
+      - name: Package
         run: |
           version="${GITHUB_REF_NAME#v}"
-          package="zinc-${version}"
-          rm -rf "$package"
-          mkdir -p "$package/bin" "$package/agent" "$package/web"
-          cp README.md SPEC.md LICENSE "$package/"
-          cp bin/zn bin/install.py "$package/bin/"
-          cp agent/turn.md agent/openai-responses.py agent/openai-responses.kdl agent/shell.py agent/requirements.txt "$package/agent/"
-          cp web/package.json web/bun.lock web/index.html web/tsconfig.json web/vite.config.ts "$package/web/"
-          cp -R web/dist "$package/web/dist"
-          tar -czf "${package}.tar.gz" "$package"
-          python - <<'PY' "${package}.tar.gz" > "${package}.tar.gz.sha256"
-          import hashlib, pathlib, sys
-          path = pathlib.Path(sys.argv[1])
-          print(f"{hashlib.sha256(path.read_bytes()).hexdigest()}  {path.name}")
-          PY
-
-      - uses: actions/upload-artifact@v4
-        with:
-          name: zinc-release
-          path: |
-            zinc-*.tar.gz
-            zinc-*.tar.gz.sha256
-          if-no-files-found: error
-
-  release:
-    runs-on: ubuntu-latest
-    needs: package
-    steps:
-      - uses: actions/download-artifact@v4
-        with:
-          path: dist
-          merge-multiple: true
+          tar --exclude='*/node_modules' --exclude='*/.git' -czf "zinc-${version}.tar.gz" zinc circuitry
+          sha256sum "zinc-${version}.tar.gz" > "zinc-${version}.tar.gz.sha256"
       - uses: softprops/action-gh-release@v2
         with:
-          files: dist/*
+          files: |
+            zinc-*.tar.gz
+            zinc-*.tar.gz.sha256

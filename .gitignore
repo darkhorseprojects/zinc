@@ -1,10 +1,7 @@
-__pycache__/
-*.pyc
-.venv/
-.pytest_cache/
 node_modules/
-web/node_modules/
-web/dist/
+dist/
 .zinc/
 .DS_Store
 *.db
+*.tgz
+*.tgz.sha256
