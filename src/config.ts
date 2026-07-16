@@ -55,7 +55,7 @@ export function parseConfig(source: string, base: string): Config {
   if (!isIP(url) && (!/^(?:[A-Za-z0-9](?:[A-Za-z0-9.-]*[A-Za-z0-9])?)$/.test(url) || /[/?#]/.test(url))) throw new Error("Zinc url must be a hostname or IP address");
   const port = integer("port", 5173);
   if (port > 65535) throw new Error("Zinc port must be between 1 and 65535");
-  const completionsUrl = text("completions-url", "http://127.0.0.1:30000/v1/chat/completions");
+  const completionsUrl = text("completions-url", "http://127.0.0.1:30000/v1/responses");
   const endpoint = new URL(completionsUrl);
   if (!/^https?:$/.test(endpoint.protocol)) throw new Error("Zinc completions-url must use HTTP or HTTPS");
   const allowlist = nodes.find((node) => node.name === "allowlist")?.children?.flatMap(leaves) ?? [];

@@ -184,4 +184,4 @@ JSON wire bytes are base64. Source GET returns bytes directly. Stale revisions a
 
 Reachability starts from visual heads, context heads, fork baselines, their block slices, and recursive packet sources. Cleanup removes orphan overflow and SQLite side files while preserving external stores.
 
-TypeScript builds host modules, Vite builds browser assets, and Edge.js runs host and CLI. Standalone installation copies Zinc, defaults, and built Circuitry artifacts. Installed packages are not source-tree symlinks.
+TypeScript builds host modules, esbuild bundles browser assets after Solid and StyleX Babel transforms, and Edge.js runs scripts, tests, host, and CLI. Production output is rejected if it emits React. Standalone installation copies Zinc, defaults, and built Circuitry artifacts. Installed packages are not source-tree symlinks.

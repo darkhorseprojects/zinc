@@ -1,4 +1,4 @@
-import circleDashedSvg from "@phosphor-icons/core/assets/regular/circle-dashed.svg?raw";
+import circleDashedSvg from "@phosphor-icons/core/assets/regular/circle-dashed.svg";
 import { animate, type JSAnimation } from "animejs";
 import { createEffect, onCleanup, Show } from "solid-js";
 import { BlockEditor, type BlockEditorHandle } from "../editor/BlockEditor";

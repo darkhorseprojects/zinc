@@ -18,11 +18,11 @@
   ],
   "scripts": {
     "dev": "edge bin/dev.js",
-    "start": "edge dist/server.js",
+    "start": "edge dist/web.js",
     "build:host": "tsc -p tsconfig.json",
-    "build:client": "vite build --config web/vite.config.ts",
-    "build": "node -e \"require('node:fs').rmSync('dist',{recursive:true,force:true})\" && npm run build:host && npm run build:client",
-    "test": "npm run build:host && vitest run",
+    "build:client": "edge web/build.mjs",
+    "build": "edge -e \"require('node:fs').rmSync('dist',{recursive:true,force:true})\" && npm run build:host && npm run build:client",
+    "test": "npm run build:host && edge test/build.mjs && edge --test .test-build/*.test.js",
     "typecheck": "tsc -p tsconfig.json --noEmit && tsc -p web/tsconfig.json --noEmit",
     "check": "npm run typecheck && npm test && npm run build",
     "uninstall:zinc": "edge bin/uninstall.js"
@@ -47,7 +47,6 @@
     "@lexical/utils": "^0.46.0",
     "@phosphor-icons/core": "^2.1.1",
     "@stylexjs/stylex": "^0.19.0",
-    "@stylexjs/unplugin": "^0.19.0",
     "@tanstack/solid-virtual": "^3.13.33",
     "@tursodatabase/database": "^0.6.1",
     "@types/node": "^26.0.1",
@@ -59,15 +58,15 @@
     "lexical": "^0.46.0",
     "marked": "^18.0.6",
     "solid-js": "^1.9.5",
-    "sugar-high": "^1.2.1",
-    "vite": "8.1.4",
-    "vite-plugin-solid": "^2.11.8"
+    "sugar-high": "^1.2.1"
   },
   "overrides": {
     "lodash-es": "^4.18.1"
   },
   "devDependencies": {
-    "typescript": "7.0.2",
-    "vitest": "^4.1.9"
+    "@stylexjs/babel-plugin": "^0.19.0",
+    "@types/babel__core": "^7.20.5",
+    "esbuild": "^0.28.1",
+    "typescript": "7.0.2"
   }
 }

@@ -13,10 +13,13 @@ import {
   prefixHead,
   role as parseRole,
   sameSlice,
+  suggestIdentifier,
+  type BlockAcknowledgement,
   type BlockDescriptor,
   type BlockPayload,
   type BlockRef,
   type Context,
+  type ContextPart,
   type ForkPointDescriptor,
   type Head,
   type Role,
@@ -45,12 +48,14 @@ type ThreadRow = {
   baseline?: string;
   baselineTo?: string;
 };
-type Packet = { id: string; sources: Slice[]; role: Role; author: string; at: number; bytes: Uint8Array; size: number };
+type PacketMetadata = { id: string; sources: Slice[]; role: Role; author: string; at: number; size: number };
+type Packet = PacketMetadata & { bytes: Uint8Array };
 type VisualItem = { block: BlockRef; origins: string[]; changed: boolean };
+type TitleRow = Pick<ThreadRow, "id" | "identifier" | "visualRevision" | "body" | "bodyTo">;
 export type CompactionDecision =
   | { action: "keep" | "drop"; sources: Slice[]; rank: number }
   | { action: "summarize"; sources: Slice[]; rank: number; bytes: Uint8Array };
-export type CommitResult = { manifest: ThreadManifest; collapsedTo?: string };
+export type CommitResult = { manifest: ThreadManifest; acknowledged: BlockAcknowledgement[]; collapsedTo?: string };
 
 const encoder = new TextEncoder(), decoder = new TextDecoder("utf-8", { fatal: true }), magic = "zinc-packet-overflow-v1\n";
 
@@ -59,6 +64,7 @@ export class ConflictError extends Error {
 }
 
 export class Store {
+  private titles = new Map<string, { revision: string; title: string }>();
   private constructor(private db: Db, readonly path: string, private directory: string, private limit: number) {}
 
   static async open(options: Options) {
@@ -71,9 +77,9 @@ export class Store {
   }
 
   async list(): Promise<ThreadSummary[]> {
-    await this.pruneBaselineForks();
-    const rows = await (await this.db.prepare("select id,identifier,visual_revision,updated from threads order by updated desc,id")).all() as any[];
-    return rows.map(summaryRow);
+    const raw = await (await this.db.prepare("select id,identifier,visual_revision,updated,body_packet,body_to from threads order by updated desc,id")).all() as any[];
+    const rows = raw.map(titleRow), titles = await this.threadTitles(rows);
+    return raw.map((row, index) => summaryRow(row, titles.get(rows[index].id)));
   }
 
   async create() {
@@ -89,12 +95,13 @@ export class Store {
   }
 
   async manifest(id: string): Promise<ThreadManifest> {
-    const row = await this.threadRow(id), head = await this.head(row, "visual"), packets = await this.packetMap(head.blocks.map((block) => block.slice.packet));
+    const row = await this.threadRow(id), head = await this.head(row, "visual"), packets = await this.packetMetadataMap(head.blocks.map((block) => block.slice.packet));
     const blocks: BlockDescriptor[] = head.blocks.map((block) => {
       const packet = packets.get(block.slice.packet); if (!packet) throw new Error(`Missing packet: ${block.slice.packet}`);
       return { id: block.id, role: packet.role, author: packet.author, sourceCount: packet.sources.length, byteLength: packet.size };
     });
-    return { id, revision: row.visualRevision, identifier: row.identifier, blocks, forkPoints: await this.forkPoints(id, new Set(head.blocks.map((block) => block.id))) };
+    const title = row.identifier || await this.threadTitle(row, head, packets);
+    return { id, revision: row.visualRevision, updated: row.updated, identifier: row.identifier, title, blocks, forkPoints: await this.forkPoints(id, new Set(head.blocks.map((block) => block.id))) };
   }
 
   async readBlocks(id: string, revision: string, ids: string[]): Promise<BlockPayload[]> {
@@ -113,6 +120,16 @@ export class Store {
 
   read(id: string) { return this.readHead(id, "visual"); }
   readContext(id: string) { return this.readHead(id, "context"); }
+  async readHeads(id: string) {
+    const row = await this.threadRow(id), heads = new Map<string, Promise<Head>>();
+    const load = (packet: string) => { let value = heads.get(packet); if (!value) { value = this.readHeadPacket(packet); heads.set(packet, value); } return value; };
+    const [rawVisual, rawContext] = await Promise.all([load(row.body), load(row.context)]), visual = prefixHead(rawVisual, row.bodyTo), context = prefixHead(rawContext, row.contextTo);
+    const packets = await this.packetMap([...visual.blocks, ...context.blocks].map((block) => block.slice.packet));
+    return {
+      visual: this.context(row.visualRevision, visual, packets),
+      context: this.context(row.contextRevision, context, packets),
+    };
+  }
 
   async state(id: string) {
     const row = await this.threadRow(id);
@@ -120,19 +137,20 @@ export class Store {
   }
 
   async commit(id: string, patch: ThreadPatch, author: string): Promise<CommitResult> {
-    const human = humanAuthor(author), files: string[] = [];
+    const human = humanAuthor(author), files: string[] = [], acknowledged: BlockAcknowledgement[] = [];
     try {
       let collapsedTo: string | undefined;
       const transaction = this.db.transaction(async () => {
         const row = await this.threadRow(id);
         if (row.visualRevision !== patch.revision) throw new ConflictError(row.visualRevision);
         const oldVisual = await this.head(row, "visual"), oldContext = await this.head(row, "context"), planned = planPatch(oldVisual, patch);
-        const oldPackets = await this.packetMap(oldVisual.blocks.map((block) => block.slice.packet)), nextBlocks: BlockRef[] = [], items: VisualItem[] = [];
+        const oldPackets = await this.packetMetadataMap(oldVisual.blocks.map((block) => block.slice.packet)), nextBlocks: BlockRef[] = [], items: VisualItem[] = [];
         for (const item of planned) {
           if ("reuse" in item) { nextBlocks.push(item.reuse); items.push({ block: item.reuse, origins: [item.id], changed: false }); continue; }
           const current = oldVisual.blocks.find((block) => block.id === item.id), first = item.origins[0], sourcePacket = current ? oldPackets.get(current.slice.packet) : first ? oldPackets.get(first.slice.packet) : null;
           const role = sourcePacket?.role ?? "user", sources = item.origins.map((origin) => copySlice(origin.slice));
           const block = { id: item.id, slice: { packet: await this.insert(sources, role, human, item.bytes, files) } };
+          acknowledged.push({ id: item.id, sources: sources.map(copySlice), role, author: human });
           nextBlocks.push(block); items.push({ block, origins: item.origins.map((origin) => origin.id), changed: true });
         }
         const nextVisual = { blocks: nextBlocks }, nextContext = await this.reconcile(oldVisual, oldContext, items);
@@ -149,24 +167,27 @@ export class Store {
         }
       });
       await transaction();
-      if (collapsedTo) { await this.collect(); return { manifest: await this.manifest(collapsedTo), collapsedTo }; }
-      return { manifest: await this.manifest(id) };
+      if (collapsedTo) { await this.collect(); return { manifest: await this.manifest(collapsedTo), acknowledged, collapsedTo }; }
+      return { manifest: await this.manifest(id), acknowledged };
     } catch (error) { await remove(files); throw error; }
   }
 
   async appendMany(id: string, role: "agent" | "system", values: Uint8Array[]) {
-    if (!values.length) return { manifest: await this.manifest(id), ids: [] as string[] };
-    const files: string[] = [], ids: string[] = [];
+    if (!values.length) { const manifest = await this.manifest(id), state = await this.state(id); return { manifest, ids: [] as string[], parts: [] as ContextPart[], contextRevision: state.contextRevision }; }
+    const files: string[] = [], ids: string[] = [], parts: ContextPart[] = []; let contextRevision = "";
     try {
       const transaction = this.db.transaction(async () => {
         const row = await this.threadRow(id), visual = await this.head(row, "visual"), context = await this.head(row, "context"), appended: BlockRef[] = [];
-        for (const value of values) { const block = next("blk"); ids.push(block); appended.push({ id: block, slice: { packet: await this.insert([], role, role, value, files) } }); }
+        for (const value of values) {
+          const block = next("blk"), packet = await this.insert([], role, role, value, files), slice = { packet };
+          ids.push(block); appended.push({ id: block, slice }); parts.push({ id: block, slice, role, author: role, bytes: value, sources: [] });
+        }
         const nextVisual = { blocks: [...visual.blocks, ...appended] }, nextContext = { blocks: [...context.blocks, ...appended] };
-        const body = await this.insert([], "system", "system", encodeHead(nextVisual), files), contextPacket = equalBlocks(nextVisual.blocks, nextContext.blocks) ? body : await this.insert([], "system", "system", encodeHead(nextContext), files);
-        const changed = await (await this.db.prepare("update threads set visual_revision=?,context_revision=?,body_packet=?,body_to=null,context_packet=?,context_to=null,updated=? where id=? and visual_revision=? and context_revision=?")).run(next("rev"), next("rev"), body, contextPacket, seconds(), id, row.visualRevision, row.contextRevision);
+        const body = await this.insert([], "system", "system", encodeHead(nextVisual), files), contextPacket = equalBlocks(nextVisual.blocks, nextContext.blocks) ? body : await this.insert([], "system", "system", encodeHead(nextContext), files), visualRevision = next("rev"); contextRevision = next("rev");
+        const changed = await (await this.db.prepare("update threads set visual_revision=?,context_revision=?,body_packet=?,body_to=null,context_packet=?,context_to=null,updated=? where id=? and visual_revision=? and context_revision=?")).run(visualRevision, contextRevision, body, contextPacket, seconds(), id, row.visualRevision, row.contextRevision);
         if (changed.changes !== 1) throw new ConflictError((await this.threadRow(id)).visualRevision);
       });
-      await transaction(); return { manifest: await this.manifest(id), ids };
+      await transaction(); return { manifest: await this.manifest(id), ids, parts, contextRevision };
     } catch (error) { await remove(files); throw error; }
   }
 
@@ -199,7 +220,7 @@ export class Store {
   }
 
   async applySource(id: string, revision: string, blockId: string, sourceIndex: number, author: string): Promise<CommitResult> {
-    const human = humanAuthor(author), files: string[] = [];
+    const human = humanAuthor(author), files: string[] = []; let acknowledged: BlockAcknowledgement | undefined;
     try {
       let collapsedTo: string | undefined;
       const transaction = this.db.transaction(async () => {
@@ -209,16 +230,17 @@ export class Store {
         const target = visual.blocks[index], packet = await this.packet(target.slice.packet);
         if (!Number.isInteger(sourceIndex) || sourceIndex < 0 || sourceIndex >= packet.sources.length) throw new Error(`Unknown packet source: ${sourceIndex}`);
         const source = packet.sources[sourceIndex], sourcePacket = await this.packet(source.packet), bytes = sliceBytes(sourcePacket.bytes, source);
-        const replacement = { id: blockId, slice: { packet: await this.insert([copySlice(source)], packet.role, human, bytes, files) } }, blocks = [...visual.blocks]; blocks[index] = replacement;
+        const replacementSources = [copySlice(source)], replacement = { id: blockId, slice: { packet: await this.insert(replacementSources, packet.role, human, bytes, files) } }, blocks = [...visual.blocks]; blocks[index] = replacement;
+        acknowledged = { id: blockId, sources: replacementSources, role: packet.role, author: human };
         const nextVisual = { blocks }, nextContext = await this.reconcile(visual, context, blocks.map((block, at) => ({ block, origins: [block.id], changed: at === index })));
         const body = await this.insert([], "system", "system", encodeHead(nextVisual), files), contextPacket = equalBlocks(blocks, nextContext.blocks) ? body : await this.insert([], "system", "system", encodeHead(nextContext), files);
         const changed = await (await this.db.prepare("update threads set visual_revision=?,context_revision=?,body_packet=?,body_to=null,context_packet=?,context_to=null,updated=? where id=? and visual_revision=?")).run(next("rev"), next("rev"), body, contextPacket, seconds(), id, row.visualRevision);
         if (changed.changes !== 1) throw new ConflictError((await this.threadRow(id)).visualRevision);
         const updated = await this.threadRow(id); if (updated.baseline && await this.baselineEqual(updated, nextVisual)) { collapsedTo = updated.parent; await this.deleteThreadRow(id); }
       });
-      await transaction();
-      if (collapsedTo) { await this.collect(); return { manifest: await this.manifest(collapsedTo), collapsedTo }; }
-      return { manifest: await this.manifest(id) };
+      await transaction(); const acknowledgements = acknowledged ? [acknowledged] : [];
+      if (collapsedTo) { await this.collect(); return { manifest: await this.manifest(collapsedTo), acknowledged: acknowledgements, collapsedTo }; }
+      return { manifest: await this.manifest(id), acknowledged: acknowledgements };
     } catch (error) { await remove(files); throw error; }
   }
 
@@ -280,7 +302,11 @@ export class Store {
 
   private async readHead(id: string, head: HeadName): Promise<Context> {
     const row = await this.threadRow(id), value = await this.head(row, head), packets = await this.packetMap(value.blocks.map((block) => block.slice.packet));
-    return { revision: head === "visual" ? row.visualRevision : row.contextRevision, parts: value.blocks.map((block) => {
+    return this.context(head === "visual" ? row.visualRevision : row.contextRevision, value, packets);
+  }
+
+  private context(revision: string, head: Head, packets: Map<string, Packet>): Context {
+    return { revision, parts: head.blocks.map((block) => {
       const packet = packets.get(block.slice.packet); if (!packet) throw new Error(`Missing packet: ${block.slice.packet}`);
       return { id: block.id, slice: copySlice(block.slice), role: packet.role, author: packet.author, bytes: packet.bytes, sources: packet.sources.map(copySlice) };
     }) };
@@ -299,16 +325,26 @@ export class Store {
     };
   }
 
+  private async packetMetadata(id: string): Promise<PacketMetadata> {
+    const row: any = await (await this.db.prepare("select id,sources,role,author,at,bytes from packets where id=?")).get(id); if (!row) throw new Error(`Missing packet: ${id}`);
+    return packetMetadata(row);
+  }
+
   private async packet(id: string): Promise<Packet> {
     const row: any = await (await this.db.prepare("select id,sources,role,author,at,bytes from packets where id=?")).get(id); if (!row) throw new Error(`Missing packet: ${id}`);
-    const stored = bytes(row.bytes), marker = overflowFile(stored);
-    return { id: String(row.id), sources: decodeSources(String(row.sources)), role: parseRole(row.role), author: String(row.author), at: Number(row.at), bytes: await readStored(stored, this.directory), size: marker ? overflowMarker(stored).size : stored.byteLength };
+    return { ...packetMetadata(row), bytes: await readStored(bytes(row.bytes), this.directory) };
+  }
+
+  private async packetMetadataMap(ids: string[]) {
+    const unique = [...new Set(ids)]; if (!unique.length) return new Map<string, PacketMetadata>();
+    const placeholders = unique.map(() => "?").join(","), rows = await (await this.db.prepare(`select id,sources,role,author,at,bytes from packets where id in (${placeholders})`)).all(...unique) as any[];
+    return new Map(rows.map((row) => [String(row.id), packetMetadata(row)]));
   }
 
   private async packetMap(ids: string[]) {
     const unique = [...new Set(ids)]; if (!unique.length) return new Map<string, Packet>();
     const placeholders = unique.map(() => "?").join(","), rows = await (await this.db.prepare(`select id,sources,role,author,at,bytes from packets where id in (${placeholders})`)).all(...unique) as any[];
-    const entries = await Promise.all(rows.map(async (row) => { const stored = bytes(row.bytes), marker = overflowFile(stored); return [String(row.id), { id: String(row.id), sources: decodeSources(String(row.sources)), role: parseRole(row.role), author: String(row.author), at: Number(row.at), bytes: await readStored(stored, this.directory), size: marker ? overflowMarker(stored).size : stored.byteLength }] as const; }));
+    const entries = await Promise.all(rows.map(async (row) => [String(row.id), { ...packetMetadata(row), bytes: await readStored(bytes(row.bytes), this.directory) }] as const));
     return new Map(entries);
   }
 
@@ -321,7 +357,8 @@ export class Store {
   private async reconcile(oldVisual: Head, oldContext: Head, items: VisualItem[]): Promise<Head> {
     if (!oldContext.blocks.length || equalBlocks(oldVisual.blocks, oldContext.blocks)) return { blocks: items.map((item) => item.block) };
     const oldIds = oldVisual.blocks.map((block) => block.id), reused = new Set(items.filter((item) => !item.changed).map((item) => item.block.id)), groups: Array<{ position: number; blocks: BlockRef[]; represented: number[] }> = [];
-    const coverage = await Promise.all(oldContext.blocks.map((block) => this.coverage(block.slice, oldVisual.blocks)));
+    const packets = new Map<string, Promise<PacketMetadata>>(), closures = new Map<string, Promise<Slice[]>>();
+    const coverage = await Promise.all(oldContext.blocks.map((block) => this.coverage(block.slice, oldVisual.blocks, packets, closures)));
     for (let index = 0; index < oldContext.blocks.length; index++) {
       const covered = coverage[index], set = new Set(covered), matches = items.map((item, position) => ({ item, position })).filter(({ item, position }) => item.origins.some((origin) => set.has(origin)) || (!item.origins.length && insertionInside(items, position, set)));
       if (!covered.length) continue;
@@ -335,26 +372,63 @@ export class Store {
     groups.sort((left, right) => left.position - right.position); return { blocks: groups.flatMap((group) => group.blocks) };
   }
 
-  private async coverage(slice: Slice, visual: BlockRef[]) {
-    const source = await this.closure(slice), result: string[] = [];
-    for (const block of visual) if (intersectsAny(source, await this.closure(block.slice))) result.push(block.id);
+  private async coverage(slice: Slice, visual: BlockRef[], packets: Map<string, Promise<PacketMetadata>>, closures: Map<string, Promise<Slice[]>>) {
+    const source = await this.closure(slice, packets, closures), result: string[] = [];
+    for (const block of visual) if (intersectsAny(source, await this.closure(block.slice, packets, closures))) result.push(block.id);
     return result;
   }
 
-  private async closure(root: Slice) {
-    const result: Slice[] = [copySlice(root)], pending = [root], visited = new Set<string>();
-    while (pending.length) { const slice = pending.pop()!, key = JSON.stringify(slice); if (visited.has(key)) continue; visited.add(key); const packet = await this.packet(slice.packet); for (const source of packet.sources) { result.push(copySlice(source)); pending.push(source); } }
+  private closure(root: Slice, packets: Map<string, Promise<PacketMetadata>>, closures: Map<string, Promise<Slice[]>>): Promise<Slice[]> {
+    const rootKey = JSON.stringify(root), existing = closures.get(rootKey); if (existing) return existing;
+    const result = (async () => {
+      const values: Slice[] = [copySlice(root)], pending = [root], visited = new Set<string>();
+      while (pending.length) {
+        const slice = pending.pop()!, key = JSON.stringify(slice); if (visited.has(key)) continue; visited.add(key);
+        let packet = packets.get(slice.packet); if (!packet) { packet = this.packetMetadata(slice.packet); packets.set(slice.packet, packet); }
+        for (const source of (await packet).sources) { values.push(copySlice(source)); pending.push(source); }
+      }
+      return values;
+    })();
+    closures.set(rootKey, result); return result;
+  }
+
+  private async threadTitle(row: TitleRow, head?: Head, metadata?: Map<string, PacketMetadata>) {
+    if (row.identifier) return row.identifier;
+    const cached = this.titles.get(row.id); if (cached?.revision === row.visualRevision) return cached.title;
+    const visual = head ?? await this.readHeadPacket(row.body, row.bodyTo), packets = metadata ?? await this.packetMetadataMap(visual.blocks.map((block) => block.slice.packet));
+    const first = visual.blocks.find((block) => packets.get(block.slice.packet)?.role === "user");
+    const title = first ? packetTitle(await this.packet(first.slice.packet), first.slice) : "thread";
+    this.titles.set(row.id, { revision: row.visualRevision, title }); return title;
+  }
+
+  private async threadTitles(rows: TitleRow[]) {
+    const result = new Map<string, string>(), pending: TitleRow[] = [];
+    for (const row of rows) {
+      if (row.identifier) result.set(row.id, row.identifier);
+      else { const cached = this.titles.get(row.id); if (cached?.revision === row.visualRevision) result.set(row.id, cached.title); else pending.push(row); }
+    }
+    if (!pending.length) return result;
+    const headPackets = await this.packetMap(pending.map((row) => row.body)), heads = new Map<string, Head>();
+    for (const row of pending) { const packet = headPackets.get(row.body); if (!packet) throw new Error(`Missing packet: ${row.body}`); heads.set(row.id, prefixHead(decodeHead(packet.bytes), row.bodyTo)); }
+    const metadata = await this.packetMetadataMap([...heads.values()].flatMap((head) => head.blocks.map((block) => block.slice.packet))), first = new Map<string, BlockRef>();
+    for (const row of pending) { const block = heads.get(row.id)!.blocks.find((item) => metadata.get(item.slice.packet)?.role === "user"); if (block) first.set(row.id, block); }
+    const bodies = await this.packetMap([...first.values()].map((block) => block.slice.packet));
+    for (const row of pending) {
+      const block = first.get(row.id), packet = block ? bodies.get(block.slice.packet) : undefined, title = block && packet ? packetTitle(packet, block.slice) : "thread";
+      result.set(row.id, title); this.titles.set(row.id, { revision: row.visualRevision, title });
+    }
     return result;
   }
 
   private async forkPoints(thread: string, visible: Set<string>): Promise<ForkPointDescriptor[]> {
-    const rows = await (await this.db.prepare("select p.id,p.block_id from fork_points p join fork_members m on m.point_id=p.id where m.thread_id=? order by p.id")).all(thread) as any[], result: ForkPointDescriptor[] = [];
+    const rows = await (await this.db.prepare("select p.id point_id,p.block_id,t.id,t.identifier,t.visual_revision,t.updated from fork_points p join fork_members owner on owner.point_id=p.id and owner.thread_id=? join fork_members member on member.point_id=p.id join threads t on t.id=member.thread_id order by p.id,t.updated desc,t.id")).all(thread) as any[];
+    const points = new Map<string, ForkPointDescriptor>();
     for (const row of rows) {
-      const block = String(row.block_id); if (!visible.has(block)) continue;
-      const members = await (await this.db.prepare("select t.id,t.identifier,t.visual_revision,t.updated from threads t join fork_members m on m.thread_id=t.id where m.point_id=? order by t.updated desc,t.id")).all(String(row.id)) as any[];
-      if (members.length > 1) result.push({ id: String(row.id), block, members: members.map(summaryRow) });
+      const id = String(row.point_id), block = String(row.block_id); if (!visible.has(block)) continue;
+      let point = points.get(id); if (!point) { point = { id, block, members: [] }; points.set(id, point); }
+      point.members.push(summaryRow(row));
     }
-    return result;
+    return [...points.values()].filter((point) => point.members.length > 1);
   }
 
   private async removeMissingMemberships(thread: string, visible: Set<string>) {
@@ -380,11 +454,6 @@ export class Store {
       if (a.role !== b.role || !Buffer.from(sliceBytes(a.bytes, left.slice)).equals(Buffer.from(sliceBytes(b.bytes, right.slice)))) return false;
     }
     return true;
-  }
-
-  private async pruneBaselineForks() {
-    const rows = await (await this.db.prepare("select id from threads where baseline_packet is not null")).all() as any[];
-    for (const value of rows) { const row = await this.threadRow(String(value.id)); if (await this.baselineEqual(row, await this.head(row, "visual"))) { const transaction = this.db.transaction(async () => this.deleteThreadRow(row.id)); await transaction(); } }
   }
 
   private async collect() {
@@ -476,7 +545,16 @@ function insertionInside(items: VisualItem[], index: number, covered: Set<string
 function intersectsAny(left: Slice[], right: Slice[]) { return left.some((a) => right.some((b) => overlaps(a, b))); }
 function overlaps(left: Slice, right: Slice) { const leftFrom = left.from ?? 0, leftTo = left.to ?? Infinity, rightFrom = right.from ?? 0, rightTo = right.to ?? Infinity; return left.packet === right.packet && leftFrom < rightTo && rightFrom < leftTo; }
 function copySlice(slice: Slice): Slice { return { packet: slice.packet, ...(slice.from === undefined ? {} : { from: slice.from }), ...(slice.to === undefined ? {} : { to: slice.to }) }; }
-function summaryRow(row: any): ThreadSummary { return { id: String(row.id), identifier: String(row.identifier), revision: String(row.visual_revision), updated: Number(row.updated) }; }
+function packetMetadata(row: any): PacketMetadata { const stored = bytes(row.bytes), marker = overflowFile(stored); return { id: String(row.id), sources: decodeSources(String(row.sources)), role: parseRole(row.role), author: String(row.author), at: Number(row.at), size: marker ? overflowMarker(stored).size : stored.byteLength }; }
+function titleRow(row: any): TitleRow { return { id: String(row.id), identifier: String(row.identifier), visualRevision: String(row.visual_revision), body: String(row.body_packet), ...(row.body_to == null ? {} : { bodyTo: String(row.body_to) }) }; }
+function packetTitle(packet: Packet, slice: Slice) {
+  try {
+    const value = JSON.parse(decoder.decode(packet.bytes)); if (!record(value) || value.zinc !== "text" || typeof value.text !== "string") return "thread";
+    const text = value.format === "markdown" && (slice.from !== undefined || slice.to !== undefined) ? markdownBlocks(value.text).slice(slice.from ?? 0, slice.to).map((block) => block.raw).join("") : value.text;
+    return suggestIdentifier(text) || "thread";
+  } catch { return "thread"; }
+}
+function summaryRow(row: any, title?: string): ThreadSummary { const identifier = String(row.identifier); return { id: String(row.id), identifier, title: title || identifier || "thread", revision: String(row.visual_revision), updated: Number(row.updated) }; }
 function reference(path: string, name?: unknown) { const absolute = resolve(path); return { path: absolute, name: typeof name === "string" && name ? name : absolute.split(/[\\/]/).pop() || absolute }; }
 function next(prefix: string) { return `${prefix}_${crypto.randomUUID()}`; }
 function seconds() { return Math.floor(Date.now() / 1000); }

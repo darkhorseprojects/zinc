@@ -188,7 +188,8 @@ function prependMarker(node: SerializedNode, text: string): SerializedNode {
   return node;
 }
 
-function sourceBlocks(nodes: SerializedNode[]) { return nodes.map(sourceBlock).filter(Boolean).join("\n\n"); }
+function sourceBlocks(nodes: SerializedNode[]) { return nodes.every(inlineRoot) ? nodes.map(inlineSource).join("") : nodes.map(sourceBlock).filter(Boolean).join("\n\n"); }
+function inlineRoot(node: SerializedNode) { return ["text", "linebreak", "equation", "link"].includes(String(node.type)); }
 function sourceBlock(node: SerializedNode): string {
   if (node.type === "list") return listSource(node, 0);
   if (node.type === "table") {
@@ -242,12 +243,12 @@ function importProducts(node: SerializedNode): SerializedNode {
 function productFenceCodeToNode(node: SerializedNode): SerializedNode {
   if (node.type !== "code" || typeof node.language !== "string") return node;
   if (node.language === "tsx") return { source: nodeText(node), type: "tsx-preview", version: 1 };
-  return ["reasoning", "shell", "error"].includes(node.language) ? element(node.language, textChildren(nodeText(node))) : node;
+  return ["reasoning", "error"].includes(node.language) ? element(node.language, textChildren(nodeText(node))) : node;
 }
 
 function productNodeToFenceCode(node: SerializedNode): SerializedNode {
   if (node.type === "tsx-preview") return element("code", textChildren(typeof node.source === "string" ? node.source : ""), { language: "tsx" });
-  return ["reasoning", "shell", "error"].includes(String(node.type)) ? element("code", textChildren(nodeText(node)), { language: node.type }) : node;
+  return ["reasoning", "error"].includes(String(node.type)) ? element("code", textChildren(nodeText(node)), { language: node.type }) : node;
 }
 
 function element(type: unknown, children: SerializedNode[], extra: Record<string, unknown> = {}): SerializedNode { return { children, direction: null, format: "", indent: 0, type, version: 1, ...extra }; }

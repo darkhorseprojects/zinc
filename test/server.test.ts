@@ -1,7 +1,8 @@
+import assert from "node:assert/strict";
 import { mkdtemp, mkdir, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, describe, it } from "node:test";
 import { ZincHost } from "../src/host.js";
 import { compileTsxPreview, createRequestHandler } from "../src/server.js";
 import type { Config } from "../src/config.js";
@@ -13,8 +14,35 @@ const packet = (text: string) => Buffer.from(encoder.encode(`${JSON.stringify({ 
 const post = (value: unknown) => ({ method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify(value) });
 
 describe("server v8", () => {
-  it("creates manifests, commits stable blocks, and batches payload reads", async () => { const { host, request } = await fixture(), createdResponse = await request(new Request("http://z/api/threads", post({ store: host.config.store }))), created: any = await createdResponse.json(); expect(created.id).toMatch(/^thr_/); const savedResponse = await request(new Request("http://z/api/thread", post({ store: host.config.store, thread: created.id, patch: { revision: created.manifest.revision, order: ["a"], writes: [{ id: "a", origins: [], bytes: packet("hello") }] } }))), saved: any = await savedResponse.json(); expect(saved.manifest.blocks[0]).toMatchObject({ id: "a", role: "user" }); const loaded = await request(new Request("http://z/api/blocks/read", post({ store: host.config.store, thread: created.id, revision: saved.manifest.revision, ids: ["a"] }))); expect(JSON.parse(Buffer.from((await loaded.json() as any).blocks[0].bytes, "base64").toString()).text).toBe("hello"); await host.close(); });
-  it("validates patch bytes and stable block source/fork requests", async () => { const { host, request } = await fixture(), created = await host.create(host.config.store); const bad = await request(new Request("http://z/api/thread", post({ store: host.config.store, thread: created.id, patch: { revision: created.manifest.revision, order: ["a"], writes: [{ id: "a", origins: [], bytes: "***" }] } }))); expect(bad.status).toBe(400); await host.close(); });
-  it("serves the configured theme and explicit cache policies", async () => { const { host, request } = await fixture(); const theme = await request(new Request("http://z/theme.css")); expect(theme.headers.get("cache-control")).toBe("no-cache"); expect(await theme.text()).toContain("--z-background:#090d12"); expect((await request(new Request("http://z/api/stores"))).headers.get("cache-control")).toBe("no-store"); expect((await request(new Request("http://z/app-12345678.js"))).headers.get("cache-control")).toBe("public, max-age=31536000, immutable"); await host.close(); });
-  it("guards previews and static traversal", async () => { const { host, request } = await fixture(); expect(compileTsxPreview(`export default function A(){return <div/>}`)).toMatchObject({ ok: true }); expect(compileTsxPreview(`import fs from "node:fs"; export default function A(){}`)).toMatchObject({ ok: false }); expect((await request(new Request("http://z/%2e%2e%2fsecret"))).status).toBe(400); await host.close(); });
+  it("creates manifests, commits stable blocks, and batches payload reads", async () => {
+    const { host, request } = await fixture(), createdResponse = await request(new Request("http://z/api/threads", post({ store: host.config.store }))), created: any = await createdResponse.json();
+    assert.match(created.id, /^thr_/);
+    const savedResponse = await request(new Request("http://z/api/thread", post({ store: host.config.store, thread: created.id, patch: { revision: created.manifest.revision, order: ["a"], writes: [{ id: "a", origins: [], bytes: packet("hello") }] } }))), saved: any = await savedResponse.json();
+    assert.equal(saved.manifest.blocks[0].id, "a");
+    assert.equal(saved.manifest.blocks[0].role, "user");
+    const loaded = await request(new Request("http://z/api/blocks/read", post({ store: host.config.store, thread: created.id, revision: saved.manifest.revision, ids: ["a"] })));
+    assert.equal(JSON.parse(Buffer.from((await loaded.json() as any).blocks[0].bytes, "base64").toString()).text, "hello");
+    await host.close();
+  });
+  it("validates patch bytes and stable block source/fork requests", async () => {
+    const { host, request } = await fixture(), created = await host.create(host.config.store);
+    const bad = await request(new Request("http://z/api/thread", post({ store: host.config.store, thread: created.id, patch: { revision: created.manifest.revision, order: ["a"], writes: [{ id: "a", origins: [], bytes: "***" }] } })));
+    assert.equal(bad.status, 400);
+    await host.close();
+  });
+  it("serves the configured theme and explicit cache policies", async () => {
+    const { host, request } = await fixture(), theme = await request(new Request("http://z/theme.css"));
+    assert.equal(theme.headers.get("cache-control"), "no-cache");
+    assert.match(await theme.text(), /--z-background:#090d12/);
+    assert.equal((await request(new Request("http://z/api/stores"))).headers.get("cache-control"), "no-store");
+    assert.equal((await request(new Request("http://z/app-12345678.js"))).headers.get("cache-control"), "public, max-age=31536000, immutable");
+    await host.close();
+  });
+  it("guards previews and static traversal", async () => {
+    const { host, request } = await fixture();
+    assert.equal(compileTsxPreview(`export default function A(){return <div/>}`).ok, true);
+    assert.equal(compileTsxPreview(`import fs from "node:fs"; export default function A(){}`).ok, false);
+    assert.equal((await request(new Request("http://z/%2e%2e%2fsecret"))).status, 400);
+    await host.close();
+  });
 });

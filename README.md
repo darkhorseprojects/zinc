@@ -31,7 +31,7 @@ theme "theme.kdl"
 url "localhost"
 port 5173
 author "anonymous"
-completions-url "http://127.0.0.1:30000/v1/chat/completions"
+completions-url "http://127.0.0.1:30000/v1/responses"
 parallel 4
 context-tokens 32768
 compact-at 80
@@ -97,6 +97,6 @@ npm run dev
 npm run check
 ```
 
-TypeScript builds the host, Vite builds the Solid browser, StyleX compiles component chrome, and Edge.js runs Zinc.
+TypeScript builds the host, esbuild bundles the Solid browser, Babel compiles Solid and StyleX, and Edge.js runs scripts, tests, Zinc, and its CLI. Production browser output is checked for React emission.
 
 See [SPEC.md](SPEC.md) and the [wiki](https://github.com/darkhorseprojects/zinc/wiki).

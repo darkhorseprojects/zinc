@@ -11,62 +11,64 @@ in {
 compact source="$completions-url" {
   (json)in #"""
   {
-    "stream": true,
-    "stream_options": { "include_usage": true },
-    "messages": [
-      { "role": "system", "content": "@Compaction" },
-      { "role": "system", "content": "Current context:\n$context\n\nOrdered context candidates:\n$candidates\n\nToken capacity: $tokens-left of $token-limit tokens remain. The configured compaction threshold is $compact-at percent." }
+    "stream": false,
+    "input": [
+      { "role": "system", "content": "@Compaction\n\nClassify every supplied candidate exactly once and call apply_compaction. Preserve order, concrete decisions, constraints, unfinished work, errors, paths, and references needed to continue." },
+      { "role": "user", "content": "Current context:\n$context\n\nOrdered context candidates:\n$candidates\n\nToken capacity: $tokens-left of $token-limit tokens remain. The configured compaction threshold is $compact-at percent." }
     ],
     "tools": [{
       "type": "function",
-      "function": {
-        "name": "apply_compaction",
-        "description": "Classify every current context packet occurrence exactly once and in order.",
-        "parameters": {
-          "type": "object",
-          "properties": {
-            "decisions": {
-              "type": "array",
-              "items": {
-                "type": "object",
-                "properties": {
-                  "action": { "type": "string", "enum": ["keep", "summarize", "drop"] },
-                  "indexes": {
-                    "type": "array",
-                    "items": { "type": "integer", "minimum": 0 },
-                    "minItems": 1
-                  },
-                  "rank": { "type": "number", "minimum": 0, "maximum": 1 },
-                  "content": { "type": "string" }
+      "name": "apply_compaction",
+      "description": "Classify every current context packet occurrence exactly once and in order.",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "decisions": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "properties": {
+                "action": { "type": "string", "enum": ["keep", "summarize", "drop"] },
+                "indexes": {
+                  "type": "array",
+                  "items": { "type": "integer", "minimum": 0 },
+                  "minItems": 1
                 },
-                "required": ["action", "indexes", "rank"],
-                "additionalProperties": false
-              }
+                "rank": { "type": "number", "minimum": 0, "maximum": 1 },
+                "content": { "type": "string" }
+              },
+              "required": ["action", "indexes", "rank"],
+              "additionalProperties": false
             }
-          },
-          "required": ["decisions"],
-          "additionalProperties": false
-        }
+          }
+        },
+        "required": ["decisions"],
+        "additionalProperties": false
       }
     }],
-    "tool_choice": { "type": "function", "function": { "name": "apply_compaction" } }
+    "tool_choice": { "type": "function", "name": "apply_compaction" }
   }
   """#
 
   (json)out #"""
   {
-    "choices": [{
-      "delta": {
-        "tool_calls": [{ "index": "?call", "function": { "arguments": { "decisions": "?decisions" } } }]
-      }
+    "output": [{
+      "type": "function_call",
+      "name": "apply_compaction",
+      "arguments": "?arguments"
     }],
     "usage": {
-      "prompt_tokens": "?prompt-tokens",
-      "completion_tokens": "?completion-tokens",
+      "input_tokens": "?prompt-tokens",
+      "output_tokens": "?completion-tokens",
       "total_tokens": "?used-tokens"
     }
   }
   """#
+}
+
+decisions source="" {
+  (text)in $arguments
+  (json)out #"{ "decisions": "?decisions" }"#
 }
 
 out {

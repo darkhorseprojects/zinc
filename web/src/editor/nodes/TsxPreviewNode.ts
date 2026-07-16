@@ -12,7 +12,7 @@ const baseCss = `
 :host { display: block; width: 100%; color: inherit; font: inherit; }
 *, *::before, *::after { box-sizing: border-box; }
 button, input, textarea, select { font: inherit; }
-[part="error"] { color: var(--error, #ef6a6a); font: inherit; white-space: pre-wrap; }
+[part="error"] { color: var(--z-negative); font: inherit; white-space: pre-wrap; }
 `;
 
 type PreviewState = {

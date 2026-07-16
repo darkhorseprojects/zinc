@@ -10,16 +10,19 @@ export type BlockDescriptor = {
   sourceCount: number;
   byteLength: number;
 };
-export type ThreadSummary = { id: string; identifier: string; revision: string; updated: number };
+export type ThreadSummary = { id: string; identifier: string; title: string; revision: string; updated: number };
 export type ForkPointDescriptor = { id: string; block: string; members: ThreadSummary[] };
 export type ThreadManifest = {
   id: string;
   revision: string;
+  updated: number;
   identifier: string;
+  title: string;
   blocks: BlockDescriptor[];
   forkPoints: ForkPointDescriptor[];
 };
 export type BlockPayload = { id: string; bytes: Uint8Array; sources: Slice[] };
+export type BlockAcknowledgement = { id: string; sources: Slice[]; role: Role; author: string };
 export type ContextPart = BlockPayload & { slice: Slice; role: Role; author: string };
 export type Context = { revision: string; parts: ContextPart[] };
 
@@ -82,6 +85,11 @@ export function planPatch(head: Head, patch: ThreadPatch): PlannedBlock[] {
     }
     return { id, origins: write.origins.map((origin) => copyBlock(base.get(origin)!)), bytes: write.bytes };
   });
+}
+
+export function suggestIdentifier(markdown: string) {
+  const plain = markdown.replace(/```[\s\S]*?```/g, " ").replace(/[*_~`$#[\]()>|\\-]/g, " ").replace(/\s+/g, " ").trim();
+  return plain.split(" ").slice(0, 7).join(" ").slice(0, 60);
 }
 
 export function normalizeIdentifier(value: string) {

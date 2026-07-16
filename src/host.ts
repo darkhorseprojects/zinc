@@ -10,6 +10,8 @@ import { loadTheme, type Theme } from "./theme.js";
 
 export type Event =
   | { type: "update" | "done"; store: string; thread: string; revision: string }
+  | { type: "append"; store: string; thread: string; revision: string; blocks: string[] }
+  | { type: "catalog"; store: string }
   | { type: "deleted"; store: string; thread: string; redirect?: string }
   | { type: "reasoning" | "response" | "error"; store: string; thread: string; text: string };
 type Execution = { controller: AbortController; task: Promise<void> };
@@ -18,6 +20,7 @@ type WorkingContext = { visualRevision: string; contextRevision: string; visual:
 type Usage = { prompt: number; completion: number; left: number; session: number };
 type ContextView = { markdown: string; active: Set<number>; omitted: boolean };
 type ActionResult = { handled: boolean; compacted: boolean };
+type ProviderResult = { reasoning: string; response: string; actions: string[]; prompt: number | null; completion: number | null; total: number | null };
 
 export class BusyError extends Error { constructor() { super("A completion is already active for this thread."); } }
 
@@ -48,28 +51,27 @@ export class ZincHost {
   async create(store: string) { this.open(); return (await this.store(store)).create(); }
   async manifest(store: string, thread: string) { return (await this.store(store)).manifest(thread); }
   async blocks(store: string, thread: string, revision: string, ids: string[]) { return (await this.store(store)).readBlocks(thread, revision, ids); }
-  async delete(store: string, thread: string) { this.open(); return (await this.store(store)).delete(thread); }
-  async release(store: string, thread: string) { this.open(); return (await this.store(store)).release(thread); }
+  async delete(store: string, thread: string) { this.open(); const path = resolve(store); this.idle(path, thread); const deleted = await (await this.store(path)).delete(thread); if (deleted) { this.publish({ type: "deleted", store: path, thread }); this.publish({ type: "catalog", store: path }); } return deleted; }
+  async release(store: string, thread: string) { this.open(); const path = resolve(store), result = await (await this.store(path)).release(thread); if (result.collapsedTo) { this.publish({ type: "deleted", store: path, thread, redirect: result.collapsedTo }); this.publish({ type: "catalog", store: path }); } return result; }
 
   packet(store: string, packet: string, from?: number, to?: number) { return readPacket(resolve(store), join(this.stateDirectory, "packets"), packet, from, to); }
 
   async source(store: string, thread: string, revision: string, block: string, source: number) {
-    this.open(); const path = resolve(store), result = await (await this.store(path)).applySource(thread, revision, block, source, this.config.author);
-    if (result.collapsedTo) this.publish({ type: "deleted", store: path, thread, redirect: result.collapsedTo });
+    this.open(); const path = resolve(store); this.idle(path, thread); const result = await (await this.store(path)).applySource(thread, revision, block, source, this.config.author);
+    if (result.collapsedTo) { this.publish({ type: "deleted", store: path, thread, redirect: result.collapsedTo }); this.publish({ type: "catalog", store: path }); }
     else this.publish({ type: "update", store: path, thread, revision: result.manifest.revision });
     return result;
   }
 
   async fork(store: string, thread: string, revision: string, block: string) {
-    this.open(); const path = resolve(store), created = await (await this.store(path)).fork(thread, revision, block);
-    this.publish({ type: "update", store: path, thread, revision });
-    this.publish({ type: "update", store: path, thread: created.id, revision: created.manifest.revision });
+    this.open(); const path = resolve(store); this.idle(path, thread); const created = await (await this.store(path)).fork(thread, revision, block);
+    this.publish({ type: "catalog", store: path });
     return created;
   }
 
   async commit(store: string, thread: string, patch: ThreadPatch) {
-    this.open(); const path = resolve(store), result = await (await this.store(path)).commit(thread, patch, this.config.author);
-    if (result.collapsedTo) this.publish({ type: "deleted", store: path, thread, redirect: result.collapsedTo });
+    this.open(); const path = resolve(store); this.idle(path, thread); const result = await (await this.store(path)).commit(thread, patch, this.config.author);
+    if (result.collapsedTo) { this.publish({ type: "deleted", store: path, thread, redirect: result.collapsedTo }); this.publish({ type: "catalog", store: path }); }
     else this.publish({ type: "update", store: path, thread, revision: result.manifest.revision });
     return result;
   }
@@ -97,7 +99,7 @@ export class ZincHost {
         })
         .finally(() => { this.active.delete(key); release(); });
       this.active.set(key, { controller, task });
-      return committed.manifest;
+      return committed;
     } catch (error) { this.active.delete(key); release(); throw error; }
   }
 
@@ -123,56 +125,60 @@ export class ZincHost {
     let working = initial, usage: Usage = { prompt: 0, completion: 0, left: this.config.contextTokens, session: 0 };
     let pendingCompact = threshold((await store.state(thread)).promptTokens, this.config), responseWaiting = false;
     const append = async (role: "agent" | "system", values: Uint8Array[]) => {
-      const result = await store.appendMany(thread, role, values); working = await this.working(store, thread);
-      this.publish({ type: "update", store: storePath, thread, revision: result.manifest.revision }); return result.manifest;
+      const result = await store.appendMany(thread, role, values), appended = workingParts({ revision: result.contextRevision, parts: result.parts });
+      working = { visualRevision: result.manifest.revision, contextRevision: result.contextRevision, visual: [...working.visual, ...appended], context: [...working.context, ...appended] };
+      this.publish({ type: "append", store: storePath, thread, revision: result.manifest.revision, blocks: result.ids }); return result.manifest;
     };
 
     while (true) {
       signal.throwIfAborted();
       const view = contextView(working.context, this.config.rawContextBytes); pendingCompact ||= view.omitted;
-      const definitions = await definitionCatalog(join(this.stateDirectory, "definitions"), pendingCompact);
-      const run = this.runtime.start(this.program, inputs(this.config, this.stateDirectory, working, view, usage, definitions, pendingCompact), {
+      if (pendingCompact) {
+        const compactProgram = parse(await readFile(join(this.stateDirectory, "definitions", "compact.md"), "utf8"));
+        const compactRun = this.runtime.start(compactProgram, compactionInputs(this.config, working, view, usage), { cwd: dirname(this.config.turn), signal });
+        let advanced = false; while (await compactRun.advance()) advanced = true;
+        if (!advanced) throw new Error("Configured compaction produced no output");
+        usage = updateUsage(usage, compactRun.output().bindings, this.config.contextTokens);
+        const handled = await this.applyAction(store, thread, working, compactRun.output().value, append, true);
+        if (!handled.compacted) throw new Error("Configured compaction produced no decisions");
+        working = await this.working(store, thread); usage = { prompt: 0, completion: 0, left: this.config.contextTokens, session: usage.session }; pendingCompact = false;
+        if (responseWaiting) { const state = await store.state(thread); this.publish({ type: "done", store: storePath, thread, revision: state.visualRevision }); return; }
+        continue;
+      }
+      const definitions = await definitionCatalog(join(this.stateDirectory, "definitions"), false);
+      const run = this.runtime.start(this.program, inputs(this.config, this.stateDirectory, working, view, usage, definitions), {
         cwd: dirname(this.config.turn), seen, signal,
-        output: (_entry, binding) => { if (!pendingCompact && (binding.name === "reasoning" || binding.name === "response") && typeof binding.value === "string" && binding.value) this.publish({ type: binding.name, store: storePath, thread, text: binding.value }); },
+        output: (_entry, binding) => { if (pendingCompact || binding.name !== "provider-event" || !record(binding.value)) return; const delta = providerDelta(binding.value); if (delta) this.publish({ type: delta.type, store: storePath, thread, text: delta.text }); },
       });
       let advanced = false; while (await run.advance()) advanced = true;
       if (!advanced) throw new Error("Configured turn produced no output");
       const root = run.output().bindings; if (!root.length) throw new Error("Configured turn produced no root output");
-      usage = updateUsage(usage, root, this.config.contextTokens);
-      const actions = strings(root, "circuitry").map((value) => value.trim()).filter(Boolean), response = strings(root, "response").join("").trim();
-      let actionFailed = false, compacted = false;
+      const provider = providerResult(root); usage = updateProviderUsage(usage, provider, this.config.contextTokens);
+      const actions = provider.actions, response = provider.response.trim();
+      let actionFailed = false;
 
-      if (!pendingCompact) {
-        const reasoning = strings(root, "reasoning").join("").trim(); if (reasoning) await append("agent", [textPacket("reasoning", reasoning)]);
-        if (response) await append("agent", responsePackets(response));
-      }
+      const reasoning = provider.reasoning.trim(); if (reasoning) await append("agent", [textPacket("reasoning", reasoning)]);
+      if (response) await append("agent", responsePackets(response));
 
       for (const document of actions) {
-        if (!pendingCompact) await append("system", [textPacket("kdl", document)]);
+        await append("system", [textPacket("kdl", document)]);
         const calls: Array<{ source: string; args: string[]; documents: unknown[] }> = [];
         try {
-          const nested = this.runtime.start(parse(document), inputs(this.config, this.stateDirectory, working, contextView(working.context, this.config.rawContextBytes), usage, definitions, pendingCompact), {
+          const nested = this.runtime.start(parse(document), inputs(this.config, this.stateDirectory, working, contextView(working.context, this.config.rawContextBytes), usage, definitions), {
             cwd: dirname(this.config.turn), signal,
             call: async (call, documents) => { if (call.source !== this.config.completionsUrl) calls.push({ source: call.source ?? "", args: call.args, documents }); },
           });
           while (await nested.advance()) {}
           const result = nested.output().value; usage = updateUsage(usage, nested.output().bindings, this.config.contextTokens);
-          const handled = await this.applyAction(store, thread, working, result, append, pendingCompact); compacted ||= handled.compacted;
-          if (handled.compacted) { working = await this.working(store, thread); usage = { prompt: 0, completion: 0, left: this.config.contextTokens, session: usage.session }; }
-          else if (!handled.handled) {
+          const handled = await this.applyAction(store, thread, working, result, append, false);
+          if (!handled.handled) {
             const processes = calls.filter(processCall);
             if (processes.length) await append("system", processes.map((call) => structuredPacket({ zinc: "shell", command: [call.source, ...call.args].join(" "), output: call.documents.map(printValue).join("") })));
             else { const text = JSON.stringify(result, null, 2); await append("system", [textPacket("json", text)]); }
           }
         } catch (error) {
-          signal.throwIfAborted(); actionFailed = true; if (pendingCompact) throw error; await append("system", [textPacket("error", message(error))]);
+          signal.throwIfAborted(); actionFailed = true; await append("system", [textPacket("error", message(error))]);
         }
-      }
-
-      if (pendingCompact) {
-        if (!compacted) throw new Error("Compact event was not resolved"); pendingCompact = false;
-        if (responseWaiting) { const state = await store.state(thread); this.publish({ type: "done", store: storePath, thread, revision: state.visualRevision }); return; }
-        continue;
       }
 
       const state = await store.state(thread); if (usage.prompt > 0) await store.recordPromptTokens(thread, state.contextRevision, usage.prompt);
@@ -198,11 +204,12 @@ export class ZincHost {
   }
 
   private async working(store: Store, thread: string): Promise<WorkingContext> {
-    const visual = await store.read(thread), context = await store.readContext(thread);
+    const { visual, context } = await store.readHeads(thread);
     return { visualRevision: visual.revision, contextRevision: context.revision, visual: workingParts(visual), context: workingParts(context) };
   }
 
   private async appendError(store: string, thread: string, text: string) { const result = await (await this.store(store)).appendMany(thread, "system", [textPacket("error", text)]); return result.manifest; }
+  private idle(store: string, thread: string) { if (this.active.has(`${store}\0${thread}`)) throw new BusyError(); }
   private store(path: string) { const absolute = resolve(path); let store = this.storesByPath.get(absolute); if (!store) { store = Store.open({ path: absolute, packets: join(this.stateDirectory, "packets"), overflowBytes: this.config.packetOverflowBytes }); this.storesByPath.set(absolute, store); } return store; }
   private publish(event: Event) { const bytes = new TextEncoder().encode(`data: ${JSON.stringify(event)}\n\n`); for (const subscriber of this.subscribers.values()) try { subscriber.enqueue(bytes); } catch {} }
   private open() { if (this.closed) throw new Error("Zinc host is closed"); }
@@ -213,9 +220,10 @@ function structuredPacket(value: Record<string, unknown>) { return new TextEncod
 function textPacket(format: Format, text: string) { return structuredPacket({ zinc: "text", format, text }); }
 function responsePackets(markdown: string) { const blocks = markdownBlocks(markdown); return (blocks.length ? blocks.map((block) => block.raw.trimEnd()).filter(Boolean) : [markdown]).map((text) => textPacket("markdown", text)); }
 function workingParts(context: Context): WorkingPart[] { return context.parts.map((part) => ({ block: part.id, slice: part.slice, role: part.role, author: part.author, markdown: packetMarkdown(part.bytes, part.slice), sources: part.sources })); }
-function inputs(config: Config, state: string, working: WorkingContext, view: ContextView, usage: Usage, definitions: string, compact: boolean) {
+function compactionInputs(config: Config, working: WorkingContext, view: ContextView, usage: Usage) { return { candidates: working.context.map((part, index) => packetRecord("context", part, view.active.has(index))), context: view.markdown, "completions-url": config.completionsUrl, "token-limit": config.contextTokens, "compact-at": config.compactAt, "tokens-left": usage.left }; }
+function inputs(config: Config, state: string, working: WorkingContext, view: ContextView, usage: Usage, definitions: string) {
   return {
-    thread: cleanMarkdown(working.visual), context: view.markdown, packets: packetCatalog(working, view.active), "compact-candidates": working.context.map((part, index) => packetRecord("context", part, view.active.has(index))), event: compact ? "compact" : "respond",
+    thread: cleanMarkdown(working.visual), context: view.markdown, packets: packetCatalog(working, view.active), "compact-candidates": working.context.map((part, index) => packetRecord("context", part, view.active.has(index))), event: "respond",
     shell: config.shell, "completions-url": config.completionsUrl, cwd: state, allowlist: config.allowlist.join(", ") || "(none)", definitions: join(state, "definitions"), "available-definitions": definitions || "No definitions are available.",
     "token-limit": config.contextTokens, "compact-at": config.compactAt, "prompt-tokens": usage.prompt, "completion-tokens": usage.completion, "tokens-left": usage.left, "session-tokens": usage.session,
   };
@@ -240,7 +248,24 @@ function packetMarkdown(bytes: Uint8Array, slice: Slice) {
   if (value.zinc === "definition" && typeof value.document === "string") return `\`\`\`kdl\n${value.document}\n\`\`\``;
   throw new Error("Context packet has no Markdown projection");
 }
-function strings(bindings: Binding[], name: string) { return bindings.flatMap((binding) => binding.name === name && typeof binding.value === "string" ? [binding.value] : []); }
+function providerDelta(event: Record<string, unknown>): { type: "reasoning" | "response"; text: string } | null { const text = typeof event.delta === "string" ? event.delta : ""; if (!text) return null; if (event.type === "response.reasoning_text.delta") return { type: "reasoning", text }; if (event.type === "response.output_text.delta") return { type: "response", text }; return null; }
+function providerResult(bindings: Binding[]): ProviderResult {
+  let reasoning = "", response = "", prompt: number | null = null, completion: number | null = null, total: number | null = null; const actions: string[] = [];
+  for (const binding of bindings) {
+    if (binding.name !== "provider-event" || !record(binding.value)) continue; const event = binding.value, failure = providerFailure(event); if (failure) throw new Error(failure); const delta = providerDelta(event); if (delta?.type === "reasoning") reasoning += delta.text; else if (delta?.type === "response") response += delta.text;
+    if (event.type === "response.output_item.done" && record(event.item) && event.item.type === "function_call" && event.item.name === "circuitry") { if (typeof event.item.arguments !== "string") throw new Error("Circuitry tool call has no arguments"); const value = JSON.parse(event.item.arguments); if (!record(value) || typeof value.kdl !== "string") throw new Error("Circuitry tool call has invalid arguments"); actions.push(value.kdl.trim()); }
+    if (event.type === "response.completed" && record(event.response) && record(event.response.usage)) { prompt = finite(event.response.usage.input_tokens); completion = finite(event.response.usage.output_tokens); total = finite(event.response.usage.total_tokens); }
+  }
+  return { reasoning, response, actions: actions.filter(Boolean), prompt, completion, total };
+}
+function providerFailure(event: Record<string, unknown>) {
+  if (event.type === "error") return typeof event.message === "string" ? event.message : "Provider error";
+  if (event.type === "response.failed") { const response = record(event.response) ? event.response : {}, error = record(response.error) ? response.error : {}; return typeof error.message === "string" ? error.message : "Provider response failed"; }
+  if (event.type === "response.incomplete") { const response = record(event.response) ? event.response : {}, detail = record(response.incomplete_details) ? response.incomplete_details : {}; return typeof detail.reason === "string" ? `Provider response incomplete: ${detail.reason}` : "Provider response incomplete"; }
+  return null;
+}
+function finite(value: unknown) { return typeof value === "number" && Number.isFinite(value) ? value : null; }
+function updateProviderUsage(current: Usage, provider: ProviderResult, limit: number): Usage { if (provider.prompt === null && provider.completion === null && provider.total === null) return current; const used = provider.total ?? (provider.prompt ?? 0) + (provider.completion ?? 0); return { prompt: provider.prompt ?? 0, completion: provider.completion ?? 0, left: Math.max(0, limit - used), session: current.session + used }; }
 function number(bindings: Binding[], name: string) { for (let index = bindings.length - 1; index >= 0; index--) if (bindings[index].name === name) { const value = bindings[index].value; return typeof value === "number" && Number.isFinite(value) ? value : null; } return null; }
 function updateUsage(current: Usage, bindings: Binding[], limit: number): Usage { const prompt = number(bindings, "prompt-tokens"), completion = number(bindings, "completion-tokens"), total = number(bindings, "used-tokens"); if (prompt === null && completion === null && total === null) return current; const used = total ?? (prompt ?? 0) + (completion ?? 0); return { prompt: prompt ?? 0, completion: completion ?? 0, left: Math.max(0, limit - used), session: current.session + used }; }
 function threshold(promptTokens: number, config: Config) { return promptTokens > 0 && promptTokens * 100 >= config.contextTokens * config.compactAt; }

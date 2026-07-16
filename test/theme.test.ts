@@ -1,4 +1,5 @@
-import { describe, expect, it } from "vitest";
+import assert from "node:assert/strict";
+import { describe, it } from "node:test";
 import { parseTheme, themeCss } from "../src/theme.js";
 
 const source = `theme {
@@ -7,6 +8,10 @@ const source = `theme {
   text "#e4e9ef"
   muted "#73808d"
   accent "#5d8dff"
+  edge "#06090e"
+  neutral "#475569"
+  line "#becdde"
+  rim "#bed2f0"
   positive "#86efac"
   negative "#fca5a5"
   warning "#fbbf24"
@@ -17,13 +22,15 @@ const source = `theme {
 describe("theme", () => {
   it("parses one strict semantic palette and emits variables", () => {
     const theme = parseTheme(source);
-    expect(theme.background).toBe("#090d12");
-    expect(themeCss(theme)).toContain("--z-background:#090d12");
+    assert.equal(theme.background, "#090d12");
+    assert.match(themeCss(theme), /--z-background:#090d12/);
+    assert.match(themeCss(theme), /--z-background-rgb:9 13 18/);
+    assert.match(themeCss(theme), /--z-edge:#06090e/);
   });
   it("rejects unknown, missing, duplicate, and non-hex colors", () => {
-    expect(() => parseTheme(source.replace("violet \"#c4b5fd\"", "other \"#c4b5fd\""))).toThrow(/Unknown/);
-    expect(() => parseTheme(source.replace(/\s+violet[^\n]+/, ""))).toThrow(/Missing/);
-    expect(() => parseTheme(source.replace("surface", "background"))).toThrow(/Duplicate/);
-    expect(() => parseTheme(source.replace("#090D12", "red"))).toThrow(/#RRGGBB/);
+    assert.throws(() => parseTheme(source.replace("violet \"#c4b5fd\"", "other \"#c4b5fd\"")), /Unknown/);
+    assert.throws(() => parseTheme(source.replace(/\s+violet[^\n]+/, "")), /Missing/);
+    assert.throws(() => parseTheme(source.replace("surface", "background")), /Duplicate/);
+    assert.throws(() => parseTheme(source.replace("#090D12", "red")), /#RRGGBB/);
   });
 });

@@ -1,7 +1,7 @@
 import { readFile } from "node:fs/promises";
 import { parse } from "kdljs";
 
-const names = ["background", "surface", "text", "muted", "accent", "positive", "negative", "warning", "info", "violet"] as const;
+const names = ["background", "surface", "text", "muted", "accent", "edge", "neutral", "line", "rim", "positive", "negative", "warning", "info", "violet"] as const;
 export type ThemeName = typeof names[number];
 export type Theme = Record<ThemeName, string>;
 type Node = { name: string; values?: unknown[]; children?: Node[] };
@@ -29,5 +29,10 @@ export function parseTheme(source: string): Theme {
 }
 
 export function themeCss(theme: Theme) {
-  return `:root{${names.map((name) => `--z-${name}:${theme[name]}`).join(";")}}\n`;
+  return `:root{${names.flatMap((name) => [`--z-${name}:${theme[name]}`, `--z-${name}-rgb:${rgb(theme[name])}`]).join(";")}}\n`;
+}
+
+function rgb(hex: string) {
+  const value = hex.slice(1, 7);
+  return `${Number.parseInt(value.slice(0, 2), 16)} ${Number.parseInt(value.slice(2, 4), 16)} ${Number.parseInt(value.slice(4, 6), 16)}`;
 }

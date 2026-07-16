@@ -8,8 +8,8 @@ const build = spawn("npm", ["run", "build"], { cwd: root, stdio: "inherit" });
 if (await new Promise((done) => build.once("exit", done)) !== 0) process.exit(1);
 const children = [
   spawn("npm", ["exec", "tsc", "--", "-p", "tsconfig.json", "--watch", "--preserveWatchOutput"], { cwd: root, stdio: "inherit" }),
-  spawn("npm", ["run", "build:client", "--", "--watch"], { cwd: root, stdio: "inherit" }),
-  spawn("edge", ["--watch", "dist/server.js"], { cwd: root, stdio: "inherit", env: process.env }),
+  spawn("edge", ["web/build.mjs", "--watch"], { cwd: root, stdio: "inherit" }),
+  spawn("edge", ["--watch", "dist/web.js"], { cwd: root, stdio: "inherit", env: process.env }),
 ];
 const stop = () => children.forEach((child) => child.kill());
 process.once("SIGINT", stop); process.once("SIGTERM", stop);

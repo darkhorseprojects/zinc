@@ -1,5 +1,5 @@
 import { $createCodeNode, $isCodeNode } from "@lexical/code-core";
-import codeSvg from "@phosphor-icons/core/assets/regular/code.svg?raw";
+import codeSvg from "@phosphor-icons/core/assets/regular/code.svg";
 import { $generateNodesFromRawText, $getNodeByKey, $getSelection, $isRangeSelection, $setSelection, type NodeKey } from "lexical";
 import { onCleanup, onMount } from "solid-js";
 import { Icon } from "../shell/Icon";

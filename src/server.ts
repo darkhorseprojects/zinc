@@ -84,7 +84,7 @@ export function createRequestHandler(host: ZincHost, clientRoot: string) {
         if (!object(value) || typeof value.store !== "string" || typeof value.thread !== "string") return bad("Invalid completion");
         if (request.method === "DELETE") return json({ cancelled: host.cancel(value.store, value.thread) });
         const patch = decodePatch(value.patch); if (!patch) return bad("Invalid completion patch");
-        return json({ started: true, manifest: await host.complete(value.store, value.thread, patch) }, 202);
+        return json({ started: true, ...await host.complete(value.store, value.thread, patch) }, 202);
       }
       if (route === "/api/events") return request.method === "GET" ? new Response(host.events(request.signal), { headers: { "content-type": "text/event-stream; charset=utf-8", "cache-control": "no-store" } }) : method();
       if (route === "/api/tsx/compile") { if (request.method !== "POST") return method(); const value = await body(request); return object(value) && typeof value.source === "string" ? json(compileTsxPreview(value.source)) : bad("Missing TSX source"); }
@@ -142,4 +142,3 @@ class RequestError extends Error {}
 function nodeRequest(request: IncomingMessage, host: string, port: number) { const method = request.method ?? "GET", headers = new Headers(); for (const [key, value] of Object.entries(request.headers)) if (Array.isArray(value)) value.forEach((item) => headers.append(key, item)); else if (value !== undefined) headers.set(key, value); const stream = method === "GET" || method === "HEAD" ? undefined : new ReadableStream<Uint8Array>({ async start(controller) { for await (const chunk of request) controller.enqueue(typeof chunk === "string" ? new TextEncoder().encode(chunk) : chunk); controller.close(); } }); return new Request(new URL(request.url ?? "/", `http://${request.headers.host ?? formatHost(host, port)}`), { method, headers, body: stream, ...(stream ? { duplex: "half" } : {}) }); }
 async function send(output: ServerResponse, response: Response) { output.writeHead(response.status, Object.fromEntries(response.headers)); if (!response.body) return void output.end(); Readable.from(response.body as unknown as AsyncIterable<Uint8Array>).pipe(output); await finished(output); }
 function disconnected(error: unknown) { return error instanceof Error && "code" in error && (error.code === "ERR_STREAM_PREMATURE_CLOSE" || error.code === "ECONNRESET"); }
-if (process.argv[1] && fileURLToPath(import.meta.url) === process.argv[1]) { const server = await startServer(); await new Promise<void>((done) => { const stop = () => void server.close().then(done); process.once("SIGINT", stop); process.once("SIGTERM", stop); }); }

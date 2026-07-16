@@ -1,6 +1,8 @@
+import * as stylex from "@stylexjs/stylex";
 import { createSignal, onCleanup, onMount } from "solid-js";
 import { PromptEditor } from "../editor/PromptEditor";
 import { createLiquidGlassMap, promptLiquidGlassOptions, type LiquidGlassMap } from "../ui/liquidGlass";
+import { promptStyles } from "./prompt.stylex";
 
 interface PromptProps {
   onSend: (text: string) => Promise<void> | void;
@@ -56,6 +58,7 @@ export function Prompt(props: PromptProps) {
     }));
   }
 
+  const shell = () => stylex.attrs(promptStyles.shell, glass() && promptStyles.glass);
   return (
     <>
       <svg class="liquid-glass-svg" xmlns="http://www.w3.org/2000/svg" width="0" height="0" color-interpolation-filters="sRGB" aria-hidden="true">
@@ -84,7 +87,7 @@ export function Prompt(props: PromptProps) {
           </filter>
         </defs>
       </svg>
-      <div ref={shellRef} class="prompt-shell" data-glass-ready={glass() ? "true" : undefined}>
+      <div ref={shellRef} class={`${shell().class ?? ""} prompt-shell`} style={shell().style} data-glass-ready={glass() ? "true" : undefined}>
         <PromptEditor
           appendText={props.appendText ?? ""}
           editable={!props.disabled}
