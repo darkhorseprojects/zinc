@@ -1,102 +1,136 @@
-[![Release](https://badgen.net/badge/Release/success/green?icon=github)](https://github.com/darkhorseprojects/zinc/actions/workflows/release.yml)
+[![Release](https://github.com/darkhorseprojects/zinc/actions/workflows/release.yml/badge.svg)](https://github.com/darkhorseprojects/zinc/actions/workflows/release.yml)
 [![License](https://badgen.net/github/license/darkhorseprojects/zinc?label=License&color=black&icon=github)](LICENSE)
 
 # Zinc
 
-Zinc is a local writing surface backed by immutable packets and completed through Circuitry.
+Zinc is a local Agent written in executable Markdown and Luau. It uses
+[Circuitry](https://github.com/darkhorseprojects/circuitry) for execution, SQLite for durable slices, and a
+Responses-compatible provider for inference.
 
 ```text
-immutable packets ── visual head  ── virtual manuscript
-                  └─ context head ── Circuitry turn
+request
+   ↓
+current Run + recent slices + recalled slices
+   ↓
+provider
+   ↓
+Circuitry calls in native output order
+   ↓
+final output item is a message
 ```
 
-## Install
+## Files
 
-Install [Edge.js](https://edgejs.org), unpack Zinc, then:
+```text
+agent.md
+core/database.md
+core/run.md
+core/env.md
+core/builder.md
+user.example.md
+examples/run.md
+```
+
+`agent.md` exposes exactly:
+
+```text
+name
+ask
+read
+merge
+discard
+```
+
+## Configure
+
+Editable Markdown defaults:
+
+```text
+agent.md          request_bytes  32768
+core/run.md       recent_bytes    4096
+core/database.md  slice_bytes    32768
+core/database.md  degrees            2
+```
+
+The checked provider is llama.cpp `/v1/responses` at `http://127.0.0.1:30000` using `ternary-bonsai-27b`.
+
+Copy `user.example.md` to your deployment as `user.md` and replace its identity value. Configure file roots,
+HTTP origins, command Allow/Deny headers, shells, and explicit environment variables in `core/env.md`.
+
+## Run
 
 ```sh
-edge bin/install.js
-zn init
-zn up
+cp user.example.md user.md
+printf '%s\n' '"Inspect the workspace."' | \
+  deno run \
+    --allow-read \
+    --allow-write \
+    --allow-env \
+    --allow-net \
+    --allow-run \
+    jsr:@darkhorseprojects/circuitry/cli \
+    --seal agent.md \
+    --seal core \
+    --seal user.md \
+    --timeout 300000 \
+    examples/run.md
 ```
 
-`zn init` creates `config.kdl`, `theme.kdl`, `turn.md`, `definitions/`, the database, packet overflow, logs, and the store registry together. `zn here` creates the same state under `./.zinc`.
+Circuitry makes dangerous native modules available only to sealed code. Environment wraps filesystem, HTTP,
+and process authority with editable Markdown policy. The surrounding OS account, container, or VM remains the
+hard authority boundary.
 
-## Configuration
+## Memory
 
-```kdl
-store "zinc.db"
-turn "turn.md"
-theme "theme.kdl"
-url "localhost"
-port 5173
-author "anonymous"
-completions-url "http://127.0.0.1:30000/v1/responses"
-parallel 4
-context-tokens 32768
-compact-at 80
-raw-context-bytes 8192
-packet-overflow-bytes 65536
-shell "sh"
-allowlist { git; rg; find; zn }
+Each user request, provider response, Circuitry result/error, or merge marker is one Slice:
+
+```text
+slices(idx, run, actor, data, overflow)
+trails(head, position, slice)
 ```
 
-The theme file is the sole color source. It supplies the background, surface, text, muted, accent, positive, negative, warning, info, and violet colors. Browser CSS derives borders, hover fills, tags, syntax colors, and glass from them.
+A value larger than `slice_bytes` is written exactly to an OS temporary file. The stored overflow reference
+and largest valid UTF-8 tail fit `slice_bytes`. Database owns transfer and deletion.
 
-`author` is an unverified local description, not an account. `agent` and `system` are reserved. Browser requests cannot select an author.
+Before every provider request Zinc takes a fresh snapshot:
 
-## Threads
-
-Schema v8 stores role-bearing immutable packets behind stable block IDs. The visual head is complete editable history. The context head is a persistent source-backed derivative used for completions. Compaction changes context without removing visible history.
-
-The browser first loads a lightweight block manifest. It fetches visible block payloads in batches, mounts one Lexical editor per loaded block, saves the complete order plus dirty blocks only, and destroys clean offscreen editors. Solid owns rows, dividers, gutters, source tags, forks, and virtualization.
-
-A packet's `role` records the block's conversational purpose. `author` records who most recently produced its bytes. Human edits to an agent block keep its agent role.
-
-One persisted identifier supplies the thread title and tags. Tags are canonicalized to the front and rendered leftmost as `#text` chips. Icons and colors are derived rather than persisted.
-
-Forks are lightweight prefix references. Every branch at a fork point sees every other live member. A fork that returns to its immutable baseline is deleted automatically.
-
-## Editing
-
-Markdown delimiters are real source characters. They collapse at rest, reveal when the caret enters their valid range, and retain the same manuscript typography. Invalid syntax loses only its derived formatting.
-
-Equations retain canonical `$…$` or `$$…$$` source and render through KaTeX. Editing exposes source in the parent Lexical root; Zinc does not create nested editable elements.
-
-TSX previews remain active by default. Their explicit toggle replaces the preview with a normal TSX `CodeNode`; save acknowledgement and Markdown reconciliation do not reverse the toggle.
-
-Reasoning, shell, recall, error, equation, and TSX preview nodes retain their specialized rendering inside each block editor.
-
-## Completions
-
-Dock submission commits dirty thread blocks and new user blocks in one transaction before starting configured `turn.md`. ZincHost derives clean Markdown from canonical packet formats; the browser sends no parallel projection array.
-
-The host supplies thread/context content, structured packet metadata, events, definitions, provider and shell settings, and token measurements as Circuitry inputs. `turn.md` and nested definitions own provider requests and prompting.
-
-Reasoning and response stream transiently. EOF makes output durable. SSE disconnect does not cancel work; explicit cancellation does. Raw model context contains roles and content but no packet IDs, source ranges, or omission comments.
-
-When measured prompt usage reaches `compact-at`, or the hard complete-range byte window cannot fit, the bundled `compact.md` returns ordered keep, summarize, or drop decisions. Zinc maps candidate indexes back to exact packet slices and updates only the context head.
-
-## Cleanup
-
-```sh
-zn clean
-zn clean --here
-zn clean --user
-zn clean --thread THREAD_ID
-zn clean --packet PACKET_ID
+```text
+complete current Run
++ contiguous recent slices ≤ recent_bytes
++ Porter matches, or trigram after a Porter miss
++ configured Trail degrees with recency bias
+→ complete outbound body ≤ request_bytes
 ```
 
-Schema v8 is fresh-only. Other schema versions fail and require explicit cleanup.
+Retrieval starts from the current request frontier. Recalled history is never fed back into the query.
+Similarity means relevance, not agreement, so explicit opposing statements remain eligible. The provider
+decides whether they contradict.
+
+`request_bytes` includes only the serialized outbound request. A provider response is uncapped by Zinc, stored
+as a Slice, and becomes mandatory continuation in the next request.
+
+## Child Agents
+
+Calling another Agent while a Run is active creates a physically separate child Database.
+
+```luau
+local run = reviewer.ask("Check the change")
+local result = reviewer.read(run)
+reviewer.merge(run) -- or reviewer.discard(run)
+```
+
+Merge copies slices and trails in SQL and transfers overflow ownership. Discard deletes the child Database and
+its overflow files.
 
 ## Development
 
 ```sh
-npm install
-npm run dev
-npm run check
+deno task check
+deno task bench
 ```
 
-TypeScript builds the host, esbuild bundles the Solid browser, Babel compiles Solid and StyleX, and Edge.js runs scripts, tests, Zinc, and its CLI. Production browser output is checked for React emission.
+Local tests use the sibling Circuitry checkout. CI checks both repositories together. Releases are created
+only from semantic-version tags and are never published from `main`.
 
-See [SPEC.md](SPEC.md) and the [wiki](https://github.com/darkhorseprojects/zinc/wiki).
+See the [wiki](https://github.com/darkhorseprojects/zinc/wiki) for Agent authoring, memory, Environment
+policy, and development details.

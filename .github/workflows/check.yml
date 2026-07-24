@@ -1,8 +1,9 @@
-name: Release
+name: Check
 
 on:
+  pull_request:
   push:
-    tags: ["v*.*.*"]
+    branches: [main]
 
 permissions:
   contents: read
@@ -26,17 +27,5 @@ jobs:
           deno-version: v2.9.3
       - run: deno task check
         working-directory: zinc
-
-  release:
-    needs: check
-    runs-on: ubuntu-latest
-    permissions:
-      contents: write
-    steps:
-      - uses: actions/checkout@v6
-      - name: Verify release version
-        shell: bash
-        run: test "$GITHUB_REF_NAME" = "v$(cat VERSION)"
-      - run: gh release create "$GITHUB_REF_NAME" --generate-notes --verify-tag
-        env:
-          GH_TOKEN: ${{ github.token }}
+      - run: git diff --exit-code -- deno.lock
+        working-directory: zinc
