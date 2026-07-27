@@ -8,12 +8,13 @@ on:
 permissions:
   contents: read
 
+env:
+  LUA_PATH_5_5: /usr/local/share/lua/5.5/?.lua;/usr/local/share/lua/5.5/?/init.lua;;
+  LUA_CPATH_5_5: /usr/local/lib/lua/5.5/?.so;;
+
 jobs:
   check:
-    strategy:
-      matrix:
-        os: [ubuntu-latest, macos-latest, windows-latest]
-    runs-on: ${{ matrix.os }}
+    runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v6
         with:
@@ -22,10 +23,50 @@ jobs:
         with:
           repository: darkhorseprojects/circuitry
           path: circuitry
-      - uses: denoland/setup-deno@v2
+      - uses: mlugg/setup-zig@v2
         with:
-          deno-version: v2.9.3
-      - run: deno task check
+          version: 0.16.0
+      - name: Install system libraries
+        run: sudo apt-get update && sudo apt-get install -y build-essential curl git libcmark-gfm-dev libcurl4-openssl-dev libreadline-dev libsqlite3-dev
+      - name: Build Lua 5.5 and LuaRocks
+        shell: bash
+        run: |
+          curl -fsSLO https://www.lua.org/ftp/lua-5.5.0.tar.gz
+          tar -xzf lua-5.5.0.tar.gz
+          make -C lua-5.5.0/src linux MYCFLAGS=-fPIC
+          sudo make -C lua-5.5.0 install
+          sudo cc -shared -Wl,-soname,liblua.so.5.5 -o /usr/local/lib/liblua.so.5.5 -Wl,--whole-archive lua-5.5.0/src/liblua.a -Wl,--no-whole-archive -lm -ldl
+          sudo ln -s liblua.so.5.5 /usr/local/lib/liblua.so
+          sudo ldconfig
+          git clone --depth 1 --branch v3.12.2 https://github.com/luarocks/luarocks.git
+          cd luarocks
+          ./configure --with-lua=/usr/local --lua-version=5.5
+          make
+          sudo make install
+      - name: Install pinned Lua modules
+        shell: bash
+        run: |
+          sudo luarocks --lua-version=5.5 install lsqlite3 0.9.6-1
+          sudo luarocks --lua-version=5.5 install luafilesystem 1.9.0
+          sudo luarocks --lua-version=5.5 install lua-curl 0.3.13-1
+          sudo luarocks --lua-version=5.5 install dkjson 2.10-1
+          git clone https://github.com/teal-language/tl.git /tmp/teal
+          git -C /tmp/teal checkout 6f1d0c5c9451f9056226ff0fafeb9612e80d2039
+          sudo cp /tmp/teal/teal/teal.lua /usr/local/share/lua/5.5/teal.lua
+          git clone --depth 1 --branch 1.6.1 https://github.com/bakpakin/Fennel.git /tmp/fennel
+          sudo cp /tmp/fennel/fennel.lua /usr/local/share/lua/5.5/fennel.lua
+      - run: zig build test
+        working-directory: circuitry
+      - run: zig build -Doptimize=ReleaseSmall
+        working-directory: circuitry
+      - name: Run Zinc suites
         working-directory: zinc
-      - run: git diff --exit-code -- deno.lock
+        env:
+          CIRCUITRY: ../circuitry/zig-out/bin/circuitry
+        run: |
+          python3 test/lines.py
+          for suite in database environment run lifecycle provider; do
+            python3 "test/$suite.py"
+          done
+      - run: CIRCUITRY=../circuitry/zig-out/bin/circuitry python3 bench/database.py
         working-directory: zinc

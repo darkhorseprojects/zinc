@@ -1,37 +1,59 @@
-[![Release](https://github.com/darkhorseprojects/zinc/actions/workflows/release.yml/badge.svg)](https://github.com/darkhorseprojects/zinc/actions/workflows/release.yml)
+[![CI](https://github.com/darkhorseprojects/zinc/actions/workflows/check.yml/badge.svg)](https://github.com/darkhorseprojects/zinc/actions/workflows/check.yml)
 [![License](https://badgen.net/github/license/darkhorseprojects/zinc?label=License&color=black&icon=github)](LICENSE)
 
 # Zinc
 
-Zinc is a local Agent written in executable Markdown and Luau. It uses
-[Circuitry](https://github.com/darkhorseprojects/circuitry) for execution, SQLite for durable slices, and a
-Responses-compatible provider for inference.
+![Zinc](artwork.svg)
+
+Zinc is one persistent local Agent, written as five executable Markdown modules:
 
 ```text
-request
-   ↓
-current Run + recent slices + recalled slices
-   ↓
-provider
-   ↓
-Circuitry calls in native output order
-   ↓
-final output item is a message
+agent.md          provider request and direct entry
+core/run.md       Run lifecycle and five-field API
+core/database.md  SQLite history and retrieval
+core/env.md       files, HTTP, shell, and profile policy
+core/builder.md   anonymous tool execution
 ```
 
-## Files
+Circuitry runs the Teal fences on Lua 5.5. Zinc uses operator-installed `lsqlite3`, LuaFileSystem, Lua-cURL, and `dkjson` directly through sealed modules.
 
-```text
-agent.md
-core/database.md
-core/run.md
-core/env.md
-core/builder.md
-user.example.md
-examples/run.md
+## Install
+
+Build Circuitry, install the Lua dependencies for Lua 5.5, then install Zinc:
+
+```sh
+circuitry agent install zinc .
+circuitry agent default zinc
+
+entry=$(circuitry agent path zinc)
+cp user.example.md "$(dirname "$entry")/state/user.md"
 ```
 
-`agent.md` exposes exactly:
+Edit `state/user.md` and set `username`. It is Zinc's local profile and default actor identity:
+
+```markdown
+# User
+
+| field    | value |
+| -------- | ----- |
+| username | colin |
+```
+
+An explicit invocation actor overrides that value. Zinc stores the actor text unchanged in `runs.actor`.
+
+## Run
+
+The installed entry implements Circuitry's raw string contract directly:
+
+```sh
+entry=$(circuitry agent path zinc)
+printf 'Inspect the workspace.' | \
+  circuitry run --seal "$(dirname "$entry")" "$entry" -- local-actor
+```
+
+Omit `local-actor` to use `user.md.username`. String answers go straight to stdout; non-string answers are encoded with `dkjson`.
+
+When imported, Zinc exposes exactly:
 
 ```text
 name
@@ -41,96 +63,62 @@ merge
 discard
 ```
 
-## Configure
+```text
+local zinc = require("@zinc")
+local run = zinc.ask("Review this change", "actor-42")
+return zinc.read(run)
+```
 
-Editable Markdown defaults:
+## Provider
+
+`agent.md` defaults to:
 
 ```text
-agent.md          request_bytes  32768
-core/run.md       recent_bytes    4096
-core/database.md  slice_bytes    32768
-core/database.md  degrees            2
+endpoint       http://127.0.0.1:30000/v1/responses
+model          ternary-bonsai-27b
+request_bytes  32768
 ```
 
-The checked provider is llama.cpp `/v1/responses` at `http://127.0.0.1:30000` using `ternary-bonsai-27b`.
+The provider sees the current Run, bounded recent history, recalled slices, the invocation actor, and the Zinc-owned profile. It receives one function tool named `circuitry`. Tool arguments contain a complete executable Markdown document and optional input.
 
-Copy `user.example.md` to your deployment as `user.md` and replace its identity value. Configure file roots,
-HTTP origins, command Allow/Deny headers, shells, and explicit environment variables in `core/env.md`.
-
-## Run
-
-```sh
-cp user.example.md user.md
-printf '%s\n' '"Inspect the workspace."' | \
-  deno run \
-    --allow-read \
-    --allow-write \
-    --allow-env \
-    --allow-net \
-    --allow-run \
-    jsr:@darkhorseprojects/circuitry/cli \
-    --seal agent.md \
-    --seal core \
-    --seal user.md \
-    --timeout 300000 \
-    examples/run.md
-```
-
-Circuitry makes dangerous native modules available only to sealed code. Environment wraps filesystem, HTTP,
-and process authority with editable Markdown policy. The surrounding OS account, container, or VM remains the
-hard authority boundary.
+Generated documents are always open. They can import `@env`, whose closures enforce the file roots, HTTP origins, and command headers in `core/env.md`. They cannot obtain Circuitry authority or the private Database API.
 
 ## Memory
 
-Each user request, provider response, Circuitry result/error, or merge marker is one Slice:
+Zinc keeps one database:
 
 ```text
-slices(idx, run, actor, data, overflow)
-trails(head, position, slice)
+~/.agents/agents/zinc/state/database.sqlite3
 ```
 
-A value larger than `slice_bytes` is written exactly to an OS temporary file. The stored overflow reference
-and largest valid UTF-8 tail fit `slice_bytes`. Database owns transfer and deletion.
+Runs are durable rows in that database. Nested calls create child Runs in the same database; `merge` marks a completed child as merged and records it in the parent, while `discard` removes the child's slices and keeps a discarded Run record.
 
-Before every provider request Zinc takes a fresh snapshot:
+Each request, provider response, tool result, and merge marker is a Slice. String leaves feed Porter and trigram FTS5 indexes. Trails connect provider responses to the context selected for them, and one recursive CTE follows those links during recall.
+
+Defaults remain ordinary Markdown fields:
 
 ```text
-complete current Run
-+ contiguous recent slices ≤ recent_bytes
-+ Porter matches, or trigram after a Porter miss
-+ configured Trail degrees with recency bias
-→ complete outbound body ≤ request_bytes
+request_bytes  32768
+recent_bytes    4096
+slice_bytes    32768
+degrees            2
 ```
 
-Retrieval starts from the current request frontier. Recalled history is never fed back into the query.
-Similarity means relevance, not agreement, so explicit opposing statements remain eligible. The provider
-decides whether they contradict.
+Large values spill to `state/slice-<idx>.json`; the database retains a bounded UTF-8 tail. Missing exact content fails with `current continuation payload is unavailable`. A current Run that cannot fit the provider budget fails with `mandatory provider request exceeds request_bytes`.
 
-`request_bytes` includes only the serialized outbound request. A provider response is uncapped by Zinc, stored
-as a Slice, and becomes mandatory continuation in the next request.
+## Trust
 
-## Child Agents
-
-Calling another Agent while a Run is active creates a physically separate child Database.
-
-```luau
-local run = reviewer.ask("Check the change")
-local result = reviewer.read(run)
-reviewer.merge(run) -- or reviewer.discard(run)
-```
-
-Merge copies slices and trails in SQL and transfers overflow ownership. Discard deletes the child Database and
-its overflow files.
+Zinc's sealed modules hold Circuitry authority. Environment policy narrows what generated tools can request, but it is not an OS sandbox. Use a dedicated account, container, VM, filesystem permissions, and network policy for machine-level confinement.
 
 ## Development
 
 ```sh
-deno task check
-deno task bench
+CIRCUITRY=../circuitry/zig-out/bin/circuitry python3 test/database.py
+CIRCUITRY=../circuitry/zig-out/bin/circuitry python3 test/environment.py
+CIRCUITRY=../circuitry/zig-out/bin/circuitry python3 test/run.py
+CIRCUITRY=../circuitry/zig-out/bin/circuitry python3 test/lifecycle.py
+CIRCUITRY=../circuitry/zig-out/bin/circuitry python3 test/provider.py
+CIRCUITRY=../circuitry/zig-out/bin/circuitry python3 bench/database.py
 ```
 
-Local tests use the sibling Circuitry checkout. CI checks both repositories together. Releases are created
-only from semantic-version tags and are never published from `main`.
-
-See the [wiki](https://github.com/darkhorseprojects/zinc/wiki) for Agent authoring, memory, Environment
-policy, and development details.
+See the [wiki](https://github.com/darkhorseprojects/zinc/wiki) for Run semantics, retrieval, Environment policy, and development details.

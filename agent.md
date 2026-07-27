@@ -2,9 +2,7 @@
 
 ## Instructions
 
-You are Zinc, a direct local Agent. Answer plainly and complete the requested work. You have one tool,
-`circuitry`. Its argument is a complete executable Markdown document with Luau fences. Use it for machine
-actions, inspect returned values, and report failures honestly.
+You are Zinc, one direct local Agent with durable memory. Answer plainly. Use the `circuitry` tool when machine work is needed, inspect its returned value, and report failures honestly.
 
 ## Provider
 
@@ -14,104 +12,100 @@ actions, inspect returned values, and report failures honestly.
 | model         | ternary-bonsai-27b                  |
 | request_bytes | 32768                               |
 
-```luau
+```teal
 local authority = require("@authority")
-local http = require("@http")
-local json = require("@json")
+local json = authority:require("dkjson")
 local environment = require("@env")
 local builder = require("@builder")
-local createAgent = require("@run")(authority)
-local user = require("@user")
+local create = require("@run")(authority)
 
 local endpoint = document.Provider.endpoint
 local model = document.Provider.model
-if type(endpoint) ~= "string" or http.origin(endpoint) == "null" then error("Provider endpoint is invalid") end
+local requestBytes = assert(math.tointeger(tonumber(document.Provider.request_bytes)), "request_bytes must be an integer")
+if type(endpoint) ~= "string" or endpoint == "" then error("Provider endpoint is invalid") end
 if type(model) ~= "string" or model == "" then error("Provider model cannot be empty") end
-if type(user) ~= "table" then error("User identity must be a table") end
-local requestBytes = assert(tonumber(document.Provider.request_bytes), "request_bytes must be a number")
-if requestBytes < 1024 or requestBytes ~= math.floor(requestBytes) then error("request_bytes must be an integer >= 1024") end
+if requestBytes < 1024 then error("request_bytes must be an integer >= 1024") end
+local profile = environment.profile()
 
-local tool = table.freeze({
-    type = "function",
-    name = "circuitry",
-    description = "Execute one complete Markdown document containing Luau and return its JSON value.",
-    strict = true,
-    parameters = table.freeze({
-        type = "object",
-        properties = table.freeze({
-            document = table.freeze({type = "string", description = "Complete executable Markdown document."}),
-        }),
-        required = table.freeze({"document"}),
-        additionalProperties = false,
-    }),
-})
-
+local function encode(value)
+   local text, failure = json.encode(value)
+   if not text then error(failure) end
+   return text
+end
+local function decode(text)
+   local value, _, failure = json.decode(text, 1, json.null)
+   if failure then error(failure) end
+   return value
+end
+local tool = {
+   type = "function",
+   name = "circuitry",
+   description = "Execute one complete Markdown document under Zinc's Environment policy.",
+   strict = true,
+   parameters = {
+      type = "object",
+      properties = {
+         document = {type = "string", description = "Complete executable Markdown document."},
+         input = {type = "string", description = "Optional raw input for the document."},
+      },
+      required = {"document"},
+      additionalProperties = false,
+   },
+}
 local instructions = table.concat({document.Instructions.text, environment.guide, builder.guide}, "\n\n")
-
-local prefix = '{"model":' .. json.encode(model) .. ',"instructions":' .. json.encode(instructions) ..
-    ',"tools":' .. json.encode({tool}) .. ',"input":['
-local suffix = "]}"
-
-local function currentItems(current)
-    local items = {{role = "user", content = "User identity: " .. json.encode(user)}}
-    for _, slice in ipairs(current) do
-        if slice.actor == "user" then
-            table.insert(items, {role = "user", content = type(slice.value) == "string" and slice.value or json.encode(slice.value)})
-        elseif slice.actor == "circuitry" then
-            table.insert(items, slice.value)
-        elseif type(slice.value) == "table" and type(slice.value.output) == "table" then
-            for _, output in ipairs(slice.value.output) do table.insert(items, output) end
-        end
-    end
-    return items
+local function providerItem(slice)
+   if slice.actor == "request" then
+      return {role = "user", content = type(slice.value) == "string" and slice.value or encode(slice.value)}
+   end
+   if slice.actor == "circuitry" then return slice.value end
+   if type(slice.value) == "table" and type(slice.value.output) == "table" then return slice.value.output end
+   return {role = "user", content = "Run event: " .. encode(slice.value)}
 end
-
 local function memoryItem(slice)
-    return {role = "user", content = "Relevant memory: " .. json.encode({actor = slice.actor, value = slice.value})}
+   return {role = "user", content = "Relevant memory: " .. encode({actor = slice.actor, value = slice.value})}
+end
+local function body(actor, items)
+   local input = {{role = "user", content = "Actor: " .. actor .. "\nProfile: " .. encode(profile)}}
+   for _, item in ipairs(items) do input[#input + 1] = item.value end
+   return encode({model = model, instructions = instructions, tools = {tool}, input = input})
+end
+local function request(actor, current, recent, recalled)
+   if type(actor) ~= "string" or type(current) ~= "table" or type(recent) ~= "table" or type(recalled) ~= "table" then error("provider context is invalid") end
+   local mandatory, memory = {}, {}
+   for _, slice in ipairs(current) do
+      local item = providerItem(slice)
+      if item[1] and item[1].type then for _, output in ipairs(item) do mandatory[#mandatory + 1] = {idx = slice.idx, value = output} end
+      else mandatory[#mandatory + 1] = {idx = slice.idx, value = item} end
+   end
+   for _, slice in ipairs(recent) do memory[#memory + 1] = {idx = slice.idx, value = memoryItem(slice)} end
+   local function selectedItems()
+      local result = {}
+      for _, item in ipairs(memory) do result[#result + 1] = item end
+      for _, item in ipairs(mandatory) do result[#result + 1] = item end
+      return result
+   end
+   while #body(actor, selectedItems()) > requestBytes and #memory > 0 do table.remove(memory, 1) end
+   if #body(actor, selectedItems()) > requestBytes then error("mandatory provider request exceeds request_bytes") end
+   for _, slice in ipairs(recalled) do
+      memory[#memory + 1] = {idx = slice.idx, value = memoryItem(slice)}
+      if #body(actor, selectedItems()) > requestBytes then table.remove(memory) end
+   end
+   local selected, seen = {}, {}
+   for _, item in ipairs(selectedItems()) do if not seen[item.idx] then selected[#selected + 1] = item.idx; seen[item.idx] = true end end
+   local response = environment.http.request({url = endpoint, method = "POST", headers = {["content-type"] = "application/json"}, body = body(actor, selectedItems())})
+   if response.status < 200 or response.status >= 300 then error("provider returned HTTP " .. response.status) end
+   if type(response.body) ~= "string" or response.body == "" then error("provider returned an empty body") end
+   local value = decode(response.body)
+   if type(value) ~= "table" or type(value.output) ~= "table" then error("provider response has no output array") end
+   return value, selected
 end
 
-local function encodedBody(fragments)
-    return prefix .. table.concat(fragments, ",") .. suffix
+local agent = create({name = "zinc", actor = function() return profile.username end, request = request})
+if input ~= nil then
+   local actor = arguments[1] or profile.username
+   local run = agent.ask(input, actor)
+   local result = agent.read(run)
+   return type(result) == "string" and result or encode(result)
 end
-
-local function request(current, recent, recalled)
-    if type(current) ~= "table" or type(recent) ~= "table" or type(recalled) ~= "table" then
-        error("provider context must contain Slice arrays")
-    end
-    local mandatory, selected = {}, {}
-    for _, item in ipairs(currentItems(current)) do table.insert(mandatory, json.encode(item)) end
-    local currentIds = {}
-    for _, slice in ipairs(current) do table.insert(currentIds, slice.idx) end
-    local memory = {}
-    for _, slice in ipairs(recent) do table.insert(memory, {idx = slice.idx, encoded = json.encode(memoryItem(slice))}) end
-    local function fragments()
-        local result = {}
-        for _, item in ipairs(memory) do table.insert(result, item.encoded) end
-        for _, item in ipairs(mandatory) do table.insert(result, item) end
-        return result
-    end
-    while #encodedBody(fragments()) > requestBytes and #memory > 0 do table.remove(memory, 1) end
-    if #encodedBody(fragments()) > requestBytes then error("mandatory provider request exceeds request_bytes") end
-    for _, slice in ipairs(recalled) do
-        local item = {idx = slice.idx, encoded = json.encode(memoryItem(slice))}
-        table.insert(memory, item)
-        if #encodedBody(fragments()) > requestBytes then table.remove(memory) end
-    end
-    local seen = {}
-    for _, item in ipairs(memory) do
-        if not seen[item.idx] then table.insert(selected, item.idx) seen[item.idx] = true end
-    end
-    for _, idx in ipairs(currentIds) do
-        if not seen[idx] then table.insert(selected, idx) seen[idx] = true end
-    end
-    local encoded = encodedBody(fragments())
-    local response = http.request({url = endpoint, method = "POST", headers = {["content-type"] = "application/json"}, body = encoded})
-    if response.status < 200 or response.status >= 300 then error("provider returned HTTP " .. tostring(response.status)) end
-    if type(response.body) ~= "string" or response.body == "" then error("provider returned an empty body") end
-    local value = json.decode(response.body)
-    if type(value) ~= "table" or type(value.output) ~= "table" then error("provider response has no output array") end
-    return value, selected
-end
-
-return createAgent({name = "zinc", request = request})
+return agent
 ```

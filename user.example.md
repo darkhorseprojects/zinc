@@ -1,5 +1,5 @@
 # User
 
-| field | value      |
-| ----- | ---------- |
-| name  | replace-me |
+| field    | value      |
+| -------- | ---------- |
+| username | replace-me |

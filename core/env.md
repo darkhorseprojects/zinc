@@ -2,14 +2,13 @@
 
 ## Guide
 
-Use configured files, HTTP, and shell access for machine actions. Check returned status and errors before
-claiming success.
+Use `require("@env")` from generated tools. Its `files`, `http`, and `shell` functions enforce this document's policy. Treat errors and nonzero statuses as failures.
 
 ## Files
 
-| root | access     |
-| ---- | ---------- |
-| .    | read-write |
+| root   | access     |
+| ------ | ---------- |
+| .      | read-write |
 
 ## HTTP
 
@@ -26,131 +25,135 @@ claiming success.
 - `git push`
 - `git reset`
 - `git clean`
-- `deno publish`
 
-## Shells
+```teal
+local authority = require("@authority")
+local lfs = authority:require("lfs")
+local curl = authority:require("cURL.safe")
+local io = authority.io
+local circuitry = require("@circuitry")
+local separator = authority.package.config:sub(1, 1)
+local state = circuitry.agent("zinc").state
 
-| system  | command        | arguments                                             |
-| ------- | -------------- | ----------------------------------------------------- |
-| linux   | /bin/sh        | ["-c"]                                                |
-| darwin  | /bin/sh        | ["-c"]                                                |
-| windows | powershell.exe | ["-NoLogo","-NoProfile","-NonInteractive","-Command"] |
-
-## Variables
-
-| system  | name        |
-| ------- | ----------- |
-| all     | PATH        |
-| linux   | HOME        |
-| darwin  | HOME        |
-| windows | USERPROFILE |
-| windows | SYSTEMROOT  |
-| windows | TEMP        |
-
-```luau
-local fs = require("@fs")
-local http = require("@http")
-local process = require("@process")
-local system = require("@system")
-local json = require("@json")
-
-local platform = system.platform()
+local function normalize(path)
+   if type(path) ~= "string" or path == "" then error("path must be nonempty text") end
+   if separator ~= "/" then path = path:gsub("\\", "/") end
+   if path:sub(1, 1) ~= "/" then path = lfs.currentdir():gsub("\\", "/") .. "/" .. path end
+   local parts = {}
+   for part in path:gmatch("[^/]+") do
+      if part == ".." then if #parts == 0 then error("path escapes its root") end; table.remove(parts)
+      elseif part ~= "." and part ~= "" then parts[#parts + 1] = part end
+   end
+   return "/" .. table.concat(parts, "/")
+end
+local function noSymlink(path)
+   local prefix = ""
+   for part in path:gmatch("[^/]+") do
+      prefix = prefix .. "/" .. part
+      local attributes = lfs.symlinkattributes(prefix)
+      if attributes and attributes.mode == "link" then error("symbolic links are outside Environment policy") end
+      if not attributes then return end
+   end
+end
+local function within(path, root)
+   return path == root.path or path:sub(1, #root.path + 1) == root.path .. "/"
+end
 local roots = {}
 for _, row in ipairs(document.Files.rows) do
-    if row.access ~= "read" and row.access ~= "read-write" then error("file access must be read or read-write") end
-    if row.root == "" then error("file root cannot be empty") end
-    table.insert(roots, {path = fs.realpath(fs.resolve(row.root)), write = row.access == "read-write"})
+   if row.access ~= "read" and row.access ~= "read-write" then error("file access must be read or read-write") end
+   local path = normalize(row.root == "$STATE" and state or row.root)
+   noSymlink(path)
+   if not lfs.attributes(path) then error("configured file root does not exist: " .. path) end
+   roots[#roots + 1] = {path = path, write = row.access == "read-write"}
 end
-if #roots == 0 then error("Environment requires at least one file root") end
-
-local function within(path, root)
-    return path == root or string.sub(path, 1, #root + 1) == root .. "/"
+local function checked(path, writing)
+   path = normalize(path); noSymlink(path)
+   for _, root in ipairs(roots) do if within(path, root) and (not writing or root.write) then return path end end
+   error("path is outside configured file roots")
 end
-
-local function locate(path, writing)
-    if type(path) ~= "string" then error("path must be a string") end
-    local candidate = fs.resolve(path)
-    local present = fs.exists(candidate)
-    local canonical = present and fs.realpath(candidate) or candidate
-    local parent = not present and writing and fs.realpath(fs.resolve(candidate, "..")) or nil
-    for _, root in ipairs(roots) do
-        local safe = within(canonical, root.path) and (parent == nil or within(parent, root.path))
-        if safe and (not writing or root.write) then return canonical end
-    end
-    error("path is outside configured file roots")
+local function read(path)
+   local file, failure = io.open(checked(path, false), "rb")
+   if not file then error(failure) end
+   local value = file:read("a"); file:close(); return value
 end
+local function write(path, value)
+   if type(value) ~= "string" then error("file value must be a string") end
+   local file, failure = io.open(checked(path, true), "wb")
+   if not file then error(failure) end
+   local ok, message = file:write(value); local closed = file:close()
+   if not ok or not closed then error(message or "file write failed") end
+end
+local files = {
+   read = read,
+   write = write,
+   list = function(path)
+      local values = {}
+      for name in lfs.dir(checked(path, false)) do if name ~= "." and name ~= ".." then values[#values + 1] = name end end
+      table.sort(values); return values
+   end,
+   mkdir = function(path) local ok, failure = lfs.mkdir(checked(path, true)); if not ok then error(failure) end end,
+   remove = function(path) local ok, failure = authority.os.remove(checked(path, true)); if not ok then error(failure) end end,
+}
 
-local files = table.freeze({
-    read = function(path) return fs.read(locate(path, false)) end,
-    write = function(path, value) return fs.write(locate(path, true), value) end,
-    list = function(path) return fs.list(locate(path, false)) end,
-    remove = function(path) return fs.remove(locate(path, true), true) end,
-})
-
+local function origin(url)
+   if type(url) ~= "string" then error("URL must be text") end
+   local value = url:match("^([%a][%w+.-]*://[^/]+)")
+   if not value then error("URL has no origin") end
+   return value:lower()
+end
 local origins = {}
 for _, row in ipairs(document.HTTP.rows) do
-    local origin = http.origin(row.origin)
-    if origins[origin] then error("duplicate HTTP origin: " .. origin) end
-    origins[origin] = true
+   local value = origin(row.origin)
+   if origins[value] then error("duplicate HTTP origin: " .. value) end
+   origins[value] = true
 end
-local network = table.freeze({
-    request = function(options)
-        if not origins[http.origin(options.url)] then error("HTTP origin is not configured") end
-        return http.request(options)
-    end,
-})
+local function request(options)
+   if type(options) ~= "table" or not origins[origin(options.url)] then error("HTTP origin is not configured") end
+   local chunks, headers = {}, {}
+   for name, value in pairs(options.headers or {}) do headers[#headers + 1] = name .. ": " .. value end
+   local handle, failure = curl.easy({
+      url = options.url, customrequest = options.method or "GET", httpheader = headers,
+      postfields = options.body, timeout = options.timeout or 30,
+      writefunction = function(chunk) chunks[#chunks + 1] = chunk; return #chunk end,
+   })
+   if not handle then error(failure) end
+   local ok, message = handle:perform()
+   local status = handle:getinfo_response_code()
+   handle:close()
+   if not ok then error(message) end
+   return {status = status, body = table.concat(chunks)}
+end
 
 local function headers(section)
-    local result = {}
-    for _, item in ipairs(section.items or {}) do
-        local value = string.match(item.text, "^`(.*)`$") or item.text
-        if value == "" then error("command header cannot be empty") end
-        table.insert(result, value)
-    end
-    return result
+   local result = {}
+   for _, value in ipairs(section.items or {}) do
+      value = value:match("^`(.*)`$") or value
+      if value == "" then error("command header cannot be empty") end
+      result[#result + 1] = value
+   end
+   return result
 end
-local allow = headers(document.Commands.Allow)
-local deny = headers(document.Commands.Deny)
+local allow, deny = headers(document.Commands.Allow), headers(document.Commands.Deny)
 local function matches(command, header)
-    return command == header or string.sub(command, 1, #header + 1) == header .. " "
+   return command == header or command:sub(1, #header + 1) == header .. " "
 end
-
-local shell
-for _, row in ipairs(document.Shells.rows) do
-    if row.system == platform then
-        if shell then error("duplicate shell for " .. platform) end
-        if row.command == "" then error("shell command cannot be empty") end
-        shell = row
-    end
+local function shell(command)
+   if type(command) ~= "string" then error("command must be text") end
+   command = command:match("^%s*(.-)%s*$")
+   for _, header in ipairs(deny) do if matches(command, header) then error("command header is denied") end end
+   if #allow > 0 then local accepted = false; for _, header in ipairs(allow) do if matches(command, header) then accepted = true end end; if not accepted then error("command header is not allowed") end end
+   local process, failure = io.popen(command .. " 2>&1", "r")
+   if not process then error(failure) end
+   local output = process:read("a")
+   local ok, _, code = process:close()
+   return {code = ok and 0 or code, output = output}
 end
-if not shell then error("no shell is configured for " .. platform) end
-local shellArguments = json.decode(shell.arguments)
-if type(shellArguments) ~= "table" then error("shell arguments must be a JSON array") end
-for _, argument in ipairs(shellArguments) do if type(argument) ~= "string" then error("shell arguments must be text") end end
-local environment, variableNames = {}, {}
-for _, row in ipairs(document.Variables.rows) do
-    if row.system == "all" or row.system == platform then
-        if row.name == "" then error("environment variable name cannot be empty") end
-        if variableNames[row.name] then error("duplicate environment variable: " .. row.name) end
-        variableNames[row.name] = true
-        local value = system.getenv(row.name)
-        if value ~= json.null then environment[row.name] = value end
-    end
+local function profile()
+   local file, failure = io.open(state .. separator .. "user.md", "rb")
+   if not file then error(failure) end
+   local parsed = circuitry.parse(file:read("a")); file:close()
+   if type(parsed.username) ~= "string" or parsed.username == "" then error("user.md username must be nonempty text") end
+   return parsed
 end
-
-local function run(command)
-    if type(command) ~= "string" then error("command must be a string") end
-    command = string.match(command, "^%s*(.-)%s*$")
-    for _, header in ipairs(deny) do if matches(command, header) then error("command header is denied") end end
-    if #allow > 0 then
-        local accepted = false
-        for _, header in ipairs(allow) do if matches(command, header) then accepted = true break end end
-        if not accepted then error("command header is not allowed") end
-    end
-    local arguments = table.clone(shellArguments)
-    table.insert(arguments, command)
-    return process.run({command = shell.command, arguments = arguments, directory = system.cwd(), environment = environment})
-end
-
-return table.freeze({guide = document.Guide.text, files = files, http = network, shell = run})
+return {guide = document.Guide.text, files = files, http = {request = request}, shell = shell, profile = profile}
 ```

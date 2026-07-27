@@ -1,0 +1,12 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 960 360" role="img" aria-labelledby="title description">
+  <title id="title">Zinc</title>
+  <desc id="description">A crystalline Z joined by circuit traces</desc>
+  <rect width="960" height="360" rx="32" fill="#101417"/>
+  <g fill="none" stroke-linecap="square" stroke-linejoin="miter">
+    <path d="M112 82h250L126 278h250" stroke="#eef4f1" stroke-width="34"/>
+    <path d="M389 82h104l54 54h89M376 278h117l54-54h89" stroke="#71d9b1" stroke-width="12"/>
+    <circle cx="654" cy="136" r="14" fill="#71d9b1" stroke="#71d9b1"/>
+    <circle cx="654" cy="224" r="14" fill="#71d9b1" stroke="#71d9b1"/>
+  </g>
+  <text x="708" y="215" fill="#eef4f1" font-family="ui-monospace, SFMono-Regular, Menlo, monospace" font-size="76" font-weight="700" letter-spacing="4">Zn</text>
+</svg>
