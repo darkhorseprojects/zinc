@@ -9,64 +9,66 @@ permissions:
   contents: read
 
 env:
-  LUA_PATH_5_5: /usr/local/share/lua/5.5/?.lua;/usr/local/share/lua/5.5/?/init.lua;;
-  LUA_CPATH_5_5: /usr/local/lib/lua/5.5/?.so;;
+  LUA_PATH: /usr/local/share/lua/5.5/?.lua;/usr/local/share/lua/5.5/?/init.lua;;
+  LUA_CPATH: /usr/local/lib/lua/5.5/?.so;;
 
 jobs:
   check:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@v4
         with:
           path: zinc
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@v4
         with:
-          repository: darkhorseprojects/circuitry
-          path: circuitry
-      - uses: mlugg/setup-zig@v2
+          repository: darkhorseprojects/portable-agents
+          ref: 9f2813f667415e2f80466a173eb773ffcc90d7fb
+          path: portable-agents
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: actions/setup-python@v5
         with:
-          version: 0.16.0
-      - name: Install system libraries
-        run: sudo apt-get update && sudo apt-get install -y build-essential curl git libcmark-gfm-dev libcurl4-openssl-dev libreadline-dev libsqlite3-dev
-      - name: Build Lua 5.5 and LuaRocks
-        shell: bash
+          python-version: "3.12"
+      - name: Install build dependencies
+        run: sudo apt-get update && sudo apt-get install -y build-essential cmake libcurl4-openssl-dev libsqlite3-dev unzip
+      - name: Build Lua 5.5
         run: |
           curl -fsSLO https://www.lua.org/ftp/lua-5.5.0.tar.gz
+          echo '57ccc32bbbd005cab75bcc52444052535af691789dba2b9016d5c50640d68b3d  lua-5.5.0.tar.gz' | sha256sum -c -
           tar -xzf lua-5.5.0.tar.gz
-          make -C lua-5.5.0/src linux MYCFLAGS=-fPIC
+          make -C lua-5.5.0 linux MYCFLAGS=-fPIC
           sudo make -C lua-5.5.0 install
-          sudo cc -shared -Wl,-soname,liblua.so.5.5 -o /usr/local/lib/liblua.so.5.5 -Wl,--whole-archive lua-5.5.0/src/liblua.a -Wl,--no-whole-archive -lm -ldl
+          sudo cc -shared -o /usr/local/lib/liblua.so.5.5 -Wl,--whole-archive lua-5.5.0/liblua.a -Wl,--no-whole-archive -lm -ldl
           sudo ln -s liblua.so.5.5 /usr/local/lib/liblua.so
           sudo ldconfig
+      - name: Install LuaRocks and modules
+        run: |
           git clone --depth 1 --branch v3.12.2 https://github.com/luarocks/luarocks.git
           cd luarocks
           ./configure --with-lua=/usr/local --lua-version=5.5
           make
           sudo make install
-      - name: Install pinned Lua modules
-        shell: bash
-        run: |
-          sudo luarocks --lua-version=5.5 install lsqlite3 0.9.6-1
-          sudo luarocks --lua-version=5.5 install luafilesystem 1.9.0
-          sudo luarocks --lua-version=5.5 install lua-curl 0.3.13-1
           sudo luarocks --lua-version=5.5 install dkjson 2.10-1
-          git clone https://github.com/teal-language/tl.git /tmp/teal
-          git -C /tmp/teal checkout 6f1d0c5c9451f9056226ff0fafeb9612e80d2039
-          sudo cp /tmp/teal/teal/teal.lua /usr/local/share/lua/5.5/teal.lua
-          git clone --depth 1 --branch 1.6.1 https://github.com/bakpakin/Fennel.git /tmp/fennel
-          sudo cp /tmp/fennel/fennel.lua /usr/local/share/lua/5.5/fennel.lua
-      - run: zig build test
-        working-directory: circuitry
-      - run: zig build -Doptimize=ReleaseSmall
-        working-directory: circuitry
-      - name: Run Zinc suites
+          sudo luarocks --lua-version=5.5 install lsqlite3complete 0.9.6-1
+          sudo luarocks --lua-version=5.5 install lua-curl 0.3.13-1
+          sudo luarocks --lua-version=5.5 install luv 1.51.0-1
+      - name: Build sqlite-vec
+        run: |
+          curl -LfsS https://github.com/asg017/sqlite-vec/archive/refs/tags/v0.1.7.tar.gz -o sqlite-vec.tar.gz
+          echo 'd58330f3f5ee2809cf5bc289f134dda9d9dddc23a4fa63bf76f88b44e402e580  sqlite-vec.tar.gz' | sha256sum -c -
+          tar -xzf sqlite-vec.tar.gz
+          make -C sqlite-vec-0.1.7 loadable
+          sudo install -m 755 sqlite-vec-0.1.7/dist/vec0.so /usr/local/lib/lua/5.5/vec0.so
+      - name: Build Portable Agents
+        working-directory: portable-agents
+        run: cargo build --locked --release
+      - name: Check Zinc
         working-directory: zinc
         env:
-          CIRCUITRY: ../circuitry/zig-out/bin/circuitry
+          AGENT: ${{ github.workspace }}/portable-agents/target/release/agent
         run: |
+          lua -e "for _,p in ipairs({'builder.lua','format-discord.lua','src/env.lua','src/sglang.lua','src/memory.lua','src/run.lua','src/store.lua'}) do assert(loadfile(p),p) end"
+          "$AGENT" check --directory . --entry zinc.md
           python3 test/lines.py
-          for suite in database environment run lifecycle provider; do
+          for suite in store memory sglang run environment builder format_discord integration concurrency; do
             python3 "test/$suite.py"
           done
-      - run: CIRCUITRY=../circuitry/zig-out/bin/circuitry python3 bench/database.py
-        working-directory: zinc

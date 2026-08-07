@@ -1,0 +1,17 @@
+#!/bin/sh
+set -eu
+cd "$(dirname "$0")"
+
+MODEL="${MODEL:-LiquidAI/LFM2.5-2.6B-GGUF}"
+PORT="${PORT:-8000}"
+HOST="${HOST:-127.0.0.1}"
+CTX="${CTX:-8192}"
+
+exec llama-server \
+  -hf "$MODEL" \
+  --host "$HOST" \
+  --port "$PORT" \
+  -c "$CTX" \
+  --temp 0.1 \
+  --top-k 50 \
+  --repeat-penalty 1.1

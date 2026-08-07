@@ -1,0 +1,16 @@
+#!/bin/sh
+set -eu
+
+REPO_URL="${LLAMACPP_REPO:-https://github.com/ggml-org/llama.cpp.git}"
+BUILD_DIR="${BUILD_DIR:-build}"
+CUDA="${CUDA:-OFF}"
+
+if [ ! -d "llama.cpp" ]; then
+  git clone --depth 1 "$REPO_URL" llama.cpp
+fi
+
+cd llama.cpp
+cmake -B "$BUILD_DIR" -DGGML_CUDA="$CUDA" -DCMAKE_BUILD_TYPE=Release
+cmake --build "$BUILD_DIR" --config Release -j --target llama-server
+
+echo "Build complete: llama.cpp/build/bin/llama-server"

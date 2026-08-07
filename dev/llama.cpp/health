@@ -1,0 +1,6 @@
+#!/bin/sh
+set -eu
+
+curl -fsS http://127.0.0.1:8000/health >/dev/null && echo "agent :8000 ok" || echo "agent :8000 offline"
+curl -fsS http://127.0.0.1:8001/health >/dev/null && echo "embed :8001 ok" || echo "embed :8001 offline"
+curl -fsS http://127.0.0.1:8002/health >/dev/null && echo "rerank :8002 ok" || echo "rerank :8002 offline"

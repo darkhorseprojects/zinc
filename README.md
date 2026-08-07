@@ -1,124 +1,92 @@
-[![CI](https://github.com/darkhorseprojects/zinc/actions/workflows/check.yml/badge.svg)](https://github.com/darkhorseprojects/zinc/actions/workflows/check.yml)
-[![License](https://badgen.net/github/license/darkhorseprojects/zinc?label=License&color=black&icon=github)](LICENSE)
+![Zinc](artwork.svg)
 
 # Zinc
 
-![Zinc](artwork.svg)
+Zinc is a persistent local agent packaged for [Portable Agents](https://github.com/darkhorseprojects/portable-agents). Portable Agents remains the runtime and authority boundary; Zinc adds durable actor-isolated history, retrieval, llama.cpp orchestration, generated Markdown execution, and delegated file, HTTP, and shell operations.
 
-Zinc is one persistent local Agent, written as five executable Markdown modules:
+## Architecture
 
 ```text
-agent.md          provider request and direct entry
-core/run.md       Run lifecycle and five-field API
-core/database.md  SQLite history and retrieval
-core/env.md       files, HTTP, shell, and profile policy
-core/builder.md   anonymous tool execution
+request
+  │
+  ├─ Store tail ── Qwen3 Embedding ── dense candidates
+  │                                      │
+  │                               Qwen3 Reranker
+  │                                      │
+  │                         hops + neighbors + provenance
+  │                                      │
+  └──────────────────────────── LiquidAI LFM2.5-2.6B
+                                         │
+                                run_lua / answer
+                                         │
+                                  Portable Agents
+                                         │
+                               Store append + final text
 ```
 
-Circuitry runs the Teal fences on Lua 5.5. Zinc uses operator-installed `lsqlite3`, LuaFileSystem, Lua-cURL, and `dkjson` directly through sealed modules.
+A Run retrieves Memory once from its actor-visible snapshot. The active transcript then only appends. Store history is scanned newest-first under `store_bytes`; rendered retrieval is packed under `context_bytes`. Child Runs are merged or discarded explicitly. The local `store` directory resolves portably to `~/.agents/zinc/store/`.
 
-## Install
+Zinc wraps `run_lua` source in a Portable Agents document for execution. It supplies configured file operations, HTTP origins, shell headers, child Runs, Builder operations, and read-only anchored Memory navigation.
 
-Build Circuitry, install the Lua dependencies for Lua 5.5, then install Zinc:
+## Models
+
+Provision the exact revisions in [`dependencies.lock`](dependencies.lock). Three `llama-server` services are required:
+
+| port | model | placement |
+| --- | --- | --- |
+| 8000 | `LiquidAI/LFM2.5-2.6B-GGUF` | CPU/GPU chat completions |
+| 8001 | `Qwen/Qwen3-Embedding-0.6B` | CPU/GPU embeddings (`/v1/embeddings`) |
+| 8002 | `Qwen/Qwen3-Reranker-0.6B` | CPU/GPU reranking (`/v1/rerank`) |
+
+The build and launch commands are in [`dev/llama.cpp`](dev/llama.cpp). Start embedding and reranking before the agent so `llama-server` sizes memory appropriately. Zinc does not start or supervise these processes.
 
 ```sh
-circuitry agent install zinc .
-circuitry agent default zinc
-
-entry=$(circuitry agent path zinc)
-cp user.example.md "$(dirname "$entry")/state/user.md"
+dev/llama.cpp/embed
+dev/llama.cpp/rerank
+dev/llama.cpp/agent
+dev/llama.cpp/health
 ```
 
-Edit `state/user.md` and set `username`. It is Zinc's local profile and default actor identity:
+## Configure
 
-```markdown
-# User
+Edit [`zinc.md`](zinc.md) for endpoints and the three Memory policies:
 
-| field    | value |
-| -------- | ----- |
-| username | colin |
-```
+- `store_bytes`: maximum historical Store JSON scanned backward from the tail;
+- `context_bytes`: maximum retrieved Memory JSON supplied to a Run;
+- `hops`: maximum bridge-query rounds.
 
-An explicit invocation actor overrides that value. Zinc stores the actor text unchanged in `runs.actor`.
+Edit [`env.md`](env.md) to grant directory access, HTTP origins, and shell headers.
 
 ## Run
 
-The installed entry implements Circuitry's raw string contract directly:
+```sh
+agent check --directory . --entry zinc.md
+
+printf 'Inspect this workspace.' | agent run \
+  --directory . --entry zinc.md \
+  --authority src/store.lua \
+  --authority src/memory.lua \
+  --authority src/llamacpp.lua \
+  --authority src/env.lua \
+  -- discord-user-42
+```
+
+Only the final normal message is printed. Reasoning, generated source, tool results, and child history remain in the Store.
+
+## Validate
 
 ```sh
-entry=$(circuitry agent path zinc)
-printf 'Inspect the workspace.' | \
-  circuitry run --seal "$(dirname "$entry")" "$entry" -- local-actor
+for suite in store memory llamacpp run environment builder format_discord integration concurrency; do
+  python3 "test/$suite.py"
+done
+
+LLAMACPP_REAL=1 python3 test/lfm.py
+LLAMACPP_REAL=1 python3 test/lfm_children.py
+python3 bench/memory.py
 ```
 
-Omit `local-actor` to use `user.md.username`. String answers go straight to stdout; non-string answers are encoded with `dkjson`.
+The real-model tests are opt-in. They test model behavior rather than only HTTP compatibility and can expose nondeterministic model failures.
 
-When imported, Zinc exposes exactly:
+## License
 
-```text
-name
-ask
-read
-merge
-discard
-```
-
-```text
-local zinc = require("@zinc")
-local run = zinc.ask("Review this change", "actor-42")
-return zinc.read(run)
-```
-
-## Provider
-
-`agent.md` defaults to:
-
-```text
-endpoint       http://127.0.0.1:30000/v1/responses
-model          ternary-bonsai-27b
-request_bytes  32768
-```
-
-The provider sees the current Run, bounded recent history, recalled slices, the invocation actor, and the Zinc-owned profile. It receives one function tool named `circuitry`. Tool arguments contain a complete executable Markdown document and optional input.
-
-Generated documents are always open. They can import `@env`, whose closures enforce the file roots, HTTP origins, and command headers in `core/env.md`. They cannot obtain Circuitry authority or the private Database API.
-
-## Memory
-
-Zinc keeps one database:
-
-```text
-~/.agents/agents/zinc/state/database.sqlite3
-```
-
-Runs are durable rows in that database. Nested calls create child Runs in the same database; `merge` marks a completed child as merged and records it in the parent, while `discard` removes the child's slices and keeps a discarded Run record.
-
-Each request, provider response, tool result, and merge marker is a Slice. String leaves feed Porter and trigram FTS5 indexes. Trails connect provider responses to the context selected for them, and one recursive CTE follows those links during recall.
-
-Defaults remain ordinary Markdown fields:
-
-```text
-request_bytes  32768
-recent_bytes    4096
-slice_bytes    32768
-degrees            2
-```
-
-Large values spill to `state/slice-<idx>.json`; the database retains a bounded UTF-8 tail. Missing exact content fails with `current continuation payload is unavailable`. A current Run that cannot fit the provider budget fails with `mandatory provider request exceeds request_bytes`.
-
-## Trust
-
-Zinc's sealed modules hold Circuitry authority. Environment policy narrows what generated tools can request, but it is not an OS sandbox. Use a dedicated account, container, VM, filesystem permissions, and network policy for machine-level confinement.
-
-## Development
-
-```sh
-CIRCUITRY=../circuitry/zig-out/bin/circuitry python3 test/database.py
-CIRCUITRY=../circuitry/zig-out/bin/circuitry python3 test/environment.py
-CIRCUITRY=../circuitry/zig-out/bin/circuitry python3 test/run.py
-CIRCUITRY=../circuitry/zig-out/bin/circuitry python3 test/lifecycle.py
-CIRCUITRY=../circuitry/zig-out/bin/circuitry python3 test/provider.py
-CIRCUITRY=../circuitry/zig-out/bin/circuitry python3 bench/database.py
-```
-
-See the [wiki](https://github.com/darkhorseprojects/zinc/wiki) for Run semantics, retrieval, Environment policy, and development details.
+[Apache-2.0](LICENSE)
