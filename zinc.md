@@ -24,7 +24,7 @@ Do not use named arguments (e.g. `path=...` is invalid in Lua) and do not use `p
 | rerank_endpoint | http://127.0.0.1:8002/v1/rerank | llama.cpp reranker endpoint. |
 | rerank_model | Qwen3-Reranker-0.6B | llama.cpp reranker model name. |
 | store_bytes | 8388608 | Maximum prior Store data considered, scanning backward from the tail. |
-| context_bytes | 65536 | Maximum retrieved-memory JSON placed in a Run. |
+| context_bytes | 32768 | Maximum retrieved-memory JSON placed in a Run. |
 | hops | 2 | Maximum retrieval bridge rounds at Run start. |
 
 ## Program

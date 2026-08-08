@@ -1,3 +1,10 @@
+local function cleanError(err)
+    local msg = tostring(err or "")
+    local firstLine = msg:match("^[^\r\n]+") or msg
+    firstLine = firstLine:gsub("^.-:%d+:%s*", "")
+    return firstLine
+end
+
 return function(config)
     local execute
 
@@ -36,9 +43,9 @@ return function(config)
                 child.closed = true
             end
         end
-        if not result[1] then return "Tool error: " .. tostring(result[2]) end
+        if not result[1] then return "Tool error: " .. cleanError(result[2]) end
         local output, failure = config.provider:toolOutput(result[2])
-        return output or "Tool error: " .. failure
+        return output or ("Tool error: " .. cleanError(failure))
     end
 
     local function calls(message)
@@ -77,7 +84,7 @@ return function(config)
                 return terminal(state, ok and value or "Zinc error: " .. tostring(value))
             end
             for _, item in ipairs(pending) do
-                local output = item.failure and "Tool error: " .. item.failure or invoke(state, item.arguments)
+                local output = item.failure and ("Tool error: " .. cleanError(item.failure)) or invoke(state, item.arguments)
                 local message = {role = "tool", tool_call_id = item.call.id, content = output}
                 config.store:append(state.id, {type = "response", source = "tool", value = message})
                 state.messages[#state.messages + 1] = message

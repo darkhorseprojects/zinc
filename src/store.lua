@@ -46,10 +46,7 @@ return function(config)
     local function transaction(work)
         assert(db:exec("BEGIN IMMEDIATE") == sqlite.OK, db:errmsg())
         local result = table.pack(pcall(work))
-        if not result[1] then
-            db:exec("ROLLBACK")
-            error(result[2])
-        end
+        if not result[1] then db:exec("ROLLBACK"); error(result[2]) end
         assert(db:exec("COMMIT") == sqlite.OK, db:errmsg())
         return table.unpack(result, 2, result.n)
     end
@@ -68,8 +65,7 @@ return function(config)
     local function status(run)
         local value = edge(run, "DESC")
         if not value then return nil end
-        if value.type == "response" and value.source == "zinc" then return "complete" end
-        return "incomplete"
+        return (value.type == "response" and value.source == "zinc") and "complete" or "incomplete"
     end
 
     local function insert(run, value)
@@ -86,28 +82,16 @@ return function(config)
     end
     assert(code == sqlite.OK, db:errmsg())
     local schema = [[
-CREATE TABLE IF NOT EXISTS slices(
-    idx INTEGER PRIMARY KEY AUTOINCREMENT,
-    run INTEGER NOT NULL,
-    actor TEXT NOT NULL,
-    data TEXT NOT NULL CHECK(json_valid(data))
-) STRICT;
+CREATE TABLE IF NOT EXISTS slices(idx INTEGER PRIMARY KEY AUTOINCREMENT, run INTEGER NOT NULL, actor TEXT NOT NULL, data TEXT NOT NULL CHECK(json_valid(data))) STRICT;
 CREATE INDEX IF NOT EXISTS slices_by_run ON slices(run,idx);
-CREATE VIRTUAL TABLE IF NOT EXISTS slice_vec USING vec0(
-    idx INTEGER PRIMARY KEY,
-    actor TEXT PARTITION KEY,
-    embedding float[1024]
-);
-PRAGMA application_id=1514753603;
-PRAGMA user_version=4;
+CREATE VIRTUAL TABLE IF NOT EXISTS slice_vec USING vec0(idx INTEGER PRIMARY KEY, actor TEXT PARTITION KEY, embedding float[1024]);
+PRAGMA application_id=1514753603; PRAGMA user_version=4;
 ]]
     transaction(function()
-        local application = rows("PRAGMA application_id")[1].application_id
-        local version = rows("PRAGMA user_version")[1].user_version
+        local app = rows("PRAGMA application_id")[1].application_id
+        local ver = rows("PRAGMA user_version")[1].user_version
         local occupied = rows("SELECT count(*) count FROM sqlite_master WHERE name NOT LIKE 'sqlite_%'")[1].count > 0
-        if application ~= 0 and application ~= 1514753603 or application == 0 and occupied or version ~= 0 and version ~= 4 then
-            error("unsupported Zinc Store")
-        end
+        if app ~= 0 and app ~= 1514753603 or app == 0 and occupied or ver ~= 0 and ver ~= 4 then error("unsupported Zinc Store") end
         assert(db:exec(schema) == sqlite.OK, db:errmsg())
     end)
 
@@ -131,13 +115,7 @@ PRAGMA user_version=4;
         assert(type(spec.snapshot) == "number" and spec.snapshot >= 0, "snapshot is invalid")
         return transaction(function()
             if spec.parent ~= nil then assert(status(spec.parent) == "incomplete", "parent Run is not active") end
-            local data = encode({
-                type = "request",
-                parent = spec.parent or json.null,
-                snapshot = spec.snapshot,
-                value = spec.request,
-                memory = spec.memory or {},
-            })
+            local data = encode({type = "request", parent = spec.parent or json.null, snapshot = spec.snapshot, value = spec.request, memory = spec.memory or {}})
             execute("INSERT INTO slices(run,actor,data) VALUES(0,?,?)", spec.actor, data)
             local run = db:last_insert_rowid()
             execute("UPDATE slices SET run=? WHERE idx=?", run, run)
@@ -161,8 +139,7 @@ PRAGMA user_version=4;
             for _, row in ipairs(rows("SELECT idx,run,actor,data FROM slices WHERE run=? AND idx>? ORDER BY idx", child, head.idx)) do
                 events[#events + 1] = slice(row)
             end
-            local payload = {type = "merged", child = child, request = request or json.null, events = events}
-            return insert(parent, payload)
+            return insert(parent, {type = "merged", child = child, request = request or json.null, events = events})
         end)
     end
 
@@ -181,8 +158,7 @@ PRAGMA user_version=4;
         local result, size = {}, 0
         for _, row in ipairs(rows(sql, actor, snapshot)) do
             if size + #row.data > maximum then break end
-            size = size + #row.data
-            result[#result + 1] = slice(row)
+            size = size + #row.data; result[#result + 1] = slice(row)
         end
         local ordered = {}
         for index = #result, 1, -1 do ordered[#ordered + 1] = result[index] end
@@ -198,9 +174,7 @@ PRAGMA user_version=4;
 
     function api:index(values)
         transaction(function()
-            for _, value in ipairs(values) do
-                execute("INSERT OR REPLACE INTO slice_vec(idx,actor,embedding) VALUES(?,?,?)", value.idx, value.actor, encode(value.vector))
-            end
+            for _, value in ipairs(values) do execute("INSERT OR REPLACE INTO slice_vec(idx,actor,embedding) VALUES(?,?,?)", value.idx, value.actor, encode(value.vector)) end
         end)
     end
 
@@ -209,9 +183,7 @@ PRAGMA user_version=4;
         local sql = "SELECT idx, distance FROM slice_vec WHERE actor=? AND embedding MATCH ? AND k=?"
         local results = {}
         for _, row in ipairs(rows(sql, actor, encode(vector), limit)) do
-            if row.idx >= first and row.idx <= snapshot then
-                results[#results + 1] = row
-            end
+            if row.idx >= first and row.idx <= snapshot then results[#results + 1] = row end
         end
         return results
     end
@@ -238,17 +210,14 @@ PRAGMA user_version=4;
         return result
     end
 
-    function api:visibleSlice(actor, snapshot, idx)
-        return self:fetch({idx}, actor, snapshot)[1]
-    end
+    function api:visibleSlice(actor, snapshot, idx) return self:fetch({idx}, actor, snapshot)[1] end
 
     function api:visibleRun(actor, snapshot, run, maximum)
         local sql = "SELECT s.idx,s.run,s.actor,s.data FROM slices s WHERE s.actor=? AND s.idx<=? AND (s.run=? OR (json_extract(s.data,'$.type')='merged' AND json_extract(s.data,'$.child')=?)) AND " .. complete .. " ORDER BY s.idx"
         local result, size = {}, 0
         for _, row in ipairs(rows(sql, actor, snapshot, run, run)) do
             assert(size + #row.data <= maximum, "Run exceeds store_bytes")
-            size = size + #row.data
-            result[#result + 1] = slice(row)
+            size = size + #row.data; result[#result + 1] = slice(row)
         end
         return result
     end

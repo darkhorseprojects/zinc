@@ -6,41 +6,53 @@ return function(config, source)
     local maximum = config.store_bytes
     local separator = package.config:sub(1, 1)
     local windows, cwd = separator == "\\", assert(uv.cwd())
+    local home = os.getenv("HOME") or os.getenv("USERPROFILE") or ""
     local function comparable(path) return windows and path:lower():gsub("\\", "/") or path end
     local function absolute(path) return path:match(windows and "^%a:[/\\]" or "^/") end
+
+    local function expand(path)
+        if home ~= "" and (path == "~" or path:sub(1, 2) == "~/" or path:sub(1, 2) == "~\\") then
+            return home .. (path == "~" and "" or (separator .. path:sub(3)))
+        end
+        return path
+    end
 
     local roots = {}
     for _, row in ipairs(document.Files or {}) do
         assert(row.access == "read" or row.access == "read-write", "file access must be read or read-write")
-        local path = row.root
+        local path = expand(row.root)
         if not absolute(path) then path = cwd .. separator .. path end
-        local actual = assert(uv.fs_realpath(path), "file root does not exist")
+        local actual = assert(uv.fs_realpath(path), "file root does not exist: " .. tostring(row.root))
         roots[#roots + 1] = {actual = actual, compare = comparable(actual), write = row.access == "read-write"}
     end
 
     local function checked(path, writing)
         assert(type(path) == "string" and path ~= "", "path must be nonempty text")
-        if not absolute(path) then path = cwd .. separator .. path end
-        local actual = uv.fs_realpath(path)
+        local expanded = expand(path)
+        if not absolute(expanded) then expanded = cwd .. separator .. expanded end
+        local actual = uv.fs_realpath(expanded)
         if not actual and writing then
-            local parent, name = path:match("^(.*)[/\\]([^/\\]+)$")
-            actual = assert(uv.fs_realpath(parent), "path parent does not exist") .. separator .. name
+            local parent, name = expanded:match("^(.*)[/\\]([^/\\]+)$")
+            actual = assert(uv.fs_realpath(parent), "File not found: parent directory does not exist: " .. path) .. separator .. name
         end
-        actual = assert(actual, "path does not exist")
-        local compare = comparable(actual)
+        if not actual then error("File not found: path '" .. path .. "' does not exist") end
+        local compare, matchedRoot, writePermitted = comparable(actual), false, false
         for _, root in ipairs(roots) do
-            local inside = compare == root.compare or compare:sub(1, #root.compare + 1) == root.compare .. "/"
-            if inside and (not writing or root.write) then return actual end
+            if compare == root.compare or compare:sub(1, #root.compare + 1) == root.compare .. "/" then
+                matchedRoot = true
+                if root.write then writePermitted = true; break end
+            end
         end
-        error("path is outside configured file roots")
+        if not matchedRoot then error("Permission denied: path '" .. path .. "' is outside configured roots in env.md") end
+        if writing and not writePermitted then error("Permission denied: path '" .. path .. "' is configured as read-only") end
+        return actual
     end
 
     local files = {}
     function files.read(path)
         local file = assert(io.open(checked(path, false), "rb"))
         local value = file:read(maximum + 1)
-        assert(file:close())
-        assert(#value <= maximum, "file response exceeds store_bytes")
+        assert(file:close()); assert(#value <= maximum, "file response exceeds store_bytes")
         return value
     end
 
@@ -81,7 +93,7 @@ return function(config, source)
 
     local function http(options)
         assert(type(options) == "table", "HTTP options must be a table")
-        assert(origins[origin(options.url)], "HTTP origin is not configured")
+        assert(origins[origin(options.url)], "Permission denied: HTTP origin '" .. tostring(options.url) .. "' is not permitted in env.md")
         assert(options.body == nil or type(options.body) == "string", "HTTP body must be text")
         assert(options.method == nil or type(options.method) == "string", "HTTP method must be text")
         assert(options.headers == nil or type(options.headers) == "table", "HTTP headers must be a table")
@@ -124,7 +136,7 @@ return function(config, source)
     local prefix = windows and {"/d", "/s", "/c"} or {"-c"}
 
     local function shell(header, command)
-        assert(headers[header], "shell header is not configured")
+        assert(headers[header], "Permission denied: shell header '" .. tostring(header) .. "' is not configured in env.md")
         assert(type(command) == "string" and #command <= maximum, "shell request exceeds store_bytes")
         local pipes = {stdout = uv.new_pipe(false), stderr = uv.new_pipe(false)}
         local output, ended = {stdout = {}, stderr = {}}, {stdout = false, stderr = false}
