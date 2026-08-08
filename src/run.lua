@@ -10,9 +10,9 @@ return function(config)
         local function run(request, method)
             local record = {closed = false}
             scope[#scope + 1] = record
-            local result, state = execute(request, parent.actor, parent)
-            record.state = state
-            config.store[method](config.store, state.id, parent.id)
+            local result, child = execute(request, parent.actor, parent)
+            record.state = child
+            config.store[method](config.store, child.id, parent.id, request)
             record.closed = true
             return result
         end

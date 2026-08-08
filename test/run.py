@@ -35,11 +35,11 @@ function memory:access(actor,snapshot)
 end
 local agent=require('./src/run.lua'){
  name='test',actor='default',store=store,memory=memory,provider=provider,
- environment={files='available'},builder={},format=require('./format-discord.lua'),instructions='instructions',
+ environment={files='available'},builder={},format=function(m) return m.content or '' end,instructions='instructions',
 }
 local result={normal=agent.ask('top','actor-42'),bad=agent.ask('bad call','actor-42'),failed=agent.ask('provider error','actor-42'),selects=selects}
 store:close();return result
-''', ("src/store.lua", "src/run.lua", "format-discord.lua"))
+''', ("src/store.lua", "src/run.lua"))
     assert value == {"normal": "finished", "bad": "corrected", "failed": "Provider error: offline", "selects": 3}, value
     connection = sqlite3.connect(package.home / ".agents/zinc/store/zinc.sqlite3")
     slices = [(actor, json.loads(data)) for actor, data in connection.execute("SELECT actor,data FROM slices ORDER BY idx")]

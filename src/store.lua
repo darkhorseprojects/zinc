@@ -13,9 +13,7 @@ local function mkdir(path)
     local parent = path:match("^(.*)[/\\][^/\\]+$")
     if parent and parent ~= "" and parent ~= path then mkdir(parent) end
     local ok, failure, code = uv.fs_mkdir(path, 448)
-    if not ok then
-        assert(code == "EEXIST" and uv.fs_stat(path), failure)
-    end
+    if not ok then assert(code == "EEXIST" and uv.fs_stat(path), failure) end
 end
 
 return function(config)
@@ -48,15 +46,16 @@ return function(config)
     local function transaction(work)
         assert(db:exec("BEGIN IMMEDIATE") == sqlite.OK, db:errmsg())
         local result = table.pack(pcall(work))
-        if result[1] and db:exec("COMMIT") == sqlite.OK then return table.unpack(result, 2, result.n) end
-        local failure = result[1] and db:errmsg() or result[2]
-        assert(db:exec("ROLLBACK") == sqlite.OK, db:errmsg())
-        error(failure)
+        if not result[1] then
+            db:exec("ROLLBACK")
+            error(result[2])
+        end
+        assert(db:exec("COMMIT") == sqlite.OK, db:errmsg())
+        return table.unpack(result, 2, result.n)
     end
 
     local function slice(row)
-        local value, _, failure = json.decode(row.data, 1, json.null)
-        if failure then error(failure) end
+        local value = json.decode(row.data)
         value.idx, value.run, value.actor = row.idx, row.run, row.actor
         return value
     end
@@ -69,7 +68,6 @@ return function(config)
     local function status(run)
         local value = edge(run, "DESC")
         if not value then return nil end
-        if value.type == "merged" then return "merged" end
         if value.type == "response" and value.source == "zinc" then return "complete" end
         return "incomplete"
     end
@@ -98,7 +96,7 @@ CREATE INDEX IF NOT EXISTS slices_by_run ON slices(run,idx);
 CREATE VIRTUAL TABLE IF NOT EXISTS slice_vec USING vec0(
     idx INTEGER PRIMARY KEY,
     actor TEXT PARTITION KEY,
-    embedding float[1024] distance_metric=cosine
+    embedding float[1024]
 );
 PRAGMA application_id=1514753603;
 PRAGMA user_version=4;
@@ -147,26 +145,24 @@ PRAGMA user_version=4;
         end)
     end
 
-    function api:append(run, value)
-        assert(type(value) == "table" and value.type == "response", "only response Slices can be appended")
+    function api:append(run, event)
+        assert(status(run) == "incomplete", "Run is not active")
+        assert(type(event) == "table" and event.type and event.source, "invalid event")
+        return insert(run, event)
+    end
+
+    function api:merge(child, parent, request)
+        assert(request == nil or type(request) == "string", "request must be text")
         return transaction(function()
-            assert(status(run) == "incomplete", "Run is not active")
-            return insert(run, value)
-        end)
-    end
-
-    function api:run(run)
-        local result = {}
-        for _, row in ipairs(rows("SELECT idx,run,actor,data FROM slices WHERE run=? ORDER BY idx", run)) do result[#result + 1] = slice(row) end
-        return result
-    end
-
-    function api:merge(child, parent)
-        transaction(function()
-            local origin = edge(child, "ASC")
-            assert(origin and origin.parent == parent and status(child) == "complete" and status(parent) == "incomplete", "only a completed child Run can be merged")
-            insert(child, {type = "merged", parent = parent})
-            insert(parent, {type = "merge", child = child})
+            assert(status(parent) == "incomplete", "parent Run is not active")
+            local head, tail = edge(child, "ASC"), edge(child, "DESC")
+            assert(head and head.parent == parent and tail and tail.type == "response" and tail.source == "zinc", "child Run cannot be merged")
+            local events = {}
+            for _, row in ipairs(rows("SELECT idx,run,actor,data FROM slices WHERE run=? AND idx>? ORDER BY idx", child, head.idx)) do
+                events[#events + 1] = slice(row)
+            end
+            local payload = {type = "merged", child = child, request = request or json.null, events = events}
+            return insert(parent, payload)
         end)
     end
 
@@ -210,9 +206,14 @@ PRAGMA user_version=4;
 
     function api:nearest(vector, actor, first, snapshot, limit)
         if limit <= 0 then return {} end
-        return rows([[SELECT idx,distance FROM slice_vec
-            WHERE embedding MATCH ? AND k=? AND actor=? AND idx>=? AND idx<=?
-            ORDER BY distance]], encode(vector), limit, actor, first, snapshot)
+        local sql = "SELECT idx, distance FROM slice_vec WHERE actor=? AND embedding MATCH ? AND k=?"
+        local results = {}
+        for _, row in ipairs(rows(sql, actor, encode(vector), limit)) do
+            if row.idx >= first and row.idx <= snapshot then
+                results[#results + 1] = row
+            end
+        end
+        return results
     end
 
     function api:fetch(ids, actor, snapshot)
@@ -233,9 +234,7 @@ PRAGMA user_version=4;
     function api:run(runId)
         local sql = "SELECT s.idx,s.run,s.actor,s.data FROM slices s WHERE s.run=? ORDER BY s.idx"
         local result = {}
-        for _, row in ipairs(rows(sql, runId)) do
-            result[#result + 1] = slice(row)
-        end
+        for _, row in ipairs(rows(sql, runId)) do result[#result + 1] = slice(row) end
         return result
     end
 
@@ -244,9 +243,9 @@ PRAGMA user_version=4;
     end
 
     function api:visibleRun(actor, snapshot, run, maximum)
-        local sql = "SELECT s.idx,s.run,s.actor,s.data FROM slices s WHERE s.run=? AND s.actor=? AND s.idx<=? AND " .. complete .. " ORDER BY s.idx"
+        local sql = "SELECT s.idx,s.run,s.actor,s.data FROM slices s WHERE s.actor=? AND s.idx<=? AND (s.run=? OR (json_extract(s.data,'$.type')='merged' AND json_extract(s.data,'$.child')=?)) AND " .. complete .. " ORDER BY s.idx"
         local result, size = {}, 0
-        for _, row in ipairs(rows(sql, run, actor, snapshot)) do
+        for _, row in ipairs(rows(sql, actor, snapshot, run, run)) do
             assert(size + #row.data <= maximum, "Run exceeds store_bytes")
             size = size + #row.data
             result[#result + 1] = slice(row)

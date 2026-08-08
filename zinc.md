@@ -51,6 +51,7 @@ local store = require("./src/store.lua")(settings)
 local provider = require("./src/llamacpp.lua")(settings)
 local memory = require("./src/memory.lua")(settings, store, provider)
 local environment = require("./src/env.lua")(settings, require("./env.md"))
+local format = function(m) return type(m) == "table" and m.content or tostring(m or "") end
 local zinc = require("./src/run.lua") {
     name = "zinc",
     actor = settings.actor,
@@ -59,7 +60,7 @@ local zinc = require("./src/run.lua") {
     provider = provider,
     environment = environment,
     builder = require("./builder.lua")(require("./docs.md")),
-    format = require("./format-discord.lua"),
+    format = format,
     instructions = table.concat({prose(document.Zinc.Instructions), prose(environment.guide)}, "\n\n"),
 }
 if args.input == nil then return zinc end

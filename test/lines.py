@@ -2,7 +2,7 @@
 from pathlib import Path
 
 root = Path(__file__).resolve().parents[1]
-files = [root / "zinc.md", root / "builder.lua", root / "format-discord.lua", *sorted((root / "src").glob("*.lua"))]
+files = [root / "zinc.md", root / "builder.lua", *sorted((root / "src").glob("*.lua"))]
 total = 0
 for path in files:
     inside = path.suffix != ".md"
