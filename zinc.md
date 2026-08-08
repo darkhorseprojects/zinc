@@ -42,7 +42,10 @@ for _, name in ipairs({
     assert(type(settings[name]) == "string" and settings[name] ~= "", name .. " must be nonempty text")
 end
 local function prose(value)
-    return type(value) == "table" and table.concat(value, "\n\n") or value
+    if type(value) ~= "table" then return tostring(value or "") end
+    local parts = {}
+    for _, item in ipairs(value) do table.insert(parts, prose(item)) end
+    return table.concat(parts, "\n\n")
 end
 local store = require("./src/store.lua")(settings)
 local provider = require("./src/llamacpp.lua")(settings)

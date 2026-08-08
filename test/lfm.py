@@ -19,9 +19,9 @@ try:
         result = success(package.run("zinc.md", input=prompt.encode(), arguments=(actor,), authority=authority, timeout=300, deadline="3m"))
         return result.stdout.decode().strip()
 
-    listing = ask("model-list", "What entries are in the current directory?")
-    reading = ask("model-read", "What verified project marker is written in README.md?")
-    working = ask("model-pwd", "What is the current working directory? Use the shell to check.")
+    listing = ask("model-list", "What entries are in the current directory? Use args.env.files.list('.') to check.")
+    reading = ask("model-read", "What verified project marker is written in README.md? Use args.env.files.read('README.md') to check.")
+    working = ask("model-pwd", "What is the current working directory? Use args.env.shell('inspect', 'pwd') to check.")
     direct = ask("model-direct", "Reply with exactly: zinc-ready")
 
     connection = sqlite3.connect(package.home / ".agents/zinc/store/zinc.sqlite3")
