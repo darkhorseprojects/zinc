@@ -1,17 +1,18 @@
 #!/bin/sh
 set -eu
-cd "$(dirname "$0")"
 
-MODEL="${MODEL:-LiquidAI/LFM2.5-2.6B-GGUF}"
+MODEL="${MODEL:-$HOME/.cache/huggingface/hub/models--LiquidAI--LFM2.5-2.6B-GGUF/snapshots/main/LFM2.5-2.6B-Q4_K_M.gguf}"
 PORT="${PORT:-8000}"
 HOST="${HOST:-127.0.0.1}"
 CTX="${CTX:-8192}"
+LLAMA_SERVER="${LLAMA_SERVER:-$HOME/dev/llama.cpp/build/bin/llama-server}"
 
-exec llama-server \
-  -hf "$MODEL" \
+exec "$LLAMA_SERVER" \
+  -m "$MODEL" \
   --host "$HOST" \
   --port "$PORT" \
   -c "$CTX" \
   --temp 0.1 \
   --top-k 50 \
-  --repeat-penalty 1.1
+  --repeat-penalty 1.1 \
+  -ngl 99

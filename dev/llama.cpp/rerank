@@ -1,14 +1,15 @@
 #!/bin/sh
 set -eu
-cd "$(dirname "$0")"
 
-MODEL="${MODEL:-Qwen/Qwen3-Reranker-0.6B-GGUF}"
+MODEL="${MODEL:-$HOME/.cache/huggingface/hub/models--ggml-org--Qwen3-Reranker-0.6B-Q8_0-GGUF/snapshots/main/qwen3-reranker-0.6b-q8_0.gguf}"
 PORT="${PORT:-8002}"
 HOST="${HOST:-127.0.0.1}"
+LLAMA_SERVER="${LLAMA_SERVER:-$HOME/dev/llama.cpp/build/bin/llama-server}"
 
-exec llama-server \
-  -hf "$MODEL" \
+exec "$LLAMA_SERVER" \
+  -m "$MODEL" \
   --reranking \
   --pooling rank \
   --host "$HOST" \
-  --port "$PORT"
+  --port "$PORT" \
+  -ngl 99

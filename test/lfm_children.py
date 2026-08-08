@@ -13,7 +13,7 @@ try:
     authority = ("src/store.lua", "src/memory.lua", "src/llamacpp.lua", "src/env.lua")
     result = success(package.run(
         "zinc.md",
-        input=b"Run a child run asking for the sum of 17 and 25, then return the sum.",
+        input=b"Run a child run via args.run.merge('What is 17 + 25?') to compute the sum, then return the child answer.",
         arguments=("child-actor",),
         authority=authority,
         timeout=300,
