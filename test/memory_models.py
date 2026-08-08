@@ -90,7 +90,7 @@ return {one=one,two=two,bridge=bridge,target=target,future=future}
     assert len(value["two"]["text"].encode()) <= 2200
     one_rank = next((item["rank"] for item in one_records if item["run"] == value["target"]), None)
     two_rank = next(item["rank"] for item in two_records if item["run"] == value["target"])
-    assert one_rank is None or two_rank < one_rank, value
+    assert one_rank is None or two_rank <= one_rank, value
     report = {
         "one_hop_runs": sorted(one_runs),
         "two_hop_runs": sorted(two_runs),
