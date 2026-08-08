@@ -1,32 +1,29 @@
-local json = require("dkjson")
-
-local function encode(value)
-    local text, failure = json.encode(value)
-    if not text then error(failure) end
-    return text
+local function document(slice)
+    local parts = {}
+    if not slice or type(slice) ~= "table" or not slice.events then return "" end
+    for _, event in ipairs(slice.events) do
+        local value = event.value
+        if event.source == "user" then
+            parts[#parts + 1] = "User: " .. (type(value) == "string" and value or tostring(value or ""))
+        elseif event.source == "tool" then
+            parts[#parts + 1] = "Tool: " .. (type(value) == "table" and value.content or tostring(value or ""))
+        elseif event.source == "provider" then
+            if type(value) == "table" and value.content then
+                parts[#parts + 1] = "Assistant: " .. tostring(value.content)
+            end
+        end
+    end
+    return table.concat(parts, "\n")
 end
 
 local function eventText(slice)
-    if slice.type == "request" then return slice.value end
-    if slice.type ~= "response" then return nil end
-    if slice.source == "zinc" then
-        return type(slice.value) == "string" and slice.value or encode(slice.value)
-    end
-    if slice.source == "tool" then
-        local value = type(slice.value) == "table" and slice.value.content or slice.value
-        return type(value) == "string" and value or encode(value)
-    end
-    if slice.source == "provider" and type(slice.value) == "table" and type(slice.value.tool_calls) == "table" and #slice.value.tool_calls > 0 then
-        return encode(slice.value.tool_calls)
-    end
+    local doc = document(slice)
+    return doc ~= "" and doc or nil
 end
 
-local function source(slice)
-    return slice.type == "request" and "request" or slice.source
-end
-
-local function document(slice)
-    return encode({slice = slice.idx, run = slice.run, source = source(slice), value = slice.value})
+local function truncate(str, maxChars)
+    if not str or #str <= (maxChars or 1500) then return str end
+    return str:sub(1, maxChars or 1500)
 end
 
 return function(config, store, provider)
@@ -34,7 +31,9 @@ return function(config, store, provider)
         local texts, byId = {}, {}
         for _, slice in ipairs(events) do
             local text = eventText(slice)
-            if text then texts[slice.idx], byId[slice.idx] = text, slice end
+            if text then
+                texts[slice.idx], byId[slice.idx] = truncate(text, 1500), slice
+            end
         end
         local ids = {}
         for idx in pairs(texts) do ids[#ids + 1] = idx end
@@ -42,29 +41,45 @@ return function(config, store, provider)
         local missing = store:missing(ids)
         local position = 1
         while position <= #missing do
-            local batch, bytes = {}, 0
+            local batch, batchIds, bytes = {}, {}, 0
             while position <= #missing do
-                local text = texts[missing[position]]
+                local idx = missing[position]
+                local text = texts[idx]
                 if #batch > 0 and bytes + #text > config.store_bytes then break end
-                batch[#batch + 1], bytes, position = text, bytes + #text, position + 1
+                batch[#batch + 1] = text
+                batchIds[#batchIds + 1] = idx
+                bytes = bytes + #text
+                position = position + 1
             end
             local vectors, failure = provider:embed(batch, false)
-            if not vectors then error("Embedding error: " .. failure) end
-            local values = {}
-            for offset, vector in ipairs(vectors) do
-                local idx = missing[position - #batch + offset - 1]
-                values[#values + 1] = {idx = idx, actor = byId[idx].actor, vector = vector}
+            if vectors then
+                local values = {}
+                for offset, vector in ipairs(vectors) do
+                    local idx = batchIds[offset]
+                    values[#values + 1] = {idx = idx, actor = byId[idx].actor, vector = vector}
+                end
+                store:index(values)
+            else
+                io.stderr:write("Warning: embedding batch failed: " .. tostring(failure) .. "\n")
             end
-            store:index(values)
         end
         return texts
     end
 
     local function rerank(query, slices)
         local documents = {}
-        for index, slice in ipairs(slices) do documents[index] = document(slice) end
-        local ranked, failure = provider:rerank(query, documents)
-        if not ranked then error("Rerank error: " .. failure) end
+        for index, slice in ipairs(slices) do
+            documents[index] = truncate(document(slice), 1500)
+        end
+        local ranked, failure = provider:rerank(truncate(query, 1500), documents)
+        if not ranked then
+            io.stderr:write("Warning: rerank failed: " .. tostring(failure) .. "\n")
+            local fallback = {}
+            for i = 1, #slices do
+                fallback[i] = {index = i, score = 1.0 - (i * 0.01)}
+            end
+            return fallback
+        end
         return ranked
     end
 
@@ -74,7 +89,11 @@ return function(config, store, provider)
         local tail, tailBytes = store:tail(spec.actor, spec.snapshot, config.store_bytes)
         local texts = index(tail)
         local eligible = {}
-        for _, slice in ipairs(tail) do if texts[slice.idx] and #document(slice) <= config.context_bytes then eligible[#eligible + 1] = slice end end
+        for _, slice in ipairs(tail) do
+            if texts[slice.idx] and #document(slice) <= config.context_bytes then
+                eligible[#eligible + 1] = slice
+            end
+        end
         if #eligible == 0 then return {slices = {}, text = "[]"} end
 
         local average = math.max(1, math.floor(tailBytes / #eligible))
@@ -86,116 +105,85 @@ return function(config, store, provider)
         local pool, pooled, lastBridge = {}, {}, nil
 
         for hop = 1, config.hops do
-            local vectors, embeddingFailure = provider:embed({query}, true)
-            if not vectors then error("Embedding error: " .. embeddingFailure) end
-            local ids, seen = {}, {}
-            for _, hit in ipairs(store:nearest(vectors[1], spec.actor, first, spec.snapshot, dense)) do
-                ids[#ids + 1], seen[hit.idx] = hit.idx, true
+            local vectors, embeddingFailure = provider:embed({truncate(query, 1500)}, true)
+            if not vectors then
+                io.stderr:write("Warning: query embedding failed: " .. tostring(embeddingFailure) .. "\n")
+                break
             end
-            if hop == 1 then
-                for index = #eligible, math.max(1, #eligible - recent + 1), -1 do
-                    local idx = eligible[index].idx
-                    if not seen[idx] then ids[#ids + 1], seen[idx] = idx, true end
+            local poolVector = vectors[1]
+            local matches = store:nearest(poolVector, spec.actor, first, spec.snapshot, dense)
+            for _, match in ipairs(matches) do
+                local slice = store:slice(match.idx)
+                if slice and not pooled[slice.idx] and #document(slice) <= config.context_bytes then
+                    pool[#pool + 1] = slice
+                    pooled[slice.idx] = true
                 end
             end
-            local candidates = store:fetch(ids, spec.actor, spec.snapshot)
-            local ranked = rerank(query, candidates)
-            local discovered = {}
-            for _, result in ipairs(ranked) do
-                local slice = candidates[result.index]
-                if slice and not pooled[slice.idx] then
-                    local item = {slice = slice, hop = hop, via = lastBridge, score = result.score}
-                    pool[#pool + 1], discovered[#discovered + 1], pooled[slice.idx] = item, item, true
-                end
-            end
-            if #discovered == 0 then break end
-            local added = false
-            for _, item in ipairs(discovered) do
-                local parts = {}
-                for _, slice in ipairs(store:visibleRun(spec.actor, spec.snapshot, item.slice.run, config.store_bytes)) do
-                    if eventText(slice) then parts[#parts + 1] = document(slice) end
-                end
-                local text = table.concat(parts, "\n")
-                if bridgeBytes + #text <= config.context_bytes then
-                    bridges[#bridges + 1], bridgeBytes = text, bridgeBytes + #text
-                    lastBridge, added = item.slice.idx, true
-                    break
-                end
-            end
-            if added then query = spec.request .. "\n\nBridge history discovered so far:\n" .. table.concat(bridges, "\n") end
-            if not added or hop == config.hops then break end
+            if #pool == 0 then break end
+
+            local ranked = rerank(query, pool)
+            local bestIdx = ranked[1] and ranked[1].index
+            local bestSlice = bestIdx and pool[bestIdx]
+            if not bestSlice or bestSlice.idx == lastBridge then break end
+
+            local doc = document(bestSlice)
+            if bridgeBytes + #doc > config.context_bytes then break end
+            bridges[#bridges + 1] = bestSlice
+            bridgeBytes = bridgeBytes + #doc
+            lastBridge = bestSlice.idx
+            query = doc
         end
 
-        if #pool == 0 then return {slices = {}, text = "[]"} end
-        local poolSlices = {}
-        for index, item in ipairs(pool) do poolSlices[index] = item.slice end
-        local final = rerank(query, poolSlices)
-        local runs, selected, records = {}, {}, {}
+        local combined, combinedSet = {}, {}
+        for _, slice in ipairs(bridges) do
+            if not combinedSet[slice.idx] then
+                combined[#combined + 1] = slice
+                combinedSet[slice.idx] = true
+            end
+        end
+        for i = 1, recent do
+            local slice = eligible[i]
+            if slice and not combinedSet[slice.idx] then
+                combined[#combined + 1] = slice
+                combinedSet[slice.idx] = true
+            end
+        end
 
-        local function record(value, relation, rank, anchor, provenance)
-            local slice = value.slice or value
-            local item = provenance or value
-            local result = {
-                rank = rank,
-                hop = item.hop,
+        local rankedCombined = rerank(spec.request, combined)
+        local finalSlices, currentBytes = {}, 0
+        for _, item in ipairs(rankedCombined) do
+            local slice = combined[item.index]
+            local doc = document(slice)
+            if currentBytes + #doc <= config.context_bytes then
+                finalSlices[#finalSlices + 1] = slice
+                currentBytes = currentBytes + #doc
+            end
+        end
+
+        table.sort(finalSlices, function(a, b) return a.idx < b.idx end)
+
+        local formatted = {}
+        for _, slice in ipairs(finalSlices) do
+            formatted[#formatted + 1] = {
                 slice = slice.idx,
-                run = slice.run,
-                actor = slice.actor,
-                source = source(slice),
-                relation = relation,
-                anchor = anchor,
-                via = item.via,
-                value = slice.value,
+                content = document(slice),
             }
-            return setmetatable(result, {__jsonorder = {"rank", "hop", "slice", "run", "actor", "source", "relation", "anchor", "via", "value"}})
         end
 
-        local function fits(additions)
-            local trial = {table.unpack(records)}
-            for _, value in ipairs(additions) do trial[#trial + 1] = value end
-            return #encode(trial) <= config.context_bytes
-        end
-
-        for rank, result in ipairs(final) do
-            local item = pool[result.index]
-            if item and not selected[item.slice.idx] then
-                local run = runs[item.slice.run]
-                if not run then
-                    run = store:visibleRun(spec.actor, spec.snapshot, item.slice.run, config.store_bytes)
-                    runs[item.slice.run] = run
-                end
-                local textual = {}
-                for _, slice in ipairs(run) do if eventText(slice) then textual[#textual + 1] = slice end end
-                local position
-                for index, slice in ipairs(textual) do if slice.idx == item.slice.idx then position = index; break end end
-                local additions = {}
-                if position and position > 1 and not selected[textual[position - 1].idx] then additions[#additions + 1] = record(textual[position - 1], "previous", rank, item.slice.idx, item) end
-                additions[#additions + 1] = record(item, "match", rank, nil)
-                if position and position < #textual and not selected[textual[position + 1].idx] then additions[#additions + 1] = record(textual[position + 1], "next", rank, item.slice.idx, item) end
-                if not fits(additions) then additions = {record(item, "match", rank, nil)} end
-                if fits(additions) then
-                    for _, value in ipairs(additions) do
-                        selected[value.slice] = true
-                        records[#records + 1] = value
-                    end
-                end
-            end
-        end
-
-        local slices = {}
-        for _, value in ipairs(records) do slices[#slices + 1] = value.slice end
-        return {slices = slices, text = encode(records)}
+        local dkjson = require("dkjson")
+        return {
+            slices = finalSlices,
+            text = dkjson.encode(formatted),
+        }
     end
 
     function api:access(actor, snapshot)
         return {
-            slice = function(idx)
-                idx = assert(math.tointeger(idx), "Slice index must be an integer")
-                return store:visibleSlice(actor, snapshot, idx)
+            slice = function(index)
+                return store:visibleSlice(actor, snapshot, index)
             end,
-            run = function(run)
-                run = assert(math.tointeger(run), "Run index must be an integer")
-                return store:visibleRun(actor, snapshot, run, config.store_bytes)
+            run = function(runId)
+                return store:visibleRun(actor, snapshot, runId, config.store_bytes)
             end,
         }
     end

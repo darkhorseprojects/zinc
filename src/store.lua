@@ -225,6 +225,20 @@ PRAGMA user_version=4;
         return result
     end
 
+    function api:slice(idx)
+        local row = rows("SELECT idx,run,actor,data FROM slices WHERE idx=?", idx)[1]
+        return row and slice(row) or nil
+    end
+
+    function api:run(runId)
+        local sql = "SELECT s.idx,s.run,s.actor,s.data FROM slices s WHERE s.run=? ORDER BY s.idx"
+        local result = {}
+        for _, row in ipairs(rows(sql, runId)) do
+            result[#result + 1] = slice(row)
+        end
+        return result
+    end
+
     function api:visibleSlice(actor, snapshot, idx)
         return self:fetch({idx}, actor, snapshot)[1]
     end

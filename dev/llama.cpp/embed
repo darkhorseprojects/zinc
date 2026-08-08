@@ -10,6 +10,9 @@ exec "$LLAMA_SERVER" \
   -m "$MODEL" \
   --embedding \
   --pooling mean \
+  -c 8192 \
+  -b 8192 \
+  -ub 8192 \
   --host "$HOST" \
   --port "$PORT" \
   -ngl 99
