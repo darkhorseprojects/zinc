@@ -55,10 +55,7 @@ function module.open(config)
     local directory = absolute and path or table.concat({ assert(uv.os_homedir()), ".agents", "zinc", path }, separator)
     mkdir(directory)
     local db = assert(sqlite.open(directory .. separator .. "zinc.sqlite3"))
-    db:busy_handler(function()
-        uv.sleep(1)
-        return true
-    end)
+    db:busy_timeout(5000)
 
     local function rows(sql, ...)
         local statement = assert(db:prepare(sql), db:errmsg())
@@ -94,43 +91,28 @@ function module.open(config)
         return table.unpack(result, 2, result.n)
     end
 
-    local journal
+    assert(
+        db:exec("PRAGMA trusted_schema=OFF; PRAGMA synchronous=FULL; PRAGMA foreign_keys=ON;") == sqlite.OK,
+        db:errmsg()
+    )
+    local deadline, journal = uv.hrtime() + 5000000000
     repeat
-        journal = db:exec("PRAGMA journal_mode=WAL; PRAGMA synchronous=FULL; PRAGMA foreign_keys=ON;")
+        journal = db:exec("PRAGMA journal_mode=WAL")
         if journal == sqlite.BUSY or journal == sqlite.LOCKED then
             uv.sleep(1)
         end
-    until journal ~= sqlite.BUSY and journal ~= sqlite.LOCKED
+    until journal ~= sqlite.BUSY and journal ~= sqlite.LOCKED or uv.hrtime() >= deadline
     assert(journal == sqlite.OK, db:errmsg())
 
     assert(db:exec("BEGIN IMMEDIATE") == sqlite.OK, db:errmsg())
-    local existing = rows("SELECT name FROM sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%'")
-    if #existing > 0 then
-        assert(rows("PRAGMA application_id")[1].application_id == APPLICATION_ID, "Store application ID is unsupported")
-        assert(rows("PRAGMA user_version")[1].user_version == SCHEMA_VERSION, "Store schema version is unsupported")
-        local allowed = {
-            results = true,
-            result_fts = true,
-            result_fts_data = true,
-            result_fts_idx = true,
-            result_fts_content = true,
-            result_fts_docsize = true,
-            result_fts_config = true,
-        }
-        local present = {}
-        for _, row in ipairs(existing) do
-            assert(allowed[row.name], "Store contains an unsupported table: " .. row.name)
-            present[row.name] = true
-        end
-        assert(present.results and present.result_fts, "Store schema is incomplete")
-        local columns = rows("PRAGMA table_info(results)")
-        local expected = { "id", "actor", "start", "role", "text" }
-        assert(#columns == #expected, "Store results schema is unsupported")
-        for index, name in ipairs(expected) do
-            assert(columns[index].name == name, "Store results schema is unsupported")
-        end
-        local definition = rows("SELECT sql FROM sqlite_master WHERE type='table' AND name='result_fts'")[1]
-        assert(definition and definition.sql:find("remove_diacritics 0", 1, true), "Store FTS tokenizer is unsupported")
+    local application_id = rows("PRAGMA application_id")[1].application_id
+    local schema_version = rows("PRAGMA user_version")[1].user_version
+    local existing = rows("SELECT name FROM sqlite_schema WHERE name NOT LIKE 'sqlite_%' LIMIT 1")
+    if application_id == 0 and schema_version == 0 then
+        assert(#existing == 0, "Store database is not empty")
+    else
+        assert(application_id == APPLICATION_ID, "Store application ID is unsupported")
+        assert(schema_version == SCHEMA_VERSION, "Store schema version is unsupported")
     end
 
     assert(db:exec(string.format(
@@ -164,6 +146,12 @@ PRAGMA user_version=%d;
         SCHEMA_VERSION
     )) == sqlite.OK, db:errmsg())
     assert(db:exec("COMMIT") == sqlite.OK, db:errmsg())
+    assert(db:exec([[
+CREATE VIRTUAL TABLE temp.grounding_tokenizer
+USING fts5(text,tokenize='unicode61 remove_diacritics 0');
+CREATE VIRTUAL TABLE temp.grounding_vocabulary
+USING fts5vocab(grounding_tokenizer,'instance');
+]]) == sqlite.OK, db:errmsg())
 
     local function insert(who, start, role, value)
         value = tail(text(value, "record text"), maximum)
@@ -172,6 +160,39 @@ PRAGMA user_version=%d;
     end
 
     local api = {}
+
+    function api:ground(value, maximum_terms)
+        value = text(value, "grounding text")
+        maximum_terms = integer(maximum_terms, "grounding term limit")
+        assert(maximum_terms > 0, "grounding term limit must be positive")
+        local terms, tokens, exact_forms, seen = {}, {}, {}, {}
+        for literal in value:gmatch("%S+") do
+            if literal:find("_", 1, true) then
+                exact_forms[#exact_forms + 1] = literal
+            end
+            local key = literal:lower()
+            if not seen[key] then
+                seen[key] = true
+                terms[#terms + 1] = literal
+                if #terms == maximum_terms then
+                    return { terms = terms, tokens = tokens, exact_forms = exact_forms }
+                end
+            end
+        end
+        execute("DELETE FROM grounding_tokenizer")
+        execute("INSERT INTO grounding_tokenizer(text) VALUES(?)", value)
+        for _, row in ipairs(rows("SELECT term FROM grounding_vocabulary ORDER BY offset")) do
+            tokens[#tokens + 1] = row.term
+            if not seen[row.term] then
+                seen[row.term] = true
+                terms[#terms + 1] = row.term
+            end
+        end
+        while #terms > maximum_terms do
+            terms[#terms] = nil
+        end
+        return { terms = terms, tokens = tokens, exact_forms = exact_forms }
+    end
 
     function api:begin(who, request)
         who, request = actor(who), text(request, "request")

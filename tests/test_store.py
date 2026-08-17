@@ -52,6 +52,25 @@ return{first=first,assistant=assistant,tool=tool,current=current,other=other,rea
         package.close()
 
 
+def test_grounding_preserves_literals_and_uses_store_fts_tokenization():
+    package = Package()
+    try:
+        value = package.lua(r'''
+local store=require('src.store').open{path='store',max_stored_record_bytes=1000}
+local grounded=store:ground('Hello sqlite3_open_v2 hello',10)
+local saturated=store:ground('one two three',2)
+store:close();return{grounded=grounded,saturated=saturated}
+''', ("src.store",))
+        assert value["grounded"] == {
+            "terms": ["Hello", "sqlite3_open_v2", "sqlite3", "open", "v2"],
+            "tokens": ["hello", "sqlite3", "open", "v2", "hello"],
+            "exact_forms": ["sqlite3_open_v2"],
+        }
+        assert value["saturated"] == {"terms": ["one", "two"], "tokens": [], "exact_forms": []}
+    finally:
+        package.close()
+
+
 def test_fts_searches_all_terms_once_without_corpus_frequency_filtering():
     package = Package()
     try:
@@ -110,7 +129,7 @@ local old,old_failure=pcall(store.open,{path='old',max_stored_record_bytes=1000}
 return{small=small,small_failure=tostring(small_failure),old=old,old_failure=tostring(old_failure)}
 ''', ("src.store",))
         assert value["small"] is False and "at least four" in value["small_failure"]
-        assert value["old"] is False and "application ID" in value["old_failure"]
+        assert value["old"] is False and "not empty" in value["old_failure"]
     finally:
         package.close()
 

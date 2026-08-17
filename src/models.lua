@@ -37,6 +37,9 @@ local module = {}
 function module.new(config, sse)
     assert(type(sse) == "table", "SSE parser is required")
     assert(config.metrics == nil or type(config.metrics) == "table", "model metrics must be a table")
+    local maximum_request_bytes =
+        assert(math.tointeger(config.max_model_request_bytes), "model request limit must be an integer")
+    assert(maximum_request_bytes > 0, "model request limit must be positive")
 
     local function measure(use, seconds)
         if config.metrics then
@@ -50,6 +53,9 @@ function module.new(config, sse)
     end
 
     local function post_source(use, url, source)
+        if #source > maximum_request_bytes then
+            return nil, "model request exceeds configured byte limit"
+        end
         local chunks = {}
         local handle, failure = curl.easy({
             url = url,
@@ -98,6 +104,9 @@ function module.new(config, sse)
             parallel_tool_calls = false,
             stream = true,
         })
+        if #request > maximum_request_bytes then
+            return nil, "model request exceeds configured byte limit"
+        end
         local parser = sse.new()
         local queue, head, tail_index = {}, 1, 0
         local failure, done, finish, active = nil, false, nil, true
@@ -305,20 +314,15 @@ function module.new(config, sse)
         end
     end
 
-    function api:propose(text, semantic_steps, cygnet_attention_minimum, maximum_terms)
-        local response, failure = post("propose", config.propose.endpoint, {
-            text = text,
-            semantic_steps = semantic_steps,
-            cygnet_attention_minimum = cygnet_attention_minimum,
-            maximum_terms = maximum_terms,
-        })
+    function api:propose(request)
+        local response, failure = post("propose", config.propose.endpoint, request)
         if not response then
             return nil, failure
         end
-        if type(response.terms) ~= "table" or type(response.truncated) ~= "boolean" then
+        if type(response.terms) ~= "table" then
             return nil, "proposal response is invalid"
         end
-        if #response.terms > maximum_terms then
+        if #response.terms > request.maximum_terms then
             return nil, "proposal response exceeds the requested term count"
         end
         local result, seen = {}, {}
@@ -329,49 +333,49 @@ function module.new(config, sse)
             seen[term] = true
             result[#result + 1] = term
         end
-        return result, response.truncated
+        return result
     end
 
-    function api:rerank(query, passages, maximum_bytes)
+    function api:rerank(query, passages)
         if #passages == 0 then
             return {}, 0
         end
-        local selected, source = {}, nil
+        local prefix = '{"documents":['
+        local middle = '],"model":' .. encode(config.rerank.model) .. ',"query":' .. encode(query) .. ',"top_n":'
+        local suffix = "}"
+        local documents, document_bytes = {}, 0
         for _, passage in ipairs(passages) do
-            selected[#selected + 1] = passage
-            local candidate = encode({
-                model = config.rerank.model,
-                query = query,
-                documents = selected,
-                top_n = #selected,
-            })
-            if #candidate > maximum_bytes then
-                selected[#selected] = nil
+            local encoded = encode(passage)
+            local count = #documents + 1
+            local projected = #prefix + document_bytes + #encoded + #documents + #middle + #tostring(count) + #suffix
+            if projected > maximum_request_bytes then
                 break
             end
-            source = candidate
+            documents[count] = encoded
+            document_bytes = document_bytes + #encoded
         end
-        if #selected == 0 then
+        if #documents == 0 then
             return nil, "first reranker passage exceeds the request byte budget"
         end
+        local source = prefix .. table.concat(documents, ",") .. middle .. #documents .. suffix
         local response, failure = post_source("rerank", config.rerank.endpoint, source)
         if not response then
             return nil, failure
         end
-        if type(response.results) ~= "table" or #response.results ~= #selected then
+        if type(response.results) ~= "table" or #response.results ~= #documents then
             return nil, "reranker response has the wrong count"
         end
         local result, seen = {}, {}
         for _, item in ipairs(response.results) do
             local index = type(item) == "table" and math.tointeger(item.index)
             local score = type(item) == "table" and item.relevance_score
-            if not index or index < 0 or index >= #selected or not finite(score) or seen[index] then
+            if not index or index < 0 or index >= #documents or not finite(score) or seen[index] then
                 return nil, "reranker item is invalid"
             end
             seen[index] = true
             result[#result + 1] = { index = index + 1, score = score }
         end
-        return result, #selected
+        return result, #documents
     end
 
     return api

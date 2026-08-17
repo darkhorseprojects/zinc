@@ -25,9 +25,9 @@ class Server(BaseHTTPRequestHandler):
             self.wfile.write(encoded)
             return
         if self.path == "/propose":
-            value = {"terms": ["ocean"], "truncated": False}
-        elif self.path == "/bad-propose":
             value = {"terms": ["ocean"]}
+        elif self.path == "/bad-propose":
+            value = {"terms": "ocean"}
         elif self.path == "/rerank":
             value = {"results": [
                 {"index": index, "relevance_score": float(len(body["documents"]) - index)}
@@ -63,27 +63,26 @@ def test_chat_streams_while_proposal_and_rerank_are_buffered():
 local base=os.getenv('BASE')
 local models=require('src.models').new({
  chat={endpoint=base..'/chat',model='chat'},propose={endpoint=base..'/propose'},
- rerank={endpoint=base..'/rerank',model='reranker'},
+ rerank={endpoint=base..'/rerank',model='reranker'},max_model_request_bytes=1048576,
 },require('src.sse'))
 local iterator=assert(models:chat{{role='system',content='trusted'},{role='user',content='request'}})
 local events={};while true do local event,failure=iterator();if not event then assert(not failure,failure);break end;events[#events+1]=event end
-local proposed,truncated=models:propose('stream',3,0,512)
-local ranked,ranked_count=models:rerank('question',{'one','two'},1048576)
-local one=models.encode{model='reranker',query='question',documents={'one'},top_n=1}
-local limited,limited_count=models:rerank('question',{'one','two'},#one)
-return{events=events,proposed=proposed,truncated=truncated,ranked=ranked,ranked_count=ranked_count,limited=limited,limited_count=limited_count}
+local request={tokens={'stream'},exact_forms={},semantic_language='en',semantic_depth=3,semantic_attention_cutoff=0,maximum_terms=512}
+local proposed=models:propose(request)
+local ranked,ranked_count=models:rerank('question',{'one','two'})
+return{events=events,proposed=proposed,ranked=ranked,ranked_count=ranked_count}
 ''', ("src.models",))
         assert [event["type"] for event in value["events"]] == ["reasoning", "response", "finish"]
-        assert value["proposed"] == ["ocean"] and value["truncated"] is False
+        assert value["proposed"] == ["ocean"]
         assert value["ranked"] == [{"index": 1, "score": 2}, {"index": 2, "score": 1}]
         assert value["ranked_count"] == 2
-        assert value["limited"] == [{"index": 1, "score": 1}] and value["limited_count"] == 1
         bodies = dict(Server.bodies)
         assert bodies["/propose"] == {
-            "text": "stream", "semantic_steps": 3, "cygnet_attention_minimum": 0, "maximum_terms": 512
+            "tokens": ["stream"], "exact_forms": [], "semantic_language": "en",
+            "semantic_depth": 3, "semantic_attention_cutoff": 0, "maximum_terms": 512
         }
         assert bodies["/rerank"] == {
-            "model": "reranker", "query": "question", "documents": ["one"], "top_n": 1
+            "model": "reranker", "query": "question", "documents": ["one", "two"], "top_n": 2
         }
     finally:
         package.close()
@@ -101,12 +100,14 @@ def test_model_failures_are_explicit():
         package.environment["BASE"] = f"http://127.0.0.1:{server.server_port}"
         value = package.lua(r'''
 local base=os.getenv('BASE');local models=require('src.models').new({
- chat={endpoint='unused',model='chat'},propose={endpoint=base..'/failure'},rerank={endpoint=base..'/failure',model='reranker'},
+ chat={endpoint='unused',model='chat'},propose={endpoint=base..'/failure'},rerank={endpoint=base..'/failure',model='reranker'},max_model_request_bytes=1000,
 },require('src.sse'))
-local proposed,proposal_failure=models:propose('x',1,0,10);local ranked,rank_failure=models:rerank('q',{'d'},1000)
-local oversized,oversized_failure=models:rerank('q',{'d'},1)
-local invalid=require('src.models').new({chat={endpoint='unused',model='chat'},propose={endpoint=base..'/bad-propose'},rerank={endpoint='unused',model='reranker'}},require('src.sse'))
-local malformed,malformed_failure=invalid:propose('x',1,0,10)
+local request={tokens={'x'},exact_forms={},semantic_language='en',semantic_depth=1,semantic_attention_cutoff=0,maximum_terms=10}
+local proposed,proposal_failure=models:propose(request);local ranked,rank_failure=models:rerank('q',{'d'})
+local tiny=require('src.models').new({chat={endpoint='unused',model='chat'},propose={endpoint='unused'},rerank={endpoint='unused',model='reranker'},max_model_request_bytes=1},require('src.sse'))
+local oversized,oversized_failure=tiny:rerank('q',{'d'})
+local invalid=require('src.models').new({chat={endpoint='unused',model='chat'},propose={endpoint=base..'/bad-propose'},rerank={endpoint='unused',model='reranker'},max_model_request_bytes=1000},require('src.sse'))
+local malformed,malformed_failure=invalid:propose(request)
 return{proposed=proposed,proposal_failure=proposal_failure,ranked=ranked,rank_failure=rank_failure,oversized=oversized,oversized_failure=oversized_failure,malformed=malformed,malformed_failure=malformed_failure}
 ''', ("src.models",))
         assert value.get("proposed") is None and value["proposal_failure"] == "offline"

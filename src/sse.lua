@@ -1,7 +1,7 @@
 local module = {}
 
 function module.new()
-    local buffer, data, event = "", nil, nil
+    local fragments, data, event = {}, nil, nil
     local finished = false
 
     local function dispatch(records)
@@ -33,24 +33,27 @@ function module.new()
     end
 
     local function parse(final)
-        local records, offset = {}, 1
-        while offset <= #buffer do
-            local ending = buffer:find("[\r\n]", offset)
+        local records, source, offset = {}, table.concat(fragments), 1
+        fragments = {}
+        while offset <= #source do
+            local ending = source:find("[\r\n]", offset)
             if not ending then
                 break
             end
-            local byte = buffer:byte(ending)
-            if byte == 13 and ending == #buffer and not final then
+            local byte = source:byte(ending)
+            if byte == 13 and ending == #source and not final then
                 break
             end
-            consume(buffer:sub(offset, ending - 1), records)
-            offset = ending + (byte == 13 and buffer:byte(ending + 1) == 10 and 2 or 1)
+            consume(source:sub(offset, ending - 1), records)
+            offset = ending + (byte == 13 and source:byte(ending + 1) == 10 and 2 or 1)
         end
-        buffer = buffer:sub(offset)
+        if offset <= #source then
+            fragments[1] = source:sub(offset)
+        end
         if final then
-            if buffer ~= "" then
-                consume(buffer, records)
-                buffer = ""
+            if fragments[1] then
+                consume(fragments[1], records)
+                fragments = {}
             end
             dispatch(records)
         end
@@ -62,8 +65,11 @@ function module.new()
     function parser:push(chunk)
         assert(not finished, "SSE parser is finished")
         assert(type(chunk) == "string" and not chunk:find("%z"), "SSE chunk must be text without NUL")
-        buffer = buffer .. chunk
-        return parse(false)
+        fragments[#fragments + 1] = chunk
+        if chunk:find("[\r\n]") or #fragments > 1 and fragments[#fragments - 1]:sub(-1) == "\r" then
+            return parse(false)
+        end
+        return {}
     end
 
     function parser:finish()

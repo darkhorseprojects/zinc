@@ -7,7 +7,6 @@ import hashlib
 import json
 import math
 import pathlib
-import re
 import shutil
 import sqlite3
 import tempfile
@@ -19,7 +18,6 @@ from typing import Any
 
 CYGNET_GZIP_SHA256 = "65e93f3620d7cc5444350d9e204259e961096138767d9ea73403ade38964cc48"
 CYGNET_DATABASE_SHA256 = "aae2cdb1418c1435558584a91181e1cb94459f2506c16f2be4b00e81428deaff"
-MAXIMUM_BODY = 16 * 1024 * 1024
 CONTENT_POS = ("NOUN", "VERB", "ADJ", "ADV")
 SCORING_RELATIONS = frozenset((
     "pertainym", "derivation", "antonym", "participle", "also", "similar", "attribute",
@@ -32,7 +30,6 @@ DOMAIN_RELATIONS = frozenset(("domain_topic", "has_domain_topic", "domain_region
 PAGERANK_RESTART = 0.15
 PAGERANK_TOLERANCE = 1e-13
 PAGERANK_MAXIMUM_ITERATIONS = 200
-NONSPACE = re.compile(r"\S+", re.UNICODE)
 
 
 def sha256(path: pathlib.Path) -> str:
@@ -168,6 +165,7 @@ WHERE e.pos IN (?,?,?,?) AND f.normalized_form<>''
     def connect(self) -> sqlite3.Connection:
         connection = sqlite3.connect(f"file:{self.database}?mode=ro&immutable=1", uri=True)
         connection.execute("PRAGMA automatic_index=OFF")
+        connection.execute("CREATE TEMP TABLE request_tokens(position INTEGER PRIMARY KEY,token TEXT NOT NULL)")
         return connection
 
     @staticmethod
@@ -221,65 +219,67 @@ WHERE e.pos IN (?,?,?,?) AND f.normalized_form<>''
             raise ValueError("Cygnet structural mass did not converge")
         return tuple(mass)
 
-    @staticmethod
-    def tokens(text: str) -> list[str]:
-        connection = sqlite3.connect(":memory:")
-        try:
-            connection.executescript("""
-CREATE VIRTUAL TABLE tokenize USING fts5(text,tokenize='unicode61 remove_diacritics 0');
-CREATE VIRTUAL TABLE vocabulary USING fts5vocab(tokenize,'instance');
-""")
-            connection.execute("INSERT INTO tokenize(text) VALUES(?)", (text,))
-            return [row[0] for row in connection.execute("SELECT term FROM vocabulary ORDER BY offset")]
-        finally:
-            connection.close()
-
-    def candidate_forms(self, tokens: list[str], raw: list[str]) -> list[str]:
-        values = {
-            normalize(" ".join(tokens[offset:offset + length]))
-            for offset in range(len(tokens))
-            for length in range(1, min(self.maximum_form_tokens, len(tokens) - offset) + 1)
-        }
-        values.update(value for value in raw if "_" in value)
-        return sorted(values)
-
     def load_form_terms(
-        self, normalized_forms: list[str], connection: sqlite3.Connection
+        self, tokens: list[str], exact_forms: list[str], language: str, connection: sqlite3.Connection
     ) -> dict[str, list[SemanticTerm]]:
-        grouped: dict[str, dict[str, set[int]]] = defaultdict(lambda: defaultdict(set))
-        for offset in range(0, len(normalized_forms), 500):
-            values = normalized_forms[offset:offset + 500]
-            placeholders = ",".join("?" for _ in values)
-            for normalized, language, source_id in connection.execute(f"""
-SELECT DISTINCT f.normalized_form,l.code,s.synset_rowid
-FROM forms f
+        connection.execute("DELETE FROM request_tokens")
+        connection.executemany("INSERT INTO request_tokens(position,token) VALUES(?,?)", enumerate(tokens))
+        matched = {
+            row[0]
+            for row in connection.execute("""
+WITH RECURSIVE spans(start,stop,normalized_form) AS (
+    SELECT position,position,token FROM request_tokens
+    UNION ALL
+    SELECT spans.start,next.position,spans.normalized_form||' '||next.token
+    FROM spans JOIN request_tokens next ON next.position=spans.stop+1
+    WHERE spans.stop-spans.start+1<?
+)
+SELECT DISTINCT spans.normalized_form
+FROM spans JOIN forms ON forms.normalized_form=spans.normalized_form
+""", (self.maximum_form_tokens,))
+        }
+        matched.update(normalize(value) for value in exact_forms if "_" in value)
+        if not matched:
+            return {}
+        connection.execute("CREATE TEMP TABLE matched_forms(normalized_form TEXT PRIMARY KEY)")
+        try:
+            connection.executemany("INSERT OR IGNORE INTO matched_forms VALUES(?)", ((value,) for value in matched))
+            grouped: dict[str, set[int]] = defaultdict(set)
+            for normalized, source_id in connection.execute("""
+SELECT DISTINCT f.normalized_form,s.synset_rowid
+FROM matched_forms m
+JOIN forms f ON f.normalized_form=m.normalized_form
 JOIN entries e ON e.rowid=f.entry_rowid
 JOIN languages l ON l.rowid=e.language_rowid
 JOIN senses s ON s.entry_rowid=e.rowid
-WHERE f.normalized_form IN ({placeholders}) AND e.pos IN (?,?,?,?)
-ORDER BY f.normalized_form,l.code,s.synset_rowid
-""", (*values, *CONTENT_POS)):
+WHERE l.code=? AND e.pos IN (?,?,?,?)
+ORDER BY f.normalized_form,s.synset_rowid
+""", (language, *CONTENT_POS)):
                 concept = self.concept_ids.get(source_id)
                 if concept is not None:
-                    grouped[normalized][language].add(concept)
-        result: dict[str, list[SemanticTerm]] = {}
-        for normalized, languages in grouped.items():
-            terms = []
-            for language, concepts in languages.items():
-                normalization, vocabulary = self.language_statistics[language]
-                probability = sum(
-                    self.structural_mass[concept] / self.concept_form_counts[(language, concept)]
-                    for concept in concepts
-                ) / normalization
-                attention = -math.log(probability * vocabulary)
-                terms.append(SemanticTerm(normalized, language, attention, frozenset(concepts)))
-            result[normalized] = terms
+                    grouped[normalized].add(concept)
+        finally:
+            connection.execute("DROP TABLE matched_forms")
+        normalization, vocabulary = self.language_statistics[language]
+        result = {}
+        for normalized, concepts in grouped.items():
+            probability = sum(
+                self.structural_mass[concept] / self.concept_form_counts[(language, concept)]
+                for concept in concepts
+            ) / normalization
+            attention = -math.log(probability * vocabulary)
+            result[normalized] = [SemanticTerm(normalized, language, attention, frozenset(concepts))]
         return result
 
     def semantic_terms(
-        self, tokens: list[str], raw: list[str], attention_minimum: float, connection: sqlite3.Connection
+        self,
+        tokens: list[str],
+        exact_forms: list[str],
+        language: str,
+        attention_cutoff: float,
+        connection: sqlite3.Connection,
     ) -> tuple[list[SemanticTerm], list[SemanticTerm]]:
-        forms = self.load_form_terms(self.candidate_forms(tokens, raw), connection)
+        forms = self.load_form_terms(tokens, exact_forms, language, connection)
         selected, rejected = [], []
         seen: set[tuple[str, str, tuple[int, ...]]] = set()
         rejected_seen: set[tuple[str, str, tuple[int, ...]]] = set()
@@ -289,9 +289,9 @@ ORDER BY f.normalized_form,l.code,s.synset_rowid
             for length in range(min(self.maximum_form_tokens, len(tokens) - offset), 0, -1):
                 normalized = normalize(" ".join(tokens[offset:offset + length]))
                 values = forms.get(normalized, [])
-                accepted = [term for term in values if term.attention >= attention_minimum]
+                accepted = [term for term in values if term.attention >= attention_cutoff]
                 for term in values:
-                    if term.attention >= attention_minimum:
+                    if term.attention >= attention_cutoff:
                         continue
                     key = (term.normalized, term.language, tuple(sorted(term.concepts)))
                     if key not in rejected_seen:
@@ -309,13 +309,14 @@ ORDER BY f.normalized_form,l.code,s.synset_rowid
                 if key not in seen:
                     seen.add(key)
                     selected.append(term)
-        for normalized in raw:
+        for value in exact_forms:
+            normalized = normalize(value)
             if "_" not in normalized:
                 continue
             for term in forms.get(normalized, []):
                 key = (term.normalized, term.language, tuple(sorted(term.concepts)))
-                target = selected if term.attention >= attention_minimum else rejected
-                target_seen = seen if term.attention >= attention_minimum else rejected_seen
+                target = selected if term.attention >= attention_cutoff else rejected
+                target_seen = seen if term.attention >= attention_cutoff else rejected_seen
                 if key not in target_seen:
                     target_seen.add(key)
                     target.append(term)
@@ -341,70 +342,92 @@ WHERE s.synset_rowid IN ({placeholders}) AND l.code=?
         return sorted(output)
 
     def expand(
-        self, selected: list[SemanticTerm], steps: int, connection: sqlite3.Connection
-    ) -> tuple[list[str], list[int]]:
+        self, selected: list[SemanticTerm], depth: int, maximum_terms: int, connection: sqlite3.Connection
+    ) -> list[str]:
         output: list[str] = []
-        visited_by_depth = [0] * (steps + 1)
+        seen: set[str] = set()
         for term in selected:
             visited = set(term.concepts)
             frontier = set(term.concepts)
-            visited_by_depth[0] += len(frontier)
-            output.extend(self.lexicalizations(frontier, term.language, connection))
-            for depth in range(1, steps + 1):
-                following = set()
-                for source in frontier:
-                    following.update(self.expansion[source])
-                following.difference_update(visited)
-                if not following:
-                    break
-                visited.update(following)
-                frontier = following
-                visited_by_depth[depth] += len(frontier)
-                output.extend(self.lexicalizations(frontier, term.language, connection))
-        return output, visited_by_depth
+            for level in range(depth + 1):
+                if level:
+                    following = {target for source in frontier for target in self.expansion[source]}
+                    following.difference_update(visited)
+                    if not following:
+                        break
+                    visited.update(following)
+                    frontier = following
+                for value in self.lexicalizations(frontier, term.language, connection):
+                    key = value.casefold()
+                    if key in seen:
+                        continue
+                    seen.add(key)
+                    output.append(value)
+                    if len(output) == maximum_terms:
+                        return output
+        return output
 
     def analyze(
-        self, text: str, semantic_steps: int, attention_minimum: float, maximum_terms: int
-    ) -> tuple[dict[str, Any], Any]:
-        if not isinstance(text, str):
-            raise ValueError("text must be text")
-        if isinstance(semantic_steps, bool) or not isinstance(semantic_steps, int) or not 0 <= semantic_steps <= 4:
-            raise ValueError("semantic_steps must be an integer from zero to four")
-        if isinstance(attention_minimum, bool) or not isinstance(attention_minimum, (int, float)):
-            raise ValueError("cygnet_attention_minimum must be a finite number")
+        self,
+        tokens: list[str],
+        exact_forms: list[str],
+        semantic_language: str,
+        semantic_depth: int,
+        attention_cutoff: float,
+        maximum_terms: int,
+    ) -> tuple[dict[str, Any], tuple[list[SemanticTerm], list[SemanticTerm]]]:
+        if not isinstance(tokens, list) or any(
+            not isinstance(value, str) or not value or "\0" in value or any(map(str.isspace, value)) for value in tokens
+        ):
+            raise ValueError("tokens must be an array of FTS tokens")
+        if not isinstance(exact_forms, list) or any(not isinstance(value, str) or not value or "\0" in value for value in exact_forms):
+            raise ValueError("exact_forms must be an array of nonempty text")
+        if not isinstance(semantic_language, str) or semantic_language not in self.language_statistics:
+            raise ValueError("semantic_language is unsupported")
+        if isinstance(semantic_depth, bool) or not isinstance(semantic_depth, int) or not 0 <= semantic_depth <= 4:
+            raise ValueError("semantic_depth must be an integer from zero to four")
+        if isinstance(attention_cutoff, bool) or not isinstance(attention_cutoff, (int, float)):
+            raise ValueError("semantic_attention_cutoff must be a finite number")
         if isinstance(maximum_terms, bool) or not isinstance(maximum_terms, int) or not 1 <= maximum_terms <= 4096:
             raise ValueError("maximum_terms must be an integer from one to 4096")
-        attention_minimum = float(attention_minimum)
-        if not math.isfinite(attention_minimum):
-            raise ValueError("cygnet_attention_minimum must be a finite number")
-        tokens = self.tokens(text)
-        raw = [normalize(value) for value in NONSPACE.findall(text)]
+        attention_cutoff = float(attention_cutoff)
+        if not math.isfinite(attention_cutoff):
+            raise ValueError("semantic_attention_cutoff must be a finite number")
         connection = self.connect()
         try:
-            selected, rejected = self.semantic_terms(tokens, raw, attention_minimum, connection)
-            semantic, visited = self.expand(selected, semantic_steps, connection)
+            selected, rejected = self.semantic_terms(
+                tokens, exact_forms, semantic_language, attention_cutoff, connection
+            )
+            semantic = self.expand(selected, semantic_depth, maximum_terms, connection)
         finally:
             connection.close()
-        terms, seen = [], set()
-        for term in [*raw, *tokens, *semantic]:
-            value = normalize(term)
-            key = value.casefold()
-            if value and key not in seen:
-                seen.add(key)
-                terms.append(value)
-        truncated = len(terms) > maximum_terms
-        return {"terms": terms[:maximum_terms], "truncated": truncated}, (tokens, raw, selected, rejected, visited)
+        return {"terms": semantic}, (selected, rejected)
 
     def propose(
-        self, text: str, semantic_steps: int, attention_minimum: float, maximum_terms: int
+        self,
+        tokens: list[str],
+        exact_forms: list[str],
+        semantic_language: str,
+        semantic_depth: int,
+        attention_cutoff: float,
+        maximum_terms: int,
     ) -> dict[str, Any]:
-        return self.analyze(text, semantic_steps, attention_minimum, maximum_terms)[0]
+        return self.analyze(
+            tokens, exact_forms, semantic_language, semantic_depth, attention_cutoff, maximum_terms
+        )[0]
 
     def inspect(
-        self, text: str, semantic_steps: int, attention_minimum: float, maximum_terms: int
+        self,
+        tokens: list[str],
+        exact_forms: list[str],
+        semantic_language: str,
+        semantic_depth: int,
+        attention_cutoff: float,
+        maximum_terms: int,
     ) -> dict[str, Any]:
-        result, analysis = self.analyze(text, semantic_steps, attention_minimum, maximum_terms)
-        tokens, raw, selected, rejected, visited = analysis
+        result, (selected, rejected) = self.analyze(
+            tokens, exact_forms, semantic_language, semantic_depth, attention_cutoff, maximum_terms
+        )
 
         def describe(term: SemanticTerm) -> dict[str, Any]:
             return {
@@ -416,16 +439,17 @@ WHERE s.synset_rowid IN ({placeholders}) AND l.code=?
 
         return {
             **result,
-            "literals": [*raw, *tokens],
+            "tokens": tokens,
+            "exact_forms": exact_forms,
             "accepted_forms": [describe(term) for term in selected],
             "rejected_forms": [describe(term) for term in rejected],
             "seed_senses": sum(len(term.concepts) for term in selected),
-            "visited_concepts_by_depth": visited,
         }
 
 
 class Handler(BaseHTTPRequestHandler):
     proposals: Proposals
+    maximum_request_bytes: int
 
     def do_GET(self) -> None:
         if self.path == "/health":
@@ -442,17 +466,26 @@ class Handler(BaseHTTPRequestHandler):
             if raw_length is None:
                 raise ValueError("content-length is required")
             length = int(raw_length)
-            if length < 0 or length > MAXIMUM_BODY:
+            if length < 0 or length > self.maximum_request_bytes:
                 raise ValueError("request body size is invalid")
             request = json.loads(self.rfile.read(length))
-            expected = {"text", "semantic_steps", "cygnet_attention_minimum", "maximum_terms"}
+            expected = {
+                "tokens",
+                "exact_forms",
+                "semantic_language",
+                "semantic_depth",
+                "semantic_attention_cutoff",
+                "maximum_terms",
+            }
             if not isinstance(request, dict) or set(request) != expected:
                 raise ValueError("request has invalid fields")
             method = self.proposals.inspect if self.path == "/inspect" else self.proposals.propose
             self.respond(200, method(
-                request["text"],
-                request["semantic_steps"],
-                request["cygnet_attention_minimum"],
+                request["tokens"],
+                request["exact_forms"],
+                request["semantic_language"],
+                request["semantic_depth"],
+                request["semantic_attention_cutoff"],
                 request["maximum_terms"],
             ))
         except (UnicodeDecodeError, json.JSONDecodeError, ValueError) as error:
@@ -500,10 +533,15 @@ def main() -> None:
     parser.add_argument("--host", default="127.0.0.1")
     parser.add_argument("--port", type=int, default=8002)
     parser.add_argument("--concurrency", type=int, default=1)
+    parser.add_argument("--maximum-request-bytes", type=int, required=True)
     arguments = parser.parse_args()
     if arguments.concurrency <= 0:
         parser.error("--concurrency must be positive")
+    if arguments.maximum_request_bytes <= 0:
+        parser.error("--maximum-request-bytes must be positive")
     Handler.proposals = Proposals(arguments.cygnet)
+    Handler.maximum_request_bytes = arguments.maximum_request_bytes
+    Handler.proposals.metadata["maximum_request_bytes"] = arguments.maximum_request_bytes
     BoundedThreadingHTTPServer((arguments.host, arguments.port), Handler, arguments.concurrency).serve_forever()
 
 

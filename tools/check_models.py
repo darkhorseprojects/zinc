@@ -3,12 +3,18 @@
 
 import argparse
 import json
+import pathlib
+import tomllib
+import urllib.parse
 import urllib.request
 
-RERANKER = "nvidia/llama-nemotron-rerank-1b-v2"
-RERANKER_REVISION = "d896ceda696c5c6fe0abf65f63a77c691bbf4548"
-CHAT_MODEL = "LiquidAI/LFM2.5-2.6B-GGUF"
-CHAT_REVISION = "b421ad1d549afeda6a0fb2ad3a697cb5a7879adc"
+ROOT = pathlib.Path(__file__).resolve().parents[1]
+with (ROOT / "dependencies.lock").open("rb") as source:
+    DEPENDENCIES = {value["name"]: value for value in tomllib.load(source)["dependency"]}
+RERANKER = urllib.parse.urlparse(DEPENDENCIES["llama-nemotron-rerank-1b-v2"]["source"]).path.lstrip("/")
+RERANKER_REVISION = DEPENDENCIES["llama-nemotron-rerank-1b-v2"]["revision"]
+CHAT_MODEL = urllib.parse.urlparse(DEPENDENCIES["LFM2.5-2.6B-GGUF"]["source"]).path.lstrip("/")
+CHAT_REVISION = DEPENDENCIES["LFM2.5-2.6B-GGUF"]["revision"]
 
 
 def get(url):
@@ -28,15 +34,22 @@ def main():
     parser.add_argument("--reranker", default="http://127.0.0.1:8001")
     parser.add_argument("--chat", default="http://127.0.0.1:8000")
     parser.add_argument("--minimum-chat-context", type=int, default=130000)
+    parser.add_argument("--maximum-request-bytes", type=int, default=1048576)
     args = parser.parse_args()
 
     proposal_health = get(args.proposals + "/health")
-    if not proposal_health.get("ready") or len(proposal_health.get("source_sha256", "")) != 64:
+    if (
+        not proposal_health.get("ready")
+        or len(proposal_health.get("source_sha256", "")) != 64
+        or proposal_health.get("maximum_request_bytes") != args.maximum_request_bytes
+    ):
         raise SystemExit("canonical Cygnet service is invalid")
     proposed = post(args.proposals + "/propose", {
-        "text": "Meridian credential rollback",
-        "semantic_steps": 1,
-        "cygnet_attention_minimum": 0,
+        "tokens": ["meridian", "credential", "rollback"],
+        "exact_forms": [],
+        "semantic_language": "en",
+        "semantic_depth": 1,
+        "semantic_attention_cutoff": 0,
         "maximum_terms": 512,
     })
     if not proposed.get("terms"):

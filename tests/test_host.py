@@ -21,11 +21,14 @@ host.files.edit{path='value.txt',edits={{oldText='two',newText='changed'}}}
 local edited=host.files.read{path='value.txt'}
 local ambiguous=pcall(host.files.edit,{path='value.txt',edits={{oldText='e',newText='x'}}})
 local outside=pcall(host.files.read,{path=os.getenv('OUTSIDE')})
-return{guide=host.guide,complete=complete,selected=selected,edited=edited,ambiguous=ambiguous,outside=outside}
+local invalid=pcall(host.files.write,{path='invalid.txt',content=string.char(255)})
+local invalid_exists=pcall(host.files.read,{path='invalid.txt'})
+return{guide=host.guide,complete=complete,selected=selected,edited=edited,ambiguous=ambiguous,outside=outside,invalid=invalid,invalid_exists=invalid_exists}
 ''', ("src.host",))
         assert value == {
             "guide": "guide", "complete": "one\ntwo\nthree\n", "selected": "two",
             "edited": "one\nchanged\nthree\n", "ambiguous": False, "outside": False,
+            "invalid": False, "invalid_exists": False,
         }
     finally:
         package.close()

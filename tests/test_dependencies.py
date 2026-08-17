@@ -11,9 +11,9 @@ def lock():
         return tomllib.load(source)
 
 
-def test_dependency_metadata_and_repository_references_are_consistent():
+def test_dependency_metadata_is_complete():
     dependencies = check_dependencies.validate_lock(lock())
-    check_dependencies.validate_repository(dependencies)
+    assert {"portable-agents", "cygnet", "llama-nemotron-rerank-1b-v2", "LFM2.5-2.6B-GGUF"} <= set(dependencies)
 
 
 def test_dependency_metadata_rejects_missing_license_hash_and_revision():

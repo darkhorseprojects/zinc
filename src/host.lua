@@ -66,6 +66,7 @@ local function files(rows, cwd, home)
 
     local function publish(target, value, mode)
         assert(type(value) == "string", "file content must be text")
+        assert(utf8.len(value), "file content must be valid UTF-8")
         local parent = assert(target:match("^(.*)[/\\][^/\\]+$"), "invalid output path")
         local fd, temporary = assert(uv.fs_mkstemp(parent .. separator .. ".zinc-XXXXXX"))
         local open = true

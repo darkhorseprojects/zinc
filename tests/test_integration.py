@@ -24,7 +24,7 @@ class Server(BaseHTTPRequestHandler):
         body = json.loads(self.rfile.read(int(self.headers["content-length"])))
         self.bodies.append((self.path, body))
         if self.path == "/propose":
-            value = {"terms": [], "truncated": False}
+            value = {"terms": []}
         elif self.path == "/rerank":
             value = {"results": [
                 {"index": index, "relevance_score": 1.0} for index in range(len(body["documents"]))
@@ -96,7 +96,7 @@ def test_complete_zinc_execution_persists_each_completed_result():
         source = source.replace("http://127.0.0.1:8000/v1/chat/completions", base + "/chat")
         source = source.replace("http://127.0.0.1:8002/propose", base + "/propose")
         source = source.replace("http://127.0.0.1:8001/rerank", base + "/rerank")
-        source = source.replace("| semantic_steps | 1 |", "| semantic_steps | 0 |")
+        source = source.replace("| semantic_depth | 1 |", "| semantic_depth | 0 |")
         (package.package / "zinc.md").write_text(source)
         output = success(package.run(
             "zinc.md", input=b"integration", arguments=("discord-42",),
@@ -120,7 +120,11 @@ def test_complete_zinc_execution_persists_each_completed_result():
         assert [message["role"] for message in chats[-1]["messages"]] == ["system", "system", "user", "assistant", "tool"]
         assert all(chat["parallel_tool_calls"] is False for chat in chats)
         proposals = [body for path, body in Server.bodies if path == "/propose"]
-        assert all(body["semantic_steps"] == 0 and body["maximum_terms"] == 512 for body in proposals)
+        assert all(
+            body["semantic_language"] == "en" and body["semantic_depth"] == 0
+            and body["semantic_attention_cutoff"] == 0 and body["maximum_terms"] <= 512
+            for body in proposals
+        )
 
         connection = sqlite3.connect(package.home / ".agents/zinc/store/zinc.sqlite3")
         rows = connection.execute("SELECT id,actor,start,role,text FROM results ORDER BY id").fetchall()

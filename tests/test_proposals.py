@@ -111,32 +111,26 @@ def test_canonical_source_is_verified_and_used_directly():
         assert compressed_instance.metadata["concepts"] == 17
 
 
-def test_raw_literals_never_depend_on_cygnet_selection():
-    with tempfile.TemporaryDirectory() as temporary:
-        terms = service(pathlib.Path(temporary)).propose("velvet-2048 sqlite3_open_v2 !!!", 1, 1e300, 4096)["terms"]
-        assert "velvet-2048" in terms
-        assert "sqlite3_open_v2" in terms
-        assert {"velvet", "2048", "sqlite3", "open", "v2"} <= set(terms)
+def propose(instance, tokens, depth=0, cutoff=-1e300, maximum=4096, language="en", exact=()):
+    return instance.propose(tokens, list(exact), language, depth, cutoff, maximum)["terms"]
 
 
 def test_attention_activates_every_sense_and_rejected_longest_forms_expose_components():
     with tempfile.TemporaryDirectory() as temporary:
         instance = service(pathlib.Path(temporary))
-        bank = instance.inspect("bank", 0, -1e300, 4096)
+        bank = instance.inspect(["bank"], [], "en", 0, -1e300, 4096)
         assert bank["seed_senses"] == 2
-        terms = set(bank["terms"])
-        assert {"bank", "shore", "river bank", "financial institution"} <= terms
+        assert {"bank", "shore", "river bank", "financial institution"} <= set(bank["terms"])
         bank_attention = min(item["attention"] for item in bank["accepted_forms"])
-        river = instance.inspect("river bank", 0, -1e300, 4096)
+        river = instance.inspect(["river", "bank"], [], "en", 0, -1e300, 4096)
         river_attention = next(item["attention"] for item in river["accepted_forms"] if item["form"] == "river bank")
         assert bank_attention > river_attention
-        fallback = set(instance.propose("river bank", 0, (bank_attention + river_attention) / 2, 4096)["terms"])
+        fallback = set(propose(instance, ["river", "bank"], cutoff=(bank_attention + river_attention) / 2))
         assert {"shore", "financial institution"} <= fallback
-        rejected = set(instance.propose("bank", 4, 1e300, 4096)["terms"])
-        assert rejected == {"bank"}
+        assert propose(instance, ["bank"], depth=4, cutoff=1e300) == []
 
 
-def test_steps_are_exhaustive_directed_multilingual_and_cycle_safe():
+def test_depth_is_exhaustive_directed_language_scoped_and_cycle_safe():
     with tempfile.TemporaryDirectory() as temporary:
         instance = service(pathlib.Path(temporary))
         expected = [
@@ -147,31 +141,32 @@ def test_steps_are_exhaustive_directed_multilingual_and_cycle_safe():
             {"being"},
         ]
         prior = set()
-        for steps in range(5):
-            current = set(instance.propose("poodle", steps, -1e300, 4096)["terms"])
-            assert expected[steps] <= current
-            for later in expected[steps + 1:]:
+        for depth in range(5):
+            current = set(propose(instance, ["poodle"], depth=depth))
+            assert expected[depth] <= current
+            for later in expected[depth + 1:]:
                 assert current.isdisjoint(later)
             assert "biology" not in current
             assert "ignored" not in current
             assert prior <= current
             prior = current
-        assert "poodle" not in set(instance.propose("dog", 4, -1e300, 4096)["terms"])
-        spanish = set(instance.propose("perro", 0, -1e300, 4096)["terms"])
+        assert "poodle" not in set(propose(instance, ["dog"], depth=4))
+        spanish = set(propose(instance, ["perro"], language="es"))
         assert "perro" in spanish and "dog" not in spanish
+        assert propose(instance, ["perro"], language="en") == []
 
 
-def test_term_limit_preserves_order_and_reports_truncation():
+def test_exact_forms_lazy_term_limit_and_validation():
     with tempfile.TemporaryDirectory() as temporary:
         instance = service(pathlib.Path(temporary))
-        full = instance.propose("velvet-2048 sqlite3_open_v2", 1, 1e300, 4096)
-        limited = instance.propose("velvet-2048 sqlite3_open_v2", 1, 1e300, 2)
-        assert limited == {"terms": full["terms"][:2], "truncated": True}
-        exact = instance.propose("bank", 0, -1e300, 4096)
-        assert exact["truncated"] is False
+        exact = propose(instance, [], exact=["river_bank"])
+        assert exact == []
+        full = propose(instance, ["bank"])
+        limited = propose(instance, ["bank"], maximum=2)
+        assert limited == full[:2]
         for maximum in (0, 4097, True):
             try:
-                instance.propose("bank", 0, 0, maximum)
+                propose(instance, ["bank"], maximum=maximum)
                 raise AssertionError("invalid maximum succeeded")
             except ValueError as error:
                 assert "maximum_terms" in str(error)
