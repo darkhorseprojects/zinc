@@ -1,87 +1,73 @@
 format = 1
 
-# All downloads and builds are provisioning steps. Zinc performs no dependency
-# discovery, installation, download, or compilation at runtime.
+# Provisioning only. Zinc performs no discovery, installation, download, build,
+# or compilation at runtime.
 
 [[dependency]]
 name = "portable-agents"
 version = "1.0.0"
-source = "https://github.com/darkhorseprojects/portable-agents.git"
-revision = "9f2813f667415e2f80466a173eb773ffcc90d7fb"
-tree = "ff56805f39ecd8f9713aaff386daccaac8f1c0f6"
-build = ["cargo build --locked --release", "install target/release/agent on PATH"]
+source = "https://github.com/darkhorseprojects/portable-agents/releases/tag/v1.0.0"
+build = ["cargo install portable-agents --version 1.0.0 --locked"]
 expected = "agent 1.0.0 with Lua 5.5"
+license = "AGPL-3.0-only"
 
 [[dependency]]
 name = "lua"
 version = "5.5.0"
 source = "https://www.lua.org/ftp/lua-5.5.0.tar.gz"
 sha256 = "57ccc32bbbd005cab75bcc52444052535af691789dba2b9016d5c50640d68b3d"
-build = ["make for the target platform", "make INSTALL_TOP=<prefix> install"]
 expected = "Lua 5.5 headers and library"
+license = "MIT"
 
 [[dependency]]
-name = "dkjson"
-version = "2.10"
-source = "https://dkolf.de/dkjson-lua/dkjson-2.10.lua"
-sha256 = "52f30be905216796ccb1e97da6135f3f5cfaaf6359544e66046e40f516a36b94"
-build = ["install as <lua-share>/dkjson.lua"]
-expected = "require('dkjson').version == 'dkjson 2.10'"
+name = "cygnet"
+version = "2026.05.12"
+source = "https://github.com/omwn/cygnet/releases/download/2026.05.12/cygnet.db.gz"
+sha256 = "65e93f3620d7cc5444350d9e204259e961096138767d9ea73403ade38964cc48"
+database_sha256 = "aae2cdb1418c1435558584a91181e1cb94459f2506c16f2be4b00e81428deaff"
+expected = "read-only canonical source for runtime structural mass, multilingual form attention, and typed expansion"
+license = "LicenseRef-Cygnet-Aggregate"
 
 [[dependency]]
-name = "lsqlite3"
-version = "0.9.6"
-source = "https://lua.sqlite.org/home/zip/lsqlite3_v096.zip?uuid=v0.9.6"
-sha256 = "ecc6e7636a54f021bca5b4a01b35af06fd7a6fc8b21c4b3eccd4fdb5dd32ad82"
-build = ["luarocks make lsqlite3complete-0.9.6-1.rockspec --local --lua-version=5.5"]
-expected = "require('lsqlite3') on Lua 5.5 package.cpath"
+name = "rust"
+version = "1.97.1"
+source = "https://static.rust-lang.org/dist/channel-rust-1.97.1.toml"
+expected = "builds Portable Agents with rustc 1.97.1"
+license = "Apache-2.0 OR MIT"
 
 [[dependency]]
-name = "lua-curl"
-version = "0.3.13"
-source = "https://github.com/Lua-cURL/Lua-cURLv3/archive/refs/tags/v0.3.13.tar.gz"
-revision = "833e87c830bed05fe3910a33f573c202a48ba6d4"
-sha256 = "aba40511a7cac4422c0238d1db42b2124ea5a727b0745f7f434f3dc119cbb2db"
-build = ["cmake -S . -B build -DLUA_VERSION=5.5 -DCMAKE_INSTALL_PREFIX=<prefix>", "cmake --build build --config Release", "cmake --install build --config Release"]
-expected = "require('cURL.safe') on Lua 5.5 package.path"
+name = "python"
+version = "3.12.12"
+source = "https://www.python.org/downloads/"
+expected = "runs proposal tools, tests, and vLLM"
+license = "PSF-2.0"
 
 [[dependency]]
-name = "luv"
-version = "1.51.0-1"
-source = "https://github.com/luvit/luv/archive/refs/tags/1.51.0-1.tar.gz"
-revision = "4c9fbc6cf6f3338bb0e0426710cf885ee557b540"
-sha256 = "d4a11178ae8e16ba5886799ea91905dd9b0b479c75aebd67866d37373e41526f"
-build = ["cmake -S . -B build -DWITH_LUA_ENGINE=Lua -DLUA_BUILD_TYPE=System -DCMAKE_INSTALL_PREFIX=<prefix>", "cmake --build build --config Release", "cmake --install build --config Release"]
-expected = "require('luv') on Lua 5.5 package.cpath"
+name = "vllm"
+version = "0.27.1"
+source = "https://github.com/vllm-project/vllm/releases/tag/v0.27.1"
+build = ["uv pip install vllm==0.27.1"]
+expected = "pooling runner exposes Cohere-compatible /rerank"
+license = "Apache-2.0"
 
 [[dependency]]
-name = "sqlite-vec"
-version = "0.1.7"
-source = "https://github.com/asg017/sqlite-vec/archive/refs/tags/v0.1.7.tar.gz"
-revision = "633eecf5067ab12ef331b3c4500c765f8e6d6da0"
-sha256 = "d58330f3f5ee2809cf5bc289f134dda9d9dddc23a4fa63bf76f88b44e402e580"
-build = ["make loadable", "install vec0 shared library on Lua 5.5 package.cpath"]
-expected = "package.searchpath('vec0', package.cpath) loads sqlite-vec 0.1.7"
+name = "llama-nemotron-rerank-1b-v2"
+source = "https://huggingface.co/nvidia/llama-nemotron-rerank-1b-v2"
+revision = "d896ceda696c5c6fe0abf65f63a77c691bbf4548"
+expected = "vLLM pooling runner with tools/nemotron-rerank.jinja"
+license = "LicenseRef-NVIDIA-Open-Model-AND-Llama-3.2-Community"
 
 [[dependency]]
 name = "llama.cpp"
-version = "b4600"
+version = "b10331"
 source = "https://github.com/ggml-org/llama.cpp.git"
-revision = "b4600"
-build = ["cmake -B build -DGGML_CUDA=ON", "cmake --build build --config Release -j --target llama-server"]
-expected = "llama-server binary capable of chat completions, embeddings, and reranking"
+revision = "7ba604f1cb61cd14898138e9abc0b4ff2601f180"
+expected = "official llama-server chat endpoint"
+license = "MIT"
 
 [[dependency]]
 name = "LFM2.5-2.6B-GGUF"
 source = "https://huggingface.co/LiquidAI/LFM2.5-2.6B-GGUF"
-expected = "llama-server chat model served as LiquidAI/LFM2.5-2.6B-GGUF"
-
-[[dependency]]
-name = "Qwen3-Embedding-0.6B"
-source = "https://huggingface.co/Qwen/Qwen3-Embedding-0.6B-GGUF"
-expected = "llama-server embedding model with 1024-dimensional output served through /v1/embeddings"
-
-[[dependency]]
-name = "Qwen3-Reranker-0.6B"
-source = "https://huggingface.co/Qwen/Qwen3-Reranker-0.6B-GGUF"
-expected = "llama-server reranker served through /v1/rerank"
+revision = "b421ad1d549afeda6a0fb2ad3a697cb5a7879adc"
+expected = "chat-only model; upstream config max_position_embeddings=131072; pinned GGUF metadata corrected with --override-kv lfm2.context_length=int:131072"
+license = "LicenseRef-LFM-Open-License-1.0"

@@ -1,0 +1,107 @@
+Zinc third-party notices
+========================
+
+Zinc does not bundle these runtime components. The pinned components below are
+provisioned separately to run or test Zinc. Their own license terms apply.
+
+Portable Agents 1.0.0
+---------------------
+Source: https://github.com/darkhorseprojects/portable-agents
+License: AGPL-3.0-only
+License text: https://github.com/darkhorseprojects/portable-agents/blob/v1.0.0/LICENSE
+
+Lua 5.5.0
+---------
+Copyright (C) 1994-2025 Lua.org, PUC-Rio.
+Source: https://www.lua.org/ftp/lua-5.5.0.tar.gz
+License: MIT
+License text: https://www.lua.org/license.html
+
+dkjson 2.10
+-----------
+Copyright (C) 2010-2026 David Heiko Kolf.
+Source: https://dkolf.de/dkjson-lua/
+License: MIT
+License text and attribution are in the pinned source file.
+
+LuaSQLite3 0.9.7
+----------------
+Copyright (C) 2002-2016 Tiago Dionizio and Doug Currie.
+Source: https://lua.sqlite.org/
+License: MIT
+License text: https://lua.sqlite.org/home/doc/tip/doc/lsqlite3.wiki
+Zinc builds the binding against the system SQLite library. SQLite is public domain.
+
+Lua-cURL 0.3.13
+---------------
+Source: https://github.com/Lua-cURL/Lua-cURLv3
+License: MIT
+License text: https://github.com/Lua-cURL/Lua-cURLv3/blob/v0.3.13/LICENSE
+
+luv 1.51.0-1
+------------
+Copyright (C) 2014-present luv contributors.
+Source: https://github.com/luvit/luv
+License: Apache-2.0
+License text: https://github.com/luvit/luv/blob/1.51.0-1/LICENSE.txt
+
+Cygnet 2026.05.12 data
+----------------------
+Cygnet is produced by the Open Multilingual Wordnet project and combines data
+from independently licensed wordnets. There is no single license for the
+aggregate lexical data. Preserve the resource-level attribution and license
+information supplied by Cygnet when redistributing the database.
+Source: https://github.com/omwn/cygnet/releases/tag/2026.05.12
+Software license: MIT
+Aggregate data license: LicenseRef-Cygnet-Aggregate
+Resource provenance and licenses: https://github.com/omwn/cygnet
+Citation: Rowan Hall Maudslay and Francis Bond (2026), "Cygnet: Refactoring the
+Open Multilingual Wordnet," LREC 2026.
+
+Rust 1.97.1
+-----------
+Copyright (C) the Rust Project Developers.
+Source: https://www.rust-lang.org/
+License: Apache-2.0 OR MIT
+License texts: https://github.com/rust-lang/rust/tree/1.97.1
+
+Python 3.12.12
+--------------
+Copyright (C) Python Software Foundation.
+Source: https://www.python.org/downloads/release/python-31212/
+License: PSF-2.0
+License text: https://docs.python.org/3.12/license.html
+
+vLLM 0.27.1
+-----------
+Copyright (C) the vLLM team.
+Source: https://github.com/vllm-project/vllm/releases/tag/v0.27.1
+License: Apache-2.0
+License text: https://github.com/vllm-project/vllm/blob/v0.27.1/LICENSE
+
+Llama Nemotron Rerank 1B v2
+---------------------------
+Publisher: NVIDIA Corporation.
+Source: https://huggingface.co/nvidia/llama-nemotron-rerank-1b-v2
+Revision: d896ceda696c5c6fe0abf65f63a77c691bbf4548
+License: LicenseRef-NVIDIA-Open-Model-AND-Llama-3.2-Community
+License terms and required attribution are provided in the pinned model
+repository and its model card.
+
+llama.cpp b10331
+----------------
+Copyright (C) llama.cpp contributors.
+Source: https://github.com/ggml-org/llama.cpp
+Revision: 7ba604f1cb61cd14898138e9abc0b4ff2601f180
+License: MIT
+License text: https://github.com/ggml-org/llama.cpp/blob/7ba604f1cb61cd14898138e9abc0b4ff2601f180/LICENSE
+
+LFM2.5-2.6B-GGUF
+----------------
+Publisher: Liquid AI, Inc.
+Source: https://huggingface.co/LiquidAI/LFM2.5-2.6B-GGUF
+Revision: b421ad1d549afeda6a0fb2ad3a697cb5a7879adc
+License: LicenseRef-LFM-Open-License-1.0
+The LFM Open License v1.0 includes a commercial-use revenue threshold and
+redistribution obligations. Review the full terms before use or distribution.
+License text: https://www.liquid.ai/lfm-license

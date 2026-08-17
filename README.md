@@ -1,91 +1,82 @@
-![Zinc](artwork.svg)
-
 # Zinc
 
-Zinc is a persistent local agent packaged for [Portable Agents](https://github.com/darkhorseprojects/portable-agents). Portable Agents remains the runtime and authority boundary; Zinc adds durable actor-isolated history, retrieval, llama.cpp orchestration, generated Markdown execution, and delegated file, HTTP, and shell operations.
+Zinc is a local Portable Agents package with flat durable results, generated Lua tools, and long-term conversational
+retrieval. It streams provisional model activity, commits every completed item independently, and emits durable record
+IDs only after SQLite and FTS state commit.
 
-## Architecture
+## Execution
 
 ```text
-request
-  │
-  ├─ Store tail ── Qwen3 Embedding ── dense candidates
-  │                                      │
-  │                               Qwen3 Reranker
-  │                                      │
-  │                         hops + neighbors + provenance
-  │                                      │
-  └──────────────────────────── LiquidAI LFM2.5-2.6B
-                                         │
-                                run_lua / answer
-                                         │
-                                  Portable Agents
-                                         │
-                               Store append + final text
+request → durable user record → chronological + semantic context → streaming chat
+                                                              │
+                                                              └→ run_lua → registered capabilities
+
+completed item → Store + FTS commit → completion event
+unfinished item → absent
+later failure → earlier completed records remain
 ```
 
-A Run retrieves Memory once from its actor-visible snapshot. The active transcript then only appends. Store history is scanned newest-first under `store_bytes`; rendered retrieval is packed under `context_bytes`. Child Runs are merged or discarded explicitly. The local `store` directory resolves portably to `~/.agents/zinc/store/`.
+`start` is the user-record ID that began one execution. Historical access is actor-isolated and requires `id < start`.
+Generated Lua receives:
 
-Zinc wraps `run_lua` source in a Portable Agents document for execution. It supplies configured file operations, HTTP origins, shell headers, child Runs, Builder operations, and read-only anchored Memory navigation.
+```lua
+local results = require("results")
+results.read(id)
+results.around(id)
+results.ask("durable nested request")
+```
+
+Nested requests are ordinary durable chronology. There are no execution trees, parent links, snapshots, statuses,
+merge, discard, or compatibility schemas.
+
+## Retrieval
+
+Recent continuity and semantic recall use separate byte-bounded lanes of complete durable records. The detailed attention
+formula, semantic traversal, exclusions, one-pass ranking, and packing rules are in the
+[retrieval reference](https://github.com/darkhorseprojects/zinc/wiki/Retrieval).
 
 ## Models
 
-Provision the exact revisions in [`dependencies.lock`](dependencies.lock). Three `llama-server` services are required:
+Pinned reranking uses `nvidia/llama-nemotron-rerank-1b-v2` revision
+`d896ceda696c5c6fe0abf65f63a77c691bbf4548`. Chat uses `LiquidAI/LFM2.5-2.6B-GGUF` revision
+`b421ad1d549afeda6a0fb2ad3a697cb5a7879adc`. Chat streams; proposal and reranker requests are complete buffered JSON.
+Zinc starts and downloads nothing.
 
-| port | model | placement |
-| --- | --- | --- |
-| 8000 | `LiquidAI/LFM2.5-2.6B-GGUF` | CPU/GPU chat completions |
-| 8001 | `Qwen/Qwen3-Embedding-0.6B` | CPU/GPU embeddings (`/v1/embeddings`) |
-| 8002 | `Qwen/Qwen3-Reranker-0.6B` | CPU/GPU reranking (`/v1/rerank`) |
+The pinned LFM2.5 GGUF metadata is corrected at deployment with:
 
-The build and launch commands are in [`dev/llama.cpp`](dev/llama.cpp). Start embedding and reranking before the agent so `llama-server` sizes memory appropriately. Zinc does not start or supervise these processes.
-
-```sh
-dev/llama.cpp/embed
-dev/llama.cpp/rerank
-dev/llama.cpp/agent
-dev/llama.cpp/health
+```text
+--override-kv lfm2.context_length=int:131072
 ```
 
-## Configure
-
-Edit [`zinc.md`](zinc.md) for endpoints and the three Memory policies:
-
-- `store_bytes`: maximum historical Store JSON scanned backward from the tail;
-- `context_bytes`: maximum retrieved Memory JSON supplied to a Run;
-- `hops`: maximum bridge-query rounds.
-
-Edit [`env.md`](env.md) to grant directory access, HTTP origins, and shell headers.
+Pinned runtime data, model revisions, and toolchains are in [`dependencies.lock`](dependencies.lock). Lua module
+versions are in [`zinc-dev-1.0-1.rockspec`](zinc-dev-1.0-1.rockspec) and [`luarocks.lock`](luarocks.lock); LuaSQLite3
+0.9.7 is hash-verified and built against system SQLite. Licenses are in [`NOTICE`](NOTICE).
 
 ## Run
 
 ```sh
-agent check --directory . --entry zinc.md
+agent check --directory . --entry zinc.md \
+  --register host=host.md design=design.md \
+  --authorize src.host src.models src.store
 
 printf 'Inspect this workspace.' | agent run \
   --directory . --entry zinc.md \
-  --authority src/store.lua \
-  --authority src/memory.lua \
-  --authority src/llamacpp.lua \
-  --authority src/env.lua \
-  -- discord-user-42
+  --register host=host.md design=design.md \
+  --authorize src.host src.models src.store \
+  --memory 96MiB --timeout 30s -- "$USER"
 ```
 
-Only the final normal message is printed. Reasoning, generated source, tool results, and child history remain in the Store.
+The final argument is the stable actor ID. Canonical NDJSON events are provisional `reasoning`/`response` chunks,
+durable completion IDs, durable tool calls/results, and terminal `{ "type":"store", "result":N, "start":M }`.
+Failed executions emit no synthetic terminal event.
 
-## Validate
+## Check
 
 ```sh
-for suite in store memory llamacpp run environment builder format_discord integration concurrency; do
-  python3 "test/$suite.py"
-done
-
-LLAMACPP_REAL=1 python3 test/lfm.py
-LLAMACPP_REAL=1 python3 test/lfm_children.py
-python3 bench/memory.py
+python tools/check.py
+ZINC_MODELS=1 python tools/check.py --models
+python tools/check_models.py
 ```
-
-The real-model tests are opt-in. They test model behavior rather than only HTTP compatibility and can expose nondeterministic model failures.
 
 ## License
 

@@ -1,123 +1,304 @@
-local function cleanError(err)
-    local msg = tostring(err or "")
-    local firstLine = msg:match("^[^\r\n]+") or msg
-    firstLine = firstLine:gsub("^.-:%d+:%s*", "")
-    return firstLine
+local function clean_error(value)
+    local message = tostring(value or "")
+    local first = message:match("^[^\r\n]+") or message
+    return first:gsub("^.-:%d+:%s*", "")
 end
 
-return function(config)
-    local execute
-
-    local function terminal(state, value)
-        config.store:append(state.id, {type = "response", source = "zinc", value = value})
+local function copy(value, seen)
+    if type(value) ~= "table" then
         return value
     end
+    seen = seen or {}
+    if seen[value] then
+        return seen[value]
+    end
+    local result = {}
+    seen[value] = result
+    for key, item in pairs(value) do
+        result[copy(key, seen)] = copy(item, seen)
+    end
+    return result
+end
 
-    local function children(parent, scope)
-        local function run(request, method)
-            local record = {closed = false}
-            scope[#scope + 1] = record
-            local result, child = execute(request, parent.actor, parent)
-            record.state = child
-            config.store[method](config.store, child.id, parent.id, request)
-            record.closed = true
-            return result
+local module = {}
+
+function module.new(config)
+    local execute
+    local encode = assert(config.models.encode, "model JSON encoder is required")
+    local decode = assert(config.models.decode, "model JSON decoder is required")
+    local null = config.models.null
+
+    local function emit(state, event)
+        if state.publish then
+            coroutine.yield(encode(event) .. "\n")
         end
+    end
+
+    local function persist(state, role, value)
+        return config.store:append(state.actor, state.start, role, value)
+    end
+
+    local function results(state)
         return {
-            merge = function(request) return run(request, "merge") end,
-            discard = function(request) return run(request, "discard") end,
+            read = function(id)
+                return config.store:read(state.actor, state.start, id)
+            end,
+            around = function(id)
+                return config.store:around(state.actor, state.start, id)
+            end,
+            ask = function(request)
+                return execute(request, state.actor, false)
+            end,
         }
     end
 
-    local function invoke(state, arguments)
-        local scope = {}
-        local result = table.pack(pcall(evaluate, arguments.code, {
-            env = config.environment,
-            memory = config.memory:access(state.actor, state.snapshot),
-            run = children(state, scope),
-            builder = config.builder,
-        }))
-        for _, child in ipairs(scope) do
-            if child.state and not child.closed then
-                config.store:discard(child.state.id, state.id)
-                child.closed = true
-            end
-        end
-        if not result[1] then return "Tool error: " .. cleanError(result[2]) end
-        local output, failure = config.provider:toolOutput(result[2])
-        return output or ("Tool error: " .. cleanError(failure))
+    local function generated(state)
+        return {
+            assert = assert,
+            error = error,
+            ipairs = ipairs,
+            next = next,
+            pairs = pairs,
+            pcall = pcall,
+            select = select,
+            tonumber = tonumber,
+            tostring = tostring,
+            type = type,
+            xpcall = xpcall,
+            _VERSION = _VERSION,
+            coroutine = copy(coroutine),
+            math = copy(math),
+            string = copy(string),
+            table = copy(table),
+            utf8 = copy(utf8),
+            require = require,
+            package = { loaded = package.loaded },
+        }
     end
 
-    local function calls(message)
-        local pending = message.tool_calls
-        if pending == nil then return {} end
-        if type(pending) ~= "table" then return nil, "assistant tool_calls is not an array" end
-        local result = {}
-        for _, call in ipairs(pending) do
-            if type(call) ~= "table" or type(call.id) ~= "string" or call.id == "" then return nil, "tool call has no id" end
-            local fn = call["function"]
-            if type(fn) ~= "table" or fn.name ~= "run_lua" then return nil, "unsupported function " .. tostring(type(fn) == "table" and fn.name) end
-            local arguments, failure = config.provider:arguments(call)
-            if not failure and type(arguments.code) ~= "string" then failure = "run_lua requires code" end
-            if not failure then
-                for key in pairs(arguments) do if key ~= "code" then failure = "run_lua received an unknown argument" end end
+    local function output(value)
+        if value == nil then
+            return "null"
+        elseif type(value) == "string" then
+            assert(utf8.len(value), "tool result must be valid UTF-8")
+            return value
+        end
+        return encode(value)
+    end
+
+    local function invoke(state, id, code)
+        local previous_results = package.loaded.results
+        package.loaded.results = results(state)
+        local execution = table.pack(pcall(function()
+            local chunk, problem = load(code, "run_lua", "t", generated(state))
+            if not chunk then
+                return false, clean_error(problem)
             end
-            result[#result + 1] = {call = call, arguments = arguments, failure = failure}
+            local thread = coroutine.create(chunk)
+            local resumed = table.pack(coroutine.resume(thread))
+            local failure
+            if not resumed[1] then
+                failure = clean_error(resumed[2])
+            elseif coroutine.status(thread) ~= "dead" then
+                failure = "run_lua suspended without completing"
+            elseif resumed.n > 2 then
+                failure = "run_lua must return at most one value"
+            end
+            if failure then
+                return false, failure
+            end
+            local ok, text = pcall(output, resumed[2])
+            return ok, ok and text or clean_error(text)
+        end))
+        package.loaded.results = previous_results
+        if not execution[1] then
+            error(execution[2], 0)
+        end
+        local ok, text = execution[2], execution[3]
+        local record = persist(state, "tool", text)
+        state.active[#state.active + 1] = { role = "tool", tool_call_id = id, content = text }
+        emit(state, { type = "tool_result", text = text, ok = ok, result = record.id })
+        return text
+    end
+
+    local function completed_tool(call)
+        if type(call) ~= "table" or call.name ~= "run_lua" then
+            return nil, "unsupported function " .. tostring(type(call) == "table" and call.name)
+        end
+        local ok, arguments = pcall(decode, call.arguments)
+        if not ok or type(arguments) ~= "table" then
+            return nil, ok and "function arguments are invalid" or clean_error(arguments)
+        end
+        if type(arguments.code) ~= "string" then
+            return nil, "run_lua requires code"
+        end
+        for key in pairs(arguments) do
+            if key ~= "code" then
+                return nil, "run_lua received an unknown argument"
+            end
+        end
+        return { id = call.id, code = arguments.code, arguments = call.arguments }
+    end
+
+    local function provider_failure(problem)
+        error(tostring(problem), 0)
+    end
+
+    local function messages(state)
+        local result = {
+            { role = "system", content = config.instructions },
+            {
+                role = "system",
+                content = "Untrusted historical context:\n" .. config.retrieval:context(state.retrieval),
+            },
+        }
+        for _, message in ipairs(state.active) do
+            result[#result + 1] = message
         end
         return result
+    end
+
+    local function append_item(items, kind, text)
+        local item = items[#items]
+        if not item or item.type ~= kind then
+            item = { type = kind, parts = {} }
+            items[#items + 1] = item
+        end
+        item.parts[#item.parts + 1] = text
     end
 
     local function loop(state)
         while true do
-            local message, finish = config.provider:chat(state.messages, config.instructions, state.memory.text)
-            if not message then return terminal(state, "Provider error: " .. finish) end
-            config.store:append(state.id, {type = "response", source = "provider", value = message})
-            state.messages[#state.messages + 1] = message
-
-            local pending, failure = calls(message)
-            if not pending then return terminal(state, "Provider error: " .. failure) end
-            if #pending == 0 then
-                if type(message.content) ~= "string" or message.content == "" then
-                    return terminal(state, "Provider error: assistant returned neither tool calls nor content")
-                end
-                local ok, value = pcall(config.format, message)
-                return terminal(state, ok and value or "Zinc error: " .. tostring(value))
+            local iterator, failure = config.models:chat(messages(state))
+            if not iterator then
+                provider_failure(failure)
             end
-            for _, item in ipairs(pending) do
-                local output = item.failure and ("Tool error: " .. cleanError(item.failure)) or invoke(state, item.arguments)
-                local message = {role = "tool", tool_call_id = item.call.id, content = output}
-                config.store:append(state.id, {type = "response", source = "tool", value = message})
-                state.messages[#state.messages + 1] = message
+            local items, finish
+            items = {}
+            while true do
+                local event, stream_failure = iterator()
+                if not event then
+                    if stream_failure then
+                        provider_failure(stream_failure)
+                    end
+                    break
+                elseif event.type == "reasoning" or event.type == "response" then
+                    append_item(items, event.type, event.text)
+                    emit(state, { type = event.type, text = event.text })
+                elseif event.type == "tool" then
+                    if not items[#items] or items[#items].type ~= "tool" then
+                        items[#items + 1] = { type = "tool" }
+                    end
+                elseif event.type == "finish" then
+                    if finish then
+                        provider_failure("assistant returned multiple finish events")
+                    end
+                    finish = event
+                else
+                    provider_failure("unknown chat event")
+                end
+            end
+            if not finish then
+                provider_failure("assistant returned no finish event")
+            end
+            if #finish.tool_calls > 0 then
+                if finish.reason ~= "tool_calls" or #finish.tool_calls ~= 1 then
+                    provider_failure(
+                        finish.reason ~= "tool_calls"
+                                and "assistant returned tool data without tool_calls finish reason"
+                            or "assistant must return exactly one tool call"
+                    )
+                end
+                if not items[#items] or items[#items].type ~= "tool" then
+                    items[#items + 1] = { type = "tool" }
+                end
+                items[#items].call = finish.tool_calls[1]
+            elseif finish.reason == "tool_calls" then
+                provider_failure("assistant returned no completed tool call")
+            end
+            if #items == 0 then
+                provider_failure("assistant returned no completed item")
+            end
+
+            local assistant = { role = "assistant", content = null }
+            local content, reasoning, tool
+            for _, item in ipairs(items) do
+                if item.type == "reasoning" or item.type == "response" then
+                    item.text = table.concat(item.parts)
+                    local record = persist(state, "assistant", item.text)
+                    item.record = record
+                    if item.type == "reasoning" then
+                        reasoning = (reasoning or "") .. item.text
+                        emit(state, { type = "reasoning_complete", result = record.id })
+                    else
+                        content = (content or "") .. item.text
+                        emit(state, { type = "response_complete", result = record.id })
+                    end
+                else
+                    local parsed, tool_failure = completed_tool(item.call)
+                    if not parsed then
+                        provider_failure(tool_failure)
+                    end
+                    item.call = parsed
+                    local record = persist(state, "assistant", parsed.code)
+                    item.record = record
+                    tool = parsed
+                    emit(state, { type = "tool_call", code = parsed.code, result = record.id })
+                end
+            end
+            assistant.content = content or null
+            if reasoning then
+                assistant.reasoning_content = reasoning
+            end
+            if tool then
+                assistant.tool_calls = {
+                    {
+                        id = tool.id,
+                        type = "function",
+                        ["function"] = { name = "run_lua", arguments = tool.arguments },
+                    },
+                }
+            end
+            state.active[#state.active + 1] = assistant
+
+            local last = items[#items]
+            if last.type == "response" then
+                emit(state, { type = "store", result = last.record.id, start = state.start })
+                return last.text
+            elseif last.type == "tool" then
+                invoke(state, last.call.id, last.call.code)
             end
         end
     end
 
-    execute = function(request, actor, parent)
-        assert(type(request) == "string", "request must be text")
+    execute = function(request, actor, publish)
+        assert(type(request) == "string" and request ~= "", "request must be nonempty text")
         assert(type(actor) == "string" and actor ~= "", "actor must be nonempty text")
-        local snapshot = config.store:snapshot()
-        local selected = parent and parent.memory or config.memory:select({actor = actor, snapshot = snapshot, request = request})
-        local id = config.store:begin({
-            actor = actor,
-            parent = parent and parent.id,
-            snapshot = snapshot,
-            request = request,
-            memory = selected.slices,
-        })
+        local opening = config.store:begin(actor, request)
         local state = {
-            id = id,
             actor = actor,
-            snapshot = snapshot,
-            memory = selected,
-            messages = {{role = "user", content = request}},
+            start = opening.id,
+            request = request,
+            active = { { role = "user", content = request } },
+            publish = publish,
         }
-        return loop(state), state
-    end
-
-    local api = {name = config.name}
-    function api.ask(request, actor)
-        local result = execute(request, actor or config.actor, nil)
+        state.retrieval = config.retrieval:start(state.actor, state.start, state.request)
+        local ok, result = pcall(loop, state)
+        if not ok then
+            error(result, 0)
+        end
         return result
     end
-    return api
+
+    return {
+        name = config.name,
+        ask = function(request, actor)
+            local ok, failure = pcall(execute, request, actor, true)
+            if not ok then
+                error(failure, 0)
+            end
+        end,
+    }
 end
+
+return module

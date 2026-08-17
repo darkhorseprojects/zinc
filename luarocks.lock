@@ -1,0 +1,8 @@
+return {
+    dependencies = {
+        dkjson = "2.10-1",
+        lsqlite3 = "0.9.7-1",
+        ["lua-curl"] = "0.3.13-1",
+        luv = "1.51.0-1",
+    },
+}

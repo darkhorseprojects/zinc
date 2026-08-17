@@ -1,37 +1,73 @@
 local sqlite = require("lsqlite3")
-local json = require("dkjson")
 local uv = require("luv")
 
-local function encode(value)
-    local text, failure = json.encode(value)
-    if not text then error(failure) end
-    return text
-end
+local APPLICATION_ID = 1514753603
+local SCHEMA_VERSION = 1
 
 local function mkdir(path)
-    if uv.fs_stat(path) then return end
+    if uv.fs_stat(path) then
+        return
+    end
     local parent = path:match("^(.*)[/\\][^/\\]+$")
-    if parent and parent ~= "" and parent ~= path then mkdir(parent) end
+    if parent and parent ~= "" and parent ~= path then
+        mkdir(parent)
+    end
     local ok, failure, code = uv.fs_mkdir(path, 448)
-    if not ok then assert(code == "EEXIST" and uv.fs_stat(path), failure) end
+    assert(ok or code == "EEXIST" and uv.fs_stat(path), failure)
 end
 
-return function(config)
+local function tail(value, maximum)
+    if #value <= maximum then
+        return value
+    end
+    local first = #value - maximum + 1
+    while first <= #value and value:byte(first) >= 128 and value:byte(first) < 192 do
+        first = first + 1
+    end
+    return value:sub(first)
+end
+
+local function actor(value)
+    assert(type(value) == "string" and value ~= "", "actor must be nonempty text")
+    return value
+end
+
+local function integer(value, what)
+    local converted = math.tointeger(value)
+    assert(converted, what .. " must be an integer")
+    return converted
+end
+
+local function text(value, what)
+    assert(type(value) == "string" and value ~= "", what .. " must be nonempty text")
+    assert(utf8.len(value), what .. " must be valid UTF-8")
+    return value
+end
+
+local module = {}
+
+function module.open(config)
+    local maximum = integer(config.max_stored_record_bytes, "stored record budget")
+    assert(maximum >= 4, "stored record budget must be at least four bytes")
     local separator = package.config:sub(1, 1)
-    assert(config.store:match("^[^/\\]+$") and config.store ~= "." and config.store ~= "..", "store must be a local directory name")
-    local home = assert(os.getenv(separator == "\\" and "USERPROFILE" or "HOME"), "home directory is unavailable")
-    local directory = table.concat({home, ".agents", "zinc", config.store}, separator)
+    local path = assert(config.path, "Store path is required")
+    local absolute = separator == "\\" and (path:match("^%a:[/\\]") or path:match("^[/\\][/\\]")) or path:match("^/")
+    local directory = absolute and path or table.concat({ assert(uv.os_homedir()), ".agents", "zinc", path }, separator)
     mkdir(directory)
     local db = assert(sqlite.open(directory .. separator .. "zinc.sqlite3"))
-    db:busy_timeout(5000)
-    assert(db:load_extension(assert(package.searchpath("vec0", package.cpath))))
+    db:busy_handler(function()
+        uv.sleep(1)
+        return true
+    end)
 
     local function rows(sql, ...)
         local statement = assert(db:prepare(sql), db:errmsg())
         assert(statement:bind_values(...) == sqlite.OK, db:errmsg())
         local result = {}
-        for row in statement:nrows() do result[#result + 1] = row end
-        statement:finalize()
+        for row in statement:nrows() do
+            result[#result + 1] = row
+        end
+        assert(statement:finalize() == sqlite.OK, db:errmsg())
         return result
     end
 
@@ -39,189 +75,209 @@ return function(config)
         local statement = assert(db:prepare(sql), db:errmsg())
         assert(statement:bind_values(...) == sqlite.OK, db:errmsg())
         local code = statement:step()
-        statement:finalize()
+        assert(statement:finalize() == sqlite.OK, db:errmsg())
         assert(code == sqlite.DONE, db:errmsg())
     end
 
     local function transaction(work)
         assert(db:exec("BEGIN IMMEDIATE") == sqlite.OK, db:errmsg())
         local result = table.pack(pcall(work))
-        if not result[1] then db:exec("ROLLBACK"); error(result[2]) end
-        assert(db:exec("COMMIT") == sqlite.OK, db:errmsg())
+        if not result[1] then
+            db:exec("ROLLBACK")
+            error(result[2], 0)
+        end
+        if db:exec("COMMIT") ~= sqlite.OK then
+            local failure = db:errmsg()
+            db:exec("ROLLBACK")
+            error(failure, 0)
+        end
         return table.unpack(result, 2, result.n)
     end
 
-    local function slice(row)
-        local value = json.decode(row.data)
-        value.idx, value.run, value.actor = row.idx, row.run, row.actor
-        return value
+    local journal
+    repeat
+        journal = db:exec("PRAGMA journal_mode=WAL; PRAGMA synchronous=FULL; PRAGMA foreign_keys=ON;")
+        if journal == sqlite.BUSY or journal == sqlite.LOCKED then
+            uv.sleep(1)
+        end
+    until journal ~= sqlite.BUSY and journal ~= sqlite.LOCKED
+    assert(journal == sqlite.OK, db:errmsg())
+
+    assert(db:exec("BEGIN IMMEDIATE") == sqlite.OK, db:errmsg())
+    local existing = rows("SELECT name FROM sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%'")
+    if #existing > 0 then
+        assert(rows("PRAGMA application_id")[1].application_id == APPLICATION_ID, "Store application ID is unsupported")
+        assert(rows("PRAGMA user_version")[1].user_version == SCHEMA_VERSION, "Store schema version is unsupported")
+        local allowed = {
+            results = true,
+            result_fts = true,
+            result_fts_data = true,
+            result_fts_idx = true,
+            result_fts_content = true,
+            result_fts_docsize = true,
+            result_fts_config = true,
+        }
+        local present = {}
+        for _, row in ipairs(existing) do
+            assert(allowed[row.name], "Store contains an unsupported table: " .. row.name)
+            present[row.name] = true
+        end
+        assert(present.results and present.result_fts, "Store schema is incomplete")
+        local columns = rows("PRAGMA table_info(results)")
+        local expected = { "id", "actor", "start", "role", "text" }
+        assert(#columns == #expected, "Store results schema is unsupported")
+        for index, name in ipairs(expected) do
+            assert(columns[index].name == name, "Store results schema is unsupported")
+        end
+        local definition = rows("SELECT sql FROM sqlite_master WHERE type='table' AND name='result_fts'")[1]
+        assert(definition and definition.sql:find("remove_diacritics 0", 1, true), "Store FTS tokenizer is unsupported")
     end
 
-    local function edge(run, direction)
-        local row = rows("SELECT idx,run,actor,data FROM slices WHERE run=? ORDER BY idx " .. direction .. " LIMIT 1", run)[1]
-        return row and slice(row)
+    assert(db:exec(string.format(
+        [[
+CREATE TABLE IF NOT EXISTS results(
+    id INTEGER PRIMARY KEY,
+    actor TEXT NOT NULL,
+    start INTEGER NOT NULL,
+    role TEXT NOT NULL CHECK(role IN ('user','assistant','tool')),
+    text TEXT NOT NULL CHECK(length(text) > 0),
+    UNIQUE(id,actor),
+    FOREIGN KEY(start,actor) REFERENCES results(id,actor),
+    CHECK((role='user' AND id=start) OR (role<>'user' AND id<>start))
+) STRICT;
+CREATE INDEX IF NOT EXISTS results_by_actor_id ON results(actor,id);
+CREATE INDEX IF NOT EXISTS results_by_actor_start_id ON results(actor,start,id);
+CREATE VIRTUAL TABLE IF NOT EXISTS result_fts USING fts5(
+    actor UNINDEXED,
+    text,
+    content='results',
+    content_rowid='id',
+    tokenize='unicode61 remove_diacritics 0'
+);
+CREATE TRIGGER IF NOT EXISTS results_fts_insert AFTER INSERT ON results BEGIN
+    INSERT INTO result_fts(rowid,actor,text) VALUES(new.id,new.actor,new.text);
+END;
+PRAGMA application_id=%d;
+PRAGMA user_version=%d;
+]],
+        APPLICATION_ID,
+        SCHEMA_VERSION
+    )) == sqlite.OK, db:errmsg())
+    assert(db:exec("COMMIT") == sqlite.OK, db:errmsg())
+
+    local function insert(who, start, role, value)
+        value = tail(text(value, "record text"), maximum)
+        execute("INSERT INTO results(actor,start,role,text) VALUES(?,?,?,?)", actor(who), start, role, value)
+        return rows("SELECT id,actor,start,role,text FROM results WHERE id=?", db:last_insert_rowid())[1]
     end
 
-    local function status(run)
-        local value = edge(run, "DESC")
-        if not value then return nil end
-        return (value.type == "response" and value.source == "zinc") and "complete" or "incomplete"
-    end
-
-    local function insert(run, value)
-        local origin = assert(edge(run, "ASC"), "Run does not exist")
-        execute("INSERT INTO slices(run,actor,data) VALUES(?,?,?)", run, origin.actor, encode(value))
-        return db:last_insert_rowid()
-    end
-
-    local code
-    for _ = 1, 5 do
-        code = db:exec("PRAGMA journal_mode=WAL; PRAGMA synchronous=FULL;")
-        if code == sqlite.OK or code ~= sqlite.BUSY and code ~= sqlite.LOCKED then break end
-        uv.sleep(50)
-    end
-    assert(code == sqlite.OK, db:errmsg())
-    local schema = [[
-CREATE TABLE IF NOT EXISTS slices(idx INTEGER PRIMARY KEY AUTOINCREMENT, run INTEGER NOT NULL, actor TEXT NOT NULL, data TEXT NOT NULL CHECK(json_valid(data))) STRICT;
-CREATE INDEX IF NOT EXISTS slices_by_run ON slices(run,idx);
-CREATE VIRTUAL TABLE IF NOT EXISTS slice_vec USING vec0(idx INTEGER PRIMARY KEY, actor TEXT PARTITION KEY, embedding float[1024]);
-PRAGMA application_id=1514753603; PRAGMA user_version=4;
-]]
-    transaction(function()
-        local app = rows("PRAGMA application_id")[1].application_id
-        local ver = rows("PRAGMA user_version")[1].user_version
-        local occupied = rows("SELECT count(*) count FROM sqlite_master WHERE name NOT LIKE 'sqlite_%'")[1].count > 0
-        if app ~= 0 and app ~= 1514753603 or app == 0 and occupied or ver ~= 0 and ver ~= 4 then error("unsupported Zinc Store") end
-        assert(db:exec(schema) == sqlite.OK, db:errmsg())
-    end)
-
-    local complete = [[(
-        json_extract((SELECT data FROM slices z WHERE z.run=s.run ORDER BY z.idx DESC LIMIT 1),'$.type')='merged'
-        OR (
-            json_extract((SELECT data FROM slices z WHERE z.run=s.run ORDER BY z.idx DESC LIMIT 1),'$.type')='response'
-            AND json_extract((SELECT data FROM slices z WHERE z.run=s.run ORDER BY z.idx DESC LIMIT 1),'$.source')='zinc'
-        )
-    )]]
     local api = {}
 
-    function api:snapshot()
-        local row = rows("SELECT seq value FROM sqlite_sequence WHERE name='slices'")[1]
-        return row and row.value or 0
-    end
-
-    function api:begin(spec)
-        assert(type(spec.request) == "string", "request must be text")
-        assert(type(spec.actor) == "string" and spec.actor ~= "", "actor must be nonempty text")
-        assert(type(spec.snapshot) == "number" and spec.snapshot >= 0, "snapshot is invalid")
+    function api:begin(who, request)
+        who, request = actor(who), text(request, "request")
+        local value = tail(request, maximum)
         return transaction(function()
-            if spec.parent ~= nil then assert(status(spec.parent) == "incomplete", "parent Run is not active") end
-            local data = encode({type = "request", parent = spec.parent or json.null, snapshot = spec.snapshot, value = spec.request, memory = spec.memory or {}})
-            execute("INSERT INTO slices(run,actor,data) VALUES(0,?,?)", spec.actor, data)
-            local run = db:last_insert_rowid()
-            execute("UPDATE slices SET run=? WHERE idx=?", run, run)
-            return run
+            local id = rows("SELECT coalesce(max(id),0)+1 id FROM results")[1].id
+            execute("INSERT INTO results(id,actor,start,role,text) VALUES(?,?,?,'user',?)", id, who, id, value)
+            return rows("SELECT id,actor,start,role,text FROM results WHERE id=?", id)[1]
         end)
     end
 
-    function api:append(run, event)
-        assert(status(run) == "incomplete", "Run is not active")
-        assert(type(event) == "table" and event.type and event.source, "invalid event")
-        return insert(run, event)
+    function api:append(who, start, role, value)
+        start = integer(start, "start")
+        assert(role == "assistant" or role == "tool", "result role must be assistant or tool")
+        return insert(who, start, role, value)
     end
 
-    function api:merge(child, parent, request)
-        assert(request == nil or type(request) == "string", "request must be text")
-        return transaction(function()
-            assert(status(parent) == "incomplete", "parent Run is not active")
-            local head, tail = edge(child, "ASC"), edge(child, "DESC")
-            assert(head and head.parent == parent and tail and tail.type == "response" and tail.source == "zinc", "child Run cannot be merged")
-            local events = {}
-            for _, row in ipairs(rows("SELECT idx,run,actor,data FROM slices WHERE run=? AND idx>? ORDER BY idx", child, head.idx)) do
-                events[#events + 1] = slice(row)
+    function api:read(who, start, id)
+        return rows(
+            "SELECT id,actor,start,role,text FROM results WHERE actor=? AND id=? AND id<?",
+            actor(who),
+            integer(id, "result id"),
+            integer(start, "start")
+        )[1]
+    end
+
+    function api:around(who, start, id)
+        who, start, id = actor(who), integer(start, "start"), integer(id, "result id")
+        local current = self:read(who, start, id)
+        if not current then
+            return nil
+        end
+        local previous = rows(
+            "SELECT id,actor,start,role,text FROM results WHERE actor=? AND id<? ORDER BY id DESC LIMIT 1",
+            who,
+            id
+        )[1]
+        local following = rows(
+            "SELECT id,actor,start,role,text FROM results WHERE actor=? AND id>? AND id<? ORDER BY id LIMIT 1",
+            who,
+            id,
+            start
+        )[1]
+        return { previous = previous, current = current, next = following }
+    end
+
+    function api:before(who, start, visit)
+        who, start = actor(who), integer(start, "start")
+        assert(type(visit) == "function", "history visitor must be a function")
+        local statement = assert(
+            db:prepare("SELECT id,actor,start,role,text FROM results WHERE actor=? AND id<? ORDER BY id DESC"),
+            db:errmsg()
+        )
+        assert(statement:bind_values(who, start) == sqlite.OK, db:errmsg())
+        local result = table.pack(pcall(function()
+            for row in statement:nrows() do
+                if visit(row) == false then
+                    break
+                end
             end
-            return insert(parent, {type = "merged", child = child, request = request or json.null, events = events})
-        end)
-    end
-
-    function api:discard(child, parent)
-        transaction(function()
-            local origin = edge(child, "ASC")
-            assert(origin and origin.parent == parent and status(child) ~= "merged" and status(parent) == "incomplete", "child Run cannot be discarded")
-            local tree = "WITH RECURSIVE tree(run) AS (SELECT ? UNION ALL SELECT s.run FROM slices s JOIN tree t ON json_extract(s.data,'$.parent')=t.run WHERE json_extract(s.data,'$.type')='request') "
-            execute(tree .. "DELETE FROM slice_vec WHERE idx IN (SELECT idx FROM slices WHERE run IN tree)", child)
-            execute(tree .. "DELETE FROM slices WHERE run IN tree", child)
-        end)
-    end
-
-    function api:tail(actor, snapshot, maximum)
-        local sql = "SELECT s.idx,s.run,s.actor,s.data FROM slices s WHERE s.actor=? AND s.idx<=? AND " .. complete .. " ORDER BY s.idx DESC"
-        local result, size = {}, 0
-        for _, row in ipairs(rows(sql, actor, snapshot)) do
-            if size + #row.data > maximum then break end
-            size = size + #row.data; result[#result + 1] = slice(row)
+        end))
+        local finalized = statement:finalize()
+        assert(finalized == sqlite.OK, db:errmsg())
+        if not result[1] then
+            error(result[2], 0)
         end
-        local ordered = {}
-        for index = #result, 1, -1 do ordered[#ordered + 1] = result[index] end
-        return ordered, size
     end
 
-    function api:missing(ids)
-        if #ids == 0 then return {} end
-        local missing = {}
-        for _, row in ipairs(rows("SELECT value idx FROM json_each(?) WHERE value NOT IN (SELECT idx FROM slice_vec)", encode(ids))) do missing[#missing + 1] = row.idx end
-        return missing
-    end
-
-    function api:index(values)
-        transaction(function()
-            for _, value in ipairs(values) do execute("INSERT OR REPLACE INTO slice_vec(idx,actor,embedding) VALUES(?,?,?)", value.idx, value.actor, encode(value.vector)) end
-        end)
-    end
-
-    function api:nearest(vector, actor, first, snapshot, limit)
-        if limit <= 0 then return {} end
-        local sql = "SELECT idx, distance FROM slice_vec WHERE actor=? AND embedding MATCH ? AND k=?"
-        local results = {}
-        for _, row in ipairs(rows(sql, actor, encode(vector), limit)) do
-            if row.idx >= first and row.idx <= snapshot then results[#results + 1] = row end
+    function api:search(who, start, terms, limit)
+        who, start = actor(who), integer(start, "start")
+        limit = integer(limit, "search result limit")
+        assert(limit > 0, "search result limit must be positive")
+        assert(type(terms) == "table", "search terms must be a table")
+        local literals, seen = {}, {}
+        for _, term in ipairs(terms) do
+            assert(type(term) == "string", "search term must be text")
+            local normalized = term:match("^%s*(.-)%s*$")
+            local key = normalized:lower()
+            if normalized ~= "" and not seen[key] then
+                seen[key] = true
+                literals[#literals + 1] = '"' .. normalized:gsub('"', '""') .. '"'
+            end
         end
-        return results
-    end
-
-    function api:fetch(ids, actor, snapshot)
-        if #ids == 0 then return {} end
-        local found = {}
-        local sql = "SELECT s.idx,s.run,s.actor,s.data FROM slices s WHERE s.idx IN (SELECT value FROM json_each(?)) AND s.actor=? AND s.idx<=? AND " .. complete
-        for _, row in ipairs(rows(sql, encode(ids), actor, snapshot)) do found[row.idx] = slice(row) end
-        local result = {}
-        for _, idx in ipairs(ids) do if found[idx] then result[#result + 1] = found[idx] end end
-        return result
-    end
-
-    function api:slice(idx)
-        local row = rows("SELECT idx,run,actor,data FROM slices WHERE idx=?", idx)[1]
-        return row and slice(row) or nil
-    end
-
-    function api:run(runId)
-        local sql = "SELECT s.idx,s.run,s.actor,s.data FROM slices s WHERE s.run=? ORDER BY s.idx"
-        local result = {}
-        for _, row in ipairs(rows(sql, runId)) do result[#result + 1] = slice(row) end
-        return result
-    end
-
-    function api:visibleSlice(actor, snapshot, idx) return self:fetch({idx}, actor, snapshot)[1] end
-
-    function api:visibleRun(actor, snapshot, run, maximum)
-        local sql = "SELECT s.idx,s.run,s.actor,s.data FROM slices s WHERE s.actor=? AND s.idx<=? AND (s.run=? OR (json_extract(s.data,'$.type')='merged' AND json_extract(s.data,'$.child')=?)) AND " .. complete .. " ORDER BY s.idx"
-        local result, size = {}, 0
-        for _, row in ipairs(rows(sql, actor, snapshot, run, run)) do
-            assert(size + #row.data <= maximum, "Run exceeds store_bytes")
-            size = size + #row.data; result[#result + 1] = slice(row)
+        if #literals == 0 then
+            return {}
         end
-        return result
+        return rows(
+            [[
+SELECT r.id,r.actor,r.start,r.role,r.text,bm25(result_fts) lexical_score
+FROM result_fts JOIN results r ON r.id=result_fts.rowid
+WHERE result_fts MATCH ? AND result_fts.actor=? AND r.id<?
+ORDER BY lexical_score,r.id
+LIMIT ?
+]],
+            table.concat(literals, " OR "),
+            who,
+            start,
+            limit
+        )
     end
 
-    function api:close() assert(db:close() == sqlite.OK) end
+    function api:close()
+        assert(db:close() == sqlite.OK, "close Zinc Store failed")
+    end
+
     return api
 end
+
+return module

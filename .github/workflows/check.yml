@@ -1,74 +1,64 @@
-name: Check
+name: check
 
 on:
-  pull_request:
   push:
     branches: [main]
+  pull_request:
+  workflow_call:
 
 permissions:
   contents: read
 
-env:
-  LUA_PATH: /usr/local/share/lua/5.5/?.lua;/usr/local/share/lua/5.5/?/init.lua;;
-  LUA_CPATH: /usr/local/lib/lua/5.5/?.so;;
-
 jobs:
   check:
-    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest, windows-latest]
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 90
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
         with:
           path: zinc
-      - uses: actions/checkout@v4
+          persist-credentials: false
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
         with:
           repository: darkhorseprojects/portable-agents
-          ref: 9f2813f667415e2f80466a173eb773ffcc90d7fb
+          ref: v1.0.0
           path: portable-agents
-      - uses: dtolnay/rust-toolchain@stable
-      - uses: actions/setup-python@v5
+          persist-credentials: false
+      - uses: luau-project/setup-lua@c47c002fc60841a11b22ef3058c86a3d08acf218
         with:
-          python-version: "3.12"
-      - name: Install build dependencies
-        run: sudo apt-get update && sudo apt-get install -y build-essential cmake libcurl4-openssl-dev libsqlite3-dev unzip
-      - name: Build Lua 5.5
+          lua-version: 5.5.0
+          luarocks-version: 3.12.2
+      - uses: dtolnay/rust-toolchain@46511b1c83438f0dd37c02d843619ece5a4abb5b
+        with:
+          toolchain: 1.97.1
+      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065
+        with:
+          python-version: "3.12.12"
+      - if: runner.os == 'Linux'
+        run: sudo apt-get update && sudo apt-get install -y libcurl4-openssl-dev libsqlite3-dev
+      - if: runner.os == 'macOS'
+        run: brew install curl sqlite3
+      - if: runner.os == 'Windows'
+        shell: pwsh
         run: |
-          curl -fsSLO https://www.lua.org/ftp/lua-5.5.0.tar.gz
-          echo '57ccc32bbbd005cab75bcc52444052535af691789dba2b9016d5c50640d68b3d  lua-5.5.0.tar.gz' | sha256sum -c -
-          tar -xzf lua-5.5.0.tar.gz
-          make -C lua-5.5.0 linux MYCFLAGS=-fPIC
-          sudo make -C lua-5.5.0 install
-          sudo cc -shared -o /usr/local/lib/liblua.so.5.5 -Wl,--whole-archive lua-5.5.0/liblua.a -Wl,--no-whole-archive -lm -ldl
-          sudo ln -s liblua.so.5.5 /usr/local/lib/liblua.so
-          sudo ldconfig
-      - name: Install LuaRocks and modules
-        run: |
-          git clone --depth 1 --branch v3.12.2 https://github.com/luarocks/luarocks.git
-          cd luarocks
-          ./configure --with-lua=/usr/local --lua-version=5.5
-          make
-          sudo make install
-          sudo luarocks --lua-version=5.5 install dkjson 2.10-1
-          sudo luarocks --lua-version=5.5 install lsqlite3complete 0.9.6-1
-          sudo luarocks --lua-version=5.5 install lua-curl 0.3.13-1
-          sudo luarocks --lua-version=5.5 install luv 1.51.0-1
-      - name: Build sqlite-vec
-        run: |
-          curl -LfsS https://github.com/asg017/sqlite-vec/archive/refs/tags/v0.1.7.tar.gz -o sqlite-vec.tar.gz
-          echo 'd58330f3f5ee2809cf5bc289f134dda9d9dddc23a4fa63bf76f88b44e402e580  sqlite-vec.tar.gz' | sha256sum -c -
-          tar -xzf sqlite-vec.tar.gz
-          make -C sqlite-vec-0.1.7 loadable
-          sudo install -m 755 sqlite-vec-0.1.7/dist/vec0.so /usr/local/lib/lua/5.5/vec0.so
-      - name: Build Portable Agents
-        working-directory: portable-agents
-        run: cargo build --locked --release
-      - name: Check Zinc
+          vcpkg install curl:x64-windows sqlite3:x64-windows
+          "CMAKE_PREFIX_PATH=$env:VCPKG_INSTALLATION_ROOT\installed\x64-windows" >> $env:GITHUB_ENV
+          "$env:VCPKG_INSTALLATION_ROOT\installed\x64-windows\bin" >> $env:GITHUB_PATH
+      - name: Install LuaSQLite3 from verified source
         working-directory: zinc
+        run: python tools/install_lsqlite3.py
+      - name: Install locked Lua modules
+        working-directory: zinc
+        run: luarocks --lua-version=5.5 make --only-deps zinc-dev-1.0-1.rockspec
+      - run: cargo install stylua --version 2.5.2 --locked
+      - run: python -m pip install pytest==9.0.3
+      - working-directory: portable-agents
+        run: cargo build --locked
+      - working-directory: zinc
         env:
-          AGENT: ${{ github.workspace }}/portable-agents/target/release/agent
-        run: |
-          lua -e "for _,p in ipairs({'builder.lua','format-discord.lua','src/env.lua','src/sglang.lua','src/memory.lua','src/run.lua','src/store.lua'}) do assert(loadfile(p),p) end"
-          "$AGENT" check --directory . --entry zinc.md
-          python3 test/lines.py
-          for suite in store memory sglang run environment builder format_discord integration concurrency; do
-            python3 "test/$suite.py"
-          done
+          AGENT: ${{ github.workspace }}/portable-agents/target/debug/agent${{ runner.os == 'Windows' && '.exe' || '' }}
+        run: python tools/check.py

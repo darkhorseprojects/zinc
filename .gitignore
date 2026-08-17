@@ -5,3 +5,5 @@ user.md
 __pycache__/
 agent-connector.yaml
 .agent-connector*
+.venv*/
+.pytest_cache/
