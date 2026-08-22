@@ -100,8 +100,8 @@ def test_complete_zinc_execution_persists_each_completed_result():
         (package.package / "zinc.md").write_text(source)
         output = success(package.run(
             "zinc.md", input=b"integration", arguments=("discord-42",),
-            authorize=("src.host", "src.store", "src.models"),
-            register={"host": "host.md", "design": "design.md", "unknown": "unknown.md"}, timeout=60,
+            trusted=("src.host", "src.store", "src.models"),
+            mounts={"host": "host.md", "design": "design.md", "unknown": "unknown.md"}, timeout=60,
         ))
         events = [json.loads(line) for line in output.stdout.splitlines()]
         assert [event["type"] for event in events] == [
@@ -110,7 +110,7 @@ def test_complete_zinc_execution_persists_each_completed_result():
         ]
         assert events[0] == {"type": "reasoning", "text": "checking"}
         assert all(fragment in events[3]["text"] for fragment in [
-            '"unknown":"available"', '"discovered":true', '"source_ok":false', '"system_ok":false'
+            '"unknown":"available"', '"discovered":true', '"source_ok":true', '"system_ok":false'
         ])
         assert events[4:6] == [{"type": "response", "text": "fin"}, {"type": "response", "text": "ished"}]
         assert events[-1] == {"type": "store", "result": 7, "start": 1}

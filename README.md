@@ -56,14 +56,15 @@ versions are in [`zinc-dev-1.0-1.rockspec`](zinc-dev-1.0-1.rockspec) and [`luaro
 
 ```sh
 agent check --directory . --entry zinc.md \
-  --register host=host.md design=design.md \
-  --authorize src.host src.models src.store
+  --mount host=host.md --mount design=design.md \
+  --trust src.host --trust src.models --trust src.store \
+  --lua-memory 96MiB --timeout 30s
 
 printf 'Inspect this workspace.' | agent run \
   --directory . --entry zinc.md \
-  --register host=host.md design=design.md \
-  --authorize src.host src.models src.store \
-  --memory 96MiB --timeout 30s -- "$USER"
+  --mount host=host.md --mount design=design.md \
+  --trust src.host --trust src.models --trust src.store \
+  --lua-memory 96MiB --timeout 30s -- "$USER"
 ```
 
 The final argument is the stable actor ID. Canonical NDJSON events are provisional `reasoning`/`response` chunks,

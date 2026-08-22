@@ -116,13 +116,6 @@ local zinc = require("src.run").new({
     retrieval = retrieval,
 })
 
-for name in pairs(package.loaded) do
-    if name == "src" or name:match("^src%.") then package.loaded[name] = nil end
-end
-package.path, package.cpath = "", ""
-package.searchers, package.preload = {}, nil
-package.loadlib, package.searchpath = nil, nil
-
 local input, actor = ...
 if input == nil then return zinc end
 assert(type(actor) == "string" and actor ~= "", "actor is required")

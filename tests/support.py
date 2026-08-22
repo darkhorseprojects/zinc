@@ -6,7 +6,7 @@ import subprocess
 import tempfile
 
 ROOT = pathlib.Path(__file__).resolve().parents[1]
-AGENT = pathlib.Path(os.environ.get("AGENT", ROOT.parent / "portable-agents/target/debug/agent")).resolve()
+AGENT = pathlib.Path(os.environ.get("AGENT", ROOT.parent / "portable-agents/zig-out/bin/agent")).resolve()
 LUA_SHARE = pathlib.Path.home() / ".local/share/lua/5.5"
 LUA_LIB = pathlib.Path.home() / ".local/lib/lua/5.5"
 LUA_EXTENSION = "dll" if os.name == "nt" else "so"
@@ -38,31 +38,33 @@ class Package:
     def close(self):
         self.temporary.cleanup()
 
-    def run(self, entry, *, input=b"", arguments=(), authorize=(), register=None, timeout=30, deadline="30s"):
+    def run(self, entry, *, input=b"", arguments=(), trusted=(), mounts=None, timeout=30, deadline="30s"):
         command = [str(AGENT), "run", "--directory", str(self.package), "--entry", entry]
-        if register:
-            command += ["--register", *(f"{name}={path}" for name, path in register.items())]
-        if authorize:
-            command += ["--authorize", *authorize]
-        command += ["--memory", "96MiB", "--timeout", deadline]
+        if mounts:
+            for name, path in mounts.items():
+                command += ["--mount", f"{name}={path}"]
+        if trusted:
+            for name in trusted:
+                command += ["--trust", name]
+        command += ["--lua-memory", "96MiB", "--timeout", deadline]
         if arguments:
             command += ["--", *arguments]
         return subprocess.run(command, input=input, cwd=self.work, env=self.environment, stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=timeout, check=False)
 
-    def lua(self, source, authorize=(), timeout=30, deadline="30s"):
+    def lua(self, source, trusted=(), timeout=30, deadline="30s"):
         entry = "_test.lua"
         (self.package / "_json.lua").write_text("return require('dkjson')\n", encoding="utf-8")
         (self.package / entry).write_text("local json=require('dkjson')\nlocal value=(function()\n" + source + "\nend)()\ncoroutine.yield(assert(json.encode(value)))\n", encoding="utf-8")
-        result = self.run(entry, register={"dkjson": "_json.lua"}, authorize=("dkjson", "_test", *authorize), timeout=timeout, deadline=deadline)
+        result = self.run(entry, mounts={"dkjson": "_json.lua"}, trusted=("dkjson", "_test", *trusted), timeout=timeout, deadline=deadline)
         if result.returncode:
             raise AssertionError(result.stderr.decode())
         return json.loads(result.stdout)
 
-    def lua_stream(self, source, authorize=(), timeout=30, deadline="30s"):
+    def lua_stream(self, source, trusted=(), timeout=30, deadline="30s"):
         entry = "_stream.lua"
         (self.package / "_json.lua").write_text("return require('dkjson')\n", encoding="utf-8")
         (self.package / entry).write_text(source, encoding="utf-8")
-        result = self.run(entry, register={"dkjson": "_json.lua"}, authorize=("dkjson", "_stream", *authorize), timeout=timeout, deadline=deadline)
+        result = self.run(entry, mounts={"dkjson": "_json.lua"}, trusted=("dkjson", "_stream", *trusted), timeout=timeout, deadline=deadline)
         if result.returncode:
             raise AssertionError(result.stderr.decode())
         return [json.loads(line) for line in result.stdout.splitlines()]

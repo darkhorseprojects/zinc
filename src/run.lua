@@ -53,7 +53,12 @@ function module.new(config)
     end
 
     local function generated(state)
-        return {
+        local loaded = {}
+        for name, value in pairs(package.loaded) do
+            loaded[name] = value
+        end
+        loaded.results = results(state)
+        local environment = {
             assert = assert,
             error = error,
             ipairs = ipairs,
@@ -71,9 +76,14 @@ function module.new(config)
             string = copy(string),
             table = copy(table),
             utf8 = copy(utf8),
-            require = require,
-            package = { loaded = package.loaded },
+            package = { loaded = loaded },
         }
+        environment.require = function(name)
+            local value = loaded[name]
+            if value ~= nil then return value end
+            return require(name)
+        end
+        return environment
     end
 
     local function output(value)
@@ -87,8 +97,6 @@ function module.new(config)
     end
 
     local function invoke(state, id, code)
-        local previous_results = package.loaded.results
-        package.loaded.results = results(state)
         local execution = table.pack(pcall(function()
             local chunk, problem = load(code, "run_lua", "t", generated(state))
             if not chunk then
@@ -110,7 +118,6 @@ function module.new(config)
             local ok, text = pcall(output, resumed[2])
             return ok, ok and text or clean_error(text)
         end))
-        package.loaded.results = previous_results
         if not execution[1] then
             error(execution[2], 0)
         end

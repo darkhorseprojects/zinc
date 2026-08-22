@@ -20,7 +20,7 @@ coroutine.yield(tostring(request.id)..':'..tostring(result.id))
 ''')
 
         def write(entry):
-            output = package.run(entry, authorize=(entry.removesuffix(".lua"), "src.store"), timeout=30)
+            output = package.run(entry, trusted=(entry.removesuffix(".lua"), "src.store"), timeout=30)
             return tuple(map(int, success(output).stdout.decode().split(":")))
 
         with concurrent.futures.ThreadPoolExecutor(max_workers=len(entries)) as pool:

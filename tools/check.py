@@ -29,9 +29,9 @@ def main() -> None:
     for entry in MARKDOWN_FILES:
         run(
             AGENT, "check", "--directory", str(ROOT), "--entry", entry.name,
-            "--register", "host=host.md", "design=design.md",
-            "--authorize", "src.host", "src.models", "src.store",
-            "--memory", "96MiB", "--timeout", "30s",
+            "--mount", "host=host.md", "--mount", "design=design.md",
+            "--trust", "src.host", "--trust", "src.models", "--trust", "src.store",
+            "--lua-memory", "96MiB", "--timeout", "30s",
         )
 
     test_python = os.environ.get("ZINC_TEST_PYTHON", sys.executable)
