@@ -80,7 +80,9 @@ function module.new(config)
         }
         environment.require = function(name)
             local value = loaded[name]
-            if value ~= nil then return value end
+            if value ~= nil then
+                return value
+            end
             return require(name)
         end
         return environment

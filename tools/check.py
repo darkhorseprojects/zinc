@@ -7,7 +7,7 @@ import subprocess
 import sys
 
 ROOT = pathlib.Path(__file__).resolve().parents[1]
-AGENT = os.environ.get("AGENT", str(ROOT.parent / "portable-agents" / "target" / "debug" / ("agent.exe" if os.name == "nt" else "agent")))
+AGENT = os.environ.get("AGENT", str(ROOT.parent / "portable-agents" / "zig-out" / "bin" / ("agent.exe" if os.name == "nt" else "agent")))
 LUA_FILES = sorted(ROOT.glob("src/**/*.lua"))
 MARKDOWN_FILES = [ROOT / "zinc.md"]
 

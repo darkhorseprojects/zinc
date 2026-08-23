@@ -71,6 +71,12 @@ The final argument is the stable actor ID. Canonical NDJSON events are provision
 durable completion IDs, durable tool calls/results, and terminal `{ "type":"store", "result":N, "start":M }`.
 Failed executions emit no synthetic terminal event.
 
+Each command starts one disposable `agent` process and one fresh Lua state. `--lua-memory` limits Lua allocator traffic
+and separately bounds stdin length; it is not an RSS limit. `--timeout` is armed inside that process before package work
+and hard-exits it with status 124 if Lua, a model request, native SQLite, or output blocks past the deadline. External
+measurement also includes process startup and caller wake-up, so 30 seconds is a lower bound rather than an exact
+end-to-end observation. Hard expiration skips finalizers and does not terminate descendants created by trusted code.
+
 ## Check
 
 ```sh

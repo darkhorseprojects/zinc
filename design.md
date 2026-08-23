@@ -38,7 +38,7 @@ Nested requests are ordinary durable chronological work. Do not invent parent tr
 
 ### Failure behavior
 
-For each external dependency, state what failure means. Tool mistakes may be returned to the model for correction. Provider, stopping, authority, persistence, and containment failures must not be converted into successful answers. Do not add synthetic fallbacks that conceal missing evidence or broken services.
+For each external dependency, state what failure means. Tool mistakes may be returned to the model for correction. Provider, stopping, authority, persistence, and deadline failures must not be converted into successful answers. Do not add synthetic fallbacks that conceal missing evidence or broken services.
 
 ### Dependencies and platforms
 
@@ -46,7 +46,7 @@ Name required runtimes, native libraries, services, model files, versions, and s
 
 ### Behavioral acceptance
 
-Test boundaries a user could actually depend on: exact authority, generated-state isolation, file and command policy, process-tree cleanup, cancellation, actor concurrency, completed-record persistence, later failure, retrieval quality, context bounds, and final delivery. Prefer real adjacent components over tests that merely reproduce a helper's branches.
+Test boundaries a user could actually depend on: exact authority, generated-state isolation, file and command policy, direct-process deadlines, cancellation, actor concurrency, completed-record persistence, later failure, retrieval quality, context bounds, and final delivery. Prefer real adjacent components over tests that merely reproduce a helper's branches.
 
 ### Completion checklist
 
@@ -61,7 +61,7 @@ Before declaring the package complete, verify:
 - generated code receives only the intended values;
 - dependencies and platforms are pinned and checked;
 - behavioral tests prove the acceptance criteria;
-- installation, checking, cancellation, and cleanup work in a real worker.
+- installation, checking, cancellation, and deadlines work in a real disposable process.
 
 ## Program
 
