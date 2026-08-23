@@ -46,7 +46,7 @@ Name required runtimes, native libraries, services, model files, versions, and s
 
 ### Behavioral acceptance
 
-Test boundaries a user could actually depend on: exact authority, generated-state isolation, file and command policy, direct-process deadlines, cancellation, actor concurrency, completed-record persistence, later failure, retrieval quality, context bounds, and final delivery. Prefer real adjacent components over tests that merely reproduce a helper's branches.
+Test boundaries a user could actually depend on: exact authority, generated-state isolation, file and command policy, caller-owned process deadlines, cancellation, actor concurrency, completed-record persistence, later failure, retrieval quality, context bounds, and final delivery. Prefer real adjacent components over tests that merely reproduce a helper's branches.
 
 ### Completion checklist
 
@@ -61,7 +61,7 @@ Before declaring the package complete, verify:
 - generated code receives only the intended values;
 - dependencies and platforms are pinned and checked;
 - behavioral tests prove the acceptance criteria;
-- installation, checking, cancellation, and deadlines work in a real disposable process.
+- installation, checking, cancellation, and caller supervision work with a real disposable process.
 
 ## Program
 

@@ -38,7 +38,7 @@ class Package:
     def close(self):
         self.temporary.cleanup()
 
-    def run(self, entry, *, input=b"", arguments=(), trusted=(), mounts=None, timeout=30, deadline="30s"):
+    def run(self, entry, *, input=b"", arguments=(), trusted=(), mounts=None, timeout=30):
         command = [str(AGENT), "run", "--directory", str(self.package), "--entry", entry]
         if mounts:
             for name, path in mounts.items():
@@ -46,25 +46,25 @@ class Package:
         if trusted:
             for name in trusted:
                 command += ["--trust", name]
-        command += ["--lua-memory", "96MiB", "--timeout", deadline]
+        command += ["--lua-memory", "96MiB"]
         if arguments:
             command += ["--", *arguments]
         return subprocess.run(command, input=input, cwd=self.work, env=self.environment, stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=timeout, check=False)
 
-    def lua(self, source, trusted=(), timeout=30, deadline="30s"):
+    def lua(self, source, trusted=(), timeout=30):
         entry = "_test.lua"
         (self.package / "_json.lua").write_text("return require('dkjson')\n", encoding="utf-8")
         (self.package / entry).write_text("local json=require('dkjson')\nlocal value=(function()\n" + source + "\nend)()\ncoroutine.yield(assert(json.encode(value)))\n", encoding="utf-8")
-        result = self.run(entry, mounts={"dkjson": "_json.lua"}, trusted=("dkjson", "_test", *trusted), timeout=timeout, deadline=deadline)
+        result = self.run(entry, mounts={"dkjson": "_json.lua"}, trusted=("dkjson", "_test", *trusted), timeout=timeout)
         if result.returncode:
             raise AssertionError(result.stderr.decode())
         return json.loads(result.stdout)
 
-    def lua_stream(self, source, trusted=(), timeout=30, deadline="30s"):
+    def lua_stream(self, source, trusted=(), timeout=30):
         entry = "_stream.lua"
         (self.package / "_json.lua").write_text("return require('dkjson')\n", encoding="utf-8")
         (self.package / entry).write_text(source, encoding="utf-8")
-        result = self.run(entry, mounts={"dkjson": "_json.lua"}, trusted=("dkjson", "_stream", *trusted), timeout=timeout, deadline=deadline)
+        result = self.run(entry, mounts={"dkjson": "_json.lua"}, trusted=("dkjson", "_stream", *trusted), timeout=timeout)
         if result.returncode:
             raise AssertionError(result.stderr.decode())
         return [json.loads(line) for line in result.stdout.splitlines()]

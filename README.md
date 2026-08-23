@@ -58,24 +58,24 @@ versions are in [`zinc-dev-1.0-1.rockspec`](zinc-dev-1.0-1.rockspec) and [`luaro
 agent check --directory . --entry zinc.md \
   --mount host=host.md --mount design=design.md \
   --trust src.host --trust src.models --trust src.store \
-  --lua-memory 96MiB --timeout 30s
+  --lua-memory 96MiB
 
 printf 'Inspect this workspace.' | agent run \
   --directory . --entry zinc.md \
   --mount host=host.md --mount design=design.md \
   --trust src.host --trust src.models --trust src.store \
-  --lua-memory 96MiB --timeout 30s -- "$USER"
+  --lua-memory 96MiB -- "$USER"
 ```
 
 The final argument is the stable actor ID. Canonical NDJSON events are provisional `reasoning`/`response` chunks,
 durable completion IDs, durable tool calls/results, and terminal `{ "type":"store", "result":N, "start":M }`.
 Failed executions emit no synthetic terminal event.
 
-Each command starts one disposable `agent` process and one fresh Lua state. `--lua-memory` limits Lua allocator traffic
-and separately bounds stdin length; it is not an RSS limit. `--timeout` is armed inside that process before package work
-and hard-exits it with status 124 if Lua, a model request, native SQLite, or output blocks past the deadline. External
-measurement also includes process startup and caller wake-up, so 30 seconds is a lower bound rather than an exact
-end-to-end observation. Hard expiration skips finalizers and does not terminate descendants created by trusted code.
+Each command starts one disposable `agent` process and one fresh Lua state. `--lua-memory` guards checked live Lua
+memory above the prepared baseline and separately bounds stdin length; it is not a hard per-allocation or RSS limit.
+Portable Agents has no internal deadline. The caller supervises the direct process when Lua, a model request, native
+SQLite, or output needs a wall-clock bound. Forced termination may skip finalizers and does not terminate descendants
+created by trusted code.
 
 ## Check
 

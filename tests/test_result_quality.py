@@ -28,7 +28,7 @@ local target=store:begin('quality',corpus.target).id;local current=store:begin('
 local retrieval=require('src.retrieval').new(store,models,{semantic_language='en',semantic_depth=1,semantic_attention_cutoff=0,max_chronological_window_bytes=64,max_retrieval_window_bytes=32768,max_proposal_terms=512,max_retrieval_candidates=64})
 local context=json.decode(retrieval:context(retrieval:start('quality',current.id,current.text)));local ids={};for _,record in ipairs(context.semantic)do ids[#ids+1]=record.id end
 store:close();return{ids=ids,target=target}
-''', ("src.store", "src.models"), timeout=900, deadline="15m")
+''', ("src.store", "src.models"), timeout=900)
         assert value["target"] in value["ids"][:8]
     finally:
         package.close()

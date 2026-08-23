@@ -31,7 +31,7 @@ def main() -> None:
             AGENT, "check", "--directory", str(ROOT), "--entry", entry.name,
             "--mount", "host=host.md", "--mount", "design=design.md",
             "--trust", "src.host", "--trust", "src.models", "--trust", "src.store",
-            "--lua-memory", "96MiB", "--timeout", "30s",
+            "--lua-memory", "96MiB",
         )
 
     test_python = os.environ.get("ZINC_TEST_PYTHON", sys.executable)
