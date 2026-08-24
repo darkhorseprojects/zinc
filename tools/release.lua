@@ -1,4 +1,37 @@
+local json = require("dkjson")
 local uv = require("luv")
+
+local function canonical(value)
+    if value == json.null then
+        return "null"
+    end
+    local kind = type(value)
+    if kind ~= "table" then
+        return assert(json.encode(value))
+    end
+    local count, maximum = 0, 0
+    for key in pairs(value) do
+        if type(key) ~= "number" or key < 1 or math.tointeger(key) == nil then
+            local keys = {}
+            for name in pairs(value) do
+                keys[#keys + 1] = assert(type(name) == "string" and name)
+            end
+            table.sort(keys)
+            local fields = {}
+            for index, name in ipairs(keys) do
+                fields[index] = assert(json.encode(name)) .. ":" .. canonical(value[name])
+            end
+            return "{" .. table.concat(fields, ",") .. "}"
+        end
+        count, maximum = count + 1, math.max(maximum, key)
+    end
+    assert(count == maximum, "canonical JSON arrays must be dense")
+    local items = {}
+    for index = 1, maximum do
+        items[index] = canonical(value[index])
+    end
+    return "[" .. table.concat(items, ",") .. "]"
+end
 
 local function execute(program, arguments)
     local output, errors = {}, {}
@@ -37,6 +70,14 @@ local function execute(program, arguments)
 end
 
 execute("moon", { "run", "dist" })
+local graph_path = "dist/zinc/file-graph.json"
+local graph_file = assert(io.open(graph_path, "rb"))
+local graph = assert(json.decode(assert(graph_file:read("*a"))))
+assert(graph_file:close())
+graph_file = assert(io.open(graph_path, "wb"))
+assert(graph_file:write(canonical(graph), "\n"))
+assert(graph_file:close())
+
 local archive = "zinc-1.0.0-x86_64-linux-gnu.tar.gz"
 os.remove("dist/" .. archive)
 execute("tar", {
