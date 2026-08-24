@@ -68,8 +68,7 @@ jobs:
         run: |
           moon sync --locked
           moon sync --offline --locked
-          moon run build-cygnet -- data/cygnet.db data/cygnet-index.db \
-            aae2cdb1418c1435558584a91181e1cb94459f2506c16f2be4b00e81428deaff
+          moon run build-cygnet
           moon run format-check
           moon run lint
           moon run test

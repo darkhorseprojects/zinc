@@ -66,7 +66,7 @@ role = "runtime"
 [scripts]
 agent-check = "../portable-agents/zig-out/bin/agent check --directory . --entry zinc.md --mount host=host.md --mount design=design.md --trust src.cygnet --trust src.dependencies --trust src.host --trust src.models --trust src.store --lua-memory 96MiB"
 benchmark = "lua tools/benchmark.lua"
-build-cygnet = "lua tools/cygnet_index.lua"
+build-cygnet = "lua tools/cygnet_index.lua data/cygnet.db data/cygnet-index.db aae2cdb1418c1435558584a91181e1cb94459f2506c16f2be4b00e81428deaff"
 dist = "moon exec ballad play partiture.lua"
 format = "moon exec stylua src tests tools partiture.lua"
 format-check = "moon exec stylua --check src tests tools partiture.lua"
