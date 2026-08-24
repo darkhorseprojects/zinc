@@ -35,11 +35,11 @@ Use `require("host")` to load this capability. `host.files.read { path, offset, 
 | name | program | arguments | directory |
 |---|---|---|---|
 | inspect | rg | ["--","{{query}}","{{paths...}}"] | . |
-| test | python | ["-m","pytest","{{arguments...}}"] | . |
-| cargo | cargo | ["{{arguments...}}"] | . |
+| test | moon | ["run","test"] | . |
 
 ## Program
 
 ```lua
+require("src.dependencies").activate(package.directory)
 return require("src.host").new(document.Host)
 ```

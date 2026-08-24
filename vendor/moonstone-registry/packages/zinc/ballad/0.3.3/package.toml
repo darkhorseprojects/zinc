@@ -1,0 +1,19 @@
+[package]
+name = "zinc/ballad"
+version = "0.3.3"
+kind = "bin"
+description = "Ballad 0.3.3 and b3sum 1.8.6 closure for Zinc"
+[[artifacts]]
+id = "lua55"
+kind = "compiled"
+target = "x86_64-linux-gnu"
+lua_abi = "5.5"
+format = "tar.gz"
+url = "blobs/b3/58/cd/58cdd00f9c3a79d461099c406b79041677b093abe025a55a935b147998544cd7.tar.gz"
+hash = "b3:58cdd00f9c3a79d461099c406b79041677b093abe025a55a935b147998544cd7"
+[artifacts.materialize]
+type = "archive"
+[[artifacts.provides]]
+kind = "bin"
+name = "ballad"
+path = "bin/ballad"

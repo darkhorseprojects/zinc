@@ -2,7 +2,7 @@ local sqlite = require("lsqlite3")
 local uv = require("luv")
 
 local APPLICATION_ID = 1514753603
-local SCHEMA_VERSION = 1
+local SCHEMA_VERSION = 2
 
 local function mkdir(path)
     if uv.fs_stat(path) then
@@ -29,7 +29,25 @@ end
 
 local function actor(value)
     assert(type(value) == "string" and value ~= "", "actor must be nonempty text")
+    assert(utf8.len(value), "actor must be valid UTF-8")
     return value
+end
+
+local function package_path(directory, path, separator)
+    assert(type(directory) == "string" and directory ~= "", "package directory is required")
+    directory = assert(uv.fs_realpath(directory), "package directory does not exist")
+    assert(type(path) == "string" and path ~= "", "Store path is required")
+    assert(
+        not path:find("\\", 1, true) and path:sub(1, 1) ~= "/" and not path:match("^%a:"),
+        "Store path must be package-relative"
+    )
+    local parts = {}
+    for part in path:gmatch("[^/]+") do
+        assert(part ~= "." and part ~= "..", "Store path must not contain traversal")
+        parts[#parts + 1] = part
+    end
+    assert(#parts > 1 and table.concat(parts, "/") == path, "Store path must contain a directory and file")
+    return directory .. separator .. table.concat(parts, separator)
 end
 
 local function integer(value, what)
@@ -50,11 +68,10 @@ function module.open(config)
     local maximum = integer(config.max_stored_record_bytes, "stored record budget")
     assert(maximum >= 4, "stored record budget must be at least four bytes")
     local separator = package.config:sub(1, 1)
-    local path = assert(config.path, "Store path is required")
-    local absolute = separator == "\\" and (path:match("^%a:[/\\]") or path:match("^[/\\][/\\]")) or path:match("^/")
-    local directory = absolute and path or table.concat({ assert(uv.os_homedir()), ".agents", "zinc", path }, separator)
+    local path = package_path(config.package_directory, config.path, separator)
+    local directory = assert(path:match("^(.*)[/\\][^/\\]+$"), "Store path has no parent")
     mkdir(directory)
-    local db = assert(sqlite.open(directory .. separator .. "zinc.sqlite3"))
+    local db = assert(sqlite.open(path))
     db:busy_timeout(5000)
 
     local function rows(sql, ...)
@@ -117,27 +134,31 @@ function module.open(config)
 
     assert(db:exec(string.format(
         [[
+CREATE TABLE IF NOT EXISTS actors(
+    id INTEGER PRIMARY KEY,
+    actor TEXT NOT NULL UNIQUE
+) STRICT;
 CREATE TABLE IF NOT EXISTS results(
     id INTEGER PRIMARY KEY,
-    actor TEXT NOT NULL,
+    actor_id INTEGER NOT NULL REFERENCES actors(id),
     start INTEGER NOT NULL,
     role TEXT NOT NULL CHECK(role IN ('user','assistant','tool')),
     text TEXT NOT NULL CHECK(length(text) > 0),
-    UNIQUE(id,actor),
-    FOREIGN KEY(start,actor) REFERENCES results(id,actor),
+    UNIQUE(id,actor_id),
+    FOREIGN KEY(start,actor_id) REFERENCES results(id,actor_id),
     CHECK((role='user' AND id=start) OR (role<>'user' AND id<>start))
 ) STRICT;
-CREATE INDEX IF NOT EXISTS results_by_actor_id ON results(actor,id);
-CREATE INDEX IF NOT EXISTS results_by_actor_start_id ON results(actor,start,id);
+CREATE INDEX IF NOT EXISTS results_by_actor_id ON results(actor_id,id);
+CREATE INDEX IF NOT EXISTS results_by_actor_start_id ON results(actor_id,start,id);
 CREATE VIRTUAL TABLE IF NOT EXISTS result_fts USING fts5(
-    actor UNINDEXED,
+    actor_id,
     text,
     content='results',
     content_rowid='id',
     tokenize='unicode61 remove_diacritics 0'
 );
 CREATE TRIGGER IF NOT EXISTS results_fts_insert AFTER INSERT ON results BEGIN
-    INSERT INTO result_fts(rowid,actor,text) VALUES(new.id,new.actor,new.text);
+    INSERT INTO result_fts(rowid,actor_id,text) VALUES(new.id,new.actor_id,new.text);
 END;
 PRAGMA application_id=%d;
 PRAGMA user_version=%d;
@@ -153,43 +174,70 @@ CREATE VIRTUAL TABLE temp.grounding_vocabulary
 USING fts5vocab(grounding_tokenizer,'instance');
 ]]) == sqlite.OK, db:errmsg())
 
+    local function actor_id(who, create)
+        who = actor(who)
+        if create then
+            execute("INSERT OR IGNORE INTO actors(actor) VALUES(?)", who)
+        end
+        local identity = rows("SELECT id FROM actors WHERE actor=?", who)[1]
+        assert(identity, "actor has no Store history")
+        return identity.id
+    end
+
+    local function record(id)
+        return rows(
+            "SELECT r.id,a.actor,r.start,r.role,r.text FROM results r JOIN actors a ON a.id=r.actor_id WHERE r.id=?",
+            id
+        )[1]
+    end
+
     local function insert(who, start, role, value)
         value = tail(text(value, "record text"), maximum)
-        execute("INSERT INTO results(actor,start,role,text) VALUES(?,?,?,?)", actor(who), start, role, value)
-        return rows("SELECT id,actor,start,role,text FROM results WHERE id=?", db:last_insert_rowid())[1]
+        execute(
+            "INSERT INTO results(actor_id,start,role,text) VALUES(?,?,?,?)",
+            actor_id(who, false),
+            start,
+            role,
+            value
+        )
+        return record(db:last_insert_rowid())
     end
 
     local api = {}
 
-    function api:ground(value, maximum_terms)
+    function api:ground(value, maximum_terms, maximum_tokens, maximum_exact_forms)
         value = text(value, "grounding text")
         maximum_terms = integer(maximum_terms, "grounding term limit")
+        maximum_tokens = integer(maximum_tokens, "semantic input token limit")
+        maximum_exact_forms = integer(maximum_exact_forms, "exact form limit")
         assert(maximum_terms > 0, "grounding term limit must be positive")
+        assert(maximum_tokens > 0, "semantic input token limit must be positive")
+        assert(maximum_exact_forms > 0, "exact form limit must be positive")
         local terms, tokens, exact_forms, seen = {}, {}, {}, {}
         for literal in value:gmatch("%S+") do
             if literal:find("_", 1, true) then
+                assert(#exact_forms < maximum_exact_forms, "grounding text exceeds exact form limit")
                 exact_forms[#exact_forms + 1] = literal
             end
             local key = literal:lower()
             if not seen[key] then
                 seen[key] = true
-                terms[#terms + 1] = literal
-                if #terms == maximum_terms then
-                    return { terms = terms, tokens = tokens, exact_forms = exact_forms }
+                if #terms < maximum_terms then
+                    terms[#terms + 1] = literal
                 end
             end
         end
         execute("DELETE FROM grounding_tokenizer")
         execute("INSERT INTO grounding_tokenizer(text) VALUES(?)", value)
         for _, row in ipairs(rows("SELECT term FROM grounding_vocabulary ORDER BY offset")) do
+            assert(#tokens < maximum_tokens, "grounding text exceeds semantic input token limit")
             tokens[#tokens + 1] = row.term
             if not seen[row.term] then
                 seen[row.term] = true
-                terms[#terms + 1] = row.term
+                if #terms < maximum_terms then
+                    terms[#terms + 1] = row.term
+                end
             end
-        end
-        while #terms > maximum_terms do
-            terms[#terms] = nil
         end
         return { terms = terms, tokens = tokens, exact_forms = exact_forms }
     end
@@ -198,9 +246,10 @@ USING fts5vocab(grounding_tokenizer,'instance');
         who, request = actor(who), text(request, "request")
         local value = tail(request, maximum)
         return transaction(function()
+            local identity = actor_id(who, true)
             local id = rows("SELECT coalesce(max(id),0)+1 id FROM results")[1].id
-            execute("INSERT INTO results(id,actor,start,role,text) VALUES(?,?,?,'user',?)", id, who, id, value)
-            return rows("SELECT id,actor,start,role,text FROM results WHERE id=?", id)[1]
+            execute("INSERT INTO results(id,actor_id,start,role,text) VALUES(?,?,?,'user',?)", id, identity, id, value)
+            return record(id)
         end)
     end
 
@@ -211,9 +260,12 @@ USING fts5vocab(grounding_tokenizer,'instance');
     end
 
     function api:read(who, start, id)
+        local identity = actor_id(who, false)
         return rows(
-            "SELECT id,actor,start,role,text FROM results WHERE actor=? AND id=? AND id<?",
-            actor(who),
+            [[SELECT r.id,a.actor,r.start,r.role,r.text
+FROM results r JOIN actors a ON a.id=r.actor_id
+WHERE r.actor_id=? AND r.id=? AND r.id<?]],
+            identity,
             integer(id, "result id"),
             integer(start, "start")
         )[1]
@@ -225,14 +277,17 @@ USING fts5vocab(grounding_tokenizer,'instance');
         if not current then
             return nil
         end
+        local identity = actor_id(who, false)
         local previous = rows(
-            "SELECT id,actor,start,role,text FROM results WHERE actor=? AND id<? ORDER BY id DESC LIMIT 1",
-            who,
+            [[SELECT r.id,a.actor,r.start,r.role,r.text FROM results r JOIN actors a ON a.id=r.actor_id
+WHERE r.actor_id=? AND r.id<? ORDER BY r.id DESC LIMIT 1]],
+            identity,
             id
         )[1]
         local following = rows(
-            "SELECT id,actor,start,role,text FROM results WHERE actor=? AND id>? AND id<? ORDER BY id LIMIT 1",
-            who,
+            [[SELECT r.id,a.actor,r.start,r.role,r.text FROM results r JOIN actors a ON a.id=r.actor_id
+WHERE r.actor_id=? AND r.id>? AND r.id<? ORDER BY r.id LIMIT 1]],
+            identity,
             id,
             start
         )[1]
@@ -243,10 +298,11 @@ USING fts5vocab(grounding_tokenizer,'instance');
         who, start = actor(who), integer(start, "start")
         assert(type(visit) == "function", "history visitor must be a function")
         local statement = assert(
-            db:prepare("SELECT id,actor,start,role,text FROM results WHERE actor=? AND id<? ORDER BY id DESC"),
+            db:prepare([[SELECT r.id,a.actor,r.start,r.role,r.text FROM results r JOIN actors a ON a.id=r.actor_id
+WHERE r.actor_id=? AND r.id<? ORDER BY r.id DESC]]),
             db:errmsg()
         )
-        assert(statement:bind_values(who, start) == sqlite.OK, db:errmsg())
+        assert(statement:bind_values(actor_id(who, false), start) == sqlite.OK, db:errmsg())
         local result = table.pack(pcall(function()
             for row in statement:nrows() do
                 if visit(row) == false then
@@ -279,16 +335,18 @@ USING fts5vocab(grounding_tokenizer,'instance');
         if #literals == 0 then
             return {}
         end
+        local identity = actor_id(who, false)
+        local query = 'actor_id:"' .. identity .. '" AND (' .. table.concat(literals, " OR ") .. ")"
         return rows(
             [[
-SELECT r.id,r.actor,r.start,r.role,r.text,bm25(result_fts) lexical_score
-FROM result_fts JOIN results r ON r.id=result_fts.rowid
-WHERE result_fts MATCH ? AND result_fts.actor=? AND r.id<?
+SELECT r.id,a.actor,r.start,r.role,r.text,bm25(result_fts,0.0,1.0) lexical_score
+FROM result_fts JOIN results r ON r.id=result_fts.rowid JOIN actors a ON a.id=r.actor_id
+WHERE result_fts MATCH ? AND r.actor_id=? AND r.id<?
 ORDER BY lexical_score,r.id
 LIMIT ?
 ]],
-            table.concat(literals, " OR "),
-            who,
+            query,
+            identity,
             start,
             limit
         )

@@ -12,7 +12,7 @@ end
 
 local module = {}
 
-function module.new(store, models, options)
+function module.new(store, models, cygnet, options)
     options = options or {}
     local encode = assert(models.encode, "model JSON encoder is required")
     local language = assert(
@@ -26,13 +26,17 @@ function module.new(store, models, options)
         assert(math.tointeger(options.max_chronological_window_bytes), "chronological window must be an integer")
     local semantic_maximum =
         assert(math.tointeger(options.max_retrieval_window_bytes), "retrieval window must be an integer")
-    local proposal_maximum =
-        assert(math.tointeger(options.max_proposal_terms), "proposal term limit must be an integer")
+    local term_maximum = assert(math.tointeger(options.max_semantic_terms), "semantic term limit must be an integer")
+    local semantic_input_maximum =
+        assert(math.tointeger(options.max_semantic_input_tokens), "semantic input token limit must be an integer")
+    local exact_form_maximum = assert(math.tointeger(options.max_exact_forms), "exact form limit must be an integer")
     local candidate_maximum =
         assert(math.tointeger(options.max_retrieval_candidates), "retrieval candidate limit must be an integer")
     assert(depth >= 0 and depth <= 4, "semantic depth must be from zero to four")
     assert(chronological_maximum > 0 and semantic_maximum > 0, "context windows must be positive")
-    assert(proposal_maximum > 0, "proposal term limit must be positive")
+    assert(term_maximum > 0, "semantic term limit must be positive")
+    assert(semantic_input_maximum > 0, "semantic input token limit must be positive")
+    assert(exact_form_maximum > 0, "exact form limit must be positive")
     assert(candidate_maximum > 0, "retrieval candidate limit must be positive")
 
     local function pack(values, maximum, get)
@@ -70,24 +74,24 @@ function module.new(store, models, options)
     end
 
     local function semantic(actor, start, anchor, recent)
-        local grounded = store:ground(anchor, proposal_maximum)
+        local grounded = store:ground(anchor, term_maximum, semantic_input_maximum, exact_form_maximum)
         local terms, seen = {}, {}
         for _, term in ipairs(grounded.terms) do
             terms[#terms + 1] = term
             seen[term] = true
         end
-        local remaining = proposal_maximum - #terms
+        local remaining = term_maximum - #terms
         if remaining > 0 then
-            local proposed, proposal_failure = models:propose({
-                tokens = grounded.tokens,
-                exact_forms = grounded.exact_forms,
-                semantic_language = language,
-                semantic_depth = depth,
-                semantic_attention_cutoff = attention_cutoff,
-                maximum_terms = remaining,
-            })
-            assert(proposed, proposal_failure)
-            for _, term in ipairs(proposed) do
+            for _, term in
+                ipairs(cygnet:expand({
+                    tokens = grounded.tokens,
+                    exact_forms = grounded.exact_forms,
+                    semantic_language = language,
+                    semantic_depth = depth,
+                    semantic_attention_cutoff = attention_cutoff,
+                    maximum_terms = remaining,
+                }))
+            do
                 if not seen[term] then
                     seen[term] = true
                     terms[#terms + 1] = term
@@ -119,14 +123,18 @@ function module.new(store, models, options)
             "reranker selected count is invalid"
         )
         assert(#ranking == reranked_count, "reranker returned the wrong count")
-        local ordered, seen = {}, {}
+        local ordered, ranked_seen = {}, {}
         for _, item in ipairs(ranking) do
             local index = math.tointeger(item.index)
             assert(
-                index and index <= reranked_count and candidates[index] and not seen[index] and finite(item.score),
+                index
+                    and index <= reranked_count
+                    and candidates[index]
+                    and not ranked_seen[index]
+                    and finite(item.score),
                 "reranker item is invalid"
             )
-            seen[index] = true
+            ranked_seen[index] = true
             ordered[#ordered + 1] = { record = candidates[index], score = item.score }
         end
         table.sort(ordered, function(left, right)

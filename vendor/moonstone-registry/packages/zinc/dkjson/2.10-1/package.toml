@@ -1,0 +1,22 @@
+[package]
+name = "zinc/dkjson"
+version = "2.10-1"
+kind = "lib"
+description = "dkjson for Zinc's pinned Lua 5.5 environment"
+
+[[artifacts]]
+id = "lua55"
+kind = "compiled"
+target = "x86_64-linux-gnu"
+lua_abi = "5.5"
+format = "tar.gz"
+url = "blobs/b3/ff/d2/ffd205cd1449cbea4b32899cfa73b55774dc297b5071001cffc0d8cc2eaa0e52.tar.gz"
+hash = "b3:ffd205cd1449cbea4b32899cfa73b55774dc297b5071001cffc0d8cc2eaa0e52"
+
+[artifacts.materialize]
+type = "archive"
+
+[[artifacts.provides]]
+kind = "lua_module"
+name = "dkjson"
+path = "share/lua/5.5/dkjson.lua"

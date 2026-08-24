@@ -89,10 +89,6 @@ function module.new(config, sse)
         return parsed and response or nil, parsed and nil or "invalid model JSON: " .. tostring(response)
     end
 
-    local function post(use, url, value)
-        return post_source(use, url, encode(value))
-    end
-
     local api = { encode = encode, decode = decode, null = json.null }
 
     function api:chat(messages)
@@ -312,28 +308,6 @@ function module.new(config, sse)
                 return nil, value
             end
         end
-    end
-
-    function api:propose(request)
-        local response, failure = post("propose", config.propose.endpoint, request)
-        if not response then
-            return nil, failure
-        end
-        if type(response.terms) ~= "table" then
-            return nil, "proposal response is invalid"
-        end
-        if #response.terms > request.maximum_terms then
-            return nil, "proposal response exceeds the requested term count"
-        end
-        local result, seen = {}, {}
-        for _, term in ipairs(response.terms) do
-            if type(term) ~= "string" or term == "" or seen[term] then
-                return nil, "proposal term is invalid"
-            end
-            seen[term] = true
-            result[#result + 1] = term
-        end
-        return result
     end
 
     function api:rerank(query, passages)

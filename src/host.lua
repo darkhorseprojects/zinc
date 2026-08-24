@@ -20,6 +20,14 @@ local function absolute(path)
     return windows and (path:match("^%a:[/\\]") or path:match("^[/\\][/\\]")) or path:match("^/")
 end
 
+local function inside(root, candidate)
+    if candidate == root then
+        return true
+    end
+    local prefix = root:sub(-1) == "/" and root or root .. "/"
+    return candidate:sub(1, #prefix) == prefix
+end
+
 local function files(rows, cwd, home)
     local roots = {}
     local function expand(path)
@@ -38,8 +46,8 @@ local function files(rows, cwd, home)
     end
 
     local function checked(path, writing)
-        local expanded, actual = expand(path)
-        actual = uv.fs_realpath(expanded)
+        local expanded = expand(path)
+        local actual = uv.fs_realpath(expanded)
         if not actual and writing then
             local parent, name = expanded:match("^(.*)[/\\]([^/\\]+)$")
             assert(parent and name and name ~= "." and name ~= "..", "invalid output path")
@@ -48,7 +56,7 @@ local function files(rows, cwd, home)
         assert(actual, "path does not exist: " .. path)
         local candidate = comparable(actual)
         for _, root in ipairs(roots) do
-            if candidate == root.path or candidate:sub(1, #root.path + 1) == root.path .. "/" then
+            if inside(root.path, candidate) then
                 assert(not writing or root.write, "path is not inside a writable root: " .. path)
                 return actual
             end
@@ -279,8 +287,8 @@ local function processes(rows, variables, cwd)
         assert(handle, problem)
         read("stdout", stdout)
         read("stderr", stderr)
-        stdin:write(input, function(problem)
-            failure = failure or problem
+        stdin:write(input, function(write_problem)
+            failure = failure or write_problem
             stdin:shutdown(function()
                 stdin:close()
             end)

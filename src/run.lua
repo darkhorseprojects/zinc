@@ -54,7 +54,13 @@ function module.new(config)
 
     local function generated(state)
         local loaded = {}
-        for name, value in pairs(package.loaded) do
+        for name, value in pairs(config.capabilities or {}) do
+            local guide = type(value) == "table" and value.guide
+            assert(
+                type(name) == "string"
+                    and (type(guide) == "string" and guide ~= "" or type(guide) == "table" and next(guide)),
+                "generated capability is invalid"
+            )
             loaded[name] = value
         end
         loaded.results = results(state)
@@ -79,11 +85,12 @@ function module.new(config)
             package = { loaded = loaded },
         }
         environment.require = function(name)
+            assert(type(name) == "string", "module name must be text")
             local value = loaded[name]
-            if value ~= nil then
-                return value
+            if value == nil then
+                error("module '" .. name .. "' is unavailable", 2)
             end
-            return require(name)
+            return value
         end
         return environment
     end

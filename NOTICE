@@ -1,14 +1,35 @@
 Zinc third-party notices
 ========================
 
-Zinc does not bundle these runtime components. The pinned components below are
-provisioned separately to run or test Zinc. Their own license terms apply.
+Zinc distributions bundle the listed Lua modules and Cygnet data. Portable
+Agents, Lua, model servers, and model weights are provisioned separately. Each
+component remains subject to its own license terms.
 
 Portable Agents 1.0.0
 ---------------------
 Source: https://github.com/darkhorseprojects/portable-agents
 License: AGPL-3.0-only
 License text: https://github.com/darkhorseprojects/portable-agents/blob/v1.0.0/LICENSE
+
+Moonstone 0.4.1 and Ballad 0.3.3
+--------------------------------
+Source: https://github.com/moonstone-sh/moonstone
+License: Apache-2.0
+
+StyLua 2.5.2
+------------
+Source: https://github.com/JohnnyMorganz/StyLua/releases/tag/v2.5.2
+License: MPL-2.0
+
+b3sum 1.8.6
+------------
+Source: https://github.com/BLAKE3-team/BLAKE3/releases/tag/1.8.6
+License: CC0-1.0 OR Apache-2.0 OR Apache-2.0 WITH LLVM-exception
+
+Busted 2.3.0 and LuaCov 0.17.0
+-----------------------------
+Sources: https://github.com/lunarmodules/busted and https://github.com/lunarmodules/luacov
+License: MIT
 
 Lua 5.5.0
 ---------
@@ -57,20 +78,6 @@ Aggregate data license: LicenseRef-Cygnet-Aggregate
 Resource provenance and licenses: https://github.com/omwn/cygnet
 Citation: Rowan Hall Maudslay and Francis Bond (2026), "Cygnet: Refactoring the
 Open Multilingual Wordnet," LREC 2026.
-
-Rust 1.97.1
------------
-Copyright (C) the Rust Project Developers.
-Source: https://www.rust-lang.org/
-License: Apache-2.0 OR MIT
-License texts: https://github.com/rust-lang/rust/tree/1.97.1
-
-Python 3.12.12
---------------
-Copyright (C) Python Software Foundation.
-Source: https://www.python.org/downloads/release/python-31212/
-License: PSF-2.0
-License text: https://docs.python.org/3.12/license.html
 
 vLLM 0.27.1
 -----------

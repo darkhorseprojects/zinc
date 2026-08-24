@@ -1,0 +1,129 @@
+name: zinc
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+    tags: ["v*"]
+
+permissions:
+  contents: read
+
+jobs:
+  quality:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          path: zinc
+          persist-credentials: false
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          repository: darkhorseprojects/portable-agents
+          ref: v1.0.0
+          path: portable-agents
+          persist-credentials: false
+      - uses: luau-project/setup-lua@09c2083852bf88c626d60e51be3fbb279abd6e51
+        with:
+          lua-version: 5.5.0
+          luarocks-version: none
+      - uses: mlugg/setup-zig@d1434d08867e3ee9daa34448df10607b98908d29
+        with:
+          version: 0.16.0
+      - name: Install Moonstone 0.4.1
+        shell: bash
+        run: |
+          curl -fsSL https://moonstone.sh/install -o "$RUNNER_TEMP/moonstone-install.sh"
+          MOONSTONE_INSTALL_VERSION=0.4.1 MOONSTONE_INSTALL_DIR="$RUNNER_TEMP/moonstone-bin" \
+            sh "$RUNNER_TEMP/moonstone-install.sh"
+          echo "$RUNNER_TEMP/moonstone-bin" >> "$GITHUB_PATH"
+      - name: Build Portable Agents 1.0.0
+        working-directory: portable-agents
+        shell: bash
+        env:
+          LD_LIBRARY_PATH: ${{ github.workspace }}/.lua/lib
+        run: |
+          source="$(find "$GITHUB_WORKSPACE/.lua" -name 'liblua55.so' -print -quit)"
+          ln -sf "$(basename "$source")" "$GITHUB_WORKSPACE/.lua/lib/liblua.so"
+          ln -sf "$(basename "$source")" "$GITHUB_WORKSPACE/.lua/lib/liblua5.5.so"
+          zig build test -Doptimize=ReleaseSafe --search-prefix ../.lua
+          zig build -Doptimize=ReleaseSmall --search-prefix ../.lua
+          zig-out/bin/agent --version | grep -Fx 'agent 1.0.0'
+      - name: Install pinned Cygnet data
+        working-directory: zinc
+        shell: bash
+        run: |
+          mkdir -p data
+          curl -fsSL https://github.com/omwn/cygnet/releases/download/2026.05.12/cygnet.db.gz \
+            -o "$RUNNER_TEMP/cygnet.db.gz"
+          echo '65e93f3620d7cc5444350d9e204259e961096138767d9ea73403ade38964cc48  '"$RUNNER_TEMP/cygnet.db.gz" \
+            | sha256sum -c -
+          gzip -dc "$RUNNER_TEMP/cygnet.db.gz" > data/cygnet.db
+          echo 'aae2cdb1418c1435558584a91181e1cb94459f2506c16f2be4b00e81428deaff  data/cygnet.db' \
+            | sha256sum -c -
+      - name: Check locked Lua environment
+        working-directory: zinc
+        shell: bash
+        run: |
+          moon sync --locked
+          moon sync --offline --locked
+          moon run build-cygnet -- data/cygnet.db data/cygnet-index.db \
+            aae2cdb1418c1435558584a91181e1cb94459f2506c16f2be4b00e81428deaff
+          moon run format-check
+          moon run lint
+          moon run test
+          moon run benchmark
+          moon run agent-check
+      - name: Build and test release
+        working-directory: zinc
+        shell: bash
+        run: |
+          moon run release
+          moon run integration
+          (cd dist && sha256sum -c SHA256SUMS)
+          test -f dist/zinc/file-graph.json
+          test ! -e dist/zinc/store
+          ! find dist/zinc \( -name '*.db-wal' -o -name '*.db-shm' \) -print | grep .
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        if: startsWith(github.ref, 'refs/tags/v')
+        with:
+          name: zinc-release
+          path: |
+            zinc/dist/zinc-*.tar.gz
+            zinc/dist/SHA256SUMS
+          if-no-files-found: error
+
+  verify-release-version:
+    if: startsWith(github.ref, 'refs/tags/v')
+    needs: quality
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          persist-credentials: false
+      - name: Verify tag and package version
+        shell: bash
+        run: |
+          version="${GITHUB_REF_NAME#v}"
+          grep -Fx "version = \"$version\"" moonstone.toml
+          grep -Fx "local archive = \"zinc-$version-x86_64-linux-gnu.tar.gz\"" tools/release.lua
+
+  github-release:
+    if: startsWith(github.ref, 'refs/tags/v')
+    needs: verify-release-version
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    environment: release
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093
+        with:
+          name: zinc-release
+          path: artifacts
+      - uses: softprops/action-gh-release@3bb12739c298aeb8a4eeaf626c5b8d85266b0e65
+        with:
+          files: artifacts/*
+          generate_release_notes: true

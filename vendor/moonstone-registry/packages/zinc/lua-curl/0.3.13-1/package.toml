@@ -1,0 +1,37 @@
+[package]
+name = "zinc/lua-curl"
+version = "0.3.13-1"
+kind = "lib"
+description = "Lua-cURL for Zinc's pinned Lua 5.5 Linux target"
+
+[[artifacts]]
+id = "linux-x86_64-lua55"
+kind = "compiled"
+target = "x86_64-linux-gnu"
+lua_abi = "5.5"
+format = "tar.gz"
+url = "blobs/b3/e8/db/e8db1c560a532238dddc44910b1bd8a09d1d2613dc3b4f763489a378eb1c1f26.tar.gz"
+hash = "b3:e8db1c560a532238dddc44910b1bd8a09d1d2613dc3b4f763489a378eb1c1f26"
+
+[artifacts.materialize]
+type = "archive"
+
+[[artifacts.provides]]
+kind = "lua_cmodule"
+name = "lcurl"
+path = "lib/lua/5.5/lcurl.so"
+
+[[artifacts.provides]]
+kind = "lua_module"
+name = "cURL"
+path = "share/lua/5.5/cURL.lua"
+
+[[artifacts.provides]]
+kind = "lua_module"
+name = "cURL.safe"
+path = "share/lua/5.5/cURL/safe.lua"
+
+[[artifacts.provides]]
+kind = "lua_module"
+name = "cURL.utils"
+path = "share/lua/5.5/cURL/utils.lua"
