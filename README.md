@@ -71,11 +71,11 @@ The final argument is the stable actor ID. Canonical NDJSON events are provision
 durable completion IDs, durable tool calls/results, and terminal `{ "type":"store", "result":N, "start":M }`.
 Failed executions emit no synthetic terminal event.
 
-Each command starts one disposable `agent` process and one fresh Lua state. `--lua-memory` guards checked live Lua
-memory above the prepared baseline and separately bounds stdin length; it is not a hard per-allocation or RSS limit.
-Portable Agents has no internal deadline. The caller supervises the direct process when Lua, a model request, native
-SQLite, or output needs a wall-clock bound. Forced termination may skip finalizers and does not terminate descendants
-created by trusted code.
+Each command starts one disposable `agent` process and one fresh Lua state. `--lua-memory` sets one total allocation-time
+budget for memory routed through Lua's allocator, includes the prepared Lua state, and separately bounds stdin length. It
+is not an RSS limit. Portable Agents has no internal deadline. The caller supervises the direct process when Lua, a model
+request, native SQLite, or output needs wall-clock or whole-process memory bounds. Forced termination may skip finalizers
+and does not terminate descendants created by trusted code.
 
 ## Check
 
