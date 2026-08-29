@@ -1,0 +1,4 @@
+#!/bin/sh
+luarocks remove busted --force
+luarocks make
+LUA_PATH="./?.lua;./?/init.lua;$LUA_PATH" busted "$@"

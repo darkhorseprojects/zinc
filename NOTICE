@@ -1,9 +1,9 @@
 Zinc third-party notices
 ========================
 
-Zinc distributions bundle the listed Lua modules and Cygnet data. Portable
-Agents, Lua, model servers, and model weights are provisioned separately. Each
-component remains subject to its own license terms.
+Zinc distributions bundle the locked Lua/SQLite closure and Cygnet data. The
+Portable Agents launcher, model servers, and model weights are released or
+provisioned separately. Each component remains subject to its own license terms.
 
 Portable Agents 1.0.0
 ---------------------
@@ -11,20 +11,15 @@ Source: https://github.com/darkhorseprojects/portable-agents
 License: AGPL-3.0-only
 License text: https://github.com/darkhorseprojects/portable-agents/blob/v1.0.0/LICENSE
 
-Moonstone 0.4.1 and Ballad 0.3.3
---------------------------------
-Source: https://github.com/moonstone-sh/moonstone
-License: Apache-2.0
+Lux 0.42.1
+----------
+Source: https://github.com/lumen-oss/lux
+License: MIT
 
 StyLua 2.5.2
 ------------
 Source: https://github.com/JohnnyMorganz/StyLua/releases/tag/v2.5.2
 License: MPL-2.0
-
-b3sum 1.8.6
-------------
-Source: https://github.com/BLAKE3-team/BLAKE3/releases/tag/1.8.6
-License: CC0-1.0 OR Apache-2.0 OR Apache-2.0 WITH LLVM-exception
 
 Busted 2.3.0 and LuaCov 0.17.0
 -----------------------------
@@ -38,33 +33,20 @@ Source: https://www.lua.org/ftp/lua-5.5.0.tar.gz
 License: MIT
 License text: https://www.lua.org/license.html
 
-dkjson 2.10
------------
-Copyright (C) 2010-2026 David Heiko Kolf.
-Source: https://dkolf.de/dkjson-lua/
+lunajson 1.2.3
+--------------
+Copyright (C) Shunsuke Shimizu and contributors.
+Source: https://github.com/grafi-tt/lunajson/tree/1.2.3
 License: MIT
-License text and attribution are in the pinned source file.
 
-LuaSQLite3 0.9.7
-----------------
+lsqlite3complete 0.9.7 and SQLite
+--------------------------------
 Copyright (C) 2002-2016 Tiago Dionizio and Doug Currie.
 Source: https://lua.sqlite.org/
 License: MIT
 License text: https://lua.sqlite.org/home/doc/tip/doc/lsqlite3.wiki
-Zinc builds the binding against the system SQLite library. SQLite is public domain.
-
-Lua-cURL 0.3.13
----------------
-Source: https://github.com/Lua-cURL/Lua-cURLv3
-License: MIT
-License text: https://github.com/Lua-cURL/Lua-cURLv3/blob/v0.3.13/LICENSE
-
-luv 1.51.0-1
-------------
-Copyright (C) 2014-present luv contributors.
-Source: https://github.com/luvit/luv
-License: Apache-2.0
-License text: https://github.com/luvit/luv/blob/1.51.0-1/LICENSE.txt
+The complete binding contains its pinned SQLite amalgamation. SQLite is public domain.
+Zinc enables FTS5 and omits loadable-extension support.
 
 Cygnet 2026.05.12 data
 ----------------------
@@ -79,35 +61,28 @@ Resource provenance and licenses: https://github.com/omwn/cygnet
 Citation: Rowan Hall Maudslay and Francis Bond (2026), "Cygnet: Refactoring the
 Open Multilingual Wordnet," LREC 2026.
 
-vLLM 0.27.1
------------
-Copyright (C) the vLLM team.
-Source: https://github.com/vllm-project/vllm/releases/tag/v0.27.1
-License: Apache-2.0
-License text: https://github.com/vllm-project/vllm/blob/v0.27.1/LICENSE
-
 Llama Nemotron Rerank 1B v2
 ---------------------------
 Publisher: NVIDIA Corporation.
-Source: https://huggingface.co/nvidia/llama-nemotron-rerank-1b-v2
-Revision: d896ceda696c5c6fe0abf65f63a77c691bbf4548
+Source: https://huggingface.co/kread/llama-nemotron-rerank-1b-v2-GGUF
+Revision: a1b4ca67f0b6a41375a3d4eb58b7a09d8389ebac
 License: LicenseRef-NVIDIA-Open-Model-AND-Llama-3.2-Community
 License terms and required attribution are provided in the pinned model
 repository and its model card.
 
-llama.cpp b10331
-----------------
+llama.cpp Nemotron reranker branch
+----------------------------------
 Copyright (C) llama.cpp contributors.
-Source: https://github.com/ggml-org/llama.cpp
-Revision: 7ba604f1cb61cd14898138e9abc0b4ff2601f180
+Source: https://github.com/kinexis-eu/llama.cpp
+Revision: 00fb89c0ca81b5732d42bed882b3de0e7b3b2e1e
 License: MIT
-License text: https://github.com/ggml-org/llama.cpp/blob/7ba604f1cb61cd14898138e9abc0b4ff2601f180/LICENSE
+License text: https://github.com/kinexis-eu/llama.cpp/blob/00fb89c0ca81b5732d42bed882b3de0e7b3b2e1e/LICENSE
 
 LFM2.5-2.6B-GGUF
 ----------------
 Publisher: Liquid AI, Inc.
 Source: https://huggingface.co/LiquidAI/LFM2.5-2.6B-GGUF
-Revision: b421ad1d549afeda6a0fb2ad3a697cb5a7879adc
+Revision: 84022ce711b28455e8c4fc364ce68c00cf995875
 License: LicenseRef-LFM-Open-License-1.0
 The LFM Open License v1.0 includes a commercial-use revenue threshold and
 redistribution obligations. Review the full terms before use or distribution.

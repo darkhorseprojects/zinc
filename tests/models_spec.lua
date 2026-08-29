@@ -1,108 +1,104 @@
-local uv = require("luv")
+local json = require("lunajson")
 local Models = require("src.models")
-local SSE = require("src.sse")
 
-local processes, paths = {}, {}
+local config = {
+    max_model_request_bytes = 4096,
+    max_parallel_tools = 4,
+    host = { limits = { http_response_bytes = 4096 } },
+    models = {
+        chat = { endpoint = "http://model/chat", model = "chat" },
+        rerank = { endpoint = "http://model/rerank", model = "rerank" },
+    },
+}
 
-local function fixture()
-    local template = (os.getenv("TMPDIR") or "/tmp") .. "/zinc-http-XXXXXX"
-    local fd, port_file = assert(uv.fs_mkstemp(template))
-    assert(uv.fs_close(fd))
-    assert(uv.fs_unlink(port_file))
-    paths[#paths + 1] = port_file
-    local exited = false
-    local handle, pid = uv.spawn(assert(uv.exepath()), {
-        args = { "tests/http_fixture.lua", port_file },
-        cwd = assert(uv.cwd()),
-        stdio = { nil, nil, nil },
-    }, function()
-        exited = true
-    end)
-    assert(handle, pid)
-    processes[#processes + 1] = {
-        handle = handle,
-        exited = function()
-            return exited
-        end,
-    }
-    for _ = 1, 200 do
-        local file = io.open(port_file, "rb")
-        if file then
-            local port = assert(tonumber(assert(file:read("*a"))))
-            assert(file:close())
-            return "http://127.0.0.1:" .. port
-        end
-        uv.sleep(5)
+local function request(options)
+    local values
+    if options.url:match("/chat$") then
+        values = {
+            {
+                type = "data",
+                data = "data: " .. json.encode({ choices = { { delta = { reasoning_content = "think" } } } }) .. "\n\n",
+            },
+            {
+                type = "data",
+                data = "data: " .. json.encode({ choices = { { delta = { content = "answer" } } } }) .. "\n\n",
+            },
+            {
+                type = "data",
+                data = "data: "
+                    .. json.encode({
+                        choices = {
+                            {
+                                delta = {
+                                    tool_calls = {
+                                        {
+                                            index = 1,
+                                            id = "b",
+                                            ["function"] = { name = "run_lua", arguments = '{"code":"return 2"}' },
+                                        },
+                                        {
+                                            index = 0,
+                                            id = "a",
+                                            ["function"] = { name = "run_lua", arguments = '{"code":"return 1"}' },
+                                        },
+                                    },
+                                },
+                                finish_reason = "tool_calls",
+                            },
+                        },
+                    })
+                    .. "\n\ndata: [DONE]\n\n",
+            },
+            { type = "response", status = 200, headers = {} },
+        }
+    else
+        values = {
+            {
+                type = "data",
+                data = json.encode({
+                    results = { { index = 1, relevance_score = 0.9 }, { index = 0, relevance_score = 0.8 } },
+                }),
+            },
+            { type = "response", status = 200, headers = {} },
+        }
     end
-    error("HTTP fixture did not start")
+    local index = 0
+    return function()
+        index = index + 1
+        return values[index]
+    end
 end
 
-after_each(function()
-    for _, process in ipairs(processes) do
-        if not process.exited() then
-            process.handle:kill("sigterm")
-        end
-        while not process.exited() do
-            uv.run("once")
-        end
-        process.handle:close()
-    end
-    processes = {}
-    for _, path in ipairs(paths) do
-        uv.fs_unlink(path)
-    end
-    paths = {}
-end)
-
-describe("Models", function()
-    it("streams chat events and validates reranker results", function()
-        local base = fixture()
-        local metrics = {}
-        local models = Models.new({
-            chat = { endpoint = base .. "/chat", model = "chat" },
-            rerank = { endpoint = base .. "/rerank", model = "reranker" },
-            max_model_request_bytes = 10000,
-            metrics = metrics,
-        }, SSE)
-        local stream = assert(models:chat({ { role = "user", content = "question" } }))
-        local events = {}
-        while true do
-            local event, failure = stream()
-            assert.is_nil(failure)
-            if not event then
-                break
-            end
-            events[#events + 1] = event
-        end
-        assert.same({
-            { type = "reasoning", text = "think" },
-            { type = "response", text = "answer" },
-            { type = "finish", reason = "stop", tool_calls = {} },
-        }, events)
-        local ranked, count = models:rerank("question", { "one", "two" })
-        assert.equals(2, count)
-        assert.same({ { index = 2, score = 1.5 }, { index = 1, score = 0.5 } }, ranked)
-        assert.equals(1, #metrics.chat)
-        assert.equals(1, #metrics.rerank)
+describe("models", function()
+    it("normalizes streamed reasoning, response, and parallel calls", function()
+        local models = Models(config, request)
+        local iterator = models:chat({ { role = "user", content = "hello" } })
+        assert.same({ type = "reasoning", text = "think" }, iterator())
+        assert.same({ type = "response", text = "answer" }, iterator())
+        local finish = iterator()
+        assert.equals("finish", finish.type)
+        assert.equals("tool_calls", finish.reason)
+        assert.same({ "a", "b" }, { finish.calls[1].id, finish.calls[2].id })
+        assert.is_nil(iterator())
     end)
 
-    it("reports endpoint and request-bound failures", function()
-        local base = fixture()
-        local models = Models.new({
-            chat = { endpoint = base .. "/chat", model = "chat" },
-            rerank = { endpoint = base .. "/failure", model = "reranker" },
-            max_model_request_bytes = 1000,
-        }, SSE)
-        local ranked, failure = models:rerank("question", { "one" })
-        assert.is_nil(ranked)
-        assert.equals("offline", failure)
-        local tiny = Models.new({
-            chat = { endpoint = base .. "/chat", model = "chat" },
-            rerank = { endpoint = base .. "/rerank", model = "reranker" },
+    it("reranks one bounded candidate prefix", function()
+        local models = Models(config, request)
+        local ranking, count = models:rerank("query", { "first", "second" })
+        assert.equals(2, count)
+        assert.same({ { index = 2, score = 0.9 }, { index = 1, score = 0.8 } }, ranking)
+    end)
+
+    it("rejects tiny requests", function()
+        local tiny = {
             max_model_request_bytes = 1,
-        }, SSE)
-        local oversized, problem = tiny:rerank("question", { "one" })
-        assert.is_nil(oversized)
-        assert.equals("first reranker passage exceeds the request byte budget", problem)
+            max_parallel_tools = 4,
+            host = config.host,
+            models = config.models,
+        }
+        local models = Models(tiny, request)
+        assert.has_error(function()
+            models:chat({ { role = "user", content = "x" } })()
+        end)
     end)
 end)

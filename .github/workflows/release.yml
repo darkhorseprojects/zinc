@@ -9,120 +9,87 @@ on:
 permissions:
   contents: read
 
+env:
+  LUX_VERSION: 0.42.1
+  PORTABLE_AGENTS_VERSION: 1.0.0
+
 jobs:
-  quality:
-    runs-on: ubuntu-24.04
+  build:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { os: ubuntu-24.04, id: linux-x86_64 }
+          - { os: ubuntu-24.04-arm, id: linux-aarch64 }
+          - { os: macos-13, id: macos-x86_64 }
+          - { os: macos-14, id: macos-aarch64 }
+          - { os: windows-latest, id: windows-x86_64 }
+    runs-on: ${{ matrix.os }}
     timeout-minutes: 90
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
-        with:
-          path: zinc
-          persist-credentials: false
-      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
-        with:
-          repository: darkhorseprojects/portable-agents
-          ref: v1.0.0
-          path: portable-agents
-          persist-credentials: false
-      - uses: luau-project/setup-lua@09c2083852bf88c626d60e51be3fbb279abd6e51
-        with:
-          lua-version: 5.5.0
-          luarocks-version: none
-      - uses: mlugg/setup-zig@d1434d08867e3ee9daa34448df10607b98908d29
-        with:
-          version: 0.16.0
-      - name: Install Moonstone 0.4.1
+        with: { persist-credentials: false }
+      - name: Install tools and Portable Agents
+        shell: bash
+        env: { GH_TOKEN: "${{ github.token }}" }
+        run: |
+          cargo install lux-cli --version "$LUX_VERSION" --root "$RUNNER_TEMP/lux" --no-default-features --features vendored --locked
+          echo "$RUNNER_TEMP/lux/bin" >> "$GITHUB_PATH"
+          mkdir "$RUNNER_TEMP/agent"
+          gh release download "v$PORTABLE_AGENTS_VERSION" -R darkhorseprojects/portable-agents -p "*-${{ matrix.id }}.*" -D "$RUNNER_TEMP/agent"
+          archive=$(find "$RUNNER_TEMP/agent" -type f | head -1)
+          if [[ "$archive" == *.zip ]]; then unzip -q "$archive" -d "$RUNNER_TEMP/agent"; else tar -xzf "$archive" -C "$RUNNER_TEMP/agent"; fi
+          agent=$(find "$RUNNER_TEMP/agent" -type f \( -name agent -o -name agent.exe \) | head -1)
+          echo "AGENT_BIN=$agent" >> "$GITHUB_ENV"
+      - name: Build Zinc closure and Cygnet index
         shell: bash
         run: |
-          curl -fsSL https://moonstone.sh/install -o "$RUNNER_TEMP/moonstone-install.sh"
-          MOONSTONE_INSTALL_VERSION=0.4.1 MOONSTONE_INSTALL_DIR="$RUNNER_TEMP/moonstone-bin" \
-            sh "$RUNNER_TEMP/moonstone-install.sh"
-          echo "$RUNNER_TEMP/moonstone-bin" >> "$GITHUB_PATH"
-      - name: Build Portable Agents 1.0.0
-        working-directory: portable-agents
-        shell: bash
-        env:
-          LD_LIBRARY_PATH: ${{ github.workspace }}/.lua/lib
-        run: |
-          source="$(find "$GITHUB_WORKSPACE/.lua" -name 'liblua55.so' -print -quit)"
-          ln -sf "$(basename "$source")" "$GITHUB_WORKSPACE/.lua/lib/liblua.so"
-          ln -sf "$(basename "$source")" "$GITHUB_WORKSPACE/.lua/lib/liblua5.5.so"
-          zig build test -Doptimize=ReleaseSafe --search-prefix ../.lua
-          zig build -Doptimize=ReleaseSmall --search-prefix ../.lua
-          zig-out/bin/agent --version | grep -Fx 'agent 1.0.0'
-      - name: Install pinned Cygnet data
-        working-directory: zinc
+          lx --lua-version 5.5 --lua-dir "$PWD/.lux/lua" install-lua
+          lx --lua-dir "$PWD/.lux/lua" --vendor-dir "$PWD/vendor/sources" --max-jobs 1 build --only-deps
+          eval "$(lx path full --no-loader --no-bin)"
+          curl -fsSL https://github.com/omwn/cygnet/releases/download/2026.05.12/cygnet.db.gz -o "$RUNNER_TEMP/cygnet.db.gz"
+          test "$(sha256sum "$RUNNER_TEMP/cygnet.db.gz" | cut -d' ' -f1)" = 65e93f3620d7cc5444350d9e204259e961096138767d9ea73403ade38964cc48
+          gzip -dc "$RUNNER_TEMP/cygnet.db.gz" > "$RUNNER_TEMP/cygnet.db"
+          lua tools/cygnet_index.lua "$RUNNER_TEMP/cygnet.db" data/cygnet.db aae2cdb1418c1435558584a91181e1cb94459f2506c16f2be4b00e81428deaff
+      - name: Test and package
         shell: bash
         run: |
-          mkdir -p data
-          curl -fsSL https://github.com/omwn/cygnet/releases/download/2026.05.12/cygnet.db.gz \
-            -o "$RUNNER_TEMP/cygnet.db.gz"
-          echo '65e93f3620d7cc5444350d9e204259e961096138767d9ea73403ade38964cc48  '"$RUNNER_TEMP/cygnet.db.gz" \
-            | sha256sum -c -
-          gzip -dc "$RUNNER_TEMP/cygnet.db.gz" > data/cygnet.db
-          echo 'aae2cdb1418c1435558584a91181e1cb94459f2506c16f2be4b00e81428deaff  data/cygnet.db' \
-            | sha256sum -c -
-      - name: Check locked Lua environment
-        working-directory: zinc
-        shell: bash
-        run: |
-          moon sync --locked
-          moon sync --offline --locked
-          moon run build-cygnet
-          moon run format-check
-          moon run lint
-          moon run test
-          moon run benchmark
-          moon run agent-check
-      - name: Build and test release
-        working-directory: zinc
-        shell: bash
-        run: |
-          moon run release
-          moon run integration
-          (cd dist && sha256sum -c SHA256SUMS)
-          test -f dist/zinc/file-graph.json
-          test ! -e dist/zinc/store
-          ! find dist/zinc \( -name '*.db-wal' -o -name '*.db-shm' \) -print | grep .
+          lx fmt --check --path src
+          lx fmt --check --path tests
+          lx fmt --check --path tools
+          for path in src tests tools; do lx --lua-version 5.4 lint --path "$path"; done
+          lx --lua-dir "$PWD/.lux/lua" --vendor-dir "$PWD/vendor/sources" --max-jobs 1 test
+          .lux/lua/bin/lua tools/benchmark.lua
+          "$AGENT_BIN" check --directory . --entry zinc.md --mount design=design.md --trust src.models --trust src.store
+          if [[ "$GITHUB_REF" == refs/tags/* ]]; then
+            root="zinc-${GITHUB_REF_NAME}-${{ matrix.id }}"
+            mkdir -p "$root/.lux/runtime/lua" "$root/.lux/runtime/lib"
+            cp zinc.md design.md models.ini models.lock README.md LICENSE NOTICE "$root/"
+            cp -R src data "$root/"
+            for package in .lux/5.5/*@*; do
+              [[ "$package" == *-zinc@* ]] && continue
+              [[ ! -d "$package/src" ]] || cp -R "$package/src/." "$root/.lux/runtime/lua/"
+              [[ ! -d "$package/lib" ]] || cp -R "$package/lib/." "$root/.lux/runtime/lib/"
+            done
+            if [[ "$RUNNER_OS" == Windows ]]; then ROOT="$root" pwsh -NoProfile -Command 'Compress-Archive $env:ROOT ($env:ROOT + ".zip")';
+            else tar -czf "$root.tar.gz" "$root"; fi
+          fi
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
         if: startsWith(github.ref, 'refs/tags/v')
         with:
-          name: zinc-release
-          path: |
-            zinc/dist/zinc-*.tar.gz
-            zinc/dist/SHA256SUMS
+          name: zinc-${{ matrix.id }}
+          path: zinc-*.${{ runner.os == 'Windows' && 'zip' || 'tar.gz' }}
           if-no-files-found: error
 
-  verify-release-version:
+  release:
     if: startsWith(github.ref, 'refs/tags/v')
-    needs: quality
+    needs: build
     runs-on: ubuntu-24.04
-    timeout-minutes: 10
-    steps:
-      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
-        with:
-          persist-credentials: false
-      - name: Verify tag and package version
-        shell: bash
-        run: |
-          version="${GITHUB_REF_NAME#v}"
-          grep -Fx "version = \"$version\"" moonstone.toml
-          grep -Fx "local archive = \"zinc-$version-x86_64-linux-gnu.tar.gz\"" tools/release.lua
-
-  github-release:
-    if: startsWith(github.ref, 'refs/tags/v')
-    needs: verify-release-version
-    runs-on: ubuntu-24.04
-    timeout-minutes: 15
     environment: release
-    permissions:
-      contents: write
+    permissions: { contents: write }
     steps:
       - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093
-        with:
-          name: zinc-release
-          path: artifacts
+        with: { pattern: zinc-*, path: artifacts, merge-multiple: true }
+      - run: cd artifacts && sha256sum zinc-* > SHA256SUMS
       - uses: softprops/action-gh-release@3bb12739c298aeb8a4eeaf626c5b8d85266b0e65
-        with:
-          files: artifacts/*
-          generate_release_notes: true
+        with: { files: "artifacts/*", generate_release_notes: true }

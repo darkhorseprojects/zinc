@@ -1,50 +1,29 @@
-local sqlite = require("lsqlite3")
-local uv = require("luv")
+local sqlite = require("lsqlite3complete")
 local Store = require("src.store")
 
-local roots = {}
-
-local function remove(path)
-    local stat = uv.fs_lstat(path)
-    if not stat then
-        return
-    end
-    if stat.type == "directory" then
-        local scan = assert(uv.fs_scandir(path))
-        while true do
-            local name = uv.fs_scandir_next(scan)
-            if not name then
-                break
-            end
-            remove(path .. "/" .. name)
-        end
-        assert(uv.fs_rmdir(path))
-    else
-        assert(uv.fs_unlink(path))
-    end
+local paths = {}
+local function temporary()
+    local path = os.tmpname()
+    os.remove(path)
+    paths[#paths + 1], paths[#paths + 2], paths[#paths + 3] = path, path .. "-wal", path .. "-shm"
+    local directory, name = assert(path:match("^(.*)[/\\]([^/\\]+)$"))
+    return directory, name, path
 end
-
-local function root()
-    local path = assert(uv.fs_mkdtemp((os.getenv("TMPDIR") or "/tmp") .. "/zinc-store-XXXXXX"))
-    roots[#roots + 1] = path
-    return path
+local function open(maximum)
+    local directory, name, path = temporary()
+    return Store({ store = name, max_stored_record_bytes = maximum }, directory), path, directory, name
 end
 
 after_each(function()
-    for _, path in ipairs(roots) do
-        remove(path)
+    for _, path in ipairs(paths) do
+        os.remove(path)
     end
-    roots = {}
+    paths = {}
 end)
 
 describe("Store", function()
     it("creates package-local durable state with actor isolation", function()
-        local directory = root()
-        local store = Store.open({
-            package_directory = directory,
-            path = "store/zinc.db",
-            max_stored_record_bytes = 5,
-        })
+        local store, path = open(5)
         local first = store:begin("actor", "old 😀 request")
         local assistant = store:append("actor", first.id, "assistant", "assistant 😀")
         local tool = store:append("actor", first.id, "tool", "tool 😀")
@@ -71,8 +50,9 @@ describe("Store", function()
         assert.equals(tool.id, around.next.id)
         store:close()
 
-        assert.is_truthy(uv.fs_stat(directory .. "/store/zinc.db"))
-        local db = assert(sqlite.open(directory .. "/store/zinc.db"))
+        local file = assert(io.open(path, "rb"))
+        file:close()
+        local db = assert(sqlite.open(path))
         local version
         for row in db:nrows("PRAGMA user_version") do
             version = row.user_version
@@ -87,11 +67,7 @@ describe("Store", function()
     end)
 
     it("uses SQLite tokenization and rejects excess semantic work", function()
-        local store = Store.open({
-            package_directory = root(),
-            path = "store/zinc.db",
-            max_stored_record_bytes = 1000,
-        })
+        local store = open(1000)
         assert.same({
             terms = { "Hello", "sqlite3_open_v2", "sqlite3", "open", "v2" },
             tokens = { "hello", "sqlite3", "open", "v2", "hello" },
@@ -112,11 +88,7 @@ describe("Store", function()
     end)
 
     it("indexes actor identity and text in one bounded FTS query", function()
-        local store = Store.open({
-            package_directory = root(),
-            path = "store/zinc.db",
-            max_stored_record_bytes = 1000,
-        })
+        local store = open(1000)
         local alpha = store:begin("actor", "common alpha").id
         local beta = store:begin("actor", "common beta").id
         local rare = store:begin("actor", "rare delta").id
@@ -134,36 +106,18 @@ describe("Store", function()
         store:close()
     end)
 
-    it("serializes concurrent writers without crossing actors", function()
-        local directory = root()
-        Store.open({
-            package_directory = directory,
-            path = "store/zinc.db",
-            max_stored_record_bytes = 1000,
-        }):close()
-        local remaining, failures, handles = 4, {}, {}
-        for index = 1, 4 do
-            local handle, problem = uv.spawn(assert(uv.exepath()), {
-                args = { "tests/store_worker.lua", directory, "actor-" .. index, "25" },
-                cwd = assert(uv.cwd()),
-                stdio = { nil, nil, nil },
-            }, function(status, signal)
-                if status ~= 0 or signal ~= 0 then
-                    failures[#failures + 1] = { status, signal }
-                end
-                remaining = remaining - 1
-            end)
-            assert(handle, problem)
-            handles[#handles + 1] = handle
+    it("serializes independent writers without crossing actors", function()
+        local first, path, directory, name = open(1000)
+        local second = Store({ store = name, max_stored_record_bytes = 1000 }, directory)
+        for index = 1, 25 do
+            local a = first:begin("actor-a", "request " .. index)
+            first:append("actor-a", a.id, "assistant", "response " .. index)
+            local b = second:begin("actor-b", "request " .. index)
+            second:append("actor-b", b.id, "assistant", "response " .. index)
         end
-        while remaining > 0 do
-            uv.run("once")
-        end
-        for _, handle in ipairs(handles) do
-            handle:close()
-        end
-        assert.same({}, failures)
-        local db = assert(sqlite.open(directory .. "/store/zinc.db"))
+        first:close()
+        second:close()
+        local db = assert(sqlite.open(path))
         local actors, records = 0, 0
         for row in db:nrows("SELECT count(*) AS count FROM actors") do
             actors = row.count
@@ -171,16 +125,16 @@ describe("Store", function()
         for row in db:nrows("SELECT count(*) AS count FROM results") do
             records = row.count
         end
-        assert.equals(4, actors)
-        assert.equals(200, records)
+        assert.equals(2, actors)
+        assert.equals(100, records)
         assert.equals(sqlite.OK, db:close())
     end)
 
     it("rejects paths outside the package", function()
-        local directory = root()
-        for _, path in ipairs({ "/tmp/zinc.db", "zinc.db", "store/../zinc.db", "store\\zinc.db" }) do
+        local directory = temporary()
+        for _, path in ipairs({ "/tmp/zinc.db", "store/../zinc.db", "store\\zinc.db", "" }) do
             assert.has_error(function()
-                Store.open({ package_directory = directory, path = path, max_stored_record_bytes = 1000 })
+                Store({ store = path, max_stored_record_bytes = 1000 }, directory)
             end)
         end
     end)

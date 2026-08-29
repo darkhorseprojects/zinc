@@ -1,11 +1,11 @@
-local sqlite = require("lsqlite3")
-local uv = require("luv")
+local sqlite = require("lsqlite3complete")
 
 local source, output, source_identity = ...
 assert(type(source) == "string" and source ~= "", "usage: lua tools/cygnet_index.lua SOURCE OUTPUT SOURCE_IDENTITY")
 assert(type(output) == "string" and output ~= "", "output path is required")
 assert(type(source_identity) == "string" and source_identity ~= "", "source identity is required")
-assert(uv.fs_stat(source), "Cygnet source does not exist")
+local source_file = assert(io.open(source, "rb"), "Cygnet source does not exist")
+source_file:close()
 
 local SCORING = {
     "pertainym",
@@ -39,7 +39,7 @@ local SCORING = {
 local RESTART, DAMPING, TOLERANCE, MAXIMUM_ITERATIONS = 0.15, 0.85, 1e-13, 200
 local CONTENT_POS = "'NOUN','VERB','ADJ','ADV'"
 local temporary = output .. ".tmp"
-uv.fs_unlink(temporary)
+os.remove(temporary)
 
 local function quote(value)
     return "'" .. value:gsub("'", "''") .. "'"
@@ -66,11 +66,10 @@ exec("ATTACH DATABASE " .. quote(source) .. " AS cygnet")
 exec([[
 CREATE TABLE metadata(key TEXT PRIMARY KEY,value TEXT NOT NULL) STRICT;
 CREATE TABLE concept_mass(synset_rowid INTEGER PRIMARY KEY,mass REAL NOT NULL CHECK(mass>0)) STRICT;
-CREATE TABLE language_statistics(
+CREATE TABLE languages(
  language TEXT PRIMARY KEY,
  normalization REAL NOT NULL CHECK(normalization>0),
- vocabulary INTEGER NOT NULL CHECK(vocabulary>0),
- maximum_form_tokens INTEGER NOT NULL CHECK(maximum_form_tokens>0)
+ vocabulary INTEGER NOT NULL CHECK(vocabulary>0)
 ) STRICT;
 CREATE TABLE concept_form_counts(
  language TEXT NOT NULL,
@@ -158,7 +157,7 @@ FROM cygnet.senses s JOIN cygnet.entries e ON e.rowid=s.entry_rowid
 JOIN cygnet.languages l ON l.rowid=e.language_rowid JOIN cygnet.forms f ON f.entry_rowid=e.rowid
 JOIN concept_mass m ON m.synset_rowid=s.synset_rowid
 WHERE e.pos IN (%s) AND f.normalized_form<>'' GROUP BY l.code,s.synset_rowid;
-INSERT INTO language_statistics(language,normalization,vocabulary,maximum_form_tokens)
+INSERT INTO languages(language,normalization,vocabulary)
 WITH language_concepts AS (
  SELECT DISTINCT l.code,s.synset_rowid FROM cygnet.entries e
  JOIN cygnet.languages l ON l.rowid=e.language_rowid JOIN cygnet.senses s ON s.entry_rowid=e.rowid
@@ -172,18 +171,47 @@ WITH language_concepts AS (
  JOIN cygnet.entries e ON e.rowid=f.entry_rowid JOIN cygnet.languages l ON l.rowid=e.language_rowid
  WHERE e.pos IN (%s) AND f.normalized_form<>'' GROUP BY l.code
 )
-SELECT n.code,n.normalization,v.vocabulary,%d FROM normalizations n JOIN vocabularies v ON v.code=n.code
+SELECT n.code,n.normalization,v.vocabulary FROM normalizations n JOIN vocabularies v ON v.code=n.code
 WHERE n.normalization>0 AND v.vocabulary>0;
-]]):format(CONTENT_POS, CONTENT_POS, CONTENT_POS, maximum_form_tokens))
+]]):format(CONTENT_POS, CONTENT_POS, CONTENT_POS))
+exec(([[
+CREATE TABLE form_scores(language TEXT NOT NULL,form TEXT NOT NULL,probability REAL NOT NULL CHECK(probability>0),PRIMARY KEY(language,form)) WITHOUT ROWID;
+CREATE TABLE form_concepts(language TEXT NOT NULL,form TEXT NOT NULL,concept INTEGER NOT NULL,PRIMARY KEY(language,form,concept)) WITHOUT ROWID;
+CREATE TABLE concept_terms(concept INTEGER NOT NULL,language TEXT NOT NULL,term TEXT NOT NULL,PRIMARY KEY(concept,language,term)) WITHOUT ROWID;
+CREATE TABLE concept_edges(source INTEGER NOT NULL,target INTEGER NOT NULL,PRIMARY KEY(source,target)) WITHOUT ROWID;
+WITH mapped AS (
+ SELECT DISTINCT l.code language,f.normalized_form form,s.synset_rowid concept
+ FROM cygnet.forms f JOIN cygnet.entries e ON e.rowid=f.entry_rowid JOIN cygnet.languages l ON l.rowid=e.language_rowid
+ JOIN cygnet.senses s ON s.entry_rowid=e.rowid JOIN concept_mass m ON m.synset_rowid=s.synset_rowid
+ WHERE e.pos IN (%s) AND f.normalized_form<>''
+)
+INSERT INTO form_concepts SELECT language,form,concept FROM mapped;
+WITH mapped AS (
+ SELECT DISTINCT l.code language,f.normalized_form form,s.synset_rowid concept
+ FROM cygnet.forms f JOIN cygnet.entries e ON e.rowid=f.entry_rowid JOIN cygnet.languages l ON l.rowid=e.language_rowid
+ JOIN cygnet.senses s ON s.entry_rowid=e.rowid JOIN concept_mass m ON m.synset_rowid=s.synset_rowid
+ WHERE e.pos IN (%s) AND f.normalized_form<>''
+)
+INSERT INTO form_scores
+SELECT x.language,x.form,sum(m.mass/c.count) FROM mapped x JOIN concept_mass m ON m.synset_rowid=x.concept
+JOIN concept_form_counts c ON c.language=x.language AND c.synset_rowid=x.concept GROUP BY x.language,x.form;
+INSERT INTO concept_terms
+SELECT DISTINCT s.synset_rowid,l.code,f.normalized_form FROM cygnet.senses s JOIN cygnet.entries e ON e.rowid=s.entry_rowid
+JOIN cygnet.languages l ON l.rowid=e.language_rowid JOIN cygnet.forms f ON f.entry_rowid=e.rowid
+JOIN concept_mass m ON m.synset_rowid=s.synset_rowid WHERE e.pos IN (%s) AND f.normalized_form<>'';
+INSERT INTO concept_edges SELECT DISTINCT source,target FROM work_edges;
+CREATE INDEX concept_terms_language_concept ON concept_terms(language,concept);
+]]):format(CONTENT_POS, CONTENT_POS, CONTENT_POS))
 
 local metadata = {
-    format_version = "1",
+    format_version = "2",
     source_identity = source_identity,
     algorithm = "relation-balanced-pagerank-v1",
     restart = tostring(RESTART),
     tolerance = tostring(TOLERANCE),
     iterations = tostring(iterations),
     concepts = tostring(count),
+    maximum_form_tokens = tostring(maximum_form_tokens),
 }
 local statement = assert(db:prepare("INSERT INTO metadata(key,value) VALUES(?,?)"))
 for key, value in pairs(metadata) do
@@ -193,8 +221,8 @@ for key, value in pairs(metadata) do
 end
 assert(statement:finalize() == sqlite.OK, db:errmsg())
 exec(
-    "DROP TABLE work_edges; DROP TABLE work_mass; DROP TABLE work_next; PRAGMA application_id=1514751817; PRAGMA user_version=1; VACUUM"
+    "DROP TABLE work_edges; DROP TABLE work_mass; DROP TABLE work_next; DROP TABLE concept_mass; DROP TABLE concept_form_counts; PRAGMA application_id=1514751817; PRAGMA user_version=2; VACUUM"
 )
 assert(db:close() == sqlite.OK, "closing Cygnet index failed")
-assert(uv.fs_rename(temporary, output))
+assert(os.rename(temporary, output))
 print(string.format("indexed %d concepts in %d iterations", count, iterations))

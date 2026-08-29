@@ -1,102 +1,132 @@
-local json = require("dkjson")
+package.preload["pa.env"] = function()
+    return assert(loadfile("../portable-agents/src/pa/env.lua"))()
+end
 local Run = require("src.run")
 
-local function encode(value)
-    return assert(json.encode(value))
-end
-local function decode(value)
-    return assert(json.decode(value))
+local function results(_, _, _, ask)
+    return { ask = ask }
 end
 
-local function execute(agent, request, actor)
-    local thread = coroutine.create(function()
-        agent.ask(request, actor)
-    end)
-    local events = {}
-    while coroutine.status(thread) ~= "dead" do
-        local ok, value = coroutine.resume(thread)
-        assert.is_true(ok, value)
-        if coroutine.status(thread) ~= "dead" then
-            events[#events + 1] = decode(value)
-        end
+local function iterator(values)
+    local index = 0
+    return function()
+        index = index + 1
+        return values[index]
     end
-    return events
 end
 
-describe("run_lua", function()
-    it("exposes only guided capabilities and invocation-local results", function()
-        local id, records = 0, {}
-        local store = {}
-        function store:begin(actor, text)
-            id = id + 1
-            local row = { id = id, actor = actor, start = id, role = "user", text = text }
-            records[#records + 1] = row
-            return row
+local function store()
+    local api = { records = {}, next = 0 }
+    local function record(self, actor, start, role, text)
+        self.next = self.next + 1
+        local value = { id = self.next, actor = actor, start = start or self.next, role = role, text = text }
+        self.records[#self.records + 1] = value
+        return value
+    end
+    function api:begin(actor, text)
+        return record(self, actor, nil, "user", text)
+    end
+    function api:append(actor, start, role, text)
+        return record(self, actor, start, role, text)
+    end
+    function api:read()
+        return nil
+    end
+    function api:around()
+        return nil
+    end
+    return api
+end
+
+local function models()
+    local api = {}
+    function api:chat(messages)
+        self.messages = messages
+        return iterator({
+            { type = "reasoning", text = "thinking" },
+            { type = "response", text = "answer" },
+            { type = "finish", reason = "stop", calls = {}, wire = {} },
+        })
+    end
+    return api
+end
+
+describe("run", function()
+    it("commits every durable completion before Store", function()
+        local database, model = store(), models()
+        local retrieval = {
+            results = results,
+            start = function(_, actor, start, anchor)
+                return { actor = actor, start = start, anchor = anchor }
+            end,
+            context = function()
+                return "{}"
+            end,
+        }
+        local zinc = Run({ max_parallel_tools = 4 }, {}, model, database, retrieval)
+        local output, stream = {}, zinc.ask("request", "actor", "instructions")
+        for event in stream do
+            output[#output + 1] = event
         end
-        function store:append(actor, start, role, text)
-            id = id + 1
-            local row = { id = id, actor = actor, start = start, role = role, text = text }
-            records[#records + 1] = row
-            return row
-        end
-        function store:read(actor, start, result)
-            return { actor = actor, start = start, id = result, text = "history" }
-        end
-        function store:around()
-            return nil
-        end
-        local retrieval = {}
-        function retrieval:start()
-            return {}
-        end
-        function retrieval:context()
-            return "{}"
-        end
-        local rounds = 0
-        local models = { encode = encode, decode = decode, null = json.null }
-        function models:chat()
-            rounds = rounds + 1
-            local values
-            if rounds == 1 then
-                local code = [[
-local loaded={};for name in pairs(package.loaded)do loaded[#loaded+1]=name end;table.sort(loaded)
-return {host=require('host').value,results=type(require('results').read),loaded=loaded,
- source=pcall(require,'src.run'),system=pcall(require,'dkjson'),missing=pcall(require,'missing')}
-]]
-                values = {
-                    { type = "tool" },
+        assert.same({ "reasoning", "reasoning_complete", "response", "response_complete", "store" }, {
+            output[1].type,
+            output[2].type,
+            output[3].type,
+            output[4].type,
+            output[5].type,
+        })
+        assert.same({ 1, 2, 3 }, { database.records[1].id, output[2].result, output[4].result })
+        assert.equals(3, output[5].result)
+        assert.equals(1, output[5].start)
+    end)
+
+    it("rejects nil generated returns", function()
+        local database = store()
+        local model = { count = 0 }
+        function model:chat()
+            self.count = self.count + 1
+            if self.count == 1 then
+                return iterator({
                     {
                         type = "finish",
                         reason = "tool_calls",
-                        tool_calls = { { id = "x", name = "run_lua", arguments = encode({ code = code }) } },
+                        calls = { { id = "call", code = "return nil" } },
+                        wire = {
+                            {
+                                id = "call",
+                                type = "function",
+                                ["function"] = { name = "run_lua", arguments = '{"code":"return nil"}' },
+                            },
+                        },
                     },
-                }
-            else
-                values = { { type = "response", text = "done" }, { type = "finish", reason = "stop", tool_calls = {} } }
+                })
             end
-            local index = 0
-            return function()
-                index = index + 1
-                return values[index]
+            return iterator({
+                { type = "response", text = "corrected" },
+                { type = "finish", reason = "stop", calls = {}, wire = {} },
+            })
+        end
+        local retrieval = {
+            results = results,
+            start = function()
+                return {}
+            end,
+            context = function()
+                return "{}"
+            end,
+        }
+        local stream = Run({ max_parallel_tools = 2 }, {}, model, database, retrieval).ask(
+            "request",
+            "actor",
+            "instructions"
+        )
+        local tool_result
+        for event in stream do
+            if event.type == "tool_result" then
+                tool_result = event
             end
         end
-        local agent = Run.new({
-            name = "zinc",
-            instructions = "test",
-            capabilities = { host = { guide = "guide", value = "available" } },
-            store = store,
-            retrieval = retrieval,
-            models = models,
-        })
-        local events = execute(agent, "request", "actor")
-        local result = decode(events[2].text)
-        assert.equals("available", result.host)
-        assert.equals("function", result.results)
-        assert.same({ "host", "results" }, result.loaded)
-        assert.is_false(result.source)
-        assert.is_false(result.system)
-        assert.is_false(result.missing)
-        assert.equals("store", events[#events].type)
-        assert.equals(4, #records)
+        assert.is_false(tool_result.ok)
+        assert.equals("run_lua returned nil", tool_result.text)
     end)
 end)

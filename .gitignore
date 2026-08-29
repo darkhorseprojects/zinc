@@ -1,5 +1,4 @@
-.moonstone/
-.ballad/
+.lux/
 /dist/
 /store/
 /data/*.db

@@ -22,17 +22,19 @@ Identify actions that are destructive, irreversible, externally visible, expensi
 
 Keep operator instructions, model configuration, roots, origins, command shapes, and substantial user-visible prose in Markdown. Keep reusable behavior in small Lua modules. Use ordinary Lua tables, closures, factories, coroutines, `package.path`, `require`, and `package.loaded`; do not add registries or lifecycle abstractions that duplicate the language.
 
-Use one explicit Markdown entry. Add another source file only when it owns a distinct responsibility or removes duplication. A small package should be understandable by reading the entry and then the few modules it requires.
+Use one explicit Markdown entry with a Config Lua fence followed by a Program Lua fence. All exact `lua` fences form one chunk, so locals cross fence boundaries. Add another source file only when it owns a distinct responsibility or removes proven duplication. Pass the unchanged root config to Zinc modules; pass a reusable library only its own subtable. Do not translate config through courier option tables.
+
+Use natural Lua return values: a sole constructor returns as the module, several independent operations return in a table, and a cohesive runtime constructor returns its operations. Do not force `.new` ceremony, registries, settings schemas, helper layers, or lifecycle abstractions that duplicate Lua.
 
 ### Generated execution
 
 Generated Lua receives a fresh explicit environment. Expose only the values required for the current job. Treat generated code and retrieved records as untrusted. Authoritative physical modules may use ambient system facilities and may deliberately return narrower capabilities, but generated code must not be able to discover those facilities on its own.
 
-Registered capabilities are concrete native Lua package values. Give substantial capabilities a `guide`, discover them through `package.loaded`, and load them with native `require` only when needed.
+Registered capabilities are concrete Lua values. Give substantial capabilities a `guide`, discover them through `package.loaded`, and load them with native `require` only when needed. Every generated tool receives a new private environment and capability projection.
 
 ### Results and persistence
 
-Commit each completed request, assistant action, tool result, and response independently before exposing it as completed. Keep unfinished work absent. A later failure must not erase earlier completed work. Use one request record ID as the execution `start`; historical reads remain actor-isolated and end at `id < start`.
+In durable mode, commit each completed request, reasoning item, response, tool call, and tool result independently before exposing it as completed. In temporary mode, commit nothing. Persistence never determines loop termination: reasoning or tools continue and only a completed final response stops. Keep unfinished work absent. A later failure must not erase earlier completed work. Use one request record ID as the durable execution `start`; historical reads remain actor-isolated and end at `id < start`.
 
 Nested requests are ordinary durable chronological work. Do not invent parent trees, terminal statuses, snapshots, merge/discard state, or rollback of previously completed records. A hard kill may leave the current unfinished item absent, but every earlier committed result remains.
 
@@ -46,7 +48,7 @@ Name required runtimes, native libraries, services, model files, versions, and s
 
 ### Behavioral acceptance
 
-Test boundaries a user could actually depend on: exact authority, generated-state isolation, file and command policy, caller-owned process deadlines, cancellation, actor concurrency, completed-record persistence, later failure, retrieval quality, context bounds, and final delivery. Prefer real adjacent components over tests that merely reproduce a helper's branches.
+Test boundaries a user could actually depend on: exact authority, generated-state isolation, file and command policy, mandatory process limits, cancellation, actor concurrency, parallel tool ordering, temporary execution, completed-record persistence, later failure, retrieval quality, context bounds, and final delivery. Prefer real adjacent components over tests that merely reproduce a helper's branches.
 
 ### Completion checklist
 

@@ -1,4 +1,4 @@
-local json = require("dkjson")
+local json = require("lunajson")
 local Retrieval = require("src.retrieval")
 
 local OPTIONS = {
@@ -55,7 +55,7 @@ describe("retrieval", function()
             self.query, self.passages = query, passages
             return { { index = 2, score = 1 }, { index = 1, score = 1 } }, 2
         end
-        local retrieval = Retrieval.new(store, models, cygnet, OPTIONS)
+        local retrieval = Retrieval(OPTIONS, store, models, cygnet)
         local state = retrieval:start("actor", 6, "immutable anchor")
         local context = assert(json.decode(retrieval:context(state)))
         assert.same({ "anchor", "M-17" }, store.terms)
@@ -80,7 +80,7 @@ describe("retrieval", function()
             end
             options.semantic_depth = depth
             assert.has_no.errors(function()
-                Retrieval.new(store, models, cygnet, options)
+                Retrieval(options, store, models, cygnet)
             end)
         end
         for _, depth in ipairs({ -1, 5 }) do
@@ -90,7 +90,7 @@ describe("retrieval", function()
             end
             options.semantic_depth = depth
             assert.has_error(function()
-                Retrieval.new(store, models, cygnet, options)
+                Retrieval(options, store, models, cygnet)
             end)
         end
     end)

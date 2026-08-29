@@ -1,8 +1,7 @@
-local module = {}
-
-function module.new()
-    local fragments, data, event = {}, nil, nil
-    local finished = false
+return function(maximum)
+    maximum = assert(math.tointeger(maximum), "SSE byte limit must be an integer")
+    assert(maximum > 0, "SSE byte limit must be positive")
+    local pending, data, event, finished = "", nil, nil, false
 
     local function dispatch(records)
         if data then
@@ -10,75 +9,58 @@ function module.new()
         end
         data, event = nil, nil
     end
-
-    local function consume(value, records)
-        if value == "" then
+    local function consume(line, records)
+        if line == "" then
             dispatch(records)
-        elseif value:sub(1, 1) ~= ":" then
-            local colon = value:find(":", 1, true)
-            local field, content = value, ""
+        elseif line:sub(1, 1) ~= ":" then
+            local colon = line:find(":", 1, true)
+            local field, value = line, ""
             if colon then
-                field, content = value:sub(1, colon - 1), value:sub(colon + 1)
-                if content:sub(1, 1) == " " then
-                    content = content:sub(2)
+                field, value = line:sub(1, colon - 1), line:sub(colon + 1)
+                if value:sub(1, 1) == " " then
+                    value = value:sub(2)
                 end
             end
             if field == "data" then
                 data = data or {}
-                data[#data + 1] = content
+                data[#data + 1] = value
             elseif field == "event" then
-                event = content
+                event = value
             end
         end
     end
-
     local function parse(final)
-        local records, source, offset = {}, table.concat(fragments), 1
-        fragments = {}
-        while offset <= #source do
-            local ending = source:find("[\r\n]", offset)
-            if not ending then
+        local records, offset = {}, 1
+        while offset <= #pending do
+            local ending = pending:find("[\r\n]", offset)
+            if not ending or pending:byte(ending) == 13 and ending == #pending and not final then
                 break
             end
-            local byte = source:byte(ending)
-            if byte == 13 and ending == #source and not final then
-                break
-            end
-            consume(source:sub(offset, ending - 1), records)
-            offset = ending + (byte == 13 and source:byte(ending + 1) == 10 and 2 or 1)
+            consume(pending:sub(offset, ending - 1), records)
+            offset = ending + (pending:byte(ending) == 13 and pending:byte(ending + 1) == 10 and 2 or 1)
         end
-        if offset <= #source then
-            fragments[1] = source:sub(offset)
-        end
+        pending = pending:sub(offset)
+        assert(#pending <= maximum, "SSE line exceeds configured byte limit")
         if final then
-            if fragments[1] then
-                consume(fragments[1], records)
-                fragments = {}
+            if pending ~= "" then
+                consume(pending, records)
             end
+            pending = ""
             dispatch(records)
         end
         return records
     end
-
-    local parser = {}
-
-    function parser:push(chunk)
-        assert(not finished, "SSE parser is finished")
-        assert(type(chunk) == "string" and not chunk:find("%z"), "SSE chunk must be text without NUL")
-        fragments[#fragments + 1] = chunk
-        if chunk:find("[\r\n]") or #fragments > 1 and fragments[#fragments - 1]:sub(-1) == "\r" then
+    return {
+        push = function(_, chunk)
+            assert(not finished, "SSE parser is finished")
+            assert(type(chunk) == "string" and not chunk:find("%z"), "invalid SSE chunk")
+            pending = pending .. chunk
             return parse(false)
-        end
-        return {}
-    end
-
-    function parser:finish()
-        assert(not finished, "SSE parser is finished")
-        finished = true
-        return parse(true)
-    end
-
-    return parser
+        end,
+        finish = function()
+            assert(not finished, "SSE parser is finished")
+            finished = true
+            return parse(true)
+        end,
+    }
 end
-
-return module
