@@ -5,14 +5,18 @@ local tool = {
     type = "function",
     ["function"] = {
         name = "run_lua",
+        description = "Execute a Lua chunk. The chunk must return exactly one non-nil value; use return, never print.",
         parameters = {
             type = "object",
             additionalProperties = false,
             required = { "code" },
-            properties = { code = { type = "string" } },
+            properties = {
+                code = { type = "string", description = "Complete Lua chunk ending in one non-nil return value." },
+            },
         },
     },
 }
+
 local function next_value(iterator, ...)
     local value = iterator(...)
     while type(value) == "function" do
@@ -20,6 +24,7 @@ local function next_value(iterator, ...)
     end
     return value
 end
+
 local function collect(iterator)
     local chunks, response, event = {}, nil, next_value(iterator)
     while event do
@@ -35,30 +40,72 @@ end
 
 return function(config, http)
     local chat, rerank = assert(config.models.chat), assert(config.models.rerank)
-    local function request(model, accept, value)
-        local body = json.encode(value, null)
-        assert(#body <= config.max_model_request_bytes, "model request exceeds configured byte limit")
+    local context = assert(math.tointeger(config.max_model_context_tokens), "model context must be an integer")
+    local reserve = assert(math.tointeger(config.min_model_output_tokens), "model output reserve must be an integer")
+    assert(context > reserve and reserve > 0, "model token limits are invalid")
+
+    local function request(endpoint, accept, value)
         return http({
-            url = model.endpoint,
+            url = endpoint,
             method = "POST",
-            body = body,
+            body = json.encode(value, null),
             headers = { ["content-type"] = "application/json", accept = accept },
         })
     end
+
+    local function post(model, endpoint, value)
+        value.model = model.model
+        local source, response = collect(request(endpoint, "application/json", value))
+        assert(response and response.status >= 200 and response.status < 300, "model endpoint failed")
+        local decoded = json.decode(source, 1, null)
+        assert(type(decoded) == "table" and type(decoded.error) ~= "table", "invalid model response")
+        return decoded
+    end
+
+    local function tokens(model, content, parse_special)
+        local value = post(model, assert(model.tokenize), {
+            content = content,
+            add_special = false,
+            parse_special = parse_special or false,
+        })
+        assert(type(value.tokens) == "table", "tokenizer response has no tokens")
+        return #value.tokens
+    end
+
     local api = {}
+    function api:encode(value)
+        return json.encode(value, null)
+    end
+    function api:tokens(content)
+        assert(type(content) == "string" and utf8.len(content), "tokenizer input must be valid text")
+        return tokens(chat, content)
+    end
 
     function api:chat(messages)
         return coroutine.wrap(function()
-            local parser = sse(config.host.limits.http_response_bytes)
-            local calls, done, finish, response = {}, false
-            local iterator = request(chat, "text/event-stream", {
+            local value = {
                 model = chat.model,
                 messages = messages,
                 tools = { tool },
                 tool_choice = "auto",
                 parallel_tool_calls = true,
                 stream = true,
+            }
+            local template = post(chat, assert(chat.template), {
+                messages = messages,
+                tools = { tool },
+                tool_choice = "auto",
+                parallel_tool_calls = true,
+                add_generation_prompt = true,
             })
+            assert(type(template.prompt) == "string", "template response has no prompt")
+            local used = tokens(chat, template.prompt, true)
+            assert(used + reserve <= context, "model prompt leaves too few output tokens")
+            value.max_tokens = context - used
+
+            local parser = sse(config.host.limits.http_response_bytes)
+            local calls, done, finish, response = {}, false
+            local iterator = request(chat.endpoint, "text/event-stream", value)
             local event = next_value(iterator)
             while event do
                 if event.type == "response" then
@@ -68,9 +115,9 @@ return function(config, http)
                         if record.data == "[DONE]" then
                             done = true
                         else
-                            local value = json.decode(record.data, 1, null)
-                            assert(type(value) == "table" and type(value.error) ~= "table", "invalid chat event")
-                            local choice = value.choices and value.choices[1]
+                            local item = json.decode(record.data, 1, null)
+                            assert(type(item) == "table" and type(item.error) ~= "table", "invalid chat event")
+                            local choice = item.choices and item.choices[1]
                             if choice then
                                 local delta = assert(choice.delta, "chat event has no delta")
                                 local reasoning = delta.reasoning_content or delta.reasoning
@@ -80,12 +127,12 @@ return function(config, http)
                                 if delta.content and delta.content ~= null and delta.content ~= "" then
                                     coroutine.yield({ type = "response", text = delta.content })
                                 end
-                                for _, item in ipairs(delta.tool_calls == null and {} or delta.tool_calls or {}) do
-                                    local index = assert(math.tointeger(item.index), "chat tool index is invalid") + 1
-                                    local call, fn = calls[index] or {}, item["function"] or {}
+                                for _, entry in ipairs(delta.tool_calls == null and {} or delta.tool_calls or {}) do
+                                    local index = assert(math.tointeger(entry.index), "chat tool index is invalid") + 1
+                                    local call, fn = calls[index] or {}, entry["function"] or {}
                                     calls[index] = call
                                     for field, fragment in pairs({
-                                        id = item.id,
+                                        id = entry.id,
                                         name = fn.name,
                                         arguments = fn.arguments,
                                     }) do
@@ -129,20 +176,20 @@ return function(config, http)
         if #passages == 0 then
             return {}, 0
         end
-        local selected, body = {}, nil
+        local selected = {}
         for _, passage in ipairs(passages) do
-            selected[#selected + 1] = passage
-            local candidate = { documents = selected, model = rerank.model, query = query, top_n = #selected }
-            if #json.encode(candidate, null) > config.max_model_request_bytes then
-                selected[#selected] = nil
+            if tokens(rerank, query .. "\n" .. passage) > config.max_rerank_passage_tokens then
                 break
             end
-            body = candidate
+            selected[#selected + 1] = passage
         end
-        assert(body, "first reranker passage exceeds the request byte budget")
-        local source, response = collect(request(rerank, "application/json", body))
-        assert(response and response.status >= 200 and response.status < 300, "reranker endpoint failed")
-        local value, result, seen = json.decode(source, 1, null), {}, {}
+        assert(#selected > 0, "first reranker passage exceeds the token budget")
+        local value = post(rerank, rerank.endpoint, {
+            documents = selected,
+            query = query,
+            top_n = #selected,
+        })
+        local result, seen = {}, {}
         assert(type(value.results) == "table" and #value.results == #selected, "reranker response has the wrong count")
         for _, item in ipairs(value.results) do
             local index = type(item) == "table" and math.tointeger(item.index)

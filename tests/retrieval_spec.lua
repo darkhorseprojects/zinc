@@ -5,10 +5,10 @@ local OPTIONS = {
     semantic_language = "en",
     semantic_depth = 1,
     semantic_attention_cutoff = 0,
-    max_chronological_window_bytes = 100,
-    max_retrieval_window_bytes = 1000,
+    max_chronological_window_tokens = 100,
+    max_retrieval_window_tokens = 1000,
     max_semantic_terms = 512,
-    max_semantic_input_tokens = 4096,
+    max_grounding_tokens = 4096,
     max_exact_forms = 512,
     max_retrieval_candidates = 64,
 }
@@ -26,12 +26,8 @@ describe("retrieval", function()
             { id = 2, role = "tool", text = "second" },
         }
         local store = {}
-        function store:before(_, _, visit)
-            for _, record in ipairs(chronological) do
-                if visit(record) == false then
-                    break
-                end
-            end
+        function store:before()
+            return chronological
         end
         function store:ground(anchor, terms, tokens, exact)
             self.anchor, self.bounds = anchor, { terms, tokens, exact }
@@ -46,11 +42,13 @@ describe("retrieval", function()
             self.request = request
             return { "M-17" }
         end
-        local models = {
-            encode = function(value)
-                return assert(json.encode(value))
-            end,
-        }
+        local models = {}
+        function models:encode(value)
+            return assert(json.encode(value))
+        end
+        function models:tokens(value)
+            return #value
+        end
         function models:rerank(query, passages)
             self.query, self.passages = query, passages
             return { { index = 2, score = 1 }, { index = 1, score = 1 } }, 2
@@ -69,8 +67,8 @@ describe("retrieval", function()
     it("bounds semantic depth", function()
         local store, models, cygnet =
             {}, {
-                encode = function()
-                    return "{}"
+                tokens = function()
+                    return 0
                 end,
             }, {}
         for _, depth in ipairs({ 0, 4 }) do

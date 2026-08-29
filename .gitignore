@@ -2,6 +2,7 @@
 /dist/
 /store/
 /data/*.db
+/models/
 user.md
 agent-connector.yaml
 .agent-connector*

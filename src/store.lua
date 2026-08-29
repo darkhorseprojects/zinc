@@ -133,19 +133,13 @@ CREATE VIRTUAL TABLE temp.grounding_vocabulary USING fts5vocab(grounding_tokeniz
         local following = one(" WHERE a.actor=? AND r.id>? AND r.id<? ORDER BY r.id LIMIT 1", actor, id, start)
         return { previous = previous, current = current, next = following }
     end
-    function api:before(actor, start, visit)
-        local statement =
-            assert(db:prepare(result_select .. " WHERE r.actor_id=? AND r.id<? ORDER BY r.id DESC"), db:errmsg())
-        assert(statement:bind_values(actor_id(actor, false), start) == sqlite.OK, db:errmsg())
-        local result = table.pack(pcall(function()
-            for row in statement:nrows() do
-                if visit(row) == false then
-                    break
-                end
-            end
-        end))
-        assert(statement:finalize() == sqlite.OK, db:errmsg())
-        assert(result[1], result[2])
+    function api:before(actor, start, limit)
+        return rows(
+            result_select .. " WHERE r.actor_id=? AND r.id<? ORDER BY r.id DESC LIMIT ?",
+            actor_id(actor, false),
+            start,
+            limit
+        )
     end
     function api:ground(value, term_maximum, token_maximum, exact_maximum)
         local terms, tokens, exact, seen = {}, {}, {}, {}
@@ -161,7 +155,7 @@ CREATE VIRTUAL TABLE temp.grounding_vocabulary USING fts5vocab(grounding_tokeniz
         execute("DELETE FROM grounding_tokenizer")
         execute("INSERT INTO grounding_tokenizer(text) VALUES(?)", value)
         for _, row in ipairs(rows("SELECT term FROM grounding_vocabulary ORDER BY offset")) do
-            assert(#tokens < token_maximum, "grounding text exceeds semantic input token limit")
+            assert(#tokens < token_maximum, "grounding text exceeds grounding token limit")
             tokens[#tokens + 1] = row.term
             if not seen[row.term] and #terms < term_maximum then
                 terms[#terms + 1], seen[row.term] = row.term, true

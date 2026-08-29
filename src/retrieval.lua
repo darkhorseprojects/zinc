@@ -1,5 +1,3 @@
-local encode = require("lunajson").encode
-
 local function finite(value)
     return type(value) == "number" and value == value and math.abs(value) < math.huge
 end
@@ -11,27 +9,36 @@ end
 return function(config, store, models, cygnet)
     assert(config.semantic_depth >= 0 and config.semantic_depth <= 4, "semantic depth must be from zero to four")
 
+    local function fits(records, maximum)
+        return models:tokens(models:encode(records)) <= maximum
+    end
+
     local function chronological(actor, start)
-        local newest, used = {}, 2
-        store:before(actor, start, function(value)
-            local record = project(value)
-            local size = #encode(record) + (#newest > 0 and 1 or 0)
-            if used + size > config.max_chronological_window_bytes then
-                return false
+        local result, cursor = {}, start
+        while true do
+            local page = store:before(actor, cursor, 32)
+            if #page == 0 then
+                break
             end
-            used = used + size
-            newest[#newest + 1] = record
-        end)
-        local result = {}
-        for index = #newest, 1, -1 do
-            result[#result + 1] = newest[index]
+            for _, value in ipairs(page) do
+                table.insert(result, 1, project(value))
+                if not fits(result, config.max_chronological_window_tokens) then
+                    table.remove(result, 1)
+                    page = {}
+                    break
+                end
+                cursor = value.id
+            end
+            if #page < 32 then
+                break
+            end
         end
         return result
     end
 
     local function semantic(actor, start, anchor, recent)
         local grounded =
-            store:ground(anchor, config.max_semantic_terms, config.max_semantic_input_tokens, config.max_exact_forms)
+            store:ground(anchor, config.max_semantic_terms, config.max_grounding_tokens, config.max_exact_forms)
         local terms, seen = {}, {}
         for _, term in ipairs(grounded.terms) do
             terms[#terms + 1], seen[term] = term, true
@@ -78,14 +85,13 @@ return function(config, store, models, cygnet)
         table.sort(ordered, function(left, right)
             return left.score == right.score and left.record.id < right.record.id or left.score > right.score
         end)
-        local result, used = {}, 2
+        local result = {}
         for _, item in ipairs(ordered) do
-            local size = #encode(item.record) + (#result > 0 and 1 or 0)
-            if used + size > config.max_retrieval_window_bytes then
+            result[#result + 1] = item.record
+            if not fits(result, config.max_retrieval_window_tokens) then
+                result[#result] = nil
                 break
             end
-            used = used + size
-            result[#result + 1] = item.record
         end
         return result
     end
@@ -102,7 +108,7 @@ return function(config, store, models, cygnet)
         }
     end
     function api:context(state)
-        return encode({ chronological = state.chronological, semantic = state.semantic })
+        return models:encode({ chronological = state.chronological, semantic = state.semantic })
     end
     function api:results(actor, start, ask)
         return {

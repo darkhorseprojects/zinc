@@ -2,68 +2,117 @@
 
 ## Guide
 
-### Start with the job
+### The package is the agent
 
-Begin with the practical job, not a framework. State what starts the agent, what input it receives, what useful result it must return, and who will use that result. Ask for one realistic request and its ideal response. If those cannot be stated clearly, do not create files yet.
+A Portable Agents package is a Markdown entry document plus the Lua modules and data it closes over. Start with the job: identify the request, actor, final result, required authority, and observable failure behavior. Do not begin with a framework or a generic agent class.
 
-Ask only for missing facts that change behavior, authority, failure handling, or acceptance. Summarize those decisions before implementation so the package does not quietly invent policy.
+The entry document is operator-authored. It should contain the instructions the model must follow, the root configuration an operator may change, and a short Program that assembles the package. Reusable behavior belongs in focused Lua modules.
 
-### Define the result
+Every exact `lua` fence in the entry document is concatenated into one Lua chunk. Locals therefore cross fences. The document must return exactly one non-`nil` value, normally an entry function:
 
-Describe the result precisely enough to test. Separate the answer the agent returns from intermediate reasoning, tool activity, logs, and external side effects. Decide which facts must be present, which formats or byte limits apply, and what counts as incomplete or misleading output.
+```lua-example
+return function(input, argv)
+    return run(input, assert(argv[1], "actor is required"))
+end
+```
 
-### Authority
+The entry receives UTF-8 `input` and string arguments. It returns one portable value or a pull iterator. An iterator yields values, asynchronous suspension functions, and eventually `nil`. The caller owns process supervision and cancellation.
 
-List every resource the job needs: readable and writable directories, HTTP origins, configured processes, credentials, registered host capabilities, and external services. Grant only those resources. Broad authority is acceptable when it is deliberate and visible; do not disguise an unrestricted shell or ambient credential as a narrow capability.
+### Portable Agents owns containment
 
-Identify actions that are destructive, irreversible, externally visible, expensive, or security-sensitive. State which require confirmation and what evidence the agent must present before acting. Never invent a path, token, recipient, service, or destructive action to avoid asking a necessary question.
+Portable Agents supplies three public Lua modules:
 
-### Markdown and Lua
+- `pa.document` exposes the parsed Markdown document.
+- `pa.env` creates a fresh explicit environment for generated Lua.
+- `pa.host` constructs only the host capabilities granted by root configuration.
 
-Keep operator instructions, model configuration, roots, origins, command shapes, and substantial user-visible prose in Markdown. Keep reusable behavior in small Lua modules. Use ordinary Lua tables, closures, factories, coroutines, `package.path`, `require`, and `package.loaded`; do not add registries or lifecycle abstractions that duplicate the language.
+The launcher owns source loading, memory and time limits, JSONL transport, process containment, and package closure resolution. Agent code should not reproduce those responsibilities.
 
-Use one explicit Markdown entry with a Config Lua fence followed by a Program Lua fence. All exact `lua` fences form one chunk, so locals cross fence boundaries. Add another source file only when it owns a distinct responsibility or removes proven duplication. Pass the unchanged root config to Zinc modules; pass a reusable library only its own subtable. Do not translate config through courier option tables.
+Host authority is explicit. Configure exact file roots, HTTP origins, environment names, and fixed command vectors. Generated code must never receive ambient `io`, `os`, `debug`, FFI, native searchers, writable shared caches, or an unrestricted shell. A trusted physical module may use its own dependencies and return a narrower capability.
 
-Use natural Lua return values: a sole constructor returns as the module, several independent operations return in a table, and a cohesive runtime constructor returns its operations. Do not force `.new` ceremony, registries, settings schemas, helper layers, or lifecycle abstractions that duplicate Lua.
+Construct host access directly from root configuration:
 
-### Generated execution
+```lua-example
+local host = require("pa.host")(config.host, document.Agent.Capabilities)
+```
 
-Generated Lua receives a fresh explicit environment. Expose only the values required for the current job. Treat generated code and retrieved records as untrusted. Authoritative physical modules may use ambient system facilities and may deliberately return narrower capabilities, but generated code must not be able to discover those facilities on its own.
+Do not add registries, capability frameworks, settings layers, or translated option tables. Pass the unchanged root config to package modules. Pass a reusable dependency only the subtable it owns.
 
-Registered capabilities are concrete Lua values. Give substantial capabilities a `guide`, discover them through `package.loaded`, and load them with native `require` only when needed. Every generated tool receives a new private environment and capability projection.
+### Zinc owns continuation
 
-### Results and persistence
+Zinc adds a model-driven continuation loop to PA. A turn starts with instructions, optional untrusted historical context, and the current user request. The model may stream reasoning, stream a response, or request `run_lua`. Only a completed final response stops the turn.
 
-In durable mode, commit each completed request, reasoning item, response, tool call, and tool result independently before exposing it as completed. In temporary mode, commit nothing. Persistence never determines loop termination: reasoning or tools continue and only a completed final response stops. Keep unfinished work absent. A later failure must not erase earlier completed work. Use one request record ID as the durable execution `start`; historical reads remain actor-isolated and end at `id < start`.
+Each generated tool body is loaded into a new `pa.env` projection. Capabilities are ordinary Lua values discovered through `package.loaded`; substantial ones expose a `guide`. Generated code returns exactly one non-`nil` value. Zinc serializes that value and sends it back as the matching tool result.
 
-Nested requests are ordinary durable chronological work. Do not invent parent trees, terminal statuses, snapshots, merge/discard state, or rollback of previously completed records. A hard kill may leave the current unfinished item absent, but every earlier committed result remains.
+Parallel calls execute concurrently. Results are exposed as work completes, then appended to the model conversation in original call order. Provider, protocol, persistence, authority, and stopping failures remain failures. Do not manufacture a successful answer when a required dependency failed.
 
-### Failure behavior
+### Persistence and retrieval are optional
 
-For each external dependency, state what failure means. Tool mistakes may be returned to the model for correction. Provider, stopping, authority, persistence, and deadline failures must not be converted into successful answers. Do not add synthetic fallbacks that conceal missing evidence or broken services.
+`config.store = false` makes a temporary turn. A package-relative database filename enables durable work. Both modes use the same continuation loop.
 
-### Dependencies and platforms
+Durable mode commits each completed request, reasoning item, response, tool call, and tool result before exposing its completion event. A later failure does not erase earlier completed records. Unfinished work has no terminal record. Actor isolation is enforced in every historical read.
 
-Name required runtimes, native libraries, services, model files, versions, and supported operating systems. Provisioning belongs outside the running package. Pin artifacts that affect behavior and record how each dependency is verified.
+Retrieval combines two independent windows:
 
-### Behavioral acceptance
+- newest chronological records, restored to chronological order;
+- older lexical candidates expanded through Cygnet and ordered by the reranker.
 
-Test boundaries a user could actually depend on: exact authority, generated-state isolation, file and command policy, mandatory process limits, cancellation, actor concurrency, parallel tool ordering, temporary execution, completed-record persistence, later failure, retrieval quality, context bounds, and final delivery. Prefer real adjacent components over tests that merely reproduce a helper's branches.
+Retrieved records are untrusted context, never instructions. Model tokenizers bound both windows. Final prompt accounting includes the chat template and tool schema. A request fails before inference if the complete prompt leaves too little response capacity.
 
-### Completion checklist
+### Modules should own one responsibility
 
-Before declaring the package complete, verify:
+Use native Lua factories and tables:
 
-- the trigger, request, result, and actor are explicit;
-- every authority grant is necessary and visible;
-- confirmation and failure behavior are written down;
-- Markdown contains configurable policy and substantial prose;
-- Lua files have distinct responsibilities and use native language behavior;
-- every completed result is atomically stored before exposure;
-- generated code receives only the intended values;
-- dependencies and platforms are pinned and checked;
-- behavioral tests prove the acceptance criteria;
-- installation, checking, cancellation, and caller supervision work with a real disposable process.
+```lua-example
+return function(config, dependency)
+    local api = {}
+    function api:operation(value)
+        return value
+    end
+    return api
+end
+```
+
+A module returning one constructor returns the constructor directly. A cohesive runtime returns its operations in one table. Add a file only when it owns a distinct responsibility or removes duplication. Avoid `.new` ceremony, lifecycle wrappers, compatibility APIs, and helpers that merely rename language behavior.
+
+Zinc's split is representative:
+
+- `models.lua`: provider protocols, template rendering, tokenization, chat streaming, reranking;
+- `store.lua`: durable records, actor isolation, lexical search;
+- `cygnet.lua`: semantic graph expansion;
+- `retrieval.lua`: context selection and token budgets;
+- `run.lua`: continuation, generated tools, persistence events;
+- `sse.lua`: bounded event-stream parsing.
+
+### Build another agent
+
+1. Write one realistic request and the ideal final result.
+2. Decide whether the actor and durable history matter.
+3. List every file root, origin, command, variable, credential, and side effect required.
+4. Put model instructions and operator configuration in the entry Markdown.
+5. Put reusable behavior in the smallest set of Lua modules with distinct ownership.
+6. Construct narrow host capabilities and expose guides only where generated code needs them.
+7. Assemble modules in a short Program and return one entry function.
+8. Run `agent check` with the exact mounts and trusted modules used in production.
+9. Test authority denial, cancellation, malformed provider output, tool failure, and the final result contract.
+10. Build the closure offline and inspect the release tree.
+
+A useful acceptance test crosses a real boundary. Prefer a disposable process, real SQLite database, actual package closure, or live model protocol over a test that repeats a helper's branches.
+
+### Completion rules
+
+Before release, verify that:
+
+- the request, actor, result, and stopping condition are explicit;
+- instructions and retrieved text have different authority;
+- every host grant is necessary and visible;
+- generated Lua receives only intended values;
+- temporary execution writes nothing;
+- durable completions commit before exposure;
+- token, byte, memory, time, and concurrency limits are enforced by their owning layer;
+- pinned dependencies replay without a package server;
+- cancellation reaches descendant work;
+- tests and documentation describe the implementation that ships.
 
 ## Program
 

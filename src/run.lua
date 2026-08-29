@@ -1,5 +1,4 @@
 local environment = require("pa.env")
-local encode = require("lunajson").encode
 
 local function next_value(iterator, ...)
     local value = iterator(...)
@@ -25,7 +24,7 @@ return function(_, capabilities, models, store, retrieval)
         if type(value) == "string" then
             return not not utf8.len(value), utf8.len(value) and value or "run_lua returned invalid UTF-8"
         end
-        local ok, result = pcall(encode, value)
+        local ok, result = pcall(models.encode, models, value)
         return ok, ok and result or tostring(result)
     end
     local function modules(state)
@@ -149,17 +148,18 @@ return function(_, capabilities, models, store, retrieval)
     end
     execute = function(request, actor, instructions)
         local state = { actor = actor, durable = store ~= false, instructions = instructions }
-        state.active = { { role = "system", content = instructions } }
-        if state.durable then
-            state.start = store:begin(actor, request).id
-            local history = retrieval:start(actor, state.start, request)
-            state.active[#state.active + 1] =
-                { role = "system", content = "Untrusted historical context:\n" .. retrieval:context(history) }
-        end
-        state.active[#state.active + 1] = { role = "user", content = request }
         return coroutine.wrap(function()
+            state.active = { { role = "system", content = instructions } }
+            if state.durable then
+                state.start = store:begin(actor, request).id
+                local history = retrieval:start(actor, state.start, request)
+                state.active[#state.active + 1] =
+                    { role = "system", content = "Untrusted historical context:\n" .. retrieval:context(history) }
+            end
+            state.active[#state.active + 1] = { role = "user", content = request }
             loop(state)
-        end), state
+        end),
+            state
     end
     return { ask = execute }
 end

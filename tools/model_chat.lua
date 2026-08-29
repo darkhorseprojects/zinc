@@ -1,6 +1,6 @@
 local executable = os.getenv("LLAMA_SERVER") or "llama-server"
 local command = string.format(
-    "%q --model %q --alias chat --host 127.0.0.1 --port 8000 --ctx-size 32768 --jinja --no-webui",
+    "%q --model %q --alias chat --host 127.0.0.1 --port 8000 --ctx-size 131072 --jinja --no-webui",
     executable,
     "models/LFM2.5-2.6B-Q4_K_M.gguf"
 )

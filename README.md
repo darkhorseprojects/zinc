@@ -15,7 +15,7 @@ Then run Zinc:
 ```sh
 printf 'Explain the current package.' | agent run \
   --directory . --entry zinc.md \
-  --trust src.models \
+  --trust src.models --trust src.store --trust src.cygnet \
   --lua-memory 96MiB --process-memory 512MiB --wall-time 2m \
   -- local:example
 ```
@@ -33,7 +33,9 @@ Normal operation uses one router endpoint for:
 
 ## Results and retrieval
 
-Durable mode commits each completed request, reasoning item, response, tool call, and tool result before exposing its completion event. Retrieval combines a bounded recent window with older FTS candidates, Cygnet term expansion, and model reranking.
+Durable mode commits each completed request, reasoning item, response, tool call, and tool result before exposing its completion event. Retrieval combines a 32K-token chronological window with a separate 32K-token semantic window built from FTS candidates, Cygnet term expansion, and model reranking.
+
+LFM runs at its native 131,072-token context. Zinc renders the real chat template, counts it with the model tokenizer, reserves at least 4K tokens for a response, and gives generation all remaining context. Nemotron reranking is bounded to its supported 8K-token passage length. HTTP byte limits remain transport safeguards rather than context estimates.
 
 `data/cygnet.db` is a self-contained generated index. Runtime code does not open or attach the raw upstream Cygnet database. See [Results and Retrieval](https://github.com/darkhorseprojects/zinc/wiki/Results-and-Retrieval).
 
@@ -41,7 +43,7 @@ Durable mode commits each completed request, reasoning item, response, tool call
 
 Zinc delegates files, HTTP, processes, execution limits, generated environments, and JSONL transport to Portable Agents. Generated tools receive fresh capability values. Durable tools additionally receive `results.read`, `results.around`, and `results.ask`.
 
-Configuration is documented in the [Configuration guide](https://github.com/darkhorseprojects/zinc/wiki/Configuration). Package authors can mount `design.md` when they want Zinc's on-demand design guide.
+Configuration is documented in the [Configuration guide](https://github.com/darkhorseprojects/zinc/wiki/Configuration). Package authors can mount `design.md` for a concise guide to PA package structure, Zinc's continuation and retrieval engineering, authority boundaries, and building another agent.
 
 ## Development
 
