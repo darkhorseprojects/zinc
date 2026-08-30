@@ -1,5 +1,5 @@
 local json = require("lunajson")
-local Retrieval = require("src.retrieval")
+local Retrieval = require("zinc.internal.retrieval")
 
 local OPTIONS = {
     semantic_language = "en",
@@ -54,42 +54,12 @@ describe("retrieval", function()
             return { { index = 2, score = 1 }, { index = 1, score = 1 } }, 2
         end
         local retrieval = Retrieval(OPTIONS, store, models, cygnet)
-        local state = retrieval:start("actor", 6, "immutable anchor")
-        local context = assert(json.decode(retrieval:context(state)))
+        local context = assert(json.decode(retrieval:start("actor", 6, "immutable anchor")))
         assert.same({ "anchor", "M-17" }, store.terms)
         assert.same({ 512, 4096, 512 }, store.bounds)
         assert.equals(511, cygnet.request.maximum_terms)
         assert.equals("immutable anchor", models.query)
         assert.same({ { id = 5, role = "assistant", text = "recent" } }, context.chronological)
         assert.same({ 1, 2 }, { context.semantic[1].id, context.semantic[2].id })
-    end)
-
-    it("bounds semantic depth", function()
-        local store, models, cygnet =
-            {}, {
-                tokens = function()
-                    return 0
-                end,
-            }, {}
-        for _, depth in ipairs({ 0, 4 }) do
-            local options = {}
-            for key, value in pairs(OPTIONS) do
-                options[key] = value
-            end
-            options.semantic_depth = depth
-            assert.has_no.errors(function()
-                Retrieval(options, store, models, cygnet)
-            end)
-        end
-        for _, depth in ipairs({ -1, 5 }) do
-            local options = {}
-            for key, value in pairs(OPTIONS) do
-                options[key] = value
-            end
-            options.semantic_depth = depth
-            assert.has_error(function()
-                Retrieval(options, store, models, cygnet)
-            end)
-        end
     end)
 end)

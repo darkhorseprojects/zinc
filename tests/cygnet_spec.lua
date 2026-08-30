@@ -1,5 +1,5 @@
 local sqlite = require("lsqlite3complete")
-local Cygnet = require("src.cygnet")
+local Cygnet = require("zinc.internal.cygnet")
 
 local paths = {}
 local function database()
@@ -23,7 +23,7 @@ INSERT INTO concept_terms VALUES(1,'en','poodle'),(2,'en','dog'),(3,'en','animal
 INSERT INTO concept_edges VALUES(1,2),(2,3);
 ]]) == sqlite.OK, db:errmsg())
     assert(db:close() == sqlite.OK)
-    return directory, name
+    return path
 end
 
 after_each(function()
@@ -35,8 +35,7 @@ end)
 
 describe("Cygnet", function()
     it("expands directed concepts by depth and language", function()
-        local directory, name = database()
-        local cygnet = Cygnet({ cygnet = name }, directory)
+        local cygnet = Cygnet(database())
         local function expand(token, language, depth)
             return cygnet:expand({
                 tokens = { token },
@@ -52,6 +51,5 @@ describe("Cygnet", function()
         assert.same({ "poodle", "dog", "animal" }, expand("poodle", "en", 2))
         assert.same({ "perro" }, expand("perro", "es", 2))
         assert.same({}, expand("perro", "en", 2))
-        cygnet:close()
     end)
 end)

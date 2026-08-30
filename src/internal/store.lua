@@ -19,11 +19,11 @@ local function tail(value, maximum)
     return value:sub(first)
 end
 
-return function(config, directory)
-    assert(type(config.store) == "string" and config.store:match("^[%w_.-]+$"), "invalid Store path")
-    local maximum = assert(math.tointeger(config.max_stored_record_bytes), "stored record budget must be an integer")
+return function(path, maximum)
+    assert(type(path) == "string" and path ~= "", "invalid Store path")
+    maximum = assert(math.tointeger(maximum), "stored record budget must be an integer")
     assert(maximum >= 4, "stored record budget must be at least four bytes")
-    local db = assert(sqlite.open(directory .. package.config:sub(1, 1) .. config.store))
+    local db = assert(sqlite.open(path))
     db:busy_timeout(5000)
 
     local function rows(sql, ...)
@@ -174,9 +174,6 @@ CREATE VIRTUAL TABLE temp.grounding_vocabulary USING fts5vocab(grounding_tokeniz
         local owner = actor_id(actor, false)
         local query = 'actor_id:"' .. owner .. '" AND (' .. table.concat(literals, " OR ") .. ")"
         return rows(SEARCH, query, owner, start, limit)
-    end
-    function api:close()
-        assert(db:close() == sqlite.OK, "close Zinc Store failed")
     end
     return api
 end

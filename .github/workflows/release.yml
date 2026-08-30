@@ -60,7 +60,7 @@ jobs:
           for path in src tests tools; do lx --lua-version 5.4 lint --path "$path"; done
           lx --lua-dir "$PWD/.lux/lua" --vendor-dir "$PWD/vendor/sources" --max-jobs 1 test
           .lux/lua/bin/lua tools/benchmark.lua
-          "$AGENT_BIN" check --directory . --entry zinc.md --mount design=design.md --trust src.models --trust src.store --trust src.cygnet
+          "$AGENT_BIN" check --directory . --entry zinc.md --lua-memory 96MiB --process-memory 512MiB --wall-time 2m
           if [[ "$GITHUB_REF" == refs/tags/* ]]; then
             root="zinc-${GITHUB_REF_NAME}-${{ matrix.id }}"
             mkdir -p "$root/.lux/runtime/lua" "$root/.lux/runtime/lib"

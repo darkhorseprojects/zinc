@@ -1,59 +1,51 @@
 # Zinc
 
-Zinc is a small Portable Agents package with optional durable conversation results, bounded retrieval, and parallel generated Lua tools.
+Zinc is a compact Portable Agents package with optional durable history, exact model token accounting, Cygnet retrieval, and parallel generated Lua tools.
 
 ## Run
 
-Start the pinned llama.cpp fork in router mode:
-
-```sh
-llama-server --host 127.0.0.1 --port 8000 --models-preset models.ini
-```
-
-Then run Zinc:
+Start the pinned llama.cpp router, then:
 
 ```sh
 printf 'Explain the current package.' | agent run \
   --directory . --entry zinc.md \
-  --trust src.models --trust src.store --trust src.cygnet \
   --lua-memory 96MiB --process-memory 512MiB --wall-time 2m \
   -- local:example
 ```
 
-`zinc.md` contains one Config fence and one short Program fence. Set `store = false` for a temporary turn or a package-relative SQLite filename for durable results. Both forms use the same loop and stop only after a completed final response.
+`config.store = false` is temporary. A package-relative path enables durable SQLite history. `max_stored_record_bytes` retains a valid UTF-8 suffix of oversized records.
 
-## Models
+## Modules
 
-Normal operation uses one router endpoint for:
+Trusted implementation uses `zinc.internal.*`. Generated code sees the sealed public modules:
 
-- `POST /v1/chat/completions` with the pinned LFM2.5 GGUF;
-- `POST /v1/rerank` with the pinned Nemotron reranker GGUF.
-
-`models.lock` records the fork commit, model revisions, and file checksums. `tools/model_chat.lua` and `tools/model_rerank.lua` launch each model independently for diagnosis. See the [Models guide](https://github.com/darkhorseprojects/zinc/wiki/Models).
-
-## Results and retrieval
-
-Durable mode commits each completed request, reasoning item, response, tool call, and tool result before exposing its completion event. Retrieval combines a 32K-token chronological window with a separate 32K-token semantic window built from FTS candidates, Cygnet term expansion, and model reranking.
-
-LFM runs at its native 131,072-token context. Zinc renders the real chat template, counts it with the model tokenizer, reserves at least 4K tokens for a response, and gives generation all remaining context. Nemotron reranking is bounded to its supported 8K-token passage length. HTTP byte limits remain transport safeguards rather than context estimates.
-
-`data/cygnet.db` is a self-contained generated index. Runtime code does not open or attach the raw upstream Cygnet database. See [Results and Retrieval](https://github.com/darkhorseprojects/zinc/wiki/Results-and-Retrieval).
-
-## Capabilities
-
-Zinc delegates files, HTTP, processes, execution limits, generated environments, and JSONL transport to Portable Agents. Generated tools receive fresh capability values. Durable tools additionally receive `results.read`, `results.around`, and `results.ask`.
-
-Configuration is documented in the [Configuration guide](https://github.com/darkhorseprojects/zinc/wiki/Configuration). Package authors can mount `design.md` for a concise guide to PA package structure, Zinc's continuation and retrieval engineering, authority boundaries, and building another agent.
-
-## Development
-
-Lux locks Lua 5.5, lunajson, and a vendored `lsqlite3complete` build with FTS5 enabled and loadable extensions omitted.
-
-```sh
-lx test
-lua tools/benchmark.lua
+```text
+pa.document
+pa.env
+pa.host
+zinc.design
+zinc.history
 ```
 
-Live model tests require the pinned router and model files. See [Development](https://github.com/darkhorseprojects/zinc/wiki/Development).
+Generated Lua uses normal `require` and can inspect `package.loaded`:
+
+```lua
+local host = require("pa.host")
+local history = require("zinc.history")
+return history.available() and history.around(42) or host.files.read({ path = "README.md" })
+```
+
+`zinc.design.guide` describes how to build another agent. Guides are optional for public modules.
+
+## Models and retrieval
+
+Chat models provide `/v1/chat/completions`, `/apply-template`, and `/tokenize`; rerankers provide `/v1/rerank` and `/tokenize`. Zinc renders the actual template and tool schema, tokenizes it exactly, and gives generation the remaining context. Model limits live in each model record.
+
+Durable retrieval combines independent chronological and semantic token windows. Semantic candidates come from actor-scoped FTS, the self-contained Cygnet database, and reranking. Retrieved records and tool output are untrusted data.
+
+```sh
+/tmp/lux-install-042/bin/lx test
+lua tools/benchmark.lua
+```
 
 License: AGPL-3.0-only.

@@ -1,14 +1,4 @@
-local function finite(value)
-    return type(value) == "number" and value == value and math.abs(value) < math.huge
-end
-
-local function project(record)
-    return { id = record.id, role = record.role, text = record.text }
-end
-
 return function(config, store, models, cygnet)
-    assert(config.semantic_depth >= 0 and config.semantic_depth <= 4, "semantic depth must be from zero to four")
-
     local function fits(records, maximum)
         return models:tokens(models:encode(records)) <= maximum
     end
@@ -21,7 +11,7 @@ return function(config, store, models, cygnet)
                 break
             end
             for _, value in ipairs(page) do
-                table.insert(result, 1, project(value))
+                table.insert(result, 1, { id = value.id, role = value.role, text = value.text })
                 if not fits(result, config.max_chronological_window_tokens) then
                     table.remove(result, 1)
                     page = {}
@@ -66,7 +56,7 @@ return function(config, store, models, cygnet)
         for _, record in ipairs(store:search(actor, start, terms, config.max_retrieval_candidates)) do
             if not excluded[record.id] then
                 excluded[record.id] = true
-                candidates[#candidates + 1] = project(record)
+                candidates[#candidates + 1] = { id = record.id, role = record.role, text = record.text }
             end
         end
         local passages = {}
@@ -78,7 +68,15 @@ return function(config, store, models, cygnet)
         local ordered, ranked = {}, {}
         for _, item in ipairs(ranking) do
             local index = math.tointeger(item.index)
-            assert(index and index <= count and not ranked[index] and finite(item.score), "reranker item is invalid")
+            assert(
+                index
+                    and index <= count
+                    and not ranked[index]
+                    and type(item.score) == "number"
+                    and item.score == item.score
+                    and math.abs(item.score) < math.huge,
+                "reranker item is invalid"
+            )
             ranked[index] = true
             ordered[#ordered + 1] = { record = candidates[index], score = item.score }
         end
@@ -99,27 +97,7 @@ return function(config, store, models, cygnet)
     local api = {}
     function api:start(actor, start, anchor)
         local recent = chronological(actor, start)
-        return {
-            actor = actor,
-            start = start,
-            anchor = anchor,
-            chronological = recent,
-            semantic = semantic(actor, start, anchor, recent),
-        }
-    end
-    function api:context(state)
-        return models:encode({ chronological = state.chronological, semantic = state.semantic })
-    end
-    function api:results(actor, start, ask)
-        return {
-            read = function(id)
-                return store:read(actor, start, id)
-            end,
-            around = function(id)
-                return store:around(actor, start, id)
-            end,
-            ask = ask,
-        }
+        return models:encode({ chronological = recent, semantic = semantic(actor, start, anchor, recent) })
     end
     return api
 end

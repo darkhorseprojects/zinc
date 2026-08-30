@@ -1,24 +1,21 @@
 local json = require("lunajson")
-local Models = require("src.models")
+local Models = require("zinc.internal.models")
 
 local config = {
-    max_model_context_tokens = 64,
-    min_model_output_tokens = 8,
-    max_rerank_passage_tokens = 100,
-    max_parallel_tools = 4,
-    host = { limits = { http_response_bytes = 4096 } },
-    models = {
-        chat = {
-            endpoint = "http://model/chat",
-            template = "http://model/template",
-            tokenize = "http://model/tokenize",
-            model = "chat",
-        },
-        rerank = {
-            endpoint = "http://model/rerank",
-            tokenize = "http://model/tokenize",
-            model = "rerank",
-        },
+    chat = {
+        endpoint = "http://model/chat",
+        template = "http://model/template",
+        tokenize = "http://model/tokenize",
+        model = "chat",
+        context_tokens = 64,
+        minimum_output_tokens = 8,
+        maximum_parallel_tools = 4,
+    },
+    rerank = {
+        endpoint = "http://model/rerank",
+        tokenize = "http://model/tokenize",
+        model = "rerank",
+        passage_tokens = 100,
     },
 }
 
@@ -122,8 +119,12 @@ describe("models", function()
         for key, value in pairs(config) do
             tiny[key] = value
         end
-        tiny.max_model_context_tokens = 10
-        tiny.min_model_output_tokens = 5
+        tiny.chat = {}
+        for key, value in pairs(config.chat) do
+            tiny.chat[key] = value
+        end
+        tiny.chat.context_tokens = 10
+        tiny.chat.minimum_output_tokens = 5
         local request = fixture()
         local models = Models(tiny, request)
         assert.has_error(function()

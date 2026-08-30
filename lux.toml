@@ -17,9 +17,10 @@ flags = ["tests"]
 type = "builtin"
 
 [build.modules]
-"src.cygnet" = "src/cygnet.lua"
-"src.models" = "src/models.lua"
-"src.retrieval" = "src/retrieval.lua"
-"src.run" = "src/run.lua"
-"src.sse" = "src/sse.lua"
-"src.store" = "src/store.lua"
+"zinc.history" = "src/history.lua"
+"zinc.internal.cygnet" = "src/internal/cygnet.lua"
+"zinc.internal.models" = "src/internal/models.lua"
+"zinc.internal.retrieval" = "src/internal/retrieval.lua"
+"zinc.internal.run" = "src/internal/run.lua"
+"zinc.internal.sse" = "src/internal/sse.lua"
+"zinc.internal.store" = "src/internal/store.lua"

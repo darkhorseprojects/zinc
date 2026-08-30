@@ -1,13 +1,11 @@
-return function(maximum)
-    maximum = assert(math.tointeger(maximum), "SSE byte limit must be an integer")
-    assert(maximum > 0, "SSE byte limit must be positive")
-    local pending, data, event, finished = "", nil, nil, false
+return function()
+    local pending, data = "", nil
 
     local function dispatch(records)
         if data then
-            records[#records + 1] = { data = table.concat(data, "\n"), event = event }
+            records[#records + 1] = { data = table.concat(data, "\n") }
         end
-        data, event = nil, nil
+        data = nil
     end
     local function consume(line, records)
         if line == "" then
@@ -24,8 +22,6 @@ return function(maximum)
             if field == "data" then
                 data = data or {}
                 data[#data + 1] = value
-            elseif field == "event" then
-                event = value
             end
         end
     end
@@ -40,7 +36,6 @@ return function(maximum)
             offset = ending + (pending:byte(ending) == 13 and pending:byte(ending + 1) == 10 and 2 or 1)
         end
         pending = pending:sub(offset)
-        assert(#pending <= maximum, "SSE line exceeds configured byte limit")
         if final then
             if pending ~= "" then
                 consume(pending, records)
@@ -50,17 +45,11 @@ return function(maximum)
         end
         return records
     end
-    return {
-        push = function(_, chunk)
-            assert(not finished, "SSE parser is finished")
+    return function(chunk)
+        if chunk ~= nil then
             assert(type(chunk) == "string" and not chunk:find("%z"), "invalid SSE chunk")
             pending = pending .. chunk
-            return parse(false)
-        end,
-        finish = function()
-            assert(not finished, "SSE parser is finished")
-            finished = true
-            return parse(true)
-        end,
-    }
+        end
+        return parse(chunk == nil)
+    end
 end

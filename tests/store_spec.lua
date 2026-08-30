@@ -1,5 +1,5 @@
 local sqlite = require("lsqlite3complete")
-local Store = require("src.store")
+local Store = require("zinc.internal.store")
 
 local paths = {}
 local function temporary()
@@ -11,7 +11,7 @@ local function temporary()
 end
 local function open(maximum)
     local directory, name, path = temporary()
-    return Store({ store = name, max_stored_record_bytes = maximum }, directory), path, directory, name
+    return Store(path, maximum), path, directory, name
 end
 
 after_each(function()
@@ -45,7 +45,6 @@ describe("Store", function()
         local around = store:around("actor", current.id, assistant.id)
         assert.equals(first.id, around.previous.id)
         assert.equals(tool.id, around.next.id)
-        store:close()
 
         local file = assert(io.open(path, "rb"))
         file:close()
@@ -81,7 +80,6 @@ describe("Store", function()
         assert.has_error(function()
             store:ground("one_two three_four", 10, 10, 1)
         end, "grounding text exceeds exact form limit")
-        store:close()
     end)
 
     it("indexes actor identity and text in one bounded FTS query", function()
@@ -100,20 +98,17 @@ describe("Store", function()
         local hidden = store:search("other", current.id, { "rare" }, 100)
         assert.equals(1, #hidden)
         assert.equals("other", hidden[1].actor)
-        store:close()
     end)
 
     it("serializes independent writers without crossing actors", function()
         local first, path, directory, name = open(1000)
-        local second = Store({ store = name, max_stored_record_bytes = 1000 }, directory)
+        local second = Store(path, 1000)
         for index = 1, 25 do
             local a = first:begin("actor-a", "request " .. index)
             first:append("actor-a", a.id, "assistant", "response " .. index)
             local b = second:begin("actor-b", "request " .. index)
             second:append("actor-b", b.id, "assistant", "response " .. index)
         end
-        first:close()
-        second:close()
         local db = assert(sqlite.open(path))
         local actors, records = 0, 0
         for row in db:nrows("SELECT count(*) AS count FROM actors") do
@@ -125,14 +120,5 @@ describe("Store", function()
         assert.equals(2, actors)
         assert.equals(100, records)
         assert.equals(sqlite.OK, db:close())
-    end)
-
-    it("rejects paths outside the package", function()
-        local directory = temporary()
-        for _, path in ipairs({ "/tmp/zinc.db", "store/../zinc.db", "store\\zinc.db", "" }) do
-            assert.has_error(function()
-                Store({ store = path, max_stored_record_bytes = 1000 }, directory)
-            end)
-        end
     end)
 end)

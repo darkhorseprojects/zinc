@@ -1,11 +1,7 @@
 package.preload["pa.env"] = function()
     return assert(loadfile("../portable-agents/src/pa/env.lua"))()
 end
-local Run = require("src.run")
-
-local function results(_, _, _, ask)
-    return { ask = ask }
-end
+local Run = require("zinc.internal.run")
 
 local function iterator(values)
     local index = 0
@@ -55,16 +51,12 @@ describe("run", function()
     it("commits every durable completion before Store", function()
         local database, model = store(), models()
         local retrieval = {
-            results = results,
-            start = function(_, actor, start, anchor)
-                return { actor = actor, start = start, anchor = anchor }
-            end,
-            context = function()
+            start = function()
                 return "{}"
             end,
         }
-        local zinc = Run({ max_parallel_tools = 4 }, {}, model, database, retrieval)
-        local output, stream = {}, zinc.ask("request", "actor", "instructions")
+        local ask = Run(model, database, retrieval)
+        local output, stream = {}, ask("request", "actor", "instructions")
         for event in stream do
             output[#output + 1] = event
         end
@@ -107,19 +99,11 @@ describe("run", function()
             })
         end
         local retrieval = {
-            results = results,
             start = function()
-                return {}
-            end,
-            context = function()
                 return "{}"
             end,
         }
-        local stream = Run({ max_parallel_tools = 2 }, {}, model, database, retrieval).ask(
-            "request",
-            "actor",
-            "instructions"
-        )
+        local stream = Run(model, database, retrieval)("request", "actor", "instructions")
         local tool_result
         for event in stream do
             if event.type == "tool_result" then

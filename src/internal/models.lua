@@ -1,5 +1,5 @@
 local json = require("lunajson")
-local sse = require("src.sse")
+local sse = require("zinc.internal.sse")
 local null = {}
 local tool = {
     type = "function",
@@ -39,9 +39,9 @@ local function collect(iterator)
 end
 
 return function(config, http)
-    local chat, rerank = assert(config.models.chat), assert(config.models.rerank)
-    local context = assert(math.tointeger(config.max_model_context_tokens), "model context must be an integer")
-    local reserve = assert(math.tointeger(config.min_model_output_tokens), "model output reserve must be an integer")
+    local chat, rerank = assert(config.chat), assert(config.rerank)
+    local context = assert(math.tointeger(chat.context_tokens), "model context must be an integer")
+    local reserve = assert(math.tointeger(chat.minimum_output_tokens), "model output reserve must be an integer")
     assert(context > reserve and reserve > 0, "model token limits are invalid")
 
     local function request(endpoint, accept, value)
@@ -103,7 +103,7 @@ return function(config, http)
             assert(used + reserve <= context, "model prompt leaves too few output tokens")
             value.max_tokens = context - used
 
-            local parser = sse(config.host.limits.http_response_bytes)
+            local parser = sse()
             local calls, done, finish, response = {}, false
             local iterator = request(chat.endpoint, "text/event-stream", value)
             local event = next_value(iterator)
@@ -111,7 +111,7 @@ return function(config, http)
                 if event.type == "response" then
                     response = event
                 else
-                    for _, record in ipairs(parser:push(event.data)) do
+                    for _, record in ipairs(parser(event.data)) do
                         if record.data == "[DONE]" then
                             done = true
                         else
@@ -148,7 +148,7 @@ return function(config, http)
                 end
                 event = next_value(iterator)
             end
-            for _, record in ipairs(parser:finish()) do
+            for _, record in ipairs(parser()) do
                 assert(record.data == "[DONE]", "trailing chat event is invalid")
             end
             assert(
@@ -165,7 +165,7 @@ return function(config, http)
                     { id = call.id, type = "function", ["function"] = { name = "run_lua", arguments = call.arguments } }
             end
             assert(
-                #decoded <= config.max_parallel_tools and (#decoded > 0) == (finish == "tool_calls"),
+                #decoded <= chat.maximum_parallel_tools and (#decoded > 0) == (finish == "tool_calls"),
                 "parallel tool limit"
             )
             coroutine.yield({ type = "finish", reason = finish, calls = decoded, wire = wire })
@@ -178,7 +178,7 @@ return function(config, http)
         end
         local selected = {}
         for _, passage in ipairs(passages) do
-            if tokens(rerank, query .. "\n" .. passage) > config.max_rerank_passage_tokens then
+            if tokens(rerank, query .. "\n" .. passage) > rerank.passage_tokens then
                 break
             end
             selected[#selected + 1] = passage

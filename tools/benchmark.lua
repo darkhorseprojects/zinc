@@ -1,5 +1,5 @@
 local json = require("lunajson")
-local Cygnet = require("src.cygnet")
+local Cygnet = require("zinc.internal.cygnet")
 
 local config = { cygnet = "data/cygnet.db" }
 local function milliseconds(work)

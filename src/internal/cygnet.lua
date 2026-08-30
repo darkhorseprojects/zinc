@@ -1,24 +1,11 @@
 local sqlite = require("lsqlite3complete")
 
-local function path(directory, value)
-    assert(
-        type(value) == "string"
-            and value:match("^[%w_./-]+$")
-            and not value:match("^[/\\]")
-            and not value:find("..", 1, true),
-        "Cygnet path is invalid"
-    )
-    return directory .. package.config:sub(1, 1) .. value:gsub("[/\\]", package.config:sub(1, 1))
-end
 local function normalize(value)
     return value:lower():gsub("_", " "):gsub("%s+", " "):match("^%s*(.-)%s*$")
 end
-local function slots(count)
-    return string.rep("?,", count):sub(1, -2)
-end
-
-return function(config, directory)
-    local db = assert(sqlite.open(path(directory, config.cygnet), sqlite.OPEN_READONLY))
+return function(path)
+    assert(type(path) == "string" and path ~= "", "Cygnet path is invalid")
+    local db = assert(sqlite.open(path, sqlite.OPEN_READONLY))
     db:busy_timeout(5000)
     local function rows(sql, ...)
         local statement = assert(db:prepare(sql), db:errmsg())
@@ -100,42 +87,26 @@ return function(config, directory)
     end
 
     local function expand(selected, request)
-        local output, output_seen = {}, {}
+        local output, seen = {}, {}
         for _, initial in ipairs(selected) do
-            local frontier, visited = initial, {}
-            for _, concept in ipairs(frontier) do
-                visited[concept] = true
+            local seeds, arguments = {}, {}
+            for index, concept in ipairs(initial) do
+                seeds[index], arguments[index] = index == 1 and "SELECT ?,0" or "UNION SELECT ?,0", concept
             end
-            for depth = 0, request.semantic_depth do
-                local query = "SELECT DISTINCT term FROM concept_terms WHERE language=? AND concept IN ("
-                    .. slots(#frontier)
-                    .. ") ORDER BY term"
-                local arguments = { request.semantic_language, table.unpack(frontier) }
-                for _, row in ipairs(rows(query, table.unpack(arguments))) do
-                    local key = row.term:lower()
-                    if not output_seen[key] then
-                        output_seen[key], output[#output + 1] = true, row.term
-                        if #output == request.maximum_terms then
-                            return output
-                        end
+            arguments[#arguments + 1] = request.semantic_depth
+            arguments[#arguments + 1] = request.semantic_language
+            local query = "WITH RECURSIVE reachable(concept,depth) AS ("
+                .. table.concat(seeds, " ")
+                .. " UNION SELECT e.target,r.depth+1 FROM concept_edges e JOIN reachable r ON e.source=r.concept WHERE r.depth<?) "
+                .. "SELECT t.term,min(r.depth) depth FROM reachable r JOIN concept_terms t ON t.concept=r.concept WHERE t.language=? GROUP BY t.term ORDER BY depth,t.term"
+            for _, row in ipairs(rows(query, table.unpack(arguments))) do
+                local key = row.term:lower()
+                if not seen[key] then
+                    seen[key], output[#output + 1] = true, row.term
+                    if #output == request.maximum_terms then
+                        return output
                     end
                 end
-                if depth == request.semantic_depth then
-                    break
-                end
-                local following = {}
-                local related = "SELECT DISTINCT target FROM concept_edges WHERE source IN ("
-                    .. slots(#frontier)
-                    .. ") ORDER BY target"
-                for _, row in ipairs(rows(related, table.unpack(frontier))) do
-                    if not visited[row.target] then
-                        visited[row.target], following[#following + 1] = true, row.target
-                    end
-                end
-                if #following == 0 then
-                    break
-                end
-                frontier = following
             end
         end
         return output
@@ -143,23 +114,7 @@ return function(config, directory)
 
     return {
         expand = function(_, request)
-            assert(type(request.tokens) == "table" and type(request.exact_forms) == "table", "Cygnet forms are invalid")
-            assert(
-                type(request.semantic_language) == "string" and request.semantic_language ~= "",
-                "Cygnet language is invalid"
-            )
-            assert(
-                request.semantic_depth >= 0 and request.semantic_depth <= 4,
-                "Cygnet depth must be from zero to four"
-            )
-            assert(request.maximum_terms >= 1 and request.maximum_terms <= 4096, "Cygnet term limit is invalid")
-            for _, token in ipairs(request.tokens) do
-                assert(type(token) == "string" and token ~= "" and not token:find("%s"), "Cygnet token is invalid")
-            end
             return expand(select_concepts(request), request)
-        end,
-        close = function()
-            assert(db:close() == sqlite.OK, "closing Cygnet failed")
         end,
     }
 end
