@@ -54,6 +54,8 @@ jobs:
       - name: Test and package
         shell: bash
         run: |
+          test "$(awk 'NF { lines++ } END { print lines }' zinc.md design.md src/*.lua src/internal/*.lua)" -lt 800
+          ! grep -R --line-number -- '--trust' zinc.md design.md src tests
           lx fmt --check --path src
           lx fmt --check --path tests
           lx fmt --check --path tools

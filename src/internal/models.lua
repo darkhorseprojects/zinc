@@ -1,41 +1,23 @@
 local json = require("lunajson")
 local sse = require("zinc.internal.sse")
+local next_value = require("zinc.internal.stream")
 local null = {}
 local tool = {
     type = "function",
     ["function"] = {
         name = "run_lua",
-        description = "Execute a Lua chunk. The chunk must return exactly one non-nil value; use return, never print.",
-        parameters = {
-            type = "object",
-            additionalProperties = false,
-            required = { "code" },
-            properties = {
-                code = { type = "string", description = "Complete Lua chunk ending in one non-nil return value." },
-            },
-        },
+        description = "Execute a Lua chunk that returns one non-nil value.",
+        parameters = { type = "object", required = { "code" }, properties = { code = { type = "string" } } },
     },
 }
 
-local function next_value(iterator, ...)
-    local value = iterator(...)
-    while type(value) == "function" do
-        value = iterator(coroutine.yield(value))
-    end
-    return value
-end
-
 local function collect(iterator)
-    local chunks, response, event = {}, nil, next_value(iterator)
-    while event do
-        if event.type == "data" then
-            chunks[#chunks + 1] = event.data
-        else
-            response = event
-        end
+    local chunks, event = {}, next_value(iterator)
+    while event and event.type == "data" do
+        chunks[#chunks + 1] = event.data
         event = next_value(iterator)
     end
-    return table.concat(chunks), response
+    return table.concat(chunks), event
 end
 
 return function(config, http)
@@ -77,27 +59,20 @@ return function(config, http)
         return json.encode(value, null)
     end
     function api:tokens(content)
-        assert(type(content) == "string" and utf8.len(content), "tokenizer input must be valid text")
         return tokens(chat, content)
     end
 
     function api:chat(messages)
         return coroutine.wrap(function()
             local value = {
-                model = chat.model,
-                messages = messages,
-                tools = { tool },
-                tool_choice = "auto",
-                parallel_tool_calls = true,
-                stream = true,
-            }
-            local template = post(chat, assert(chat.template), {
                 messages = messages,
                 tools = { tool },
                 tool_choice = "auto",
                 parallel_tool_calls = true,
                 add_generation_prompt = true,
-            })
+            }
+            local template = post(chat, assert(chat.template), value)
+            value.add_generation_prompt, value.stream = nil, true
             assert(type(template.prompt) == "string", "template response has no prompt")
             local used = tokens(chat, template.prompt, true)
             assert(used + reserve <= context, "model prompt leaves too few output tokens")
@@ -174,7 +149,7 @@ return function(config, http)
 
     function api:rerank(query, passages)
         if #passages == 0 then
-            return {}, 0
+            return {}
         end
         local selected = {}
         for _, passage in ipairs(passages) do
@@ -201,9 +176,9 @@ return function(config, http)
                     and type(item.relevance_score) == "number",
                 "reranker item is invalid"
             )
-            seen[index], result[#result + 1] = true, { index = index + 1, score = item.relevance_score }
+            seen[index], result[#result + 1] = true, index + 1
         end
-        return result, #selected
+        return result
     end
     return api
 end

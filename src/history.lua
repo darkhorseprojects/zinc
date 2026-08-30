@@ -1,4 +1,4 @@
-local active, initialized
+local active
 local public = {
     available = function()
         return active ~= nil and active.durable
@@ -16,8 +16,6 @@ local public = {
 }
 
 return function()
-    assert(not initialized, "zinc.history is already initialized")
-    initialized = true
     package.loaded["zinc.history"] = public
     return public,
         function(thread, context, ...)

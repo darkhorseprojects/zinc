@@ -1,7 +1,6 @@
 local json = require("lunajson")
 local Cygnet = require("zinc.internal.cygnet")
 
-local config = { cygnet = "data/cygnet.db" }
 local function milliseconds(work)
     local started = os.clock()
     local result = work()
@@ -9,12 +8,12 @@ local function milliseconds(work)
 end
 
 local open_ms, cygnet = milliseconds(function()
-    return Cygnet(config, ".")
+    return Cygnet("data/cygnet.db")
 end)
 local samples = {}
 for index = 1, 40 do
     samples[index] = milliseconds(function()
-        return cygnet:expand({
+        return cygnet({
             tokens = { "portable", "agent", "memory" },
             exact_forms = {},
             semantic_language = "en",
@@ -24,7 +23,6 @@ for index = 1, 40 do
         })
     end)
 end
-cygnet:close()
 table.sort(samples)
 
 print(json.encode({

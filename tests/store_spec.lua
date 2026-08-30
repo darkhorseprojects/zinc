@@ -6,12 +6,11 @@ local function temporary()
     local path = os.tmpname()
     os.remove(path)
     paths[#paths + 1], paths[#paths + 2], paths[#paths + 3] = path, path .. "-wal", path .. "-shm"
-    local directory, name = assert(path:match("^(.*)[/\\]([^/\\]+)$"))
-    return directory, name, path
+    return path
 end
 local function open(maximum)
-    local directory, name, path = temporary()
-    return Store(path, maximum), path, directory, name
+    local path = temporary()
+    return Store(path, maximum), path
 end
 
 after_each(function()
@@ -53,12 +52,12 @@ describe("Store", function()
         for row in db:nrows("PRAGMA user_version") do
             version = row.user_version
         end
-        assert.equals(2, version)
+        assert.equals(3, version)
         local columns = {}
         for row in db:nrows("PRAGMA table_info(results)") do
             columns[#columns + 1] = row.name
         end
-        assert.same({ "id", "actor_id", "start", "role", "text" }, columns)
+        assert.same({ "id", "actor", "start", "role", "text" }, columns)
         assert.equals(sqlite.OK, db:close())
     end)
 
@@ -101,7 +100,7 @@ describe("Store", function()
     end)
 
     it("serializes independent writers without crossing actors", function()
-        local first, path, directory, name = open(1000)
+        local first, path = open(1000)
         local second = Store(path, 1000)
         for index = 1, 25 do
             local a = first:begin("actor-a", "request " .. index)
@@ -111,7 +110,7 @@ describe("Store", function()
         end
         local db = assert(sqlite.open(path))
         local actors, records = 0, 0
-        for row in db:nrows("SELECT count(*) AS count FROM actors") do
+        for row in db:nrows("SELECT count(DISTINCT actor) AS count FROM results") do
             actors = row.count
         end
         for row in db:nrows("SELECT count(*) AS count FROM results") do

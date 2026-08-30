@@ -37,9 +37,9 @@ describe("retrieval", function()
             self.terms, self.maximum = terms, maximum
             return candidates
         end
-        local cygnet = {}
-        function cygnet:expand(request)
-            self.request = request
+        local cygnet_request
+        local function cygnet(request)
+            cygnet_request = request
             return { "M-17" }
         end
         local models = {}
@@ -51,15 +51,15 @@ describe("retrieval", function()
         end
         function models:rerank(query, passages)
             self.query, self.passages = query, passages
-            return { { index = 2, score = 1 }, { index = 1, score = 1 } }, 2
+            return { 2, 1 }
         end
         local retrieval = Retrieval(OPTIONS, store, models, cygnet)
-        local context = assert(json.decode(retrieval:start("actor", 6, "immutable anchor")))
+        local context = assert(json.decode(retrieval("actor", 6, "immutable anchor")))
         assert.same({ "anchor", "M-17" }, store.terms)
         assert.same({ 512, 4096, 512 }, store.bounds)
-        assert.equals(511, cygnet.request.maximum_terms)
+        assert.equals(511, cygnet_request.maximum_terms)
         assert.equals("immutable anchor", models.query)
         assert.same({ { id = 5, role = "assistant", text = "recent" } }, context.chronological)
-        assert.same({ 1, 2 }, { context.semantic[1].id, context.semantic[2].id })
+        assert.same({ 2, 1 }, { context.semantic[1].id, context.semantic[2].id })
     end)
 end)

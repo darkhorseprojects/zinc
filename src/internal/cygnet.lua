@@ -1,4 +1,12 @@
 local sqlite = require("lsqlite3complete")
+local EXPAND = [[
+WITH RECURSIVE reachable(concept,depth) AS (
+ SELECT concept,0 FROM form_concepts WHERE language=? AND form=?
+ UNION SELECT e.target,r.depth+1 FROM reachable r JOIN concept_edges e ON e.source=r.concept WHERE r.depth<?
+)
+SELECT t.term,min(r.depth) depth FROM reachable r JOIN concept_terms t ON t.concept=r.concept
+WHERE t.language=? GROUP BY t.term ORDER BY depth,t.term
+]]
 
 local function normalize(value)
     return value:lower():gsub("_", " "):gsub("%s+", " "):match("^%s*(.-)%s*$")
@@ -17,63 +25,47 @@ return function(path)
         assert(statement:finalize() == sqlite.OK, db:errmsg())
         return result
     end
-    local metadata = {}
-    for _, row in ipairs(rows("SELECT key,value FROM metadata")) do
-        metadata[row.key] = row.value
-    end
+    local metadata = rows([[
+SELECT max(value) FILTER(WHERE key='format_version') format,
+ max(value) FILTER(WHERE key='algorithm') algorithm,
+ max(value) FILTER(WHERE key='maximum_form_tokens') maximum FROM metadata
+]])[1]
     assert(
-        metadata.format_version == "2" and metadata.algorithm == "relation-balanced-pagerank-v1",
+        metadata.format == "2" and metadata.algorithm == "relation-balanced-pagerank-v1",
         "Cygnet format is unsupported"
     )
-    local maximum = assert(tonumber(metadata.maximum_form_tokens), "Cygnet metadata is incomplete")
-    local languages = {}
-    for _, row in ipairs(rows("SELECT language,normalization,vocabulary FROM languages")) do
-        languages[row.language] = row
+    local maximum = assert(tonumber(metadata.maximum), "Cygnet metadata is incomplete")
+
+    local function recognized(form, request)
+        local score = rows(
+            [[
+SELECT s.probability,l.normalization,l.vocabulary FROM form_scores s JOIN languages l ON l.language=s.language
+WHERE s.language=? AND s.form=? AND EXISTS(SELECT 1 FROM form_concepts c WHERE c.language=s.language AND c.form=s.form)
+]],
+            request.semantic_language,
+            form
+        )[1]
+        return score
+            and -math.log(score.probability / score.normalization * score.vocabulary)
+                >= request.semantic_attention_cutoff
     end
 
-    local function concepts(form, request)
-        local score, language =
-            rows("SELECT probability FROM form_scores WHERE language=? AND form=?", request.semantic_language, form)[1],
-            languages[request.semantic_language]
-        if
-            not score
-            or not language
-            or -math.log(score.probability / language.normalization * language.vocabulary)
-                < request.semantic_attention_cutoff
-        then
-            return
-        end
-        local result = {}
-        for _, row in
-            ipairs(
-                rows(
-                    "SELECT concept FROM form_concepts WHERE language=? AND form=? ORDER BY concept",
-                    request.semantic_language,
-                    form
-                )
-            )
-        do
-            result[#result + 1] = row.concept
-        end
-        return #result > 0 and result or nil
-    end
-
-    local function select_concepts(request)
+    local function select_forms(request)
         local selected, seen, offset = {}, {}, 1
-        local function add(values)
-            if not values then
+        local function add(value)
+            local form = normalize(value)
+            if not recognized(form, request) then
                 return false
             end
-            local key = table.concat(values, ",")
-            if not seen[key] then
-                seen[key], selected[#selected + 1] = true, values
+            if not seen[form] then
+                seen[form], selected[#selected + 1] = true, form
             end
             return true
         end
         while offset <= #request.tokens do
             local accepted = 0
             for count = math.min(maximum, #request.tokens - offset + 1), 1, -1 do
-                if add(concepts(normalize(table.concat(request.tokens, " ", offset, offset + count - 1)), request)) then
+                if add(table.concat(request.tokens, " ", offset, offset + count - 1)) then
                     accepted = count
                     break
                 end
@@ -81,25 +73,17 @@ return function(path)
             offset = offset + math.max(accepted, 1)
         end
         for _, form in ipairs(request.exact_forms) do
-            add(concepts(normalize(form), request))
+            add(form)
         end
         return selected
     end
 
-    local function expand(selected, request)
+    return function(request)
         local output, seen = {}, {}
-        for _, initial in ipairs(selected) do
-            local seeds, arguments = {}, {}
-            for index, concept in ipairs(initial) do
-                seeds[index], arguments[index] = index == 1 and "SELECT ?,0" or "UNION SELECT ?,0", concept
-            end
-            arguments[#arguments + 1] = request.semantic_depth
-            arguments[#arguments + 1] = request.semantic_language
-            local query = "WITH RECURSIVE reachable(concept,depth) AS ("
-                .. table.concat(seeds, " ")
-                .. " UNION SELECT e.target,r.depth+1 FROM concept_edges e JOIN reachable r ON e.source=r.concept WHERE r.depth<?) "
-                .. "SELECT t.term,min(r.depth) depth FROM reachable r JOIN concept_terms t ON t.concept=r.concept WHERE t.language=? GROUP BY t.term ORDER BY depth,t.term"
-            for _, row in ipairs(rows(query, table.unpack(arguments))) do
+        for _, form in ipairs(select_forms(request)) do
+            for _, row in
+                ipairs(rows(EXPAND, request.semantic_language, form, request.semantic_depth, request.semantic_language))
+            do
                 local key = row.term:lower()
                 if not seen[key] then
                     seen[key], output[#output + 1] = true, row.term
@@ -111,10 +95,4 @@ return function(path)
         end
         return output
     end
-
-    return {
-        expand = function(_, request)
-            return expand(select_concepts(request), request)
-        end,
-    }
 end

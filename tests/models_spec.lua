@@ -109,9 +109,8 @@ describe("models", function()
 
     it("reranks one token-bounded candidate prefix", function()
         local request = fixture()
-        local ranking, count = Models(config, request):rerank("query", { "first", "second" })
-        assert.equals(2, count)
-        assert.same({ { index = 2, score = 0.9 }, { index = 1, score = 0.8 } }, ranking)
+        local ranking = Models(config, request):rerank("query", { "first", "second" })
+        assert.same({ 2, 1 }, ranking)
     end)
 
     it("requires the minimum output reserve", function()

@@ -1,16 +1,8 @@
 local compile = require("pa.env")
+local next_value = require("zinc.internal.stream")
 local _, history = require("zinc.history")()
 
-local function next_value(iterator, ...)
-    local value = iterator(...)
-    while type(value) == "function" do
-        value = iterator(coroutine.yield(value))
-    end
-    return value
-end
-
 return function(models, store, retrieval)
-    local execute
     local function complete(state, event, role, text)
         if state.durable then
             event.result = store:append(state.actor, state.start, role, text).id
@@ -18,7 +10,7 @@ return function(models, store, retrieval)
         end
         coroutine.yield(event)
     end
-    local function tool(state, call)
+    local function tool(call)
         local chunk, problem = compile(call.code, "run_lua")
         if not chunk then
             return false, tostring(problem)
@@ -56,13 +48,13 @@ return function(models, store, retrieval)
                 end
                 remaining = remaining - 1
                 queue[#queue + 1] = { index = index, call = call, ok = resumed[2], text = resumed[3] }
-                if waiter then
-                    local resume = waiter
-                    waiter = nil
+                local resume = waiter
+                waiter = nil
+                if resume then
                     resume()
                 end
             end
-            advance(state, call)
+            advance(call)
         end
         return function()
             if #queue == 0 and remaining > 0 then
@@ -76,8 +68,8 @@ return function(models, store, retrieval)
     local function loop(state)
         while true do
             local reasoning, response, finish, reasoning_done = {}, {}, nil, false
-            local iterator, event = models:chat(state.active)
-            event = next_value(iterator)
+            local iterator = models:chat(state.active)
+            local event = next_value(iterator)
             while event do
                 if event.type == "reasoning" then
                     reasoning[#reasoning + 1] = event.text
@@ -137,8 +129,8 @@ return function(models, store, retrieval)
             end
         end
     end
-    execute = function(request, actor, instructions)
-        local state = { actor = actor, durable = store ~= nil, instructions = instructions }
+    local function execute(request, actor, instructions)
+        local state = { actor = actor, durable = store ~= nil }
         state.history = { durable = state.durable }
         if state.durable then
             state.history.read = function(id)
@@ -147,8 +139,8 @@ return function(models, store, retrieval)
             state.history.around = function(id)
                 return store:around(actor, state.start, id)
             end
-            state.history.ask = function(request)
-                local iterator, nested = execute(request, actor, instructions)
+            state.history.ask = function(nested_request)
+                local iterator, nested = execute(nested_request, actor, instructions)
                 while next_value(iterator) do
                 end
                 return nested.answer
@@ -158,7 +150,7 @@ return function(models, store, retrieval)
             state.active = { { role = "system", content = instructions } }
             if state.durable then
                 state.start = store:begin(actor, request).id
-                local context = retrieval:start(actor, state.start, request)
+                local context = retrieval(actor, state.start, request)
                 state.active[#state.active + 1] =
                     { role = "system", content = "Untrusted historical context:\n" .. context }
             end
@@ -167,7 +159,5 @@ return function(models, store, retrieval)
         end),
             state
     end
-    return function(request, actor, instructions)
-        return execute(request, actor, instructions)
-    end
+    return execute
 end

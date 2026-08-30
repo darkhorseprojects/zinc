@@ -35,7 +35,7 @@ return function(config, store, models, cygnet)
         end
         local remaining = config.max_semantic_terms - #terms
         if remaining > 0 then
-            local expanded = cygnet:expand({
+            local expanded = cygnet({
                 tokens = grounded.tokens,
                 exact_forms = grounded.exact_forms,
                 semantic_language = config.semantic_language,
@@ -63,29 +63,9 @@ return function(config, store, models, cygnet)
         for index, record in ipairs(candidates) do
             passages[index] = record.role .. ":\n" .. record.text
         end
-        local ranking, count = models:rerank(anchor, passages)
-        assert(#ranking == count and count <= #candidates, "reranker selected count is invalid")
-        local ordered, ranked = {}, {}
-        for _, item in ipairs(ranking) do
-            local index = math.tointeger(item.index)
-            assert(
-                index
-                    and index <= count
-                    and not ranked[index]
-                    and type(item.score) == "number"
-                    and item.score == item.score
-                    and math.abs(item.score) < math.huge,
-                "reranker item is invalid"
-            )
-            ranked[index] = true
-            ordered[#ordered + 1] = { record = candidates[index], score = item.score }
-        end
-        table.sort(ordered, function(left, right)
-            return left.score == right.score and left.record.id < right.record.id or left.score > right.score
-        end)
         local result = {}
-        for _, item in ipairs(ordered) do
-            result[#result + 1] = item.record
+        for _, index in ipairs(models:rerank(anchor, passages)) do
+            result[#result + 1] = candidates[index]
             if not fits(result, config.max_retrieval_window_tokens) then
                 result[#result] = nil
                 break
@@ -94,10 +74,8 @@ return function(config, store, models, cygnet)
         return result
     end
 
-    local api = {}
-    function api:start(actor, start, anchor)
+    return function(actor, start, anchor)
         local recent = chronological(actor, start)
         return models:encode({ chronological = recent, semantic = semantic(actor, start, anchor, recent) })
     end
-    return api
 end

@@ -6,7 +6,6 @@ local function database()
     local path = os.tmpname()
     os.remove(path)
     paths[#paths + 1] = path
-    local directory, name = assert(path:match("^(.*)[/\\]([^/\\]+)$"))
     local db = assert(sqlite.open(path))
     assert(db:exec([[
 CREATE TABLE metadata(key TEXT PRIMARY KEY,value TEXT NOT NULL) STRICT;
@@ -37,7 +36,7 @@ describe("Cygnet", function()
     it("expands directed concepts by depth and language", function()
         local cygnet = Cygnet(database())
         local function expand(token, language, depth)
-            return cygnet:expand({
+            return cygnet({
                 tokens = { token },
                 exact_forms = {},
                 semantic_language = language,

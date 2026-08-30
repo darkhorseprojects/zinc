@@ -50,11 +50,9 @@ end
 describe("run", function()
     it("commits every durable completion before Store", function()
         local database, model = store(), models()
-        local retrieval = {
-            start = function()
-                return "{}"
-            end,
-        }
+        local function retrieval()
+            return "{}"
+        end
         local ask = Run(model, database, retrieval)
         local output, stream = {}, ask("request", "actor", "instructions")
         for event in stream do
@@ -98,11 +96,9 @@ describe("run", function()
                 { type = "finish", reason = "stop", calls = {}, wire = {} },
             })
         end
-        local retrieval = {
-            start = function()
-                return "{}"
-            end,
-        }
+        local function retrieval()
+            return "{}"
+        end
         local stream = Run(model, database, retrieval)("request", "actor", "instructions")
         local tool_result
         for event in stream do
