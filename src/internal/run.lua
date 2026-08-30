@@ -1,6 +1,12 @@
 local compile = require("pa.env")
-local next_value = require("zinc.internal.stream")
 local _, history = require("zinc.history")()
+local function next_value(iterator, ...)
+    local value = iterator(...)
+    while type(value) == "function" do
+        value = iterator(coroutine.yield(value))
+    end
+    return value
+end
 
 return function(models, store, retrieval)
     local function complete(state, event, role, text)
@@ -33,21 +39,17 @@ return function(models, store, retrieval)
         for index, call in ipairs(calls) do
             local thread = coroutine.create(tool)
             local function advance(...)
-                local resumed = table.pack(history(thread, state.history, ...))
-                if not resumed[1] then
-                    resumed = { true, false, tostring(resumed[2]), n = 3 }
-                end
-                if coroutine.status(thread) ~= "dead" then
-                    local suspension = resumed[2]
-                    if type(suspension) ~= "function" or resumed.n ~= 2 then
-                        resumed = { true, false, "run_lua yielded an invalid value", n = 3 }
-                    else
-                        suspension(advance)
-                        return
+                local resumed, ok, text = history(thread, state.history, ...)
+                if not resumed then
+                    ok, text = false, tostring(ok)
+                elseif coroutine.status(thread) ~= "dead" then
+                    if type(ok) == "function" and text == nil then
+                        return ok(advance)
                     end
+                    ok, text = false, "run_lua yielded an invalid value"
                 end
                 remaining = remaining - 1
-                queue[#queue + 1] = { index = index, call = call, ok = resumed[2], text = resumed[3] }
+                queue[#queue + 1] = { index = index, call = call, ok = ok, text = text }
                 local resume = waiter
                 waiter = nil
                 if resume then
@@ -105,11 +107,10 @@ return function(models, store, retrieval)
             state.active[#state.active + 1] = assistant
             if #finish.calls == 0 then
                 state.answer = assistant.content
-                coroutine.yield(
+                return coroutine.yield(
                     state.durable and { type = "store", result = state.result, start = state.start }
                         or { type = "done", durable = false }
                 )
-                return
             end
             local results, group = {}, parallel(state, finish.calls)
             local result = next_value(group)

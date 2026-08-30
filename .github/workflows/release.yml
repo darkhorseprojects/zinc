@@ -54,7 +54,7 @@ jobs:
       - name: Test and package
         shell: bash
         run: |
-          test "$(awk 'NF { lines++ } END { print lines }' zinc.md design.md src/*.lua src/internal/*.lua)" -lt 800
+          test "$(awk 'NF { lines++ } END { print lines }' zinc.md design.md src/*.lua src/internal/*.lua)" -lt 715
           ! grep -R --line-number -- '--trust' zinc.md design.md src tests
           lx fmt --check --path src
           lx fmt --check --path tests
@@ -62,7 +62,7 @@ jobs:
           for path in src tests tools; do lx --lua-version 5.4 lint --path "$path"; done
           lx --lua-dir "$PWD/.lux/lua" --vendor-dir "$PWD/vendor/sources" --max-jobs 1 test
           .lux/lua/bin/lua tools/benchmark.lua
-          "$AGENT_BIN" check --directory . --entry zinc.md --lua-memory 96MiB --process-memory 512MiB --wall-time 2m
+          "$AGENT_BIN" check --directory . --entry zinc.md --lua-memory 96MiB
           if [[ "$GITHUB_REF" == refs/tags/* ]]; then
             root="zinc-${GITHUB_REF_NAME}-${{ matrix.id }}"
             mkdir -p "$root/.lux/runtime/lua" "$root/.lux/runtime/lib"

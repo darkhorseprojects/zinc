@@ -4,22 +4,11 @@ return function(config, store, models, cygnet)
     end
 
     local function chronological(actor, start)
-        local result, cursor = {}, start
-        while true do
-            local page = store:before(actor, cursor, 32)
-            if #page == 0 then
-                break
-            end
-            for _, value in ipairs(page) do
-                table.insert(result, 1, { id = value.id, role = value.role, text = value.text })
-                if not fits(result, config.max_chronological_window_tokens) then
-                    table.remove(result, 1)
-                    page = {}
-                    break
-                end
-                cursor = value.id
-            end
-            if #page < 32 then
+        local result = {}
+        for _, value in ipairs(store:before(actor, start, config.max_chronological_window_tokens)) do
+            table.insert(result, 1, { id = value.id, role = value.role, text = value.text })
+            if not fits(result, config.max_chronological_window_tokens) then
+                table.remove(result, 1)
                 break
             end
         end
@@ -29,10 +18,7 @@ return function(config, store, models, cygnet)
     local function semantic(actor, start, anchor, recent)
         local grounded =
             store:ground(anchor, config.max_semantic_terms, config.max_grounding_tokens, config.max_exact_forms)
-        local terms, seen = {}, {}
-        for _, term in ipairs(grounded.terms) do
-            terms[#terms + 1], seen[term] = term, true
-        end
+        local terms = grounded.terms
         local remaining = config.max_semantic_terms - #terms
         if remaining > 0 then
             local expanded = cygnet({
@@ -44,9 +30,7 @@ return function(config, store, models, cygnet)
                 maximum_terms = remaining,
             })
             for _, term in ipairs(expanded) do
-                if not seen[term] then
-                    terms[#terms + 1], seen[term] = term, true
-                end
+                terms[#terms + 1] = term
             end
         end
         local excluded, candidates = {}, {}

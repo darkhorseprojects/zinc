@@ -8,13 +8,9 @@ SELECT t.term,min(r.depth) depth FROM reachable r JOIN concept_terms t ON t.conc
 WHERE t.language=? GROUP BY t.term ORDER BY depth,t.term
 ]]
 
-local function normalize(value)
-    return value:lower():gsub("_", " "):gsub("%s+", " "):match("^%s*(.-)%s*$")
-end
 return function(path)
     assert(type(path) == "string" and path ~= "", "Cygnet path is invalid")
     local db = assert(sqlite.open(path, sqlite.OPEN_READONLY))
-    db:busy_timeout(5000)
     local function rows(sql, ...)
         local statement = assert(db:prepare(sql), db:errmsg())
         assert(statement:bind_values(...) == sqlite.OK, db:errmsg())
@@ -26,15 +22,11 @@ return function(path)
         return result
     end
     local metadata = rows([[
-SELECT max(value) FILTER(WHERE key='format_version') format,
- max(value) FILTER(WHERE key='algorithm') algorithm,
- max(value) FILTER(WHERE key='maximum_form_tokens') maximum FROM metadata
+SELECT value maximum FROM metadata WHERE key='maximum_form_tokens'
+AND EXISTS(SELECT 1 FROM metadata WHERE key='format_version' AND value='2')
+AND EXISTS(SELECT 1 FROM metadata WHERE key='algorithm' AND value='relation-balanced-pagerank-v1')
 ]])[1]
-    assert(
-        metadata.format == "2" and metadata.algorithm == "relation-balanced-pagerank-v1",
-        "Cygnet format is unsupported"
-    )
-    local maximum = assert(tonumber(metadata.maximum), "Cygnet metadata is incomplete")
+    local maximum = assert(metadata and tonumber(metadata.maximum), "Cygnet format is unsupported")
 
     local function recognized(form, request)
         local score = rows(
@@ -53,7 +45,7 @@ WHERE s.language=? AND s.form=? AND EXISTS(SELECT 1 FROM form_concepts c WHERE c
     local function select_forms(request)
         local selected, seen, offset = {}, {}, 1
         local function add(value)
-            local form = normalize(value)
+            local form = value:lower():gsub("_", " "):gsub("%s+", " "):match("^%s*(.-)%s*$")
             if not recognized(form, request) then
                 return false
             end

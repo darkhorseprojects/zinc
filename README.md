@@ -8,9 +8,7 @@ Start the pinned llama.cpp router, then:
 
 ```sh
 printf 'Explain the current package.' | agent run \
-  --directory . --entry zinc.md \
-  --lua-memory 96MiB --process-memory 512MiB --wall-time 2m \
-  -- local:example
+  --directory . --entry zinc.md --lua-memory 96MiB -- local:example
 ```
 
 `config.store = false` is temporary. A package-relative path enables durable SQLite history. `max_stored_record_bytes` retains a valid UTF-8 suffix of oversized records.
@@ -32,7 +30,7 @@ Generated Lua uses normal `require` and can inspect `package.loaded`:
 ```lua
 local host = require("pa.host")
 local history = require("zinc.history")
-return history.available() and history.around(42) or host.files.read({ path = "README.md" })
+return history.around(42) or host.files.read({ path = "README.md" })
 ```
 
 `zinc.design.guide` describes how to build another agent. Guides are optional for public modules.

@@ -1,8 +1,5 @@
 local active
 local public = {
-    available = function()
-        return active ~= nil and active.durable
-    end,
     read = function(id)
         return active and active.durable and active.read(id) or nil
     end,
