@@ -7,9 +7,7 @@ WHERE result_fts MATCH ? AND r.actor=? AND r.id<? ORDER BY lexical_score,r.id LI
 ]]
 
 local function tail(value, maximum)
-    if #value <= maximum then
-        return value
-    end
+    if #value <= maximum then return value end
     return (value:sub(-maximum):gsub("^[\128-\191]*", ""))
 end
 
@@ -30,15 +28,9 @@ return function(path, maximum)
         assert(statement:finalize() == sqlite.OK, db:errmsg())
         return result
     end
-    local function one(where, ...)
-        return rows(SELECT .. where, ...)[1]
-    end
+    local function one(where, ...) return rows(SELECT .. where, ...)[1] end
 
-    assert(
-        db:exec("PRAGMA trusted_schema=OFF; PRAGMA synchronous=FULL; PRAGMA foreign_keys=ON; PRAGMA journal_mode=WAL")
-            == sqlite.OK,
-        db:errmsg()
-    )
+    assert(db:exec("PRAGMA trusted_schema=OFF; PRAGMA synchronous=FULL; PRAGMA foreign_keys=ON; PRAGMA journal_mode=WAL") == sqlite.OK, db:errmsg())
     local version = rows("PRAGMA user_version")[1].user_version
     assert(version == 0 or version == 3, "Store format is unsupported")
     assert(db:exec(string.format(
@@ -77,29 +69,19 @@ RETURNING id,actor,coalesce(start,id) start,role,text]],
     end
 
     local api = {}
-    function api:begin(actor, request)
-        return add(actor, nil, "user", request)
-    end
-    function api:append(actor, start, role, text)
-        return add(actor, assert(math.tointeger(start), "start must be an integer"), role, text)
-    end
-    function api:read(actor, start, id)
-        return one(" WHERE actor=? AND id=? AND id<?", actor, id, start)
-    end
+    function api:begin(actor, request) return add(actor, nil, "user", request) end
+    function api:append(actor, start, role, text) return add(actor, assert(math.tointeger(start), "start must be an integer"), role, text) end
+    function api:read(actor, start, id) return one(" WHERE actor=? AND id=? AND id<?", actor, id, start) end
     function api:around(actor, start, id)
         local current = self:read(actor, start, id)
-        if not current then
-            return nil
-        end
+        if not current then return nil end
         return {
             previous = one(" WHERE actor=? AND id<? ORDER BY id DESC LIMIT 1", actor, id),
             current = current,
             next = one(" WHERE actor=? AND id>? AND id<? ORDER BY id LIMIT 1", actor, id, start),
         }
     end
-    function api:before(actor, start, limit)
-        return rows(SELECT .. " WHERE actor=? AND id<? ORDER BY id DESC LIMIT ?", actor, start, limit)
-    end
+    function api:before(actor, start, limit) return rows(SELECT .. " WHERE actor=? AND id<? ORDER BY id DESC LIMIT ?", actor, start, limit) end
     function api:ground(value, term_maximum, token_maximum, exact_maximum)
         local terms, tokens, exact, seen = {}, {}, {}, {}
         for literal in value:gmatch("%S+") do
@@ -127,9 +109,7 @@ RETURNING id,actor,coalesce(start,id) start,role,text]],
         for _, term in ipairs(terms) do
             literals[#literals + 1] = '"' .. term:gsub('"', '""') .. '"'
         end
-        if #literals == 0 then
-            return {}
-        end
+        if #literals == 0 then return {} end
         return rows(SEARCH, table.concat(literals, " OR "), actor, start, limit)
     end
     return api

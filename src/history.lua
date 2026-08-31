@@ -1,11 +1,7 @@
 local active
 local public = {
-    read = function(id)
-        return active and active.durable and active.read(id) or nil
-    end,
-    around = function(id)
-        return active and active.durable and active.around(id) or nil
-    end,
+    read = function(id) return active and active.durable and active.read(id) or nil end,
+    around = function(id) return active and active.durable and active.around(id) or nil end,
     ask = function(request)
         assert(active and active.durable, "durable history is unavailable")
         return active.ask(request)

@@ -73,12 +73,8 @@ describe("Store", function()
             tokens = { "one", "two", "three" },
             exact_forms = {},
         }, store:ground("one two three", 2, 100, 100))
-        assert.has_error(function()
-            store:ground("one two three", 10, 2, 10)
-        end, "grounding text exceeds grounding token limit")
-        assert.has_error(function()
-            store:ground("one_two three_four", 10, 10, 1)
-        end, "grounding text exceeds exact form limit")
+        assert.has_error(function() store:ground("one two three", 10, 2, 10) end, "grounding text exceeds grounding token limit")
+        assert.has_error(function() store:ground("one_two three_four", 10, 10, 1) end, "grounding text exceeds exact form limit")
     end)
 
     it("indexes actor identity and text in one bounded FTS query", function()

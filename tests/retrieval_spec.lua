@@ -26,9 +26,7 @@ describe("retrieval", function()
             { id = 2, role = "tool", text = "second" },
         }
         local store = {}
-        function store:before()
-            return chronological
-        end
+        function store:before() return chronological end
         function store:ground(anchor, terms, tokens, exact)
             self.anchor, self.bounds = anchor, { terms, tokens, exact }
             return { terms = { "anchor" }, tokens = { "immutable", "anchor" }, exact_forms = {} }
@@ -43,12 +41,8 @@ describe("retrieval", function()
             return { "M-17" }
         end
         local models = {}
-        function models:encode(value)
-            return assert(json.encode(value))
-        end
-        function models:tokens(value)
-            return #value
-        end
+        function models:encode(value) return assert(json.encode(value)) end
+        function models:tokens(value) return #value end
         function models:rerank(query, passages)
             self.query, self.passages = query, passages
             return { 2, 1 }

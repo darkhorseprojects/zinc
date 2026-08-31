@@ -24,6 +24,7 @@ jobs:
           - { os: macos-13, id: macos-x86_64 }
           - { os: macos-14, id: macos-aarch64 }
           - { os: windows-latest, id: windows-x86_64 }
+          - { os: windows-11-arm, id: windows-aarch64 }
     runs-on: ${{ matrix.os }}
     timeout-minutes: 90
     steps:
@@ -54,8 +55,8 @@ jobs:
       - name: Test and package
         shell: bash
         run: |
-          test "$(awk 'NF { lines++ } END { print lines }' zinc.md design.md src/*.lua src/internal/*.lua)" -lt 715
-          ! grep -R --line-number -- '--trust' zinc.md design.md src tests
+          test "$(awk 'NF { lines++ } END { print lines }' zinc.md design.md src/*.lua src/internal/*.lua)" -lt 600
+          ! grep -R -E --line-number -- '--trust|pa\.document|next_value|local source(, directory)? = \.\.\.' zinc.md design.md src tests
           lx fmt --check --path src
           lx fmt --check --path tests
           lx fmt --check --path tools

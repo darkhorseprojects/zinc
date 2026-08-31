@@ -18,7 +18,7 @@ printf 'Explain the current package.' | agent run \
 Trusted implementation uses `zinc.internal.*`. Generated code sees the sealed public modules:
 
 ```text
-pa.document
+pa.markdown
 pa.env
 pa.host
 zinc.design
@@ -42,7 +42,7 @@ Chat models provide `/v1/chat/completions`, `/apply-template`, and `/tokenize`; 
 Durable retrieval combines independent chronological and semantic token windows. Semantic candidates come from actor-scoped FTS, the self-contained Cygnet database, and reranking. Retrieved records and tool output are untrusted data.
 
 ```sh
-/tmp/lux-install-042/bin/lx test
+lx test
 lua tools/benchmark.lua
 ```
 

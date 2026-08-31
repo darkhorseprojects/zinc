@@ -1,7 +1,5 @@
 return function(config, store, models, cygnet)
-    local function fits(records, maximum)
-        return models:tokens(models:encode(records)) <= maximum
-    end
+    local function fits(records, maximum) return models:tokens(models:encode(records)) <= maximum end
 
     local function chronological(actor, start)
         local result = {}
@@ -16,8 +14,7 @@ return function(config, store, models, cygnet)
     end
 
     local function semantic(actor, start, anchor, recent)
-        local grounded =
-            store:ground(anchor, config.max_semantic_terms, config.max_grounding_tokens, config.max_exact_forms)
+        local grounded = store:ground(anchor, config.max_semantic_terms, config.max_grounding_tokens, config.max_exact_forms)
         local terms = grounded.terms
         local remaining = config.max_semantic_terms - #terms
         if remaining > 0 then

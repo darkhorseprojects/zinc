@@ -7,21 +7,21 @@ local function milliseconds(work)
     return (os.clock() - started) * 1000, result
 end
 
-local open_ms, cygnet = milliseconds(function()
-    return Cygnet("data/cygnet.db")
-end)
+local open_ms, cygnet = milliseconds(function() return Cygnet("data/cygnet.db") end)
 local samples = {}
 for index = 1, 40 do
-    samples[index] = milliseconds(function()
-        return cygnet({
-            tokens = { "portable", "agent", "memory" },
-            exact_forms = {},
-            semantic_language = "en",
-            semantic_depth = 1,
-            semantic_attention_cutoff = 0,
-            maximum_terms = 512,
-        })
-    end)
+    samples[index] = milliseconds(
+        function()
+            return cygnet({
+                tokens = { "portable", "agent", "memory" },
+                exact_forms = {},
+                semantic_language = "en",
+                semantic_depth = 1,
+                semantic_attention_cutoff = 0,
+                maximum_terms = 512,
+            })
+        end
+    )
 end
 table.sort(samples)
 

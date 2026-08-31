@@ -1,5 +1,5 @@
 std = "lua54"
-max_line_length = 120
+max_line_length = 160
 ignore = { "212/self" }
 
 files["tests/**/*.lua"] = {

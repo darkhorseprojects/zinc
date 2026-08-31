@@ -50,9 +50,7 @@ local function fixture()
             return iterator({
                 {
                     type = "data",
-                    data = "data: "
-                        .. json.encode({ choices = { { delta = { reasoning_content = "think" } } } })
-                        .. "\n\n",
+                    data = "data: " .. json.encode({ choices = { { delta = { reasoning_content = "think" } } } }) .. "\n\n",
                 },
                 {
                     type = "data",
@@ -60,29 +58,27 @@ local function fixture()
                 },
                 {
                     type = "data",
-                    data = "data: "
-                        .. json.encode({
-                            choices = {
-                                {
-                                    delta = {
-                                        tool_calls = {
-                                            {
-                                                index = 1,
-                                                id = "b",
-                                                ["function"] = { name = "run_lua", arguments = '{"code":"return 2"}' },
-                                            },
-                                            {
-                                                index = 0,
-                                                id = "a",
-                                                ["function"] = { name = "run_lua", arguments = '{"code":"return 1"}' },
-                                            },
+                    data = "data: " .. json.encode({
+                        choices = {
+                            {
+                                delta = {
+                                    tool_calls = {
+                                        {
+                                            index = 1,
+                                            id = "b",
+                                            ["function"] = { name = "run_lua", arguments = '{"code":"return 2"}' },
+                                        },
+                                        {
+                                            index = 0,
+                                            id = "a",
+                                            ["function"] = { name = "run_lua", arguments = '{"code":"return 1"}' },
                                         },
                                     },
-                                    finish_reason = "tool_calls",
                                 },
+                                finish_reason = "tool_calls",
                             },
-                        })
-                        .. "\n\ndata: [DONE]\n\n",
+                        },
+                    }) .. "\n\ndata: [DONE]\n\n",
                 },
                 { type = "response", status = 200, headers = {} },
             })
@@ -97,14 +93,13 @@ end
 describe("models", function()
     it("counts the rendered prompt and uses all remaining output context", function()
         local request, seen = fixture()
-        local stream = Models(config, request):chat({ { role = "user", content = "hello" } })
-        assert.same({ type = "reasoning", text = "think" }, stream())
-        assert.same({ type = "response", text = "answer" }, stream())
-        local finish = stream()
+        local events = {}
+        local finish = Models(config, request):chat({ { role = "user", content = "hello" } }, function(event) events[#events + 1] = event end)
+        assert.same({ type = "reasoning", text = "think" }, events[1])
+        assert.same({ type = "response", text = "answer" }, events[2])
         assert.equals("tool_calls", finish.reason)
         assert.same({ "a", "b" }, { finish.calls[1].id, finish.calls[2].id })
         assert.equals(58, seen[3].body.max_tokens)
-        assert.is_nil(stream())
     end)
 
     it("reranks one token-bounded candidate prefix", function()
@@ -127,7 +122,7 @@ describe("models", function()
         local request = fixture()
         local models = Models(tiny, request)
         assert.has_error(function()
-            models:chat({ { role = "user", content = "x" } })()
+            models:chat({ { role = "user", content = "x" } }, function() end)
         end)
     end)
 end)

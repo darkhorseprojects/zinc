@@ -1,15 +1,5 @@
-package.preload["pa.env"] = function()
-    return assert(loadfile("../portable-agents/src/pa/env.lua"))()
-end
+package.preload["pa.env"] = function() return assert(loadfile("../portable-agents/src/pa/env.lua"))() end
 local Run = require("zinc.internal.run")
-
-local function iterator(values)
-    local index = 0
-    return function()
-        index = index + 1
-        return values[index]
-    end
-end
 
 local function store()
     local api = { records = {}, next = 0 }
@@ -19,30 +9,20 @@ local function store()
         self.records[#self.records + 1] = value
         return value
     end
-    function api:begin(actor, text)
-        return record(self, actor, nil, "user", text)
-    end
-    function api:append(actor, start, role, text)
-        return record(self, actor, start, role, text)
-    end
-    function api:read()
-        return nil
-    end
-    function api:around()
-        return nil
-    end
+    function api:begin(actor, text) return record(self, actor, nil, "user", text) end
+    function api:append(actor, start, role, text) return record(self, actor, start, role, text) end
+    function api:read() return nil end
+    function api:around() return nil end
     return api
 end
 
 local function models()
     local api = {}
-    function api:chat(messages)
+    function api:chat(messages, emit)
         self.messages = messages
-        return iterator({
-            { type = "reasoning", text = "thinking" },
-            { type = "response", text = "answer" },
-            { type = "finish", reason = "stop", calls = {}, wire = {} },
-        })
+        emit({ type = "reasoning", text = "thinking" })
+        emit({ type = "response", text = "answer" })
+        return { type = "finish", reason = "stop", calls = {}, wire = {} }
     end
     return api
 end
@@ -50,9 +30,7 @@ end
 describe("run", function()
     it("commits every durable completion before Store", function()
         local database, model = store(), models()
-        local function retrieval()
-            return "{}"
-        end
+        local function retrieval() return "{}" end
         local ask = Run(model, database, retrieval)
         local output, stream = {}, ask("request", "actor", "instructions")
         for event in stream do
@@ -73,38 +51,30 @@ describe("run", function()
     it("rejects nil generated returns", function()
         local database = store()
         local model = { count = 0 }
-        function model:chat()
+        function model:chat(_, emit)
             self.count = self.count + 1
             if self.count == 1 then
-                return iterator({
-                    {
-                        type = "finish",
-                        reason = "tool_calls",
-                        calls = { { id = "call", code = "return nil" } },
-                        wire = {
-                            {
-                                id = "call",
-                                type = "function",
-                                ["function"] = { name = "run_lua", arguments = '{"code":"return nil"}' },
-                            },
+                return {
+                    type = "finish",
+                    reason = "tool_calls",
+                    calls = { { id = "call", code = "return nil" } },
+                    wire = {
+                        {
+                            id = "call",
+                            type = "function",
+                            ["function"] = { name = "run_lua", arguments = '{"code":"return nil"}' },
                         },
                     },
-                })
+                }
             end
-            return iterator({
-                { type = "response", text = "corrected" },
-                { type = "finish", reason = "stop", calls = {}, wire = {} },
-            })
+            emit({ type = "response", text = "corrected" })
+            return { type = "finish", reason = "stop", calls = {}, wire = {} }
         end
-        local function retrieval()
-            return "{}"
-        end
+        local function retrieval() return "{}" end
         local stream = Run(model, database, retrieval)("request", "actor", "instructions")
         local tool_result
         for event in stream do
-            if event.type == "tool_result" then
-                tool_result = event
-            end
+            if event.type == "tool_result" then tool_result = event end
         end
         assert.is_false(tool_result.ok)
         assert.equals("run_lua returned nil", tool_result.text)
