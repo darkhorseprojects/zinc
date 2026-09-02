@@ -9,9 +9,6 @@ local document = require("pa.markdown")()
 local directory = document.directory
 
 local config = {
-    store = directory .. "/zinc.db",
-    cygnet = directory .. "/data/cygnet.db",
-    max_stored_record_bytes = 8388608,
     models = {
         chat = {
             endpoint = "http://127.0.0.1:8000/v1/chat/completions",
@@ -20,7 +17,8 @@ local config = {
             model = "chat",
             context_tokens = 131072,
             minimum_output_tokens = 4096,
-            maximum_parallel_tools = 8,
+            maximum_tools = 8,
+            event_bytes = 1048576,
         },
         rerank = {
             endpoint = "http://127.0.0.1:8000/v1/rerank",
@@ -29,32 +27,33 @@ local config = {
             passage_tokens = 8192,
         },
     },
-    retrieval = {
-        semantic_language = "en",
-        semantic_depth = 1,
-        semantic_attention_cutoff = 0,
-        max_chronological_window_tokens = 32768,
-        max_retrieval_window_tokens = 32768,
-        max_semantic_terms = 512,
-        max_grounding_tokens = 4096,
-        max_exact_forms = 512,
-        max_retrieval_candidates = 64,
+    memory = {
+        store = directory .. "/zinc.db",
+        cygnet = directory .. "/data/cygnet.db",
+        max_stored_record_bytes = 8388608,
+        retrieval = {
+            semantic_language = "en",
+            semantic_depth = 1,
+            semantic_attention_cutoff = 0,
+            max_chronological_window_tokens = 32768,
+            max_retrieval_window_tokens = 32768,
+            max_semantic_terms = 512,
+            max_grounding_tokens = 4096,
+            max_exact_forms = 512,
+            max_retrieval_candidates = 64,
+        },
     },
+    run = { maximum_turns = 32, maximum_nested_requests = 4 },
     host = {
-        files = { { root = directory, access = "read-write" } },
-        http = { { origin = "http://127.0.0.1:8000" } },
+        files = { { root = directory, access = "read-write", bytes = 8388608 } },
+        http = { { origin = "http://127.0.0.1:8000", timeout_ms = 300000, request_bytes = 8388608, response_bytes = 16777216 } },
     },
 }
 require("zinc.design")
-local host = require("pa.host")(config.host)
-local models = require("zinc.internal.models")(config.models, assert(host.http))
-local store, retrieval
-if config.store then
-    store = require("zinc.internal.store")(config.store, config.max_stored_record_bytes)
-    local cygnet = require("zinc.internal.cygnet")(config.cygnet)
-    retrieval = require("zinc.internal.retrieval")(config.retrieval, store, models, cygnet)
-end
-local ask = require("zinc.internal.run")(models, store, retrieval)
+local host = require("pa.host").new(config.host)
+local model = require("zinc.internal.model")(config.models, assert(host.http))
+local memory = require("zinc.internal.memory")(config.memory, model)
+local ask = require("zinc.internal.run")(config.run, model, memory)
 return function(input, argv)
     return ask(input, assert(argv[1], "actor is required"), table.concat(document.Zinc.Instructions, "\n\n"))
 end

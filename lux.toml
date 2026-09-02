@@ -18,8 +18,6 @@ type = "builtin"
 
 [build.modules]
 "zinc.history" = "src/history.lua"
-"zinc.internal.cygnet" = "src/internal/cygnet.lua"
-"zinc.internal.models" = "src/internal/models.lua"
-"zinc.internal.retrieval" = "src/internal/retrieval.lua"
+"zinc.internal.memory" = "src/internal/memory.lua"
+"zinc.internal.model" = "src/internal/model.lua"
 "zinc.internal.run" = "src/internal/run.lua"
-"zinc.internal.store" = "src/internal/store.lua"

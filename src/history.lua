@@ -10,12 +10,12 @@ local public = {
 
 return function()
     package.loaded["zinc.history"] = public
-    return public,
-        function(thread, context, ...)
-            local previous = active
-            active = context
-            local result = table.pack(coroutine.resume(thread, ...))
-            active = previous
-            return table.unpack(result, 1, result.n)
-        end
+    return public, function(context, work, ...)
+        local previous = active
+        active = context
+        local result = table.pack(pcall(work, ...))
+        active = previous
+        assert(result[1], result[2])
+        return table.unpack(result, 2, result.n)
+    end
 end
