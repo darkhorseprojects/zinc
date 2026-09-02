@@ -30,17 +30,16 @@ local function query(db, sql, ...)
 end
 
 local function tail(value, maximum)
-    if #value <= maximum then return value end
+    if not maximum or #value <= maximum then return value end
     return (value:sub(-maximum):gsub("^[\128-\191]*", ""))
 end
 
-local function open_store(path, maximum)
+local function open_store(path)
     assert(type(path) == "string" and path ~= "", "invalid Store path")
-    maximum = assert(math.tointeger(maximum), "stored record budget must be an integer")
-    assert(maximum >= 4, "stored record budget must be at least four bytes")
     local db = assert(sqlite.open(path))
-    db:busy_timeout(5000)
-    assert(db:exec("PRAGMA trusted_schema=OFF; PRAGMA synchronous=FULL; PRAGMA foreign_keys=ON; PRAGMA journal_mode=WAL") == sqlite.OK, db:errmsg())
+    assert(
+        db:exec("PRAGMA trusted_schema=OFF; PRAGMA synchronous=FULL; PRAGMA foreign_keys=ON; PRAGMA journal_mode=WAL") ==
+        sqlite.OK, db:errmsg())
     local version = query(db, "PRAGMA user_version")[1].user_version
     assert(version == 0 or version == 3, "Store format is unsupported")
     assert(db:exec(string.format([[
@@ -63,45 +62,70 @@ CREATE VIRTUAL TABLE temp.grounding_tokenizer USING fts5(text,tokenize='unicode6
 CREATE VIRTUAL TABLE temp.grounding_vocabulary USING fts5vocab(grounding_tokenizer,'instance');
 ]]) == sqlite.OK, db:errmsg())
     local function one(where, ...) return query(db, SELECT .. where, ...)[1] end
-    local function add(actor, start, role, text)
-        assert(type(actor) == "string" and actor ~= "" and type(text) == "string" and text ~= "" and utf8.len(text), "invalid record")
+    local function add(actor, start, role, text, maximum)
+        assert(type(actor) == "string" and actor ~= "" and type(text) == "string" and text ~= "" and utf8.len(text),
+            "invalid record")
         return query(db, [[INSERT INTO results(actor,start,role,text) VALUES(?,?,?,?)
 RETURNING id,actor,coalesce(start,id) start,role,text]], actor, start, role, tail(text, maximum))[1]
     end
     local store = {}
-    function store:begin(actor, request) return add(actor, nil, "user", request) end
-    function store:append(actor, start, role, text) return add(actor, assert(math.tointeger(start), "start must be an integer"), role, text) end
+    function store:begin(actor, request, maximum) return add(actor, nil, "user", request, maximum) end
+
+    function store:append(actor, start, role, text, maximum)
+        return add(actor,
+            assert(math.tointeger(start), "start must be an integer"), role, text, maximum)
+    end
+
     function store:read(actor, start, id) return one(" WHERE actor=? AND id=? AND id<?", actor, id, start) end
+
     function store:around(actor, start, id)
         local current = self:read(actor, start, id)
         if not current then return nil end
-        return { previous = one(" WHERE actor=? AND id<? ORDER BY id DESC LIMIT 1", actor, id), current = current, next = one(" WHERE actor=? AND id>? AND id<? ORDER BY id LIMIT 1", actor, id, start) }
+        return {
+            previous = one(" WHERE actor=? AND id<? ORDER BY id DESC LIMIT 1", actor, id),
+            current = current,
+            next =
+                one(" WHERE actor=? AND id>? AND id<? ORDER BY id LIMIT 1", actor, id, start)
+        }
     end
-    function store:before(actor, start, limit) return query(db, SELECT .. " WHERE actor=? AND id<? ORDER BY id DESC LIMIT ?", actor, start, limit) end
+
+    function store:before(actor, start, limit)
+        return query(db,
+            SELECT .. " WHERE actor=? AND id<? ORDER BY id DESC LIMIT ?", actor, start, limit or -1)
+    end
+
     function store:ground(value, term_maximum, token_maximum, exact_maximum)
         local terms, tokens, exact, seen = {}, {}, {}, {}
         for literal in value:gmatch("%S+") do
             if literal:find("_", 1, true) then
-                assert(#exact < exact_maximum, "grounding text exceeds exact form limit")
+                assert(not exact_maximum or #exact < exact_maximum, "grounding text exceeds exact form limit")
                 exact[#exact + 1] = literal
             end
-            if not seen[literal:lower()] and #terms < term_maximum then terms[#terms + 1], seen[literal:lower()] = literal, true end
+            if not seen[literal:lower()] and (not term_maximum or #terms < term_maximum) then
+                terms[#terms + 1], seen[literal:lower()] =
+                    literal, true
+            end
         end
         assert(db:exec("DELETE FROM grounding_tokenizer") == sqlite.OK, db:errmsg())
         query(db, "INSERT INTO grounding_tokenizer(text) VALUES(?) RETURNING rowid", value)
         for _, row in ipairs(query(db, "SELECT term FROM grounding_vocabulary ORDER BY offset")) do
-            assert(#tokens < token_maximum, "grounding text exceeds grounding token limit")
+            assert(not token_maximum or #tokens < token_maximum, "grounding text exceeds grounding token limit")
             tokens[#tokens + 1] = row.term
-            if not seen[row.term] and #terms < term_maximum then terms[#terms + 1], seen[row.term] = row.term, true end
+            if not seen[row.term] and (not term_maximum or #terms < term_maximum) then
+                terms[#terms + 1], seen[row.term] =
+                    row.term, true
+            end
         end
         return { terms = terms, tokens = tokens, exact_forms = exact }
     end
+
     function store:search(actor, start, terms, limit)
         local literals = {}
         for _, term in ipairs(terms) do literals[#literals + 1] = '"' .. term:gsub('"', '""') .. '"' end
         if #literals == 0 then return {} end
-        return query(db, SEARCH, table.concat(literals, " OR "), actor, start, limit)
+        return query(db, SEARCH, table.concat(literals, " OR "), actor, start, limit or -1)
     end
+
     return store
 end
 
@@ -111,7 +135,8 @@ local function open_cygnet(path)
     local maximum = assert(metadata and tonumber(metadata.value), "Cygnet format is unsupported")
     local function recognized(form, request)
         local score = query(db, SCORE, request.semantic_language, form)[1]
-        return score and -math.log(score.probability / score.normalization * score.vocabulary) >= request.semantic_attention_cutoff
+        return score and
+            -math.log(score.probability / score.normalization * score.vocabulary) >= request.semantic_attention_cutoff
     end
     return function(request)
         local forms, seen, offset = {}, {}, 1
@@ -124,15 +149,17 @@ local function open_cygnet(path)
         while offset <= #request.tokens do
             local accepted = 0
             for count = math.min(maximum, #request.tokens - offset + 1), 1, -1 do
-                if add(table.concat(request.tokens, " ", offset, offset + count - 1)) then accepted = count break end
+                if add(table.concat(request.tokens, " ", offset, offset + count - 1)) then
+                    accepted = count
+                    break
+                end
             end
             offset = offset + math.max(accepted, 1)
         end
         for _, form in ipairs(request.exact_forms) do add(form) end
-        local output = {}
-        seen = {}
+        local output = {}; seen = {}
         for _, form in ipairs(forms) do
-            local remaining = request.maximum_terms - #output
+            local remaining = request.maximum_terms and request.maximum_terms - #output or -1
             if remaining == 0 then break end
             for _, row in ipairs(query(db, EXPAND, request.semantic_language, form, request.semantic_depth, request.semantic_language, remaining)) do
                 local key = row.term:lower()
@@ -144,50 +171,81 @@ local function open_cygnet(path)
 end
 
 local function retrieval(config, store, model, expand)
-    local function fits(records, maximum) return model:tokens(model:encode(records)) <= maximum end
-    local function recent(actor, start)
-        local result = {}
-        for _, value in ipairs(store:before(actor, start, config.max_chronological_window_tokens)) do
+    local function fits(records, maximum, limits)
+        return not maximum or
+            model:tokens(model:encode(records), limits) <= maximum
+    end
+    local function recent(actor, start, limits)
+        local maximum, result = limits.chronological_tokens, {}
+        for _, value in ipairs(store:before(actor, start, limits.chronological_records)) do
             table.insert(result, 1, { id = value.id, role = value.role, text = value.text })
-            if not fits(result, config.max_chronological_window_tokens) then table.remove(result, 1) break end
+            if not fits(result, maximum, limits.runtime) then
+                table.remove(result, 1)
+                break
+            end
         end
         return result
     end
-    return function(actor, start, anchor)
-        local chronological = recent(actor, start)
-        local grounded = store:ground(anchor, config.max_semantic_terms, config.max_grounding_tokens, config.max_exact_forms)
-        local remaining = config.max_semantic_terms - #grounded.terms
-        if remaining > 0 then
-            for _, term in ipairs(expand({ tokens = grounded.tokens, exact_forms = grounded.exact_forms, semantic_language = config.semantic_language, semantic_depth = config.semantic_depth, semantic_attention_cutoff = config.semantic_attention_cutoff, maximum_terms = remaining })) do grounded.terms[#grounded.terms + 1] = term end
+    return function(actor, start, anchor, limits)
+        local bounds = limits.retrieval or {}
+        local request = {
+            runtime = limits,
+            chronological_records = bounds.chronological_records,
+            chronological_tokens =
+                bounds.chronological_tokens
+        }
+        local chronological = recent(actor, start, request)
+        local grounded = store:ground(anchor, bounds.semantic_terms, bounds.grounding_tokens, bounds.exact_forms)
+        local remaining = bounds.semantic_terms and bounds.semantic_terms - #grounded.terms
+        if not remaining or remaining > 0 then
+            for _, term in ipairs(expand({ tokens = grounded.tokens, exact_forms = grounded.exact_forms, semantic_language = config.semantic_language, semantic_depth = config.semantic_depth, semantic_attention_cutoff = config.semantic_attention_cutoff, maximum_terms = remaining })) do
+                grounded.terms[#grounded.terms + 1] =
+                    term
+            end
         end
         local excluded, candidates = {}, {}
         for _, record in ipairs(chronological) do excluded[record.id] = true end
-        for _, record in ipairs(store:search(actor, start, grounded.terms, config.max_retrieval_candidates)) do
+        for _, record in ipairs(store:search(actor, start, grounded.terms, bounds.candidates)) do
             if not excluded[record.id] then
-                excluded[record.id] = true
-                candidates[#candidates + 1] = { id = record.id, role = record.role, text = record.text }
+                excluded[record.id] = true; candidates[#candidates + 1] = {
+                    id = record.id,
+                    role = record.role,
+                    text =
+                        record.text
+                }
             end
         end
-        local passages = {}
-        for index, record in ipairs(candidates) do passages[index] = record.role .. ":\n" .. record.text end
-        local semantic = {}
-        for _, index in ipairs(model:rerank(anchor, passages)) do
-            semantic[#semantic + 1] = candidates[index]
-            if not fits(semantic, config.max_retrieval_window_tokens) then semantic[#semantic] = nil break end
+        local passages = {}; for index, record in ipairs(candidates) do
+            passages[index] = record.role ..
+                ":\n" .. record.text
         end
+        local semantic = {}
+        for _, index in ipairs(model:rerank(anchor, passages, limits)) do
+            semantic[#semantic + 1] = candidates[index]
+            if not fits(semantic, bounds.semantic_tokens, limits) then
+                semantic[#semantic] = nil
+                break
+            end
+        end
+        chronological[0], semantic[0] = #chronological, #semantic
         return model:encode({ chronological = chronological, semantic = semantic })
     end
 end
 
 return function(config, model)
     if not config.store then return nil end
-    local store = open_store(config.store, config.max_stored_record_bytes)
+    local store = open_store(config.store)
     local context = retrieval(config.retrieval, store, model, open_cygnet(config.cygnet))
     local memory = {}
-    function memory:begin(actor, request) return store:begin(actor, request) end
-    function memory:append(actor, start, role, text) return store:append(actor, start, role, text) end
+    function memory:begin(actor, request, maximum) return store:begin(actor, request, maximum) end
+
+    function memory:append(actor, start, role, text, maximum) return store:append(actor, start, role, text, maximum) end
+
     function memory:read(actor, start, id) return store:read(actor, start, id) end
+
     function memory:around(actor, start, id) return store:around(actor, start, id) end
-    function memory:context(actor, start, anchor) return context(actor, start, anchor) end
+
+    function memory:context(actor, start, anchor, limits) return context(actor, start, anchor, limits) end
+
     return memory
 end

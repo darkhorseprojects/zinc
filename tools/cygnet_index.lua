@@ -102,10 +102,10 @@ WHERE t.type IN (%s) AND sc.pos IN (%s) AND tc.pos IN (%s) AND ss.synset_rowid<>
 exec("CREATE INDEX work_edges_target ON work_edges(target)")
 exec(
     "INSERT INTO work_mass SELECT rowid,1.0/(SELECT count(*) FROM cygnet.synsets WHERE pos IN ("
-        .. CONTENT_POS
-        .. ")) FROM cygnet.synsets WHERE pos IN ("
-        .. CONTENT_POS
-        .. ")"
+    .. CONTENT_POS
+    .. ")) FROM cygnet.synsets WHERE pos IN ("
+    .. CONTENT_POS
+    .. ")"
 )
 local count = assert(scalar("SELECT count(*) FROM work_mass"), "Cygnet has no content concepts")
 assert(count > 0, "Cygnet has no content concepts")
@@ -131,7 +131,8 @@ WITH source_families AS (
 SELECT m.synset,%0.17g/%d+%0.17g*%0.17g/%d+coalesce(c.value,0)
 FROM work_mass m LEFT JOIN contribution c ON c.target=m.synset;
 ]]):format(DAMPING, RESTART, count, DAMPING, dangling, count))
-    local difference = scalar([[SELECT sum(abs(m.value-n.value)) FROM work_mass m JOIN work_next n ON n.synset=m.synset]])
+    local difference = scalar(
+        [[SELECT sum(abs(m.value-n.value)) FROM work_mass m JOIN work_next n ON n.synset=m.synset]])
     exec("DELETE FROM work_mass; INSERT INTO work_mass SELECT * FROM work_next")
     if difference <= TOLERANCE then
         iterations = iteration

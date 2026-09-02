@@ -1,5 +1,7 @@
 local active
 local public = {
+    guide =
+    "`zinc.history` provides actor-bound `read(id)`, `around(id)`, and `ask(request)` during durable tool execution.",
     read = function(id) return active and active.durable and active.read(id) or nil end,
     around = function(id) return active and active.durable and active.around(id) or nil end,
     ask = function(request)

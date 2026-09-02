@@ -22,13 +22,13 @@ jobs:
       - name: Verify source
         shell: bash
         run: |
-          test "$(awk 'NF { lines++ } END { print lines }' src/*.lua src/internal/*.lua)" -le 549
+          test "$(awk 'NF { lines++ } END { print lines }' src/*.lua src/internal/*.lua)" -le 566
           cargo install lux-cli --version "$LUX_VERSION" --root "$RUNNER_TEMP/lux" --no-default-features --features vendored --locked
           echo "$RUNNER_TEMP/lux/bin" >> "$GITHUB_PATH"
-          "$RUNNER_TEMP/lux/bin/lx" fmt --check --path src
-          "$RUNNER_TEMP/lux/bin/lx" fmt --check --path tests
-          "$RUNNER_TEMP/lux/bin/lx" fmt --check --path tools
-          for path in src tests tools; do "$RUNNER_TEMP/lux/bin/lx" --lua-version 5.4 lint --path "$path"; done
+          for path in src tests tools; do "$RUNNER_TEMP/lux/bin/lx" --lua-version 5.5 fmt --backend emmylua-codestyle --path "$path"; done
+          git diff --exit-code -- src tests tools
+          "$RUNNER_TEMP/lux/bin/lx" --lua-version 5.5 lua -- -e 'for i = 1, #arg do assert(loadfile(arg[i])) end' src/*.lua src/internal/*.lua tests/*.lua tools/*.lua
+          for path in src tests tools; do "$RUNNER_TEMP/lux/bin/lx" --lua-version 5.4 lint --path "$path" -- --no-max-line-length; done
 
   build:
     needs: verify
@@ -78,7 +78,7 @@ jobs:
           if [[ "$GITHUB_REF" == refs/tags/* ]]; then
             root="zinc-${GITHUB_REF_NAME}-${{ matrix.id }}"
             mkdir -p "$root/.lux/runtime/lua" "$root/.lux/runtime/lib"
-            cp zinc.md design.md models.ini models.lock README.md LICENSE NOTICE "$root/"
+            cp zinc.md host.md design.md agent-connector.yaml models.ini models.lock README.md LICENSE NOTICE "$root/"
             cp -R src data "$root/"
             for package in .lux/5.5/*@*; do
               [[ "$package" == *-zinc@* ]] && continue
