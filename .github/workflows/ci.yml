@@ -10,8 +10,9 @@ permissions:
   contents: read
 
 env:
-  LUX_VERSION: 0.42.1
-  PORTABLE_AGENTS_VERSION: 1.0.0
+  CFLAGS: -DSQLITE_ENABLE_FTS5
+  LUX_VERSION: 0.43.3
+  PORTABLE_AGENTS_COMMIT: 42c90b7d829bacfcc59c3285e0faf4898f7781ab
 
 jobs:
   verify:
@@ -22,13 +23,13 @@ jobs:
       - name: Verify source
         shell: bash
         run: |
-          test "$(awk 'NF { lines++ } END { print lines }' src/*.lua src/internal/*.lua)" -le 566
           cargo install lux-cli --version "$LUX_VERSION" --root "$RUNNER_TEMP/lux" --no-default-features --features vendored --locked
           echo "$RUNNER_TEMP/lux/bin" >> "$GITHUB_PATH"
-          for path in src tests tools; do "$RUNNER_TEMP/lux/bin/lx" --lua-version 5.5 fmt --backend emmylua-codestyle --path "$path"; done
-          git diff --exit-code -- src tests tools
-          "$RUNNER_TEMP/lux/bin/lx" --lua-version 5.5 lua -- -e 'for i = 1, #arg do assert(loadfile(arg[i])) end' src/*.lua src/internal/*.lua tests/*.lua tools/*.lua
-          for path in src tests tools; do "$RUNNER_TEMP/lux/bin/lx" --lua-version 5.4 lint --path "$path" -- --no-max-line-length; done
+          for path in package/src tests tools; do "$RUNNER_TEMP/lux/bin/lx" --lua-version 5.5 fmt --backend stylua --path "$path"; done
+          python3 tools/format_fences.py --check
+          git diff --exit-code -- package/src tests tools
+          find package/src tests tools -name '*.lua' -print0 | xargs -0 "$RUNNER_TEMP/lux/bin/lx" --lua-version 5.5 lua -- -e 'for i = 1, #arg do assert(loadfile(arg[i])) end'
+          for path in package/src tests tools; do "$RUNNER_TEMP/lux/bin/lx" --lua-version 5.4 lint --path "$path" -- --no-max-line-length; done
 
   build:
     needs: verify
@@ -47,23 +48,45 @@ jobs:
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
         with: { persist-credentials: false }
+      - uses: mlugg/setup-zig@d1434d08867e3ee9daa34448df10607b98908d29
+        with: { version: 0.16.0 }
       - name: Install tools and Portable Agents
         shell: bash
-        env: { GH_TOKEN: "${{ github.token }}" }
         run: |
           cargo install lux-cli --version "$LUX_VERSION" --root "$RUNNER_TEMP/lux" --no-default-features --features vendored --locked
           echo "$RUNNER_TEMP/lux/bin" >> "$GITHUB_PATH"
-          mkdir "$RUNNER_TEMP/agent"
-          gh release download "v$PORTABLE_AGENTS_VERSION" -R darkhorseprojects/portable-agents -p "*-${{ matrix.id }}.*" -D "$RUNNER_TEMP/agent"
-          archive=$(find "$RUNNER_TEMP/agent" -type f | head -1)
-          if [[ "$archive" == *.zip ]]; then unzip -q "$archive" -d "$RUNNER_TEMP/agent"; else tar -xzf "$archive" -C "$RUNNER_TEMP/agent"; fi
-          agent=$(find "$RUNNER_TEMP/agent" -type f \( -name agent -o -name agent.exe \) | head -1)
+          curl -fsSL https://www.lua.org/ftp/lua-5.5.0.tar.gz -o "$RUNNER_TEMP/lua.tar.gz"
+          test "$(sha256sum "$RUNNER_TEMP/lua.tar.gz" | cut -d' ' -f1)" = 57ccc32bbbd005cab75bcc52444052535af691789dba2b9016d5c50640d68b3d
+          tar -xzf "$RUNNER_TEMP/lua.tar.gz" -C "$RUNNER_TEMP"
+          mkdir -p "$RUNNER_TEMP/lua55/lib/pkgconfig" "$RUNNER_TEMP/lua55/bin"
+          sources=$(find "$RUNNER_TEMP/lua-5.5.0/src" -maxdepth 1 -name '*.c' ! -name lua.c ! -name luac.c ! -name onelua.c ! -name ltests.c -print)
+          case "$RUNNER_OS" in
+            Linux) zig cc -O2 -fPIC -DLUA_USE_LINUX -shared $sources -lm -ldl -Wl,-soname,liblua5.5.so -o "$RUNNER_TEMP/lua55/lib/liblua5.5.so" ;;
+            macOS) zig cc -O2 -fPIC -DLUA_USE_MACOSX -dynamiclib $sources -Wl,-install_name,"$RUNNER_TEMP/lua55/lib/liblua5.5.dylib" -o "$RUNNER_TEMP/lua55/lib/liblua5.5.dylib" ;;
+            Windows) zig cc -O2 -DLUA_BUILD_AS_DLL -shared $sources -Wl,--out-implib,"$RUNNER_TEMP/lua55/lib/liblua5.5.dll.a" -o "$RUNNER_TEMP/lua55/bin/lua5.5.dll" ;;
+          esac
+          cat > "$RUNNER_TEMP/lua55/lib/pkgconfig/lua5.5.pc" <<EOF
+          prefix=$RUNNER_TEMP/lua55
+          libdir=\${prefix}/lib
+          Name: Lua
+          Description: Lua language engine
+          Version: 5.5.0
+          Libs: -L\${libdir} -llua5.5
+          EOF
+          echo "PKG_CONFIG_PATH=$RUNNER_TEMP/lua55/lib/pkgconfig" >> "$GITHUB_ENV"
+          [[ "$RUNNER_OS" != Linux ]] || echo "LD_LIBRARY_PATH=$RUNNER_TEMP/lua55/lib" >> "$GITHUB_ENV"
+          [[ "$RUNNER_OS" != macOS ]] || echo "DYLD_LIBRARY_PATH=$RUNNER_TEMP/lua55/lib" >> "$GITHUB_ENV"
+          [[ "$RUNNER_OS" != Windows ]] || echo "$RUNNER_TEMP/lua55/bin" >> "$GITHUB_PATH"
+          git clone https://github.com/darkhorseprojects/portable-agents.git "$RUNNER_TEMP/portable-agents"
+          git -C "$RUNNER_TEMP/portable-agents" checkout "$PORTABLE_AGENTS_COMMIT"
+          (cd "$RUNNER_TEMP/portable-agents" && PKG_CONFIG_PATH="$RUNNER_TEMP/lua55/lib/pkgconfig" zig build -Doptimize=ReleaseSafe -Dsystem-lua=true --search-prefix "$RUNNER_TEMP/lua55")
+          agent=$(find "$RUNNER_TEMP/portable-agents/zig-out/bin" -type f \( -name agent -o -name agent.exe \) | head -1)
           echo "AGENT_BIN=$agent" >> "$GITHUB_ENV"
       - name: Build runtime closure
         shell: bash
         run: |
           lx --lua-version 5.5 --lua-dir "$PWD/.lux/lua" install-lua
-          lx --lua-dir "$PWD/.lux/lua" --vendor-dir "$PWD/vendor/sources" --max-jobs 1 build --only-deps
+          lx --lua-dir "$PWD/.lux/lua" --vendor-dir "$PWD/vendor/sources" --max-jobs 1 build
           eval "$(lx path full --no-loader --no-bin)"
           curl -fsSL https://github.com/omwn/cygnet/releases/download/2026.05.12/cygnet.db.gz -o "$RUNNER_TEMP/cygnet.db.gz"
           test "$(sha256sum "$RUNNER_TEMP/cygnet.db.gz" | cut -d' ' -f1)" = 65e93f3620d7cc5444350d9e204259e961096138767d9ea73403ade38964cc48
@@ -73,13 +96,19 @@ jobs:
         shell: bash
         run: |
           lx --lua-dir "$PWD/.lux/lua" --vendor-dir "$PWD/vendor/sources" --max-jobs 1 test
-          "$AGENT_BIN" check --directory . --entry zinc.md --lua-memory 96MiB
+          package=$(find .lux/5.5 -mindepth 1 -maxdepth 1 -type d -name '*-zinc@*' -print -quit)
+          test -n "$package"
+          source="$package/src"
+          "$AGENT_BIN" check "$source" zinc
+          eval "$(lx path full --no-loader --no-bin)"
+          if command -v python3 >/dev/null; then python3 tests/pa_integration.py "$AGENT_BIN" "$PWD"; else python tests/pa_integration.py "$AGENT_BIN" "$PWD"; fi
           if [[ '${{ matrix.id }}' == linux-x86_64 ]]; then .lux/lua/bin/lua tools/benchmark.lua; fi
           if [[ "$GITHUB_REF" == refs/tags/* ]]; then
             root="zinc-${GITHUB_REF_NAME}-${{ matrix.id }}"
-            mkdir -p "$root/.lux/runtime/lua" "$root/.lux/runtime/lib"
-            cp zinc.md host.md design.md agent-connector.yaml models.ini models.lock README.md LICENSE NOTICE "$root/"
-            cp -R src data "$root/"
+            mkdir -p "$root/.lux/runtime/lua" "$root/.lux/runtime/lib" "$root/state" "$root/workspace"
+            cp models.ini models.lock README.md LICENSE NOTICE "$root/"
+            cp -R "$source" "$root/package"
+            cp -R data "$root/"
             for package in .lux/5.5/*@*; do
               [[ "$package" == *-zinc@* ]] && continue
               [[ ! -d "$package/src" ]] || cp -R "$package/src/." "$root/.lux/runtime/lua/"

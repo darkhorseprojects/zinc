@@ -17,7 +17,14 @@ flags = ["tests"]
 type = "builtin"
 
 [build.modules]
-"zinc.history" = "src/history.lua"
-"zinc.internal.memory" = "src/internal/memory.lua"
-"zinc.internal.model" = "src/internal/model.lua"
-"zinc.internal.run" = "src/internal/run.lua"
+"zinc" = "package/zinc.md"
+"design" = "package/design.md"
+"presets.unsafe" = "package/presets/unsafe.md"
+"presets.safe" = "package/presets/safe.md"
+"presets.no-host" = "package/presets/no-host.md"
+"src.entry" = "package/src/entry.lua"
+"src.json" = "package/src/json.lua"
+"src.memory" = "package/src/memory.lua"
+"src.model" = "package/src/model.lua"
+"src.run" = "package/src/run.lua"
+"src.store" = "package/src/store.lua"

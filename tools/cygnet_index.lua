@@ -41,11 +41,15 @@ local CONTENT_POS = "'NOUN','VERB','ADJ','ADV'"
 local temporary = output .. ".tmp"
 os.remove(temporary)
 
-local function quote(value) return "'" .. value:gsub("'", "''") .. "'" end
+local function quote(value)
+    return "'" .. value:gsub("'", "''") .. "'"
+end
 
 local db = assert(sqlite.open(temporary))
 db:busy_timeout(5000)
-local function exec(sql) assert(db:exec(sql) == sqlite.OK, db:errmsg()) end
+local function exec(sql)
+    assert(db:exec(sql) == sqlite.OK, db:errmsg())
+end
 local function scalar(sql)
     local result
     for row in db:nrows(sql) do
@@ -102,10 +106,10 @@ WHERE t.type IN (%s) AND sc.pos IN (%s) AND tc.pos IN (%s) AND ss.synset_rowid<>
 exec("CREATE INDEX work_edges_target ON work_edges(target)")
 exec(
     "INSERT INTO work_mass SELECT rowid,1.0/(SELECT count(*) FROM cygnet.synsets WHERE pos IN ("
-    .. CONTENT_POS
-    .. ")) FROM cygnet.synsets WHERE pos IN ("
-    .. CONTENT_POS
-    .. ")"
+        .. CONTENT_POS
+        .. ")) FROM cygnet.synsets WHERE pos IN ("
+        .. CONTENT_POS
+        .. ")"
 )
 local count = assert(scalar("SELECT count(*) FROM work_mass"), "Cygnet has no content concepts")
 assert(count > 0, "Cygnet has no content concepts")
@@ -131,8 +135,8 @@ WITH source_families AS (
 SELECT m.synset,%0.17g/%d+%0.17g*%0.17g/%d+coalesce(c.value,0)
 FROM work_mass m LEFT JOIN contribution c ON c.target=m.synset;
 ]]):format(DAMPING, RESTART, count, DAMPING, dangling, count))
-    local difference = scalar(
-        [[SELECT sum(abs(m.value-n.value)) FROM work_mass m JOIN work_next n ON n.synset=m.synset]])
+    local difference =
+        scalar([[SELECT sum(abs(m.value-n.value)) FROM work_mass m JOIN work_next n ON n.synset=m.synset]])
     exec("DELETE FROM work_mass; INSERT INTO work_mass SELECT * FROM work_next")
     if difference <= TOLERANCE then
         iterations = iteration
@@ -142,7 +146,8 @@ end
 assert(iterations, "Cygnet structural mass did not converge")
 exec("INSERT INTO concept_mass SELECT synset,value FROM work_mass")
 
-local maximum_form_tokens = scalar(([[SELECT coalesce(max(length(f.normalized_form)-length(replace(f.normalized_form,' ',''))+1),1)
+local maximum_form_tokens =
+    scalar(([[SELECT coalesce(max(length(f.normalized_form)-length(replace(f.normalized_form,' ',''))+1),1)
 FROM cygnet.forms f JOIN cygnet.entries e ON e.rowid=f.entry_rowid
 WHERE e.pos IN (%s) AND f.normalized_form<>'';]]):format(CONTENT_POS))
 exec(([[
