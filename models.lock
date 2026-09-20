@@ -12,7 +12,7 @@ license = "LicenseRef-Cygnet-Aggregate"
 [[dependency]]
 name = "llama.cpp-nemotron"
 source = "https://github.com/kinexis-eu/llama.cpp.git"
-revision = "00fb89c0ca81b5732d42bed882b3de0e7b3b2e1e"
+revision = "88bfe5be79100efb61f4afd83c420bde451602a8"
 expected = "router provides /v1/chat/completions and /v1/rerank"
 license = "MIT"
 

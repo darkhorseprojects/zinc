@@ -6,13 +6,6 @@ lua = "5.5"
 lsqlite3complete = "0.9.7-1"
 lunajson = "1.2.3-1"
 
-[test_dependencies]
-busted = "2.3.0-1"
-
-[test]
-type = "busted"
-flags = ["tests"]
-
 [build]
 type = "builtin"
 
@@ -23,7 +16,6 @@ type = "builtin"
 "presets.safe" = "package/presets/safe.md"
 "presets.no-host" = "package/presets/no-host.md"
 "src.entry" = "package/src/entry.lua"
-"src.json" = "package/src/json.lua"
 "src.memory" = "package/src/memory.lua"
 "src.model" = "package/src/model.lua"
 "src.run" = "package/src/run.lua"

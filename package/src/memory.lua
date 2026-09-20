@@ -1,4 +1,4 @@
-local json = require("src.json")
+local json = require("lunajson")
 local sqlite = require("lsqlite3complete")
 
 local EXPAND = [[WITH RECURSIVE reachable(concept,depth) AS (
@@ -68,8 +68,8 @@ CREATE VIRTUAL TABLE temp.grounding_vocabulary USING fts5vocab(grounding_tokeniz
         return #encoded <= maximum or model:tokens(encoded) <= maximum
     end
 
-    local function chronological(actor, boundary)
-        local values = store:before(actor, boundary, config.chronological_records)
+    local function chronological(actor, boundary, branch)
+        local values = store:before(actor, boundary, branch, config.chronological_records)
         local function prefix(count)
             local result = { [0] = count }
             for index = count, 1, -1 do
@@ -149,6 +149,9 @@ CREATE VIRTUAL TABLE temp.grounding_vocabulary USING fts5vocab(grounding_tokeniz
             add(form)
         end
         seen = {}
+        for _, term in ipairs(terms) do
+            seen[term:lower()] = true
+        end
         for _, form in ipairs(forms) do
             local remaining = config.semantic_terms - #terms
             if remaining == 0 then
@@ -176,11 +179,11 @@ CREATE VIRTUAL TABLE temp.grounding_vocabulary USING fts5vocab(grounding_tokeniz
     end
 
     local memory = {}
-    function memory:context(actor, boundary, anchor)
+    function memory:context(actor, boundary, branch, anchor)
         if boundary == 0 then
             return '{"chronological":[],"semantic":[]}'
         end
-        local recent = chronological(actor, boundary)
+        local recent = chronological(actor, boundary, branch)
         local terms, tokens, exact = ground(anchor)
         if #terms < config.semantic_terms then
             expand(terms, tokens, exact)
@@ -189,14 +192,14 @@ CREATE VIRTUAL TABLE temp.grounding_vocabulary USING fts5vocab(grounding_tokeniz
         for _, record in ipairs(recent) do
             excluded[record.id] = true
         end
-        for _, record in ipairs(store:search(actor, boundary, terms, config.candidates + #recent)) do
+        for _, record in ipairs(store:search(actor, boundary, branch, terms, config.candidates + #recent)) do
             if not excluded[record.id] and #candidates < config.candidates then
                 excluded[record.id], candidates[#candidates + 1] = true, record
             end
         end
         local passages = {}
         for index, record in ipairs(candidates) do
-            passages[index] = record.role .. ":\n" .. record.text
+            passages[index] = record.kind .. ":\n" .. record.text
         end
         local semantic = {}
         for _, index in ipairs(model:rerank(anchor, passages)) do

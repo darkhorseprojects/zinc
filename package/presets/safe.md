@@ -1,86 +1,127 @@
-# Safe
+# Operations
 
-Generated Lua may access the dedicated `workspace` directory, send GET or POST requests to `http://127.0.0.1:8000`, and search workspace files with `/usr/bin/rg`. Edit the literal member table to replace, rename, remove, or add trusted wrappers.
+Filesystem paths and search directories are relative to their named roots.
 
 ```lua
-local json = require("src.json")
 local pa = require("pa")
-local root = pa.fs("workspace")
+local home = assert(os.getenv("HOME"), "HOME is unavailable")
 
-local function path(value)
-    assert(type(value) == "string" and value ~= "" and utf8.len(value), "invalid path")
-    assert(value:sub(1, 1) ~= "/" and not value:find("\\", 1, true), "invalid path")
-    for part in value:gmatch("[^/]+") do
-        assert(part ~= "." and part ~= "..", "invalid path")
-    end
-    assert(not value:find("//", 1, true) and value:sub(-1) ~= "/", "invalid path")
-    return value
+local roots = {
+    home = {
+        path = home,
+        handle = pa.fs(home),
+        operations = { "read", "write", "search" },
+    },
+}
+
+local actions = {
+    model_health = { method = "GET", origin = "http://127.0.0.1:8000", path = "/health" },
+    model_models = { method = "GET", origin = "http://127.0.0.1:8000", path = "/v1/models" },
+}
+
+local function prompt(parent, memory)
+    parent = parent and tostring(parent) or "nil"
+    return string.format(
+        [[self({preset=P,question=Q,parent=%s,memory=%d}) -> {branch,id,parent,memory,text}
+P = nil | "safe" | "no-host"
+self.destroy(branch) -> "destroyed"
+local r=self({question="QUESTION",parent=%s,memory=%d}); self.destroy(r.branch); return r.text]],
+        parent,
+        memory,
+        parent,
+        memory
+    )
 end
 
-local function headers(value)
-    assert(type(value) == "table", "headers must be an object")
-    for key, item in pairs(value) do
-        assert(
-            type(key) == "string" and type(item) == "string" and utf8.len(key) and utf8.len(item),
-            "headers must contain UTF-8 strings"
-        )
+local function relative(path)
+    assert(type(path) == "string" and not path:find("\\", 1, true), "invalid path")
+    assert(path:sub(1, 1) ~= "/" and path:sub(-1) ~= "/" and not path:find("//", 1, true), "invalid path")
+    for part in path:gmatch("[^/]+") do
+        assert(part ~= "." and part ~= "..", "invalid path")
     end
-    return value
+    return path
 end
 
 return {
     document = pa.document(),
+    targets = { "safe", "no-host" },
+    prompt = prompt,
+    whitelist = { roots = roots, actions = actions },
     members = {
         fs = {
-            prompt = 'JSON fields: operation, path, optional data. Example: return self.fs([=[{"operation":"read","path":"README.md"}]=]).',
-            call = function(input)
-                local value = json.object(input, { operation = true, path = true, data = true })
-                local file = path(value.path)
-                if value.operation == "read" then
-                    assert(value.data == nil, "invalid read")
-                    local data = root.read(file)
+            usage = {
+                "self.fs.read(root,path) -> string",
+                'return self.fs.read("home","PATH")',
+                'self.fs.write(root,path,text) -> "written"',
+                'return self.fs.write("home","PATH","TEXT")',
+            },
+            adapter = [[
+self.fs={
+ read=function(root,path) return invoke("fs","read",root,path) end,
+ write=function(root,path,text) return invoke("fs","write",root,path,text) end,
+}
+]],
+            call = function(action, arguments)
+                local root = assert(roots[arguments[1]], "unknown root")
+                local path = relative(arguments[2])
+                if action == "read" then
+                    assert(#arguments == 2, "invalid read")
+                    local data = root.handle:read(path)
                     assert(utf8.len(data), "file is not UTF-8")
-                    return json.encode({ data = data })
+                    return data
                 end
-                assert(
-                    value.operation == "write" and type(value.data) == "string" and utf8.len(value.data),
-                    "invalid write"
-                )
-                root.write(file, value.data)
-                return '{"written":true}'
+                assert(action == "write" and #arguments == 3, "invalid write")
+                assert(type(arguments[3]) == "string" and utf8.len(arguments[3]), "invalid text")
+                root.handle:write(path, arguments[3])
+                return "written"
             end,
         },
         http = {
-            prompt = 'JSON fields: method, path, body, headers. Example: return self.http([=[{"method":"GET","path":"/health","body":"","headers":{}}]=]).',
-            call = function(input)
-                local value = json.object(input, { method = true, path = true, body = true, headers = true })
-                assert(value.method == "GET" or value.method == "POST", "method is denied")
-                assert(type(value.path) == "string" and type(value.body) == "string", "invalid HTTP request")
+            usage = {
+                "self.http.call(action,body,headers) -> {status,body}",
+                'return self.http.call("model_health","",{})',
+            },
+            adapter = [[
+self.http={call=function(action,body,headers) return invoke("http","call",action,body,headers or {}) end}
+]],
+            call = function(action, arguments)
+                assert(action == "call" and #arguments == 3, "invalid HTTP call")
+                local selected = assert(actions[arguments[1]], "unknown HTTP action")
+                assert(type(arguments[2]) == "string", "invalid HTTP body")
                 local status, body =
-                    pa.http("http://127.0.0.1:8000", value.method, value.path, value.body, headers(value.headers))
-                assert(utf8.len(body), "response is not UTF-8")
-                return json.encode({ status = status, body = body })
+                    pa.http(selected.origin, selected.method, selected.path, arguments[2], arguments[3])
+                assert(utf8.len(body), "HTTP body is not UTF-8")
+                return { status = status, body = body }
             end,
         },
-        process = {
-            prompt = 'JSON fields: query, paths. Example: return self.process([=[{"query":"event","paths":["README.md"]}]=]).',
-            call = function(input)
-                local value = json.object(input, { query = true, paths = true })
-                assert(type(value.query) == "string" and value.query ~= "", "invalid query")
-                assert(type(value.paths) == "table" and #value.paths > 0, "invalid paths")
-                local arguments, count = { "--", value.query }, 0
-                for key, item in pairs(value.paths) do
-                    assert(math.type(key) == "integer" and key >= 1 and key <= #value.paths, "paths must be dense")
-                    assert(type(item) == "string", "paths must be strings")
-                    count = count + 1
+        search = {
+            usage = {
+                "self.search.text(root,directory,query) -> string",
+                'return self.search.text("home","DIRECTORY","QUERY")',
+                "self.search.files(root,directory) -> string",
+                'return self.search.files("home","DIRECTORY")',
+            },
+            adapter = [[
+self.search={
+ text=function(root,directory,query) return invoke("search","text",root,directory,query) end,
+ files=function(root,directory) return invoke("search","files",root,directory) end,
+}
+]],
+            call = function(action, arguments)
+                local root = assert(roots[arguments[1]], "unknown root")
+                local directory = relative(arguments[2])
+                local target = directory == "" and root.path or root.path .. "/" .. directory
+                local command
+                if action == "text" then
+                    assert(#arguments == 3 and type(arguments[3]) == "string", "invalid search")
+                    command = { "--", arguments[3], target }
+                else
+                    assert(action == "files" and #arguments == 2, "invalid search")
+                    command = { "--files", "--", target }
                 end
-                assert(count == #value.paths, "paths must be dense")
-                for _, item in ipairs(value.paths) do
-                    arguments[#arguments + 1] = path(item)
-                end
-                local code, stdout, stderr = pa.process("/usr/bin/rg", arguments, "")
-                assert(utf8.len(stdout) and utf8.len(stderr), "process output is not UTF-8")
-                return json.encode({ code = code, stdout = stdout, stderr = stderr })
+                local code, stdout, stderr = pa.process("/usr/bin/rg", command, "")
+                assert((code == 0 or action == "text" and code == 1) and utf8.len(stdout), stderr)
+                return stdout
             end,
         },
     },

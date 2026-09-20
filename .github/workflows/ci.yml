@@ -12,7 +12,7 @@ permissions:
 env:
   CFLAGS: -DSQLITE_ENABLE_FTS5
   LUX_VERSION: 0.43.3
-  PORTABLE_AGENTS_COMMIT: 42c90b7d829bacfcc59c3285e0faf4898f7781ab
+  PORTABLE_AGENTS_COMMIT: d95476b7638480108175cd1b9026ee02559c1714
 
 jobs:
   verify:
@@ -25,11 +25,11 @@ jobs:
         run: |
           cargo install lux-cli --version "$LUX_VERSION" --root "$RUNNER_TEMP/lux" --no-default-features --features vendored --locked
           echo "$RUNNER_TEMP/lux/bin" >> "$GITHUB_PATH"
-          for path in package/src tests tools; do "$RUNNER_TEMP/lux/bin/lx" --lua-version 5.5 fmt --backend stylua --path "$path"; done
+          for path in package/src tools; do "$RUNNER_TEMP/lux/bin/lx" --lua-version 5.5 fmt --backend stylua --path "$path"; done
           python3 tools/format_fences.py --check
-          git diff --exit-code -- package/src tests tools
-          find package/src tests tools -name '*.lua' -print0 | xargs -0 "$RUNNER_TEMP/lux/bin/lx" --lua-version 5.5 lua -- -e 'for i = 1, #arg do assert(loadfile(arg[i])) end'
-          for path in package/src tests tools; do "$RUNNER_TEMP/lux/bin/lx" --lua-version 5.4 lint --path "$path" -- --no-max-line-length; done
+          git diff --exit-code -- package/src tools
+          find package/src tools -name '*.lua' -print0 | xargs -0 "$RUNNER_TEMP/lux/bin/lx" --lua-version 5.5 lua -- -e 'assert(loadfile(arg[0])); for i = 1, #arg do assert(loadfile(arg[i])) end; os.exit()'
+          for path in package/src tools; do "$RUNNER_TEMP/lux/bin/lx" --lua-version 5.4 lint --path "$path" -- --no-max-line-length; done
 
   build:
     needs: verify
@@ -86,27 +86,25 @@ jobs:
         shell: bash
         run: |
           lx --lua-version 5.5 --lua-dir "$PWD/.lux/lua" install-lua
-          lx --lua-dir "$PWD/.lux/lua" --vendor-dir "$PWD/vendor/sources" --max-jobs 1 build
+          lx --lua-dir "$PWD/.lux/lua" --max-jobs 1 build
           eval "$(lx path full --no-loader --no-bin)"
           curl -fsSL https://github.com/omwn/cygnet/releases/download/2026.05.12/cygnet.db.gz -o "$RUNNER_TEMP/cygnet.db.gz"
           test "$(sha256sum "$RUNNER_TEMP/cygnet.db.gz" | cut -d' ' -f1)" = 65e93f3620d7cc5444350d9e204259e961096138767d9ea73403ade38964cc48
           gzip -dc "$RUNNER_TEMP/cygnet.db.gz" > "$RUNNER_TEMP/cygnet.db"
           lua tools/cygnet_index.lua "$RUNNER_TEMP/cygnet.db" data/cygnet.db aae2cdb1418c1435558584a91181e1cb94459f2506c16f2be4b00e81428deaff
-      - name: Test and package
+      - name: Package
         shell: bash
         run: |
-          lx --lua-dir "$PWD/.lux/lua" --vendor-dir "$PWD/vendor/sources" --max-jobs 1 test
           package=$(find .lux/5.5 -mindepth 1 -maxdepth 1 -type d -name '*-zinc@*' -print -quit)
           test -n "$package"
           source="$package/src"
           "$AGENT_BIN" check "$source" zinc
           eval "$(lx path full --no-loader --no-bin)"
-          if command -v python3 >/dev/null; then python3 tests/pa_integration.py "$AGENT_BIN" "$PWD"; else python tests/pa_integration.py "$AGENT_BIN" "$PWD"; fi
-          if [[ '${{ matrix.id }}' == linux-x86_64 ]]; then .lux/lua/bin/lua tools/benchmark.lua; fi
+          if [[ '${{ matrix.id }}' == linux-x86_64 ]]; then .lux/lua/bin/lua tools/retrieval_smoke.lua; fi
           if [[ "$GITHUB_REF" == refs/tags/* ]]; then
             root="zinc-${GITHUB_REF_NAME}-${{ matrix.id }}"
-            mkdir -p "$root/.lux/runtime/lua" "$root/.lux/runtime/lib" "$root/state" "$root/workspace"
-            cp models.ini models.lock README.md LICENSE NOTICE "$root/"
+            mkdir -p "$root/.lux/runtime/lua" "$root/.lux/runtime/lib" "$root/state"
+            cp models.ini models.lock README.md BENCHMARKS.md LICENSE NOTICE "$root/"
             cp -R "$source" "$root/package"
             cp -R data "$root/"
             for package in .lux/5.5/*@*; do

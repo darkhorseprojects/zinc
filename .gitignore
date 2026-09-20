@@ -2,7 +2,6 @@
 /dist/
 /store/
 /state/
-/workspace/
 /data/*.db
 /models/
 user.md

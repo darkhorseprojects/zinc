@@ -1,6 +1,25 @@
-local json = require("src.json")
+local json = require("lunajson")
 local make_model = require("src.model")
 local make_run = require("src.run")
+
+local NULL = {}
+
+local function decode(source, maximum)
+    assert(type(source) == "string" and (not maximum or #source <= maximum) and utf8.len(source), "invalid JSON bytes")
+    local value, offset = json.decode(source, 1, NULL)
+    assert(source:sub(offset):match("^%s*$"), "JSON has trailing data")
+    return value
+end
+
+local function object(source, fields, maximum)
+    assert(source:match("^%s*{"), "JSON value must be an object")
+    local value = decode(source, maximum)
+    assert(type(value) == "table", "JSON value must be an object")
+    for key in pairs(value) do
+        assert(fields[key], "unknown JSON field")
+    end
+    return value
+end
 
 local function document_text(document)
     local output = {}
@@ -24,133 +43,126 @@ local function document_text(document)
         end
     end
     collect(document)
-    return table.concat(output, "\n\n")
+    return table.concat(output, "\n")
+end
+
+local function request(value, nested)
+    assert(type(value) == "table", "invalid Zinc request")
+    local fields = { question = true, parent = true, memory = true }
+    if nested then
+        fields.preset = true
+    end
+    for key in pairs(value) do
+        assert(fields[key], "unknown Zinc request field")
+    end
+    assert(type(value.question) == "string" and value.question ~= "" and utf8.len(value.question), "invalid question")
+    assert(value.parent == nil or math.type(value.parent) == "integer" and value.parent > 0, "invalid parent")
+    assert(math.type(value.memory) == "integer" and value.memory >= 0, "invalid memory")
+    assert(not nested or value.preset == nil or type(value.preset) == "string", "invalid preset")
+    return value
+end
+
+local function native(value, null)
+    if value == null then
+        return nil
+    end
+    if type(value) ~= "table" then
+        return value
+    end
+    local output = {}
+    for key, item in pairs(value) do
+        output[key] = native(item, null)
+    end
+    return output
 end
 
 return function(spec)
-    assert(
-        type(spec) == "table" and type(spec.document) == "table" and type(spec.design) == "table",
-        "invalid Zinc specification"
-    )
-    assert(
-        type(spec.model) == "table" and type(spec.store) == "table" and type(spec.memory) == "table",
-        "invalid Zinc specification"
-    )
-    assert(type(spec.limits) == "table" and type(spec.presets) == "table", "invalid Zinc specification")
-
-    local members, preset_documents = {}, {}
-    for _, preset_name in ipairs({ "unsafe", "safe", "no-host" }) do
-        local preset = spec.presets[preset_name]
-        assert(type(preset) == "table" and type(preset.document) == "table", "invalid preset")
-        assert(type(preset.members) == "table", "invalid preset members")
-        for key in pairs(preset) do
-            assert(key == "document" or key == "members", "unknown preset field")
-        end
-        preset_documents[preset_name] = document_text(preset.document)
-        for name, member in pairs(preset.members) do
-            assert(type(name) == "string" and name ~= "" and utf8.len(name), "invalid member name")
-            assert(name ~= "document" and name ~= "design" and name ~= "zinc" and name ~= "pa", "reserved member name")
-            assert(type(member) == "table" and type(member.call) == "function", "invalid preset member")
-            assert(
-                type(member.prompt) == "string" and member.prompt ~= "" and utf8.len(member.prompt),
-                "invalid member prompt"
-            )
-            for key in pairs(member) do
-                assert(key == "call" or key == "prompt", "unknown member field")
-            end
-            members[name] = true
+    local documents = { base = document_text(spec.document), presets = {} }
+    local union = {}
+    for name, preset in pairs(spec.presets) do
+        documents.presets[name] = document_text(preset.document)
+        for member in pairs(preset.members) do
+            union[member] = true
         end
     end
 
-    local limit_names = { "request_bytes", "config_bytes", "record_bytes", "tool_result_bytes", "model_rounds" }
-    for _, name in ipairs(limit_names) do
-        assert(math.type(spec.limits[name]) == "integer" and spec.limits[name] > 0, "invalid limit: " .. name)
-    end
-    for key in pairs(spec.limits) do
-        local known = false
-        for _, name in ipairs(limit_names) do
-            known = known or key == name
-        end
-        assert(known, "unknown limit: " .. tostring(key))
-    end
-    local memory_limits = {
-        "chronological_records",
-        "chronological_tokens",
-        "semantic_terms",
-        "grounding_tokens",
-        "exact_forms",
-        "candidates",
-        "semantic_tokens",
-    }
-    assert(type(spec.memory.cygnet) == "string" and spec.memory.cygnet ~= "", "invalid Cygnet path")
-    assert(
-        type(spec.memory.semantic_language) == "string" and spec.memory.semantic_language ~= "",
-        "invalid semantic language"
-    )
-    assert(
-        math.type(spec.memory.semantic_depth) == "integer" and spec.memory.semantic_depth >= 0,
-        "invalid semantic depth"
-    )
-    local cutoff = spec.memory.semantic_attention_cutoff
-    assert(
-        type(cutoff) == "number" and cutoff == cutoff and cutoff ~= math.huge and cutoff ~= -math.huge,
-        "invalid semantic cutoff"
-    )
-    for _, name in ipairs(memory_limits) do
-        assert(math.type(spec.memory[name]) == "integer" and spec.memory[name] > 0, "invalid memory limit: " .. name)
-    end
-    assert(spec.model.chat.maximum_output_tokens < spec.model.chat.context_tokens, "invalid model context")
-    assert(spec.limits.record_bytes >= spec.model.chat.maximum_tool_source_bytes, "tool source exceeds record limit")
-    assert(spec.limits.record_bytes >= spec.limits.tool_result_bytes, "tool result exceeds record limit")
-
-    local cached_source, cached_config, cached_preset
     local function configuration(source)
-        assert(
-            type(source) == "string" and #source <= spec.limits.config_bytes and utf8.len(source),
-            "invalid Zinc config"
+        local value = object(
+            source,
+            { version = true, actor = true, preset = true, quota = true, imports = true },
+            spec.limits.config_bytes
         )
-        if source == cached_source then
-            return cached_config, cached_preset
-        end
-        local value = json.object(source, { version = true, actor = true, preset = true, imports = true })
         assert(value.version == 1, "unsupported Zinc config version")
-        assert(
-            type(value.actor) == "string" and value.actor ~= "" and utf8.len(value.actor),
-            "actor must be nonempty UTF-8"
-        )
-        local preset = spec.presets[value.preset]
-        assert(preset, "unknown Zinc preset")
-        assert(type(value.imports) == "table", "imports must be an object")
-        for name, prompt in pairs(value.imports) do
+        assert(type(value.actor) == "string" and value.actor ~= "" and utf8.len(value.actor), "invalid actor")
+        assert(spec.presets[value.preset], "unknown Zinc preset")
+        assert(value.quota == NULL or math.type(value.quota) == "integer" and value.quota > 0, "invalid quota")
+        assert(type(value.imports) == "table", "invalid Imports")
+        for name, description in pairs(value.imports) do
             assert(type(name) == "string" and name ~= "" and name ~= "pa" and utf8.len(name), "invalid Import name")
-            assert(type(prompt) == "string" and prompt ~= "" and utf8.len(prompt), "invalid Import prompt")
+            assert(
+                type(description) == "string" and description ~= "" and utf8.len(description),
+                "invalid Import description"
+            )
         end
-        cached_source, cached_config, cached_preset = source, value, preset
-        return value, preset
+        return value
     end
 
     local entry, runner = {}, nil
-    local zinc_text, design_text = document_text(spec.document), document_text(spec.design)
 
     function entry.document(input, opaque)
         configuration(opaque)
         assert(input == "", "document takes empty input")
-        return zinc_text
+        return documents.base
     end
 
     function entry.design(input, opaque)
         configuration(opaque)
         assert(input == "", "design takes empty input")
-        return design_text
+        return document_text(spec.design)
     end
 
-    for name in pairs(members) do
-        entry[name] = function(input, opaque)
-            local _, preset = configuration(opaque)
-            local member = preset.members[name]
-            assert(member, name .. " is unavailable")
-            return member.call(input)
+    for name in pairs(union) do
+        local member = name
+        entry[member] = function(value, opaque)
+            local config = configuration(opaque)
+            local descriptor = assert(spec.presets[config.preset].members[member], member .. " is unavailable")
+            assert(
+                type(value) == "table" and type(value.action) == "string" and type(value.arguments) == "table",
+                "invalid capability call"
+            )
+            return descriptor.call(value.action, value.arguments)
         end
+    end
+
+    function entry.zinc_call(value, opaque)
+        local config = configuration(opaque)
+        assert(type(value) == "table" and math.type(value.caller) == "integer", "invalid Zinc caller")
+        local call, final = runner:nested(config.actor, config.imports, value.caller, request(value.arguments[1], true))
+        return {
+            branch = call.branch,
+            id = final.id,
+            parent = final.parent,
+            memory = final.memory,
+            text = final.text,
+        }
+    end
+
+    function entry.zinc_destroy(value, opaque)
+        local config = configuration(opaque)
+        assert(type(value) == "table" and math.type(value.caller) == "integer", "invalid Zinc caller")
+        local branch = value.arguments and value.arguments[1]
+        assert(math.type(branch) == "integer" and branch > 0, "invalid branch")
+        return runner:destroy(config.actor, value.caller, branch)
+    end
+
+    function entry.agent(value, opaque)
+        local config = configuration(opaque)
+        assert(type(value) == "table" and math.type(value.caller) == "integer", "invalid Agent caller")
+        local name, call = value.arguments and value.arguments[1], value.arguments and value.arguments[2]
+        assert(type(name) == "string" and config.imports[name], "unknown Import")
+        runner:authorize(config.actor, value.caller)
+        local result = require(name)(json.encode(call, NULL))
+        return native(decode(result), NULL)
     end
 
     local function invoke(input, opaque)
@@ -158,44 +170,31 @@ return function(spec)
             type(input) == "string" and #input <= spec.limits.request_bytes and utf8.len(input),
             "invalid Zinc input"
         )
-        local config, preset = configuration(opaque)
-        local request = json.object(input, { question = true, parent = true, memory = true })
-        assert(
-            type(request.question) == "string" and request.question ~= "" and utf8.len(request.question),
-            "question must be nonempty UTF-8"
-        )
-        assert(
-            request.parent == json.null or math.type(request.parent) == "integer" and request.parent > 0,
-            "parent must be null or positive"
-        )
-        assert(math.type(request.memory) == "integer" and request.memory >= 0, "memory must be nonnegative")
-        local parent
-        if request.parent ~= json.null then
-            parent = request.parent
+        local config = configuration(opaque)
+        local value = object(input, { question = true, parent = true, memory = true })
+        if value.parent == NULL then
+            value.parent = nil
         end
-        local final = runner({
+        request(value, false)
+        local _, final = runner:root({
             actor = config.actor,
             imports = config.imports,
-            input = input,
-            parent = parent,
-            memory = request.memory,
-            preset = preset,
-            question = request.question,
+            memory = value.memory,
+            parent = value.parent,
+            preset = spec.presets[config.preset],
+            preset_name = config.preset,
+            question = value.question,
+            quota = config.quota == NULL and spec.quota or config.quota,
         })
         return json.encode({
             id = final.id,
-            parent = final.parent or json.null,
+            parent = final.parent or NULL,
             memory = final.memory,
             text = final.text,
-        })
+        }, NULL)
     end
 
-    function entry.zinc(input, opaque)
-        return invoke(input, opaque)
-    end
-
-    local model = make_model(spec.model)
-    runner = make_run(spec, entry, model, { zinc = zinc_text, presets = preset_documents })
+    runner = make_run(spec, entry, make_model(spec.model), documents)
     return setmetatable(entry, {
         __call = function(_, input, opaque)
             return invoke(input, opaque)

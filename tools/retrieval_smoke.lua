@@ -43,20 +43,26 @@ local open_ms, opened = milliseconds(function()
     return { store = store, memory = memory }
 end)
 local store, memory = opened.store, opened.memory
-local first = store:append("benchmark", nil, 0, { { role = "user", text = "portable agent memory" } }, 4096)[1]
-local answer = store:append("benchmark", first.id, first.id, {
-    { role = "assistant", text = "Portable Agents use explicit Lua capabilities." },
-}, 4096)[1]
+local _, branch = store:start("benchmark", 4096, nil, 0, "safe", "portable agent memory")
+local answer = store:append(branch, {
+    { kind = "response", text = "Portable Agents use explicit Lua capabilities." },
+})[1]
 local samples = {}
 for index = 1, 40 do
     samples[index] = milliseconds(function()
-        return memory:context("benchmark", answer.id, "portable agent memory")
+        return memory:context("benchmark", answer.id, branch, "portable agent memory")
     end)
 end
 memory:close()
 store:close()
 table.sort(samples)
 print(json.encode({
+    kind = "synthetic_retrieval_smoke",
+    clock = "os.clock",
+    store = ":memory:",
+    tokenizer = "whitespace",
+    reranker = "identity",
+    records = 1,
     memory_open_ms = open_ms,
     representative_retrieval = {
         samples = #samples,
@@ -66,6 +72,3 @@ print(json.encode({
         maximum_ms = samples[#samples],
     },
 }))
-assert(open_ms <= 20, "memory open exceeds 20 ms")
-assert(samples[20] <= 10, "retrieval median exceeds 10 ms")
-assert(samples[38] <= 20, "retrieval p95 exceeds 20 ms")

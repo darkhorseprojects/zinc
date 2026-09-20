@@ -1,349 +1,194 @@
 # Zinc
 
-Zinc is a Portable Agents package with durable event branches, actor-isolated memory, Cygnet semantic retrieval, and parallel generated Lua tools.
+Zinc is a Portable Agents package with actor-isolated durable memory, Cygnet semantic retrieval, configured Lua capabilities, concurrent Eval tools, temporary nested branches, and Store-backed tool-token quotas.
 
-## Package layout
+## Package
 
-`package/zinc.md` is the sole Portable Agents entry. It owns deployment configuration and composes three literal preset tables:
+`package/zinc.md` is the sole entry. Production modules are:
 
-- `package/presets/unsafe.md` provides thin byte adapters over unrestricted PA hosts.
-- `package/presets/safe.md` provides trusted editable wrappers rooted in `workspace/`.
-- `package/presets/no-host.md` has an empty member table.
-
-Implementation lives under `package/src/`. Construct every Agent with `sourceDir: "./package"` and `entryModule: "zinc"`; a call's opaque config selects the preset.
-
-Release archives include Lua modules under `.lux/runtime/lua` and native modules under `.lux/runtime/lib`. Add both to Lua's module paths before invoking an ABI-compatible Lua 5.5 `agent` built with `-Dsystem-lua=true`.
-
-## Package configuration
-
-Edit the Lua fence in `package/zinc.md` to configure:
-
-- Chat and rerank model origins, routes, model names, and token limits.
-- Store and Cygnet paths.
-- Cygnet recognition and expansion settings.
-- Chronological and semantic retrieval budgets.
-- Request, config, event, tool-result, and model-round limits.
-
-Edit the corresponding literal table under `package/presets/` to replace, rename, remove, or add trusted members. Every member stores its callable function beside its model prompt. Request fields cannot define authority.
-
-Markdown Lua fences retrieve their immutable authored document with:
-
-```lua
-local document = require("pa").document()
+```text
+package/zinc.md
+package/design.md
+package/presets/{unsafe,safe,no-host}.md
+package/src/{entry,memory,model,run,store}.lua
 ```
 
-## Portable Agents config
+Construct Agents with `sourceDir: "./package"` and `entryModule: "zinc"`. Portable Agents must be built with ABI-compatible dynamic Lua 5.5 through `-Dsystem-lua=true`.
 
-Config is opaque to Portable Agents, but it is not opaque to Zinc. Zinc interprets it as strict UTF-8 JSON. Every field is required and unknown fields fail.
+## Config
+
+Opaque config is strict UTF-8 JSON with exactly these fields:
 
 ```json
 {
   "version": 1,
   "actor": "account:42",
   "preset": "safe",
+  "quota": null,
   "imports": {
-    "research": "Research agent with documentation access.",
-    "lower": "Zinc configured without host operations."
+    "research": "Research agent."
   }
 }
 ```
 
-| Field | Type | Contract |
-|---|---|---|
-| `version` | integer | Must equal `1`. |
-| `actor` | string | Nonempty UTF-8 stable identity supplied by the embedder. |
-| `preset` | string | Exactly `unsafe`, `safe`, or `no-host`. |
-| `imports` | object | Import module names mapped to nonempty UTF-8 descriptions. Use `{}` when none are supplied. |
+- `version` is `1`.
+- `actor` is a nonempty authenticated identity.
+- `preset` is `unsafe`, `safe`, or `no-host`.
+- `quota` is `null` for the package default or a positive per-run override.
+- `imports` maps configured PA Import names to concise descriptions.
 
-Config larger than `limits.config_bytes` fails. `pa` is not a valid Import name.
-
-PA no longer assigns an Agent ID. The embedder must derive `actor` from an authenticated identity. Agents intended to share history use the same actor and package Store. Call input cannot override either actor or preset.
-
-### Unsafe config
-
-```json
-{
-  "version": 1,
-  "actor": "account:42",
-  "preset": "unsafe",
-  "imports": {}
-}
-```
-
-### Safe config
-
-```json
-{
-  "version": 1,
-  "actor": "account:42",
-  "preset": "safe",
-  "imports": {}
-}
-```
-
-### No-host config
-
-```json
-{
-  "version": 1,
-  "actor": "account:42",
-  "preset": "no-host",
-  "imports": {}
-}
-```
+The default quota is configured in `package/zinc.md`.
 
 ## Calls
 
-Every call is strict UTF-8 JSON with exactly three required fields:
+Root input remains exactly:
 
 ```json
-{
-  "question": "Explain the current package.",
-  "parent": null,
-  "memory": 0
-}
+{"question":"...","parent":null,"memory":0}
 ```
 
-| Field | Contract |
-|---|---|
-| `question` | Nonempty UTF-8 string. |
-| `parent` | `null` or a positive actor-owned event ID. Selects branch attachment. |
-| `memory` | `0` or a positive actor-owned event ID. Selects the inclusive retrieval boundary. |
+`parent` is `null` or an actor-owned event ID. `memory` is an independent inclusive actor-owned event boundary, with `0` selecting no history.
 
-A result identifies the final assistant event:
+A root result remains:
 
 ```json
-{
-  "id": 42,
-  "parent": 41,
-  "memory": 0,
-  "text": "..."
-}
+{"id":42,"parent":41,"memory":0,"text":"..."}
 ```
 
-Continue from that response with `parent=42` and `memory=42`. Reusing an earlier parent creates a sibling branch. Parent and memory are independent.
+## Presets
 
-## Entry functions
+Preset Markdown is included in the selected model prompt and contains only operational instructions. Preset Lua owns the actual whitelist, exact Lua signatures, trusted Eval adapters, and implementations.
 
-The entry always has `document`, `design`, and `zinc`. It also has the static union of names declared by trusted presets. A direct preset-member call dispatches through opaque config and rejects when that member is unavailable under the selected preset.
+The default configured preset exposes:
 
-Every Eval view contains the three core members plus exactly the selected preset's members. No-host adds none. Adding a trusted safe member requires no runtime change.
+```text
+root home = $HOME [read, write, search]
+HTTP model_health = GET http://127.0.0.1:8000/health
+HTTP model_models = GET http://127.0.0.1:8000/v1/models
+```
 
-The entry and PA-created proxies hide their metatables. PA already makes Markdown documents recursively read-only.
+Edit `package/presets/safe.md` to change those values. “Safe” means configured.
+
+The unsafe preset accepts caller-selected filesystem roots, HTTP coordinates, and absolute process executables. No-host adds no filesystem, HTTP, search, or process member.
 
 ## Generated Lua
 
-Zinc prepends `local self, input = ...` to each `run_lua` source. Generated code must not redeclare or replace those bindings. Call selected operations through `self`:
+Generated code receives native Lua `self` and `input`. JSON is not part of the public capability API.
 
 ```lua
-return self.document("")
+local text = self.fs.read("home", "notes.txt")
+self.fs.write("home", "copy.txt", text)
+return text
 ```
-
-Navigate history through the same configured Zinc entry:
 
 ```lua
-return self.zinc([[
-{"question":"Reconsider this event.","parent":184,"memory":184}
-]])
+local response = self.http.call("model_health", "", {})
+return response.body
 ```
-
-Load only external caller Imports with `require`:
 
 ```lua
-local lower = require("lower")
-return lower([[
-{"question":"Investigate without host access.","parent":184,"memory":184}
-]])
+return self.search.text("home", "dev/zinc", "event")
 ```
 
-A generated source must return exactly one non-nil string. Eval has no `pa` module or native loaders.
+Configured Imports appear under `self.agents`:
 
-## Host protocols
-
-All host requests reject unknown fields. File and process outputs must be UTF-8.
-
-### Unsafe filesystem
-
-Read:
-
-```json
-{"root":"/srv/data","operation":"read","path":"notes.txt"}
+```lua
+local result = self.agents["research"].call({
+    question = "Find the source.",
+    parent = nil,
+    memory = 0,
+})
+return result.text
 ```
 
-```json
-{"data":"..."}
+Each `run_lua` source returns one Lua value. Portable Agents renders complete table results as Lua, while string results remain unchanged. Independent sources in one model response execute concurrently and return in model order.
+
+## Nested Zinc
+
+Nested calls create temporary branches:
+
+```lua
+local child = self({
+    preset = "no-host",
+    question = "Check the evidence.",
+    parent = input.parent,
+    memory = input.memory,
+})
+return child.text
 ```
 
-Write:
-
-```json
-{"root":"/srv/data","operation":"write","path":"notes.txt","data":"..."}
-```
-
-```json
-{"written":true}
-```
-
-### Safe filesystem
-
-The protocol omits `root`:
-
-```json
-{"operation":"read","path":"README.md"}
-```
-
-Safe paths are nonempty normalized relative paths. Absolute paths, backslashes, `.`, `..`, doubled separators, and trailing separators are denied. The fixed root is the dedicated `workspace/` directory; Store, Cygnet, package, model, and runtime files are outside its authority.
-
-### Unsafe HTTP
-
-```json
-{
-  "origin": "https://example.com",
-  "method": "POST",
-  "path": "/items",
-  "body": "{}",
-  "headers": {"content-type":"application/json"}
-}
-```
-
-### Safe HTTP
-
-The protocol omits `origin`:
-
-```json
-{
-  "method": "GET",
-  "path": "/health",
-  "body": "",
-  "headers": {}
-}
-```
-
-The default origin is `http://127.0.0.1:8000`; only `GET` and `POST` are accepted.
-
-Both return:
-
-```json
-{"status":200,"body":"..."}
-```
-
-### Unsafe process
-
-```json
-{
-  "executable": "/usr/bin/tool",
-  "arguments": ["--flag"],
-  "input": ""
-}
-```
-
-The executable must be an absolute path and arguments must be a dense string array.
-
-### Safe process
-
-```json
-{"query":"event","paths":["src","tests"]}
-```
-
-The default policy runs:
+Allowed targets are:
 
 ```text
-/usr/bin/rg -- event src tests
-```
-
-Paths follow the safe filesystem path rules and at least one path is required. No shell or arbitrary argument list is available.
-
-Both process presets return:
-
-```json
-{"code":0,"stdout":"...","stderr":""}
-```
-
-## Imports and authority
-
-An Import is another configured Agent. An Agent cannot import itself, so create separate Agent objects even when they use the same Zinc source and entry. Every Import carries its own config.
-
-Caller Imports add authority independently of Zinc's local preset. The embedder must enforce the desired graph. Recommended downgrade-only arrangements are:
-
-```text
-unsafe -> safe
-unsafe -> no-host
-safe -> no-host
+unsafe  -> unsafe, safe, no-host
+safe    -> safe, no-host
 no-host -> no-host
 ```
 
-`config.imports` describes actual Imports to the model; it does not create or constrain them. The caller must make the description map agree with the Imports passed to PA.
+Continue an investigation by using its returned `id` as the next `parent` and `memory`. To inspect and remove it in one source:
 
-## TypeScript SDK
-
-```ts
-import { Effect } from "effect";
-import * as Agent from "./portable-agents/sdk/mod.ts";
-
-const encode = (value: unknown) =>
-  new TextEncoder().encode(JSON.stringify(value));
-
-const program = Effect.gen(function* () {
-  const zinc = yield* Agent.make({
-    sourceDir: "./package",
-    entryModule: "zinc",
-  });
-
-  return yield* zinc.call(
-    encode({
-      question: "Explain the package.",
-      parent: null,
-      memory: 0,
-    }),
-    encode({
-      version: 1,
-      actor: "account:42",
-      preset: "safe",
-      imports: {},
-    }),
-  );
-});
-
-const output = await Effect.runPromise(program);
-console.log(new TextDecoder().decode(output));
+```lua
+local child = self({
+    preset = "no-host",
+    question = "Check the evidence.",
+    parent = input.parent,
+    memory = input.memory,
+})
+local text = child.text
+self.destroy(child.branch)
+return text
 ```
 
-A lower-authority Import uses another Agent:
+Destruction removes the selected temporary branch and descendants. Durable parent call sources, results, and final responses remain.
 
-```ts
-const unsafe = yield* Agent.make({ sourceDir: "./package", entryModule: "zinc" });
-const lower = yield* Agent.make({ sourceDir: "./package", entryModule: "zinc" });
+## Quota
 
-const output = yield* unsafe.call(input, unsafeConfig, [{
-  name: "lower",
-  agent: lower,
-  config: lowerConfig,
-}]);
+Quota counts exact chat-tokenizer tokens in:
+
+- accepted model-generated Lua source
+- the complete result or traceback from that accepted source
+
+It does not count questions, prompts, memory, reasoning, regular responses, trusted adapter source, or quota metadata.
+
+A source is admitted only when its tokens fit the committed remaining quota. Accepted results are always stored in full and may make the balance negative. Later sources are rejected when they do not fit.
+
+The first prompt contains the current balance. After every tool wave, the final tool message receives nonpersistent `quota_remaining=N` metadata. Nested loops derive the same run through their caller Store event; no quota value is passed recursively.
+
+## Store and memory
+
+Store format `5` normalizes state into runs, branches, and events:
+
+- runs own actor and budget
+- branches own run, base, memory, preset, and lifetime
+- events own branch, kind, text, and optional tool token count
+
+No migration is performed. Format `0` initializes; format `5` opens; every other version fails.
+
+Normal retrieval sees durable actor events. A temporary branch also sees its own temporary ancestry. Chronological and semantic retrieval remain bounded by the inclusive memory coordinate. Cygnet format `2` and `relation-balanced-pagerank-v1` remain required.
+
+No SQLite transaction spans model, HTTP, process, Eval, or imported-Agent work.
+
+## Models
+
+`models.ini` configures LFM2.5-2.6B with its official generation settings:
+
+```text
+temperature = 0.1
+top-k = 50
+repetition penalty = 1.1
 ```
 
-The Import config uses the same actor and `preset: "no-host"` when it should share history without host authority.
+Chat uses the embedded Jinja template through non-stream `/v1/chat/completions`. Reranking uses the locked Nemotron reranker.
 
-## Memory
-
-SQLite events are append-only and actor-isolated. Chronological retrieval selects actor events with `id <= memory`, fits the newest events to an exact tokenizer budget, and presents them oldest-first.
-
-Semantic retrieval preserves Zinc's Cygnet pipeline: FTS grounding, longest recognized forms, attention filtering, relation expansion, actor/memory-bounded candidates, chronological exclusion, reranking, and an independent token budget. Recalled events retain `id`, `parent`, `memory`, `role`, and `text`.
-
-No SQLite transaction spans model, host, Eval, process, or imported Agent work. Store and Cygnet connections close on success and failure.
-
-Build the generated Cygnet index locked by `models.lock`:
+Models remain external to release archives. Build Cygnet data with:
 
 ```sh
 lua tools/cygnet_index.lua SOURCE.db data/cygnet.db SOURCE_SHA256
 ```
 
-The source must produce Zinc format `2` metadata.
+## Benchmarks
 
-## Parallel Lua
-
-The model sees one `run_lua` tool with `parallel_tool_calls=true`. All calls in a nonterminal completion are submitted in one table-form `pa.eval` call. PA runs independent states concurrently and returns results in source order. Zinc persists calls and outputs in model order.
-
-Reasoning-last and tool-last completions continue. Zinc returns only when the last normalized item is regular assistant content.
+The matched evaluation protocol for LongMemEval-V2, MemoryArena, and BEAM is in [`BENCHMARKS.md`](BENCHMARKS.md). LongMemEval-V2 calls its largest public tier `medium`; it has no public `large` tier.
 
 ## Development
 
@@ -351,13 +196,10 @@ Reasoning-last and tool-last completions continue. Zinc returns only when the la
 python3 tools/format_fences.py
 lx --lua-version 5.5 fmt --backend stylua --path package/src
 CFLAGS=-DSQLITE_ENABLE_FTS5 lx --lua-version 5.5 build
-lx --lua-version 5.5 test
 agent check package zinc
-lua tools/benchmark.lua
+lx --lua-version 5.5 lua tools/retrieval_smoke.lua
 ```
 
-CI builds Portable Agents from pinned commit `42c90b7d829bacfcc59c3285e0faf4898f7781ab`. Runtime use requires `agent` built with `-Dsystem-lua=true` so the native SQLite module can load.
-
-Production executable Lua is formatted with StyLua, including fences in `package/zinc.md` and `package/presets/*.md`. Tests, tools, dependencies, and prose are excluded from production size accounting.
+CI pins Portable Agents commit `d95476b7638480108175cd1b9026ee02559c1714`.
 
 License: AGPL-3.0-only.
