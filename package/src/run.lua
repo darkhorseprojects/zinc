@@ -3,10 +3,7 @@ local make_store = require("src.store")
 local pa = require("pa")
 
 local CORE_ADAPTER = [[
-self=setmetatable(self,{
- __call=function(_,request) return invoke("zinc_call","call",request) end,
- __metatable=false,
-})
+callable(self,function(_,request) return invoke("zinc_call","call",request) end)
 self.destroy=function(branch) return invoke("zinc_destroy","destroy",branch) end
 ]]
 
@@ -23,7 +20,6 @@ local function render(name, preset, documents)
     local lines = {
         documents.base,
         documents.presets[name],
-        "`self` and `input` are defined. Do not redefine them. Every source must end with a value-returning `return` statement. Never use `print`.",
     }
     local whitelist = preset.whitelist
     if whitelist.roots then
@@ -41,6 +37,9 @@ local function render(name, preset, documents)
         end
     end
     lines[#lines + 1] = "Lua"
+    lines[#lines + 1] = "Use Lua 5.5 syntax only. Lua comments begin with `--`."
+    lines[#lines + 1] =
+        "`self` and `input` are defined. Do not redefine them. Every source must end with a value-returning `return` statement. Never use `print`."
     local members, adapters = names(preset.members), { CORE_ADAPTER }
     for _, member in ipairs(members) do
         local descriptor = preset.members[member]
@@ -73,7 +72,7 @@ local function source(prepared, imports, caller, call, code)
             name
         )
     end
-    return "local self,input=(function(raw,_,setmetatable)\nlocal caller="
+    return "local self,input=(function(raw,callable)\nlocal caller="
         .. caller
         .. "\n"
         .. [[local function invoke(member,action,...)
@@ -85,7 +84,7 @@ local self={}
         .. "\n"
         .. table.concat(agents, "\n")
         .. string.format(
-            "\nreturn self,{question=%q,parent=%s,memory=%d}\nend)((...),select(2,...),setmetatable)\nsetmetatable=nil\n",
+            "\nreturn self,{question=%q,parent=%s,memory=%d}\nend)((...),callable)\ncallable=nil\n",
             call.question,
             call.parent and tostring(call.parent) or "nil",
             call.memory
@@ -161,24 +160,17 @@ return function(spec, entry, model, documents)
 
             local evaluated
             if #sources > 0 then
-                local ok, value = pcall(
-                    pa.eval,
-                    (function()
-                        local view = {
-                            zinc_call = entry.zinc_call,
-                            zinc_destroy = entry.zinc_destroy,
-                        }
-                        if #import_names > 0 then
-                            view.agent = entry.agent
-                        end
-                        for _, name in ipairs(selected.names) do
-                            view[name] = entry[name]
-                        end
-                        return view
-                    end)(),
-                    sources,
-                    ""
-                )
+                local view = {
+                    zinc_call = entry.zinc_call,
+                    zinc_destroy = entry.zinc_destroy,
+                }
+                if #import_names > 0 then
+                    view.agent = entry.agent
+                end
+                for _, name in ipairs(selected.names) do
+                    view[name] = entry[name]
+                end
+                local ok, value = pcall(pa.eval, view, sources, "")
                 evaluated = ok and value or {}
                 if not ok then
                     for index in ipairs(sources) do

@@ -11,7 +11,9 @@ local function prompt(parent, memory)
         [[self({preset=P,question=Q,parent=%s,memory=%d}) -> {branch,id,parent,memory,text}
 P = nil | "unsafe" | "safe" | "no-host"
 self.destroy(branch) -> "destroyed"
-local r=self({question="QUESTION",parent=%s,memory=%d}); self.destroy(r.branch); return r.text]],
+local child = self({question="QUESTION",parent=%s,memory=%d})
+self.destroy(child.branch)
+return child.text]],
         parent,
         memory,
         parent,
@@ -27,10 +29,12 @@ return {
     members = {
         fs = {
             usage = {
-                "self.fs.read(root,path) -> string",
-                'return self.fs.read("/srv/data","notes.txt")',
-                'self.fs.write(root,path,text) -> "written"',
-                'return self.fs.write("/srv/data","notes.txt","TEXT")',
+                [[self.fs.read(root,path) -> string
+local text = self.fs.read("/srv/data","notes.txt")
+return text]],
+                [[self.fs.write(root,path,text) -> "written"
+local result = self.fs.write("/srv/data","notes.txt","TEXT")
+return result]],
             },
             adapter = [[
 self.fs={
@@ -55,8 +59,9 @@ self.fs={
         },
         http = {
             usage = {
-                "self.http.request(method,origin,path,body,headers) -> {status,body}",
-                'return self.http.request("GET","https://example.com","/","",{})',
+                [[self.http.request(method,origin,path,body,headers) -> {status,body}
+local response = self.http.request("GET","https://example.com","/","",{})
+return response]],
             },
             adapter = [[
 self.http={request=function(method,origin,path,body,headers)
@@ -75,8 +80,9 @@ end}
         },
         process = {
             usage = {
-                "self.process.run(executable,arguments,input) -> {code,stdout,stderr}",
-                'return self.process.run("/usr/bin/rg",{"--files"},"")',
+                [[self.process.run(executable,arguments,input) -> {code,stdout,stderr}
+local result = self.process.run("/usr/bin/rg",{"--files"},"")
+return result]],
             },
             adapter = [[
 self.process={run=function(executable,arguments,input)

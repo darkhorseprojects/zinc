@@ -9,7 +9,9 @@ local function prompt(parent, memory)
         [[self({preset=P,question=Q,parent=%s,memory=%d}) -> {branch,id,parent,memory,text}
 P = nil | "no-host"
 self.destroy(branch) -> "destroyed"
-local r=self({question="QUESTION",parent=%s,memory=%d}); self.destroy(r.branch); return r.text]],
+local child = self({question="QUESTION",parent=%s,memory=%d})
+self.destroy(child.branch)
+return child.text]],
         parent,
         memory,
         parent,

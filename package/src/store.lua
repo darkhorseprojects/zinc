@@ -221,7 +221,7 @@ AND run IN (SELECT id FROM runs WHERE actor=?) RETURNING id]]
                     admitted[index] = { accepted = false }
                 end
             end
-            return admitted, remaining
+            return admitted
         end)
     end
 
@@ -236,7 +236,6 @@ AND run IN (SELECT id FROM runs WHERE actor=?) RETURNING id]]
     function store:destroy(actor, caller_branch, branch)
         return transaction(function()
             assert(rows(db, statements.destroy, caller_branch, branch, actor)[1], "branch is unavailable")
-            return true
         end)
     end
 

@@ -25,7 +25,9 @@ local function prompt(parent, memory)
         [[self({preset=P,question=Q,parent=%s,memory=%d}) -> {branch,id,parent,memory,text}
 P = nil | "safe" | "no-host"
 self.destroy(branch) -> "destroyed"
-local r=self({question="QUESTION",parent=%s,memory=%d}); self.destroy(r.branch); return r.text]],
+local child = self({question="QUESTION",parent=%s,memory=%d})
+self.destroy(child.branch)
+return child.text]],
         parent,
         memory,
         parent,
@@ -50,10 +52,12 @@ return {
     members = {
         fs = {
             usage = {
-                "self.fs.read(root,path) -> string",
-                'return self.fs.read("home","PATH")',
-                'self.fs.write(root,path,text) -> "written"',
-                'return self.fs.write("home","PATH","TEXT")',
+                [[self.fs.read(root,path) -> string
+local text = self.fs.read("home","PATH")
+return text]],
+                [[self.fs.write(root,path,text) -> "written"
+local result = self.fs.write("home","PATH","TEXT")
+return result]],
             },
             adapter = [[
 self.fs={
@@ -78,8 +82,9 @@ self.fs={
         },
         http = {
             usage = {
-                "self.http.call(action,body,headers) -> {status,body}",
-                'return self.http.call("model_health","",{})',
+                [[self.http.call(action,body,headers) -> {status,body}
+local response = self.http.call("model_health","",{})
+return response]],
             },
             adapter = [[
 self.http={call=function(action,body,headers) return invoke("http","call",action,body,headers or {}) end}
@@ -96,10 +101,12 @@ self.http={call=function(action,body,headers) return invoke("http","call",action
         },
         search = {
             usage = {
-                "self.search.text(root,directory,query) -> string",
-                'return self.search.text("home","DIRECTORY","QUERY")',
-                "self.search.files(root,directory) -> string",
-                'return self.search.files("home","DIRECTORY")',
+                [[self.search.text(root,directory,query) -> string
+local matches = self.search.text("home","DIRECTORY","QUERY")
+return matches]],
+                [[self.search.files(root,directory) -> string
+local files = self.search.files("home","DIRECTORY")
+return files]],
             },
             adapter = [[
 self.search={

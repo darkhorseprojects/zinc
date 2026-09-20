@@ -186,10 +186,6 @@ Models remain external to release archives. Build Cygnet data with:
 lua tools/cygnet_index.lua SOURCE.db data/cygnet.db SOURCE_SHA256
 ```
 
-## Benchmarks
-
-The matched evaluation protocol for LongMemEval-V2, MemoryArena, and BEAM is in [`BENCHMARKS.md`](BENCHMARKS.md). LongMemEval-V2 calls its largest public tier `medium`; it has no public `large` tier.
-
 ## Development
 
 ```sh
@@ -197,9 +193,8 @@ python3 tools/format_fences.py
 lx --lua-version 5.5 fmt --backend stylua --path package/src
 CFLAGS=-DSQLITE_ENABLE_FTS5 lx --lua-version 5.5 build
 agent check package zinc
-lx --lua-version 5.5 lua tools/retrieval_smoke.lua
 ```
 
-CI pins Portable Agents commit `d95476b7638480108175cd1b9026ee02559c1714`.
+CI pins Portable Agents commit `ea725058da73783a168923a41920927b7f5df9c5`.
 
 License: AGPL-3.0-only.

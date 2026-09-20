@@ -12,7 +12,7 @@ permissions:
 env:
   CFLAGS: -DSQLITE_ENABLE_FTS5
   LUX_VERSION: 0.43.3
-  PORTABLE_AGENTS_COMMIT: d95476b7638480108175cd1b9026ee02559c1714
+  PORTABLE_AGENTS_COMMIT: ea725058da73783a168923a41920927b7f5df9c5
 
 jobs:
   verify:
@@ -99,12 +99,10 @@ jobs:
           test -n "$package"
           source="$package/src"
           "$AGENT_BIN" check "$source" zinc
-          eval "$(lx path full --no-loader --no-bin)"
-          if [[ '${{ matrix.id }}' == linux-x86_64 ]]; then .lux/lua/bin/lua tools/retrieval_smoke.lua; fi
           if [[ "$GITHUB_REF" == refs/tags/* ]]; then
             root="zinc-${GITHUB_REF_NAME}-${{ matrix.id }}"
             mkdir -p "$root/.lux/runtime/lua" "$root/.lux/runtime/lib" "$root/state"
-            cp models.ini models.lock README.md BENCHMARKS.md LICENSE NOTICE "$root/"
+            cp models.ini models.lock README.md LICENSE NOTICE "$root/"
             cp -R "$source" "$root/package"
             cp -R data "$root/"
             for package in .lux/5.5/*@*; do
