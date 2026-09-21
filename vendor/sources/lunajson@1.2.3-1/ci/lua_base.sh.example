@@ -1,3 +1,0 @@
-# available values: linux, freebsd, macosx
-platform="linux"
-lua_base="${HOME}/lua"

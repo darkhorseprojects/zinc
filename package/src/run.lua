@@ -37,9 +37,9 @@ local function render(name, preset, documents)
         end
     end
     lines[#lines + 1] = "Lua"
-    lines[#lines + 1] = "Use Lua 5.5 syntax only. Lua comments begin with `--`."
+    lines[#lines + 1] = "Use Lua 5.5. Comments begin with `--`."
     lines[#lines + 1] =
-        "`self` and `input` are defined. Do not redefine them. Every source must end with a value-returning `return` statement. Never use `print`."
+        "`self` and `input` are defined; do not redefine them. Return a non-nil value. Do not use `print`."
     local members, adapters = names(preset.members), { CORE_ADAPTER }
     for _, member in ipairs(members) do
         local descriptor = preset.members[member]
@@ -115,7 +115,7 @@ return function(spec, entry, model, documents)
             .. selected.prompt(call.parent, call.memory)
             .. "\nEval quota: "
             .. store:quota(call.run)
-            .. " tokens. Source and result tokens are charged."
+            .. " tokens. Sources and results consume it."
         local context = memory:context(call.actor, call.memory, call.branch, call.question)
         local user = call.question
         if call.memory ~= 0 then

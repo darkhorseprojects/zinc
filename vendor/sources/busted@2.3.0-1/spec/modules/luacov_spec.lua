@@ -1,2 +1,0 @@
-require 'busted.modules.luacov'()
-

@@ -1,5 +1,0 @@
-return {
-	'lunajson',
-	'dkjson',
-	'cjson',
-}

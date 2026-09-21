@@ -13,13 +13,13 @@ local TOOL = {
     type = "function",
     ["function"] = {
         name = "run_lua",
-        description = "Evaluate a complete Lua 5.5 chunk ending with `return VALUE`.",
+        description = "Evaluate Lua source.",
         parameters = {
             type = "object",
             additionalProperties = false,
             required = { "code" },
             properties = {
-                code = { type = "string", description = "Complete Lua 5.5 source. `print` is unavailable." },
+                code = { type = "string", description = "Source." },
             },
         },
     },
