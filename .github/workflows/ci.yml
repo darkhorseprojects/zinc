@@ -12,7 +12,7 @@ permissions:
 env:
   CFLAGS: -DSQLITE_ENABLE_FTS5
   LUX_VERSION: 0.43.3
-  PORTABLE_AGENTS_COMMIT: ea725058da73783a168923a41920927b7f5df9c5
+  PORTABLE_AGENTS_COMMIT: 114e6fa5c395541e0ac2b435f38a2877c34d5cb9
 
 jobs:
   verify:
@@ -102,7 +102,7 @@ jobs:
           if [[ "$GITHUB_REF" == refs/tags/* ]]; then
             root="zinc-${GITHUB_REF_NAME}-${{ matrix.id }}"
             mkdir -p "$root/.lux/runtime/lua" "$root/.lux/runtime/lib" "$root/state"
-            cp models.ini models.lock README.md LICENSE NOTICE "$root/"
+            cp ac.yaml models.ini models.lock README.md LICENSE NOTICE "$root/"
             cp -R "$source" "$root/package"
             cp -R data "$root/"
             for package in .lux/5.5/*@*; do

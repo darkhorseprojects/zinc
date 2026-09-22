@@ -16,6 +16,19 @@ local function names(value)
     return result
 end
 
+local function quote(text)
+    return "> " .. text:gsub("\n", "\n> ")
+end
+
+local function fenced(language, text)
+    local size = 3
+    for marker in text:gmatch("`+") do
+        size = math.max(size, #marker + 1)
+    end
+    local marker = string.rep("`", size)
+    return marker .. language .. "\n" .. text .. "\n" .. marker
+end
+
 local function render(name, preset, documents)
     local lines = {
         documents.base,
@@ -139,6 +152,13 @@ return function(spec, entry, model, documents)
                 events[#events + 1] = { kind = "response", text = completion.content }
             end
             local rows = #events > 0 and store:append(call.branch, events) or {}
+            for _, event in ipairs(events) do
+                if event.kind == "reasoning" then
+                    pa.emit(quote(event.text))
+                elseif #completion.calls > 0 then
+                    pa.emit(event.text)
+                end
+            end
             messages[#messages + 1] = assistant
             if #completion.calls == 0 then
                 return assert(rows[#rows], "model returned no response")
@@ -149,6 +169,9 @@ return function(spec, entry, model, documents)
                 requests[index] = { kind = "call", text = tool.code, tokens = model:tokens(tool.code) }
             end
             local admitted = store:admit(call.branch, requests)
+            for _, tool in ipairs(completion.calls) do
+                pa.emit(fenced("lua", tool.code))
+            end
             local sources, positions = {}, {}
             for index, admission in ipairs(admitted) do
                 if admission.accepted then
@@ -208,6 +231,9 @@ return function(spec, entry, model, documents)
             if #result_events > 0 then
                 store:append(call.branch, result_events)
             end
+            for _, output in ipairs(outputs) do
+                pa.emit(fenced("text", output))
+            end
             local remaining = store:quota(call.run)
             for index, tool in ipairs(completion.calls) do
                 local content = outputs[index]
@@ -242,9 +268,13 @@ return function(spec, entry, model, documents)
 
     function runner:root(call)
         return run(function(store)
-            local run_id, branch =
+            if call.automatic then
+                call.parent = store:head(call.actor)
+                call.memory = call.parent or 0
+            end
+            local run_id, branch, start =
                 store:start(call.actor, call.quota, call.parent, call.memory, call.preset_name, call.question)
-            call.run, call.branch = run_id, branch
+            call.run, call.branch, call.start = run_id, branch, start.id
             return call
         end)
     end

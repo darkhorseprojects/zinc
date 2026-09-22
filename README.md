@@ -36,24 +36,22 @@ Opaque config is strict UTF-8 JSON with exactly these fields:
 - `preset` is `unsafe`, `safe`, or `no-host`.
 - `quota` is `null` for the package default or a positive per-run override.
 - `imports` maps configured PA Import names to concise descriptions.
+- Optional `parent` and `memory` fields select explicit actor-owned coordinates and must be supplied together.
 
 The default quota is configured in `package/zinc.md`.
 
 ## Calls
 
-Root input remains exactly:
+Root input is the nonempty UTF-8 question. When `parent` and `memory` are absent from config, Zinc continues from the
+latest durable response owned by `actor`; a new actor starts with no history. Set both fields for an explicit branch:
 
 ```json
-{"question":"...","parent":null,"memory":0}
+{"parent":42,"memory":42}
 ```
 
-`parent` is `null` or an actor-owned event ID. `memory` is an independent inclusive actor-owned event boundary, with `0` selecting no history.
-
-A root result remains:
-
-```json
-{"id":42,"parent":41,"memory":0,"text":"..."}
-```
+`parent` may be `null`; `memory` is an inclusive event boundary with `0` selecting no history. Root output is the final
+Markdown response with a subdued Store-coordinate footer. With PA streaming enabled, Zinc first emits stored reasoning
+as blockquotes, stored intermediate responses as Markdown, tool calls as Lua fences, and tool results as text fences.
 
 ## Presets
 
@@ -186,6 +184,21 @@ Models remain external to release archives. Build Cygnet data with:
 lua tools/cygnet_index.lua SOURCE.db data/cygnet.db SOURCE_SHA256
 ```
 
+## Agent Connector
+
+The tracked `ac.yaml` defines the Zinc policy. Fill a member, channel, or guild route, then connect and run:
+
+```sh
+../llama.cpp-nemotron/build/bin/llama-server --models-preset models.ini --port 8000
+agc connect .
+agc check .
+agc run .
+```
+
+Connector expands the configured actor, supplies the optional Discord Import, streams Zinc's emitted Markdown, and
+passes per-command config overlays without interpreting Zinc's schema. Zinc owns continuation in its Store. The exact
+child environment must include the Lua 5.5 paths produced by `lx path full`.
+
 ## Development
 
 ```sh
@@ -195,6 +208,7 @@ CFLAGS=-DSQLITE_ENABLE_FTS5 lx --lua-version 5.5 build
 agent check package zinc
 ```
 
-CI pins Portable Agents commit `ea725058da73783a168923a41920927b7f5df9c5`.
+Zinc requires Portable Agents protocol 1 with optional `pa.emit` support. CI pins commit
+`114e6fa5c395541e0ac2b435f38a2877c34d5cb9`.
 
 License: AGPL-3.0-only.

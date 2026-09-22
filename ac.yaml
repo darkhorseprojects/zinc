@@ -1,0 +1,28 @@
+version: 1
+
+policies:
+  zinc:
+    source: package
+    entry: zinc
+    memory_bytes: 100663296
+    environment:
+      - HOME
+      - LUA_PATH
+      - LUA_CPATH
+      - LD_LIBRARY_PATH
+      - DYLD_LIBRARY_PATH
+      - PATH
+      - SystemRoot
+    discord: true
+    imports: {}
+    config:
+      version: 1
+      actor: "discord:${application}:${policy}:member:${member}:channel:${channel}"
+      preset: safe
+      quota: null
+      imports:
+        discord: "Discord capability for channel ${channel}."
+
+members: {}
+channels: {}
+guilds: {}

@@ -89,7 +89,7 @@ return function(spec)
     local function configuration(source)
         local value = object(
             source,
-            { version = true, actor = true, preset = true, quota = true, imports = true },
+            { version = true, actor = true, preset = true, quota = true, imports = true, parent = true, memory = true },
             spec.limits.config_bytes
         )
         assert(value.version == 1, "unsupported Zinc config version")
@@ -97,6 +97,16 @@ return function(spec)
         assert(spec.presets[value.preset], "unknown Zinc preset")
         assert(value.quota == NULL or math.type(value.quota) == "integer" and value.quota > 0, "invalid quota")
         assert(type(value.imports) == "table", "invalid Imports")
+        local coordinates = value.parent ~= nil or value.memory ~= nil
+        assert(
+            not coordinates or value.parent ~= nil and value.memory ~= nil,
+            "parent and memory must be configured together"
+        )
+        assert(
+            value.parent == nil or value.parent == NULL or math.type(value.parent) == "integer" and value.parent > 0,
+            "invalid parent"
+        )
+        assert(value.memory == nil or math.type(value.memory) == "integer" and value.memory >= 0, "invalid memory")
         for name, description in pairs(value.imports) do
             assert(type(name) == "string" and name ~= "" and name ~= "pa" and utf8.len(name), "invalid Import name")
             assert(
@@ -167,31 +177,32 @@ return function(spec)
 
     local function invoke(input, opaque)
         assert(
-            type(input) == "string" and #input <= spec.limits.request_bytes and utf8.len(input),
+            type(input) == "string" and input ~= "" and #input <= spec.limits.request_bytes and utf8.len(input),
             "invalid Zinc input"
         )
         local config = configuration(opaque)
-        local value = object(input, { question = true, parent = true, memory = true })
-        if value.parent == NULL then
-            value.parent = nil
-        end
-        request(value, false)
-        local _, final = runner:root({
+        local automatic = config.parent == nil
+        local parent = config.parent == NULL and nil or config.parent
+        local call, final = runner:root({
             actor = config.actor,
+            automatic = automatic,
             imports = config.imports,
-            memory = value.memory,
-            parent = value.parent,
+            memory = automatic and nil or config.memory,
+            parent = parent,
             preset = spec.presets[config.preset],
             preset_name = config.preset,
-            question = value.question,
+            question = input,
             quota = config.quota == NULL and spec.quota or config.quota,
         })
-        return json.encode({
-            id = final.id,
-            parent = final.parent or NULL,
-            memory = final.memory,
-            text = final.text,
-        }, NULL)
+        return final.text
+            .. "\n\n-# result #"
+            .. final.id
+            .. " · start #"
+            .. call.start
+            .. " · parent "
+            .. (final.parent and "#" .. final.parent or "none")
+            .. " · memory #"
+            .. final.memory
     end
 
     runner = make_run(spec, entry, make_model(spec.model), documents)

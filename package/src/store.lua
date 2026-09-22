@@ -124,6 +124,13 @@ WHERE e.id=? AND e.kind='call' AND r.actor=?]]
             insert = prepare(db, "INSERT INTO events(branch,kind,tokens,text) VALUES(?,?,?,?) RETURNING id"),
             charge = prepare(db, "UPDATE runs SET used=used+? WHERE id=?"),
             last = prepare(db, "SELECT id FROM events WHERE branch=? ORDER BY id DESC LIMIT 1"),
+            head = prepare(
+                db,
+                [[SELECT e.id FROM events e
+JOIN branches b ON b.id=e.branch JOIN runs r ON r.id=b.run
+WHERE r.actor=? AND b.temporary=0 AND e.kind='response'
+ORDER BY e.id DESC LIMIT 1]]
+            ),
             quota = prepare(db, "SELECT budget-used remaining FROM runs WHERE id=?"),
             destroy = prepare(
                 db,
@@ -227,6 +234,11 @@ AND run IN (SELECT id FROM runs WHERE actor=?) RETURNING id]]
 
     function store:caller(actor, event)
         return assert(rows(db, statements.caller, event, actor)[1], "caller is unavailable")
+    end
+
+    function store:head(actor)
+        local row = rows(db, statements.head, actor)[1]
+        return row and row.id or nil
     end
 
     function store:quota(run)
