@@ -178,7 +178,8 @@ repetition penalty = 1.1
 
 Chat uses the embedded Jinja template through non-stream `/v1/chat/completions`. Reranking uses the locked Nemotron reranker.
 
-Models remain external to release archives. Build Cygnet data with:
+Models remain external to release archives. `models.ini` identifies their Hugging Face repositories and files; the
+router resolves them through the standard Hugging Face cache. Build Cygnet data with:
 
 ```sh
 lua tools/cygnet_index.lua SOURCE.db data/cygnet.db SOURCE_SHA256
