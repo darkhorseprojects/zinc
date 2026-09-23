@@ -49,7 +49,14 @@ WHEN EXISTS(
   new.memory IS NOT NULL AND NOT EXISTS(
    SELECT 1 FROM events e JOIN branches b ON b.id=e.branch JOIN runs r ON r.id=b.run
    WHERE e.id=new.memory AND r.actor=current.actor AND (
-    b.temporary=0 AND b.result IS NOT NULL AND e.id<=b.result OR new.temporary=1 AND b.run=new.run
+    b.temporary=0 AND b.result IS NOT NULL AND e.id<=b.result OR
+    new.temporary=1 AND b.run=new.run AND b.id IN (
+     WITH RECURSIVE lineage(id) AS (
+      SELECT branch FROM events WHERE id=new.base UNION ALL
+      SELECT parent.branch FROM lineage l JOIN branches child ON child.id=l.id
+      JOIN events parent ON parent.id=child.base
+     ) SELECT id FROM lineage
+    )
    )
   )
  )
