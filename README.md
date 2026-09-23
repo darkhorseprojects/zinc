@@ -33,7 +33,10 @@ Opaque config is strict UTF-8 JSON. The only required fields are:
 }
 ```
 
-All nested keys are validated against the package defaults; unspecified values remain unchanged. The trusted `model` table in `package/zinc.md` configures the origin and chat, rerank, and tokenizer paths. They are not opaque per-call overrides: letting a caller redirect model requests would expose private history to another server. The safe preset's allowed HTTP actions remain independent. PA resource ceilings and Connector concurrency are separate embedder policy, not Zinc config. Imports are discovered from PA grants and documented by each required module.
+All nested keys are validated against the package defaults; numeric defaults are trusted upper bounds for per-call
+overrides except a higher semantic attention cutoff, which narrows retrieval. Connector grants caller control only over the top-level paths listed in its policy's `overrides`; the tracked
+policy seals `actor`, `preset`, and `version`. An installed policy without `overrides` denies per-call changes until its
+operator explicitly grants them. The trusted `model` table in `package/zinc.md` configures the origin and chat, rerank, and tokenizer paths. They are not opaque per-call overrides: letting a caller redirect model requests would expose private history to another server. The safe preset's allowed HTTP actions remain independent. PA resource ceilings and Connector concurrency are separate embedder policy, not Zinc config. Imports are discovered from PA grants and documented by each required module.
 
 ## Calls
 
@@ -45,7 +48,7 @@ latest durable response owned by `actor`; a new actor starts with no history. Se
 ```
 
 `parent` may be `null`; `memory` is an inclusive event boundary with `0` selecting no history. Root output is the final
-Markdown response with a subdued Store-coordinate footer. With PA streaming enabled, Zinc sends model content or quoted reasoning deltas as they arrive, then complete intermediate messages, tool calls as Lua fences, and bounded tool results as text fences. The Store marks a terminal result only after a complete model turn.
+Markdown response with a subdued Store-coordinate footer. With PA streaming enabled, Zinc appends model content or quoted reasoning as it arrives, then sends complete tool calls as Lua fences and bounded tool results as text fences. The Store marks a terminal result only after a complete model turn.
 
 ## Presets
 
@@ -169,9 +172,9 @@ top-p = 0.95
 min-p = 0.0
 ```
 
-The chat router allocates 32,768 tokens and the reranker 4,096. Default retrieval caps chronological history at 4,096 tokens and semantic results at 2,048 tokens (16 candidates); larger per-call overrides may exceed the router context. MiniCPM5 itself supports up to 131,072 tokens. Reasoning is off by default because a reproduced long-thinking completion reached the 8,192-token output limit before answering; callers may explicitly enable it. The pinned local llama.cpp fork includes the specialized MiniCPM5 XML tool-call parser.
+The chat router allocates a single 131,072-token slot and the reranker 4,096. Default retrieval reserves up to 30,000 tokens each for chronological and semantic history (256 records and 64 candidates); available history may be smaller. Before every chat round Zinc applies the server's template with the tool schema, counts its tokens, reserves the configured output maximum and 4,096 tokens of headroom, and discards the oldest complete transient tool waves if necessary. The system, question, and retrieved history remain intact; an oversized base prompt fails rather than silently truncating. Numeric overrides cannot exceed the trusted package defaults. MiniCPM5 itself supports up to 131,072 tokens. Reasoning is off by default because a reproduced long-thinking completion reached the 8,192-token output limit before answering; callers may explicitly enable it. The pinned local llama.cpp fork includes the specialized MiniCPM5 XML tool-call parser.
 
-Chat uses the embedded Jinja template and SSE `/v1/chat/completions` stream. Zinc assembles complete tool arguments before Eval, bounds response bytes during transfer, and reports HTTP status and phase diagnostics without recording prompts. Reranking uses the locked Nemotron reranker. Model origin and chat, rerank, and tokenizer paths can be edited in trusted `package/zinc.md`, independently of the safe preset's HTTP grants.
+Chat uses the embedded Jinja template, `/apply-template` and `/tokenize` for exact prompt admission, `/props?model=chat` for effective slot size, and an SSE `/v1/chat/completions` stream. Zinc assembles complete tool arguments before Eval, bounds response bytes during transfer, and reports HTTP status and phase diagnostics without recording prompts. Reranking uses the locked Nemotron reranker. Model origin and chat, rerank, and tokenizer paths can be edited in trusted `package/zinc.md`, independently of the safe preset's HTTP grants.
 
 Models remain external to release archives. `models.ini` identifies their Hugging Face repositories and files; the
 router resolves them through the standard Hugging Face cache. Build Cygnet data with:
@@ -205,7 +208,6 @@ cp "$(find .lux/5.5 -path '*/lib/lsqlite3complete.so' -type f -print -quit)" pac
 agent check package zinc
 ```
 
-Zinc requires Portable Agents protocol 1 with `pa.emit_delta`, `pa.log`, and bounded streaming `pa.http`. CI pins commit
-`74b2c85c83c9734552b56d35aa9adebdb2b9c27f`.
+Zinc requires Portable Agents protocol 1 with `pa.emit(bytes, "append")`, `pa.log`, and bounded streaming `pa.http`. Connector and Zinc CI must pin the matched PA revision before publication.
 
 License: AGPL-3.0-only.

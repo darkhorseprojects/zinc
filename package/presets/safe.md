@@ -19,22 +19,6 @@ local actions = {
     model_models = { method = "GET", origin = "http://127.0.0.1:8000", path = "/v1/models" },
 }
 
-local function prompt(parent, memory)
-    parent = parent and tostring(parent) or "nil"
-    return string.format(
-        [[self({preset=P,question=Q,parent=%s,memory=%d}) -> {branch,id,parent,memory,text}
-P = nil | "safe" | "no-host"
-self.destroy(branch) -> "destroyed"
-local child = self({question="QUESTION",parent=%s,memory=%d})
-self.destroy(child.branch)
-return child.text]],
-        parent,
-        memory,
-        parent,
-        memory
-    )
-end
-
 local function relative(path)
     assert(type(path) == "string" and not path:find("\\", 1, true), "invalid path")
     assert(path:sub(1, 1) ~= "/" and path:sub(-1) ~= "/" and not path:find("//", 1, true), "invalid path")
@@ -47,7 +31,6 @@ end
 return {
     document = pa.document(),
     targets = { "safe", "no-host" },
-    prompt = prompt,
     whitelist = { roots = roots, actions = actions },
     members = {
         fs = {

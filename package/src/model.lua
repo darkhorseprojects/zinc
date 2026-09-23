@@ -49,7 +49,6 @@ return function(endpoints, config)
         }, maximum)
         pa.log("model.http.status." .. status)
         assert(status >= 200 and status < 300, "model endpoint failed: HTTP " .. status)
-        assert(not maximum or #body <= maximum, "model response is too large")
         local result = decode(body)
         assert(type(result) == "table" and type(result.error) ~= "table", "invalid model response")
         pa.log("model.http.end")
@@ -58,16 +57,16 @@ return function(endpoints, config)
 
     local function post(model, path, value, maximum)
         value.model = model.name
-        return request(path, value, maximum)
+        return request(path, value, maximum or chat.maximum_response_bytes)
     end
 
-    local function tokens(model, path, content)
+    local function tokens(model, path, content, special)
         pa.log("model.tokenize.begin")
         local result = post(model, path, {
             content = content,
             add_special = false,
-            parse_special = false,
-        })
+            parse_special = special or false,
+        }, chat.maximum_response_bytes)
         pa.log("model.tokenize.end")
         return #dense(result.tokens, "tokenizer tokens")
     end
@@ -78,12 +77,23 @@ return function(endpoints, config)
         return tokens(chat, endpoints.chat.tokenize, content)
     end
 
-    function api:chat(messages)
-        local data = ""
-        local finished, done = nil, false
-        local contents, thoughts, calls = {}, {}, {}
-        local streamed_content, streamed_reasoning = false, false
-        local request_body = json.encode({
+    function api:context()
+        local path = endpoints.chat.props
+            .. "?model="
+            .. chat.name:gsub("([^%w%-._~])", function(byte)
+                return string.format("%%%02X", byte:byte())
+            end)
+        local status, body = pa.http(endpoints.origin, "GET", path, nil, nil, 65536)
+        assert(status >= 200 and status < 300, "model properties failed: HTTP " .. status)
+        local value = decode(body)
+        local settings = type(value) == "table" and value.default_generation_settings
+        local context = type(settings) == "table" and settings.n_ctx
+        assert(math.type(context) == "integer" and context > 0, "invalid context")
+        return context
+    end
+
+    local function chat_body(messages)
+        return {
             model = chat.name,
             messages = messages,
             tools = { TOOL },
@@ -91,7 +101,21 @@ return function(endpoints, config)
             max_tokens = chat.maximum_output_tokens,
             chat_template_kwargs = { enable_thinking = chat.thinking },
             stream = true,
-        }, NULL)
+        }
+    end
+
+    function api:prompt_tokens(messages)
+        local result = request(endpoints.chat.template, chat_body(messages), chat.maximum_response_bytes)
+        assert(type(result.prompt) == "string", "invalid chat template")
+        return tokens(chat, endpoints.chat.tokenize, result.prompt, true)
+    end
+
+    function api:chat(messages)
+        local data = ""
+        local finished, done = nil, false
+        local contents, thoughts, calls = {}, {}, {}
+        local streamed_kind
+        local request_body = json.encode(chat_body(messages), NULL)
         pa.log("model.http.begin")
         local status = pa.http(
             endpoints.origin,
@@ -135,17 +159,21 @@ return function(endpoints, config)
                             if type(delta.reasoning_content) == "string" and delta.reasoning_content ~= "" then
                                 thoughts[#thoughts + 1] = delta.reasoning_content
                                 if chat.thinking then
-                                    local prefix = streamed_reasoning and "" or "> "
-                                    pa.emit_delta("reasoning", prefix .. delta.reasoning_content:gsub("\n", "\n> "))
-                                    streamed_reasoning = true
+                                    if streamed_kind == "content" then
+                                        pa.emit("")
+                                    end
+                                    local prefix = streamed_kind == "reasoning" and "" or "> "
+                                    pa.emit(prefix .. delta.reasoning_content:gsub("\n", "\n> "), "append")
+                                    streamed_kind = "reasoning"
                                 end
                             end
                             if type(delta.content) == "string" and delta.content ~= "" then
                                 contents[#contents + 1] = delta.content
-                                if not chat.thinking then
-                                    pa.emit_delta("content", delta.content)
-                                    streamed_content = true
+                                if streamed_kind == "reasoning" then
+                                    pa.emit("")
                                 end
+                                pa.emit(delta.content, "append")
+                                streamed_kind = "content"
                             end
                             for _, tool in ipairs(dense(delta.tool_calls or {}, "chat stream tool calls")) do
                                 local index = type(tool) == "table" and tool.index
@@ -229,12 +257,14 @@ return function(endpoints, config)
             tool_calls[index] = { id = id, type = "function", ["function"] = { name = name, arguments = arguments } }
         end
 
-        pa.log("model.chat.finish." .. tostring(finished))
-        assert(finished ~= "length", "chat completion was truncated")
+        if finished == "length" then
+            pa.log("model.chat.length")
+            error("chat completion was truncated", 0)
+        end
+        assert(finished == "stop" or finished == "tool_calls", "invalid tool completion")
+        pa.log("model.chat.finish." .. finished)
         if #decoded_calls == 0 then
             assert(finished == "stop" and content and content ~= "", "chat completion has no response")
-        else
-            assert(finished == "tool_calls" or finished == "stop", "invalid tool completion")
         end
         pa.log("model.chat.decoded")
         return {
@@ -242,8 +272,6 @@ return function(endpoints, config)
             content = content,
             calls = decoded_calls,
             tool_calls = tool_calls,
-            streamed_content = streamed_content,
-            streamed_reasoning = streamed_reasoning,
         }
     end
 

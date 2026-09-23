@@ -73,22 +73,21 @@ CREATE VIRTUAL TABLE temp.grounding_vocabulary USING fts5vocab(grounding_tokeniz
         return #encoded <= maximum or model:tokens(encoded) <= maximum
     end
 
-    local function chronological(actor, boundary, branch)
-        local values = store:before(actor, boundary, branch, config.chronological.records)
+    local function fitting(values, maximum, reverse)
         local function prefix(count)
             local result = { [0] = count }
-            for index = count, 1, -1 do
-                result[#result + 1] = values[index]
+            for index = 1, count do
+                result[index] = values[reverse and count - index + 1 or index]
             end
             return result
         end
-        if fits(prefix(#values), config.chronological.tokens) then
+        if fits(prefix(#values), maximum) then
             return prefix(#values)
         end
         local low, high = 0, #values
         while low + 1 < high do
             local middle = (low + high) // 2
-            if fits(prefix(middle), config.chronological.tokens) then
+            if fits(prefix(middle), maximum) then
                 low = middle
             else
                 high = middle
@@ -187,7 +186,11 @@ CREATE VIRTUAL TABLE temp.grounding_vocabulary USING fts5vocab(grounding_tokeniz
         if boundary == 0 then
             return '{"chronological":[],"semantic":[]}'
         end
-        local recent = chronological(actor, boundary, branch)
+        local recent = fitting(
+            store:before(actor, boundary, branch, config.chronological.records),
+            config.chronological.tokens,
+            true
+        )
         if config.semantic.tokens == 0 or config.semantic.terms == 0 or config.semantic.candidates == 0 then
             return json.encode({ chronological = recent, semantic = { [0] = 0 } })
         end
@@ -212,24 +215,7 @@ CREATE VIRTUAL TABLE temp.grounding_vocabulary USING fts5vocab(grounding_tokeniz
         for _, index in ipairs(model:rerank(anchor, passages)) do
             ranked[#ranked + 1] = candidates[index]
         end
-        local low, high = 0, #ranked + 1
-        while low + 1 < high do
-            local middle = (low + high) // 2
-            local selected = { [0] = middle }
-            for index = 1, middle do
-                selected[index] = ranked[index]
-            end
-            if fits(selected, config.semantic.tokens) then
-                low = middle
-            else
-                high = middle
-            end
-        end
-        local semantic = { [0] = low }
-        for index = 1, low do
-            semantic[index] = ranked[index]
-        end
-        return json.encode({ chronological = recent, semantic = semantic })
+        return json.encode({ chronological = recent, semantic = fitting(ranked, config.semantic.tokens, false) })
     end
 
     function memory:close()

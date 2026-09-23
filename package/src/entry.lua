@@ -74,7 +74,12 @@ local function merge(defaults, overrides, path)
         if type(value) == "table" then
             output[name] = merge(value, selected, field)
         elseif type(value) == "number" then
-            assert(math.type(selected) == "integer" and selected >= 0, "invalid " .. field)
+            assert(
+                math.type(selected) == "integer"
+                    and selected >= 0
+                    and (field == "config.retrieval.semantic.attention_cutoff" or selected <= value),
+                "invalid " .. field
+            )
             if not path:find("^config%.retrieval") then
                 assert(selected > 0, "invalid " .. field)
             end

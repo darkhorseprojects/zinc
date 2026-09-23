@@ -8,6 +8,7 @@ policies:
     instructions: 200000000
     discord: true
     imports: {}
+    overrides: [parent, memory, run, models, retrieval]
     config:
       version: 1
       actor: "discord:${application}:${policy}:member:${member}:channel:${channel}"

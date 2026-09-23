@@ -20,7 +20,12 @@ local config = {
     -- Safe-preset HTTP actions are separate capability grants.
     model = {
         origin = "http://127.0.0.1:8000",
-        chat = { endpoint = "/v1/chat/completions", tokenize = "/tokenize" },
+        chat = {
+            endpoint = "/v1/chat/completions",
+            template = "/apply-template",
+            props = "/props",
+            tokenize = "/tokenize",
+        },
         rerank = { endpoint = "/v1/rerank", tokenize = "/tokenize" },
     },
     defaults = {
@@ -34,7 +39,7 @@ local config = {
                 maximum_tool_calls = 16, -- Calls accepted from one completion.
                 maximum_tool_source_bytes = 65536, -- Decoded Lua source bytes per call.
                 maximum_tool_argument_bytes = 524288, -- Raw JSON argument bytes per call.
-                maximum_response_bytes = 8388608, -- Reject after PA reads the HTTP body.
+                maximum_response_bytes = 8388608, -- PA bounds each model response during transfer.
             },
             rerank = {
                 name = "rerank", -- Alias in models.ini.
@@ -44,7 +49,7 @@ local config = {
         },
         retrieval = {
             -- Keep the newest fitting history, then present it oldest first.
-            chronological = { records = 24, tokens = 4096 },
+            chronological = { records = 256, tokens = 30000 },
             semantic = {
                 language = "en", -- Cygnet language.
                 depth = 1, -- Cygnet concept-edge hops.
@@ -52,8 +57,8 @@ local config = {
                 terms = 64, -- FTS search terms after grounding and expansion.
                 grounding_tokens = 64, -- Cygnet tokenizer terms read from the question.
                 exact_forms = 32, -- Underscored literals considered for grounding.
-                candidates = 16, -- FTS records sent to the reranker.
-                tokens = 2048, -- Token budget for selected semantic records.
+                candidates = 64, -- FTS records sent to the reranker.
+                tokens = 30000, -- Token budget for selected semantic records.
             },
         },
     },

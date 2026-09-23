@@ -65,36 +65,28 @@ BEGIN SELECT raise(ABORT,'invalid branch coordinates'); END;
 PRAGMA user_version=1;
 ]]
 
-local BEFORE = [[WITH RECURSIVE visible(id,ceiling) AS (
+local VISIBLE = [[WITH RECURSIVE visible(id,ceiling) AS (
  SELECT ?,? UNION ALL
  SELECT parent.branch,min(v.ceiling,child.base) FROM visible v
  JOIN branches child ON child.id=v.id JOIN events parent ON parent.id=child.base
 )
-SELECT e.id,b.id branch,
+]]
+local RECORD = [[SELECT e.id,b.id branch,
  COALESCE((SELECT max(previous.id) FROM events previous WHERE previous.branch=e.branch AND previous.id<e.id),b.base) parent,
  b.memory,e.kind,e.text
 FROM events e JOIN branches b ON b.id=e.branch JOIN runs r ON r.id=b.run
-WHERE r.actor=? AND e.id<=? AND (
+]]
+local SCOPE = [[r.actor=? AND e.id<=? AND (
  b.temporary=0 AND b.result IS NOT NULL AND b.result<=? OR
  EXISTS(SELECT 1 FROM visible v WHERE v.id=b.id AND e.id<=v.ceiling)
 )
-ORDER BY e.id DESC LIMIT ?]]
-
-local SEARCH = [[WITH RECURSIVE visible(id,ceiling) AS (
- SELECT ?,? UNION ALL
- SELECT parent.branch,min(v.ceiling,child.base) FROM visible v
- JOIN branches child ON child.id=v.id JOIN events parent ON parent.id=child.base
-)
-SELECT e.id,b.id branch,
- COALESCE((SELECT max(previous.id) FROM events previous WHERE previous.branch=e.branch AND previous.id<e.id),b.base) parent,
- b.memory,e.kind,e.text
-FROM event_fts JOIN events e ON e.id=event_fts.rowid
-JOIN branches b ON b.id=e.branch JOIN runs r ON r.id=b.run
-WHERE event_fts MATCH ? AND r.actor=? AND e.id<=? AND (
- b.temporary=0 AND b.result IS NOT NULL AND b.result<=? OR
- EXISTS(SELECT 1 FROM visible v WHERE v.id=b.id AND e.id<=v.ceiling)
-)
-ORDER BY bm25(event_fts),e.id LIMIT ?]]
+]]
+local BEFORE = VISIBLE .. RECORD .. "WHERE " .. SCOPE .. "ORDER BY e.id DESC LIMIT ?"
+local SEARCH = VISIBLE
+    .. RECORD
+    .. "JOIN event_fts ON event_fts.rowid=e.id WHERE event_fts MATCH ? AND "
+    .. SCOPE
+    .. "ORDER BY bm25(event_fts),e.id LIMIT ?"
 
 local function prepare(db, source)
     return assert(db:prepare(source), db:errmsg())
@@ -190,7 +182,7 @@ AND run IN (SELECT id FROM runs WHERE actor=?) RETURNING id]]
         local previous = rows(db, statements.last, branch)[1]
         local parent = previous and previous.id or info.base
         local remaining = rows(db, statements.quota, info.run)[1].remaining
-        local output = {}
+        local charged, output = 0, {}
         for index, event in ipairs(events) do
             assert(type(event.text) == "string" and event.text ~= "" and utf8.len(event.text), "invalid event text")
             local metered = event.kind == "call" or event.kind == "result"
@@ -198,14 +190,9 @@ AND run IN (SELECT id FROM runs WHERE actor=?) RETURNING id]]
             if metered then
                 assert(event.tokens <= remaining, "Eval quota exhausted")
                 remaining = remaining - event.tokens
+                charged = charged + event.tokens
             end
             local id = rows(db, statements.insert, branch, event.kind, event.tokens, event.text)[1].id
-            if event.tokens then
-                local reset = statements.charge:reset()
-                assert(reset == sqlite.OK or reset == sqlite.DONE, db:errmsg())
-                assert(statements.charge:bind_values(event.tokens, info.run) == sqlite.OK, db:errmsg())
-                assert(statements.charge:step() == sqlite.DONE, db:errmsg())
-            end
             output[index] = {
                 id = id,
                 branch = branch,
@@ -216,6 +203,12 @@ AND run IN (SELECT id FROM runs WHERE actor=?) RETURNING id]]
                 text = event.text,
             }
             parent = id
+        end
+        if charged > 0 then
+            local reset = statements.charge:reset()
+            assert(reset == sqlite.OK or reset == sqlite.DONE, db:errmsg())
+            assert(statements.charge:bind_values(charged, info.run) == sqlite.OK, db:errmsg())
+            assert(statements.charge:step() == sqlite.DONE, db:errmsg())
         end
         return output
     end
@@ -253,13 +246,23 @@ AND run IN (SELECT id FROM runs WHERE actor=?) RETURNING id]]
         return transaction(function()
             local info = assert(rows(db, statements.branch_info, branch)[1], "branch is unavailable")
             local remaining = rows(db, statements.quota, info.run)[1].remaining
-            local admitted = {}
+            local admitted, selected = {}, {}
             for index, call in ipairs(calls) do
                 if call.tokens <= remaining then
-                    admitted[index] = { accepted = true, row = append(branch, { call })[1] }
+                    selected[#selected + 1] = call
+                    admitted[index] = { accepted = true, position = #selected }
                     remaining = remaining - call.tokens
                 else
                     admitted[index] = { accepted = false }
+                end
+            end
+            if #selected > 0 then
+                local inserted = append(branch, selected)
+                for _, admission in ipairs(admitted) do
+                    if admission.accepted then
+                        admission.row = inserted[admission.position]
+                        admission.position = nil
+                    end
                 end
             end
             return admitted

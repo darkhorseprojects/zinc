@@ -6,6 +6,12 @@ local CORE_ADAPTER = [[
 callable(self,function(_,request) return invoke("zinc_call","call",request) end)
 self.destroy=function(branch) return invoke("zinc_destroy","destroy",branch) end
 ]]
+local NESTED_CALL = [[self({preset=P,question=Q,parent=%s,memory=%d}) -> {branch,id,parent,memory,text}
+P = %s
+self.destroy(branch) -> "destroyed"
+local child = self({question="QUESTION",parent=%s,memory=%d})
+self.destroy(child.branch)
+return child.text]]
 
 local function names(value)
     local result = {}
@@ -14,10 +20,6 @@ local function names(value)
     end
     table.sort(result)
     return result
-end
-
-local function quote(text)
-    return "> " .. text:gsub("\n", "\n> ")
 end
 
 local function fenced(language, text)
@@ -61,7 +63,16 @@ local function render(name, preset, documents)
         end
         adapters[#adapters + 1] = descriptor.adapter
     end
-    return { system = table.concat(lines, "\n"), names = members, adapters = adapters, prompt = preset.prompt }
+    local targets = { "nil" }
+    for _, target in ipairs(preset.targets) do
+        targets[#targets + 1] = string.format("%q", target)
+    end
+    return {
+        system = table.concat(lines, "\n"),
+        names = members,
+        adapters = adapters,
+        targets = table.concat(targets, " | "),
+    }
 end
 
 local function import_prompt()
@@ -115,10 +126,11 @@ return function(spec, entry, make_model, documents)
     local function execute(store, memory, model, call)
         local selected = prepared[call.preset]
         local imports = import_prompt()
+        local parent = call.parent and tostring(call.parent) or "nil"
         local system = selected.system
             .. (imports ~= "" and "\n" .. imports or "")
             .. "\n"
-            .. selected.prompt(call.parent, call.memory)
+            .. string.format(NESTED_CALL, parent, call.memory, selected.targets, parent, call.memory)
             .. "\nEval quota: "
             .. store:quota(call.run)
             .. " tokens. Sources and results consume it."
@@ -130,8 +142,18 @@ return function(spec, entry, make_model, documents)
             user = "History:\n" .. context .. "\n\nQuestion:\n" .. user
         end
         local messages = { { role = "system", content = system }, { role = "user", content = user } }
+        local context_tokens = model:context()
+        assert(context_tokens >= 120000, "chat model has less than 120k context")
+        local maximum_prompt = context_tokens - call.config.models.chat.maximum_output_tokens - 4096
 
         for _ = 1, call.config.run.max_model_rounds do
+            while model:prompt_tokens(messages) > maximum_prompt do
+                assert(#messages > 2, "question and retrieval exceed chat context")
+                local count = messages[3].tool_calls and #messages[3].tool_calls or 0
+                for _ = 1, count + 1 do
+                    table.remove(messages, 3)
+                end
+            end
             pa.log("model.chat.begin")
             local completion = model:chat(messages)
             pa.log("model.chat.end")
@@ -149,13 +171,6 @@ return function(spec, entry, make_model, documents)
                 events[#events + 1] = { kind = "response", text = completion.content }
             end
             local rows = #events > 0 and store:append(call.branch, events) or {}
-            for _, event in ipairs(events) do
-                if event.kind == "reasoning" and not completion.streamed_reasoning then
-                    pa.emit(quote(event.text))
-                elseif event.kind == "response" and #completion.calls > 0 and not completion.streamed_content then
-                    pa.emit(event.text)
-                end
-            end
             messages[#messages + 1] = assistant
             if #completion.calls == 0 then
                 return assert(rows[#rows], "model returned no response")
