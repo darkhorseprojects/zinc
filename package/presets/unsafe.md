@@ -27,7 +27,7 @@ self.fs={
 ]],
             call = function(action, arguments)
                 assert(type(arguments[1]) == "string" and type(arguments[2]) == "string", "invalid filesystem call")
-                local root = pa.fs(arguments[1])
+                local root <close> = pa.fs(arguments[1])
                 if action == "read" then
                     assert(#arguments == 2, "invalid read")
                     local data = root:read(arguments[2])

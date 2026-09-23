@@ -74,6 +74,9 @@ CREATE VIRTUAL TABLE temp.grounding_vocabulary USING fts5vocab(grounding_tokeniz
     end
 
     local function fitting(values, maximum, reverse)
+        if maximum == 0 or #values == 0 then
+            return { [0] = 0 }
+        end
         local function prefix(count)
             local result = { [0] = count }
             for index = 1, count do
