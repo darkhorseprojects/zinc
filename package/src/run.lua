@@ -237,7 +237,7 @@ return function(spec, entry, make_model, documents)
 
     local function run(start, config)
         local store = make_store(spec.store)
-        local model = make_model(spec.origin, config.models)
+        local model = make_model(spec.model, config.models)
         local memory
         local result = table.pack(pcall(function()
             local call = start(store)

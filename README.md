@@ -33,7 +33,7 @@ Opaque config is strict UTF-8 JSON. The only required fields are:
 }
 ```
 
-All nested keys are validated against the package defaults; unspecified values remain unchanged. PA resource ceilings and Connector concurrency are separate embedder policy, not Zinc config. Imports are discovered from PA grants and documented by each required module.
+All nested keys are validated against the package defaults; unspecified values remain unchanged. The trusted `model` table in `package/zinc.md` configures the origin and chat, rerank, and tokenizer paths. They are not opaque per-call overrides: letting a caller redirect model requests would expose private history to another server. The safe preset's allowed HTTP actions remain independent. PA resource ceilings and Connector concurrency are separate embedder policy, not Zinc config. Imports are discovered from PA grants and documented by each required module.
 
 ## Calls
 
@@ -172,7 +172,7 @@ min-p = 0.0
 
 Its 65,536-token router context fits the default combined retrieval budgets and output ceiling; the model supports up to 131,072 tokens. The pinned local llama.cpp fork includes the specialized MiniCPM5 XML tool-call parser.
 
-Chat uses the embedded Jinja template through non-stream `/v1/chat/completions`. Reranking uses the locked Nemotron reranker.
+Chat uses the embedded Jinja template through the default non-stream `/v1/chat/completions` route. Reranking uses the locked Nemotron reranker. Model origin and chat, rerank, and tokenizer paths can be edited in trusted `package/zinc.md`, independently of the safe preset's HTTP grants.
 
 Models remain external to release archives. `models.ini` identifies their Hugging Face repositories and files; the
 router resolves them through the standard Hugging Face cache. Build Cygnet data with:

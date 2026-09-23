@@ -13,37 +13,51 @@ local config = {
         safe = require("presets.safe"),
         ["no-host"] = require("presets.no-host"),
     },
+    -- Writable history and the read-only Cygnet retrieval index.
     store = { path = "state/zinc.db" },
     cygnet = "data/cygnet.db",
-    origin = "http://127.0.0.1:8000",
+    -- Trusted model network destinations; opaque per-call overrides cannot redirect them.
+    -- Safe-preset HTTP actions are separate capability grants.
+    model = {
+        origin = "http://127.0.0.1:8000",
+        chat = { endpoint = "/v1/chat/completions", tokenize = "/tokenize" },
+        rerank = { endpoint = "/v1/rerank", tokenize = "/tokenize" },
+    },
     defaults = {
+        -- Eval source and results spend quota; rounds bound one model/tool loop.
         run = { quota_tokens = 32768, max_model_rounds = 32 },
         models = {
             chat = {
-                name = "chat",
-                thinking = true,
-                maximum_output_tokens = 8192,
-                maximum_tool_calls = 16,
-                maximum_tool_source_bytes = 65536,
-                maximum_tool_argument_bytes = 524288,
-                maximum_response_bytes = 8388608,
+                name = "chat", -- Alias in models.ini.
+                thinking = true, -- Jinja enable_thinking template argument.
+                maximum_output_tokens = 8192, -- Tokens generated per completion.
+                maximum_tool_calls = 16, -- Calls accepted from one completion.
+                maximum_tool_source_bytes = 65536, -- Decoded Lua source bytes per call.
+                maximum_tool_argument_bytes = 524288, -- Raw JSON argument bytes per call.
+                maximum_response_bytes = 8388608, -- Reject after PA reads the HTTP body.
             },
-            rerank = { name = "rerank", passage_tokens = 8192, query_tokens = 8192 },
+            rerank = {
+                name = "rerank", -- Alias in models.ini.
+                passage_tokens = 8192, -- Maximum tokens in query plus one passage.
+                query_tokens = 8192, -- Oversized queries skip reranking.
+            },
         },
         retrieval = {
+            -- Keep the newest fitting history, then present it oldest first.
             chronological = { records = 64, tokens = 16384 },
             semantic = {
-                language = "en",
-                depth = 1,
-                attention_cutoff = 0,
-                terms = 512,
-                grounding_tokens = 512,
-                exact_forms = 64,
-                candidates = 64,
-                tokens = 16384,
+                language = "en", -- Cygnet language.
+                depth = 1, -- Cygnet concept-edge hops.
+                attention_cutoff = 0, -- Minimum information score for a grounded form.
+                terms = 512, -- FTS search terms after grounding and expansion.
+                grounding_tokens = 512, -- Cygnet tokenizer terms read from the question.
+                exact_forms = 64, -- Underscored literals considered for grounding.
+                candidates = 64, -- FTS records sent to the reranker.
+                tokens = 16384, -- Token budget for selected semantic records.
             },
         },
     },
+    -- UTF-8 byte ceilings before question processing and config decoding.
     limits = { request_bytes = 1048576, config_bytes = 65536 },
 }
 

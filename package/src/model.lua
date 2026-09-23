@@ -38,11 +38,11 @@ local function finite(value)
     return type(value) == "number" and value == value and value ~= math.huge and value ~= -math.huge
 end
 
-return function(origin, config)
+return function(endpoints, config)
     local chat, rerank = config.chat, config.rerank
 
     local function request(path, value, maximum)
-        local status, body = pa.http(origin, "POST", path, json.encode(value, NULL), {
+        local status, body = pa.http(endpoints.origin, "POST", path, json.encode(value, NULL), {
             ["content-type"] = "application/json",
             accept = "application/json",
         })
@@ -58,8 +58,8 @@ return function(origin, config)
         return request(path, value, maximum)
     end
 
-    local function tokens(model, content)
-        local result = post(model, "/tokenize", {
+    local function tokens(model, path, content)
+        local result = post(model, path, {
             content = content,
             add_special = false,
             parse_special = false,
@@ -70,11 +70,11 @@ return function(origin, config)
     local api = {}
 
     function api:tokens(content)
-        return tokens(chat, content)
+        return tokens(chat, endpoints.chat.tokenize, content)
     end
 
     function api:chat(messages)
-        local result = post(chat, "/v1/chat/completions", {
+        local result = post(chat, endpoints.chat.endpoint, {
             messages = messages,
             tools = { TOOL },
             parallel_tool_calls = true,
@@ -135,20 +135,23 @@ return function(origin, config)
     end
 
     function api:rerank(query, passages)
-        if #query > rerank.query_tokens and tokens(rerank, query) > rerank.query_tokens then
+        if #query > rerank.query_tokens and tokens(rerank, endpoints.rerank.tokenize, query) > rerank.query_tokens then
             return {}
         end
         local selected, source = {}, {}
         for index, passage in ipairs(passages) do
             local content = query .. "\n" .. passage
-            if #content <= rerank.passage_tokens or tokens(rerank, content) <= rerank.passage_tokens then
+            if
+                #content <= rerank.passage_tokens
+                or tokens(rerank, endpoints.rerank.tokenize, content) <= rerank.passage_tokens
+            then
                 selected[#selected + 1], source[#source + 1] = passage, index
             end
         end
         if #selected == 0 then
             return {}
         end
-        local ranked = post(rerank, "/v1/rerank", {
+        local ranked = post(rerank, endpoints.rerank.endpoint, {
             documents = selected,
             query = query,
             top_n = #selected,
