@@ -100,15 +100,22 @@ self.search={
             call = function(action, arguments)
                 local root = assert(roots[arguments[1]], "unknown root")
                 local directory = relative(arguments[2])
-                local target = directory == "" and root.path or root.path .. "/" .. directory
-                local command
+                local command = { "--no-follow" }
+                if directory ~= "" then
+                    local path = (root.path .. "/" .. directory):gsub("[*?%[%]{}\\]", "\\%0"):gsub("^/", "")
+                    command[#command + 1] = "--glob"
+                    command[#command + 1] = "**/" .. path .. "/**"
+                end
                 if action == "text" then
                     assert(#arguments == 3 and type(arguments[3]) == "string", "invalid search")
-                    command = { "--", arguments[3], target }
+                    command[#command + 1] = "--"
+                    command[#command + 1] = arguments[3]
                 else
                     assert(action == "files" and #arguments == 2, "invalid search")
-                    command = { "--files", "--", target }
+                    command[#command + 1] = "--files"
+                    command[#command + 1] = "--"
                 end
+                command[#command + 1] = root.path
                 local code, stdout, stderr = pa.process("/usr/bin/rg", command, "")
                 assert((code == 0 or action == "text" and code == 1) and utf8.len(stdout), stderr)
                 return stdout

@@ -111,7 +111,7 @@ return function(endpoints, config)
     end
 
     function api:chat(messages)
-        local data = ""
+        local fragments = {}
         local finished, done = nil, false
         local contents, thoughts, calls = {}, {}, {}
         local streamed_kind
@@ -131,14 +131,17 @@ return function(endpoints, config)
                 if code < 200 or code >= 300 then
                     return
                 end
-                data = data .. chunk
+                local start = 1
                 while true do
-                    local boundary = data:find("\n", 1, true)
+                    local boundary = chunk:find("\n", start, true)
                     if not boundary then
+                        fragments[#fragments + 1] = chunk:sub(start)
                         break
                     end
-                    local line = data:sub(1, boundary - 1)
-                    data = data:sub(boundary + 1)
+                    fragments[#fragments + 1] = chunk:sub(start, boundary - 1)
+                    local line = table.concat(fragments)
+                    fragments = {}
+                    start = boundary + 1
                     if line:sub(-1) == "\r" then
                         line = line:sub(1, -2)
                     end
@@ -222,7 +225,7 @@ return function(endpoints, config)
         )
         pa.log("model.http.status." .. status)
         assert(status >= 200 and status < 300, "model endpoint failed: HTTP " .. status)
-        assert(done and finished and data:match("^%s*$"), "chat stream ended early")
+        assert(done and finished and table.concat(fragments):match("^%s*$"), "chat stream ended early")
         pa.log("model.http.end")
         local reasoning = #thoughts > 0 and table.concat(thoughts) or nil
         local content = #contents > 0 and table.concat(contents) or nil

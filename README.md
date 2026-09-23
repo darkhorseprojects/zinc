@@ -13,7 +13,7 @@ package/presets/{unsafe,safe,no-host}.md
 package/src/{entry,memory,model,run,store}.lua
 ```
 
-Construct Agents with `sourceDir: "./package"` and `entryModule: "zinc"`. Portable Agents must be built with ABI-compatible dynamic Lua 5.5 through `-Dsystem-lua=true`.
+Construct Agents from the assembled release `package/` with `sourceDir: "./package"` and `entryModule: "zinc"`. In a source checkout, build and stage the locked Lunajson and SQLite dependencies as described under Development before checking the Image. Portable Agents must be built with ABI-compatible dynamic Lua 5.5 through `-Dsystem-lua=true`.
 
 ## Config
 
@@ -203,9 +203,13 @@ passes per-command config overlays without interpreting Zinc's schema. Zinc owns
 python3 tools/format_fences.py
 lx --lua-version 5.5 fmt --backend stylua --path package/src
 CFLAGS=-DSQLITE_ENABLE_FTS5 lx --lua-version 5.5 build
-mkdir -p package/native
-cp "$(find .lux/5.5 -path '*/lib/lsqlite3complete.so' -type f -print -quit)" package/native/
-agent check package zinc
+source=$(find .lux/5.5 -mindepth 1 -maxdepth 1 -type d -name '*-zinc@*' -print -quit)/src
+dep=$(find .lux/5.5 -mindepth 1 -maxdepth 1 -type d -name '*-lunajson@1.2.3-1' -print -quit)
+mkdir -p "$source/lunajson" "$source/native"
+cp package/lunajson.lua "$source/"
+cp "$dep/src/lunajson/decoder.lua" "$dep/src/lunajson/encoder.lua" "$source/lunajson/"
+cp "$(find .lux/5.5 -path '*/lib/lsqlite3complete.so' -type f -print -quit)" "$source/native/"
+agent check "$source" zinc
 ```
 
 Zinc requires Portable Agents protocol 1 with `pa.emit(bytes, "append")`, `pa.log`, and bounded streaming `pa.http`. Connector and Zinc CI must pin the matched PA revision before publication.

@@ -99,8 +99,11 @@ jobs:
           test -n "$package"
           source="$package/src"
           mkdir -p "$source/native"
+          dep=$(find .lux/5.5 -mindepth 1 -maxdepth 1 -type d -name '*-lunajson@1.2.3-1' -print -quit)
+          test -n "$dep"
           cp package/lunajson.lua "$source/"
-          cp -R package/lunajson "$source/"
+          mkdir -p "$source/lunajson"
+          cp "$dep/src/lunajson/decoder.lua" "$dep/src/lunajson/encoder.lua" "$source/lunajson/"
           if [[ "$RUNNER_OS" == Windows ]]; then suffix=dll; else suffix=so; fi
           native=$(find .lux/5.5 -path "*/lib/lsqlite3complete.$suffix" -type f -print -quit)
           test -n "$native"
