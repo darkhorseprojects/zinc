@@ -45,8 +45,7 @@ latest durable response owned by `actor`; a new actor starts with no history. Se
 ```
 
 `parent` may be `null`; `memory` is an inclusive event boundary with `0` selecting no history. Root output is the final
-Markdown response with a subdued Store-coordinate footer. With PA streaming enabled, Zinc first emits stored reasoning
-as blockquotes, stored intermediate responses as Markdown, tool calls as Lua fences, and tool results as text fences.
+Markdown response with a subdued Store-coordinate footer. With PA streaming enabled, Zinc sends model content or quoted reasoning deltas as they arrive, then complete intermediate messages, tool calls as Lua fences, and bounded tool results as text fences. The Store marks a terminal result only after a complete model turn.
 
 ## Presets
 
@@ -138,11 +137,11 @@ Destruction removes the selected temporary branch and descendants. Durable paren
 Quota counts exact chat-tokenizer tokens in:
 
 - accepted model-generated Lua source
-- the complete result or traceback from that accepted source
+- the bounded result or traceback representation from that accepted source
 
 It does not count questions, prompts, memory, reasoning, regular responses, trusted adapter source, or quota metadata.
 
-A source is admitted only when its tokens fit the committed remaining quota. Accepted results are always stored in full and may make the balance negative. Later sources are rejected when they do not fit.
+A source is admitted only when its tokens fit the committed remaining quota. Results longer than `run.maximum_tool_result_bytes` are UTF-8 truncated with their call coordinate and original byte count; if a bounded result exceeds the remaining token quota, a zero-token omission marker is stored instead. The Store refuses metered writes that would overdraw the run. Existing historical rows are preserved.
 
 The first prompt contains the current balance. After every tool wave, the final tool message receives nonpersistent `quota_remaining=N` metadata. Nested loops derive the same run through their caller Store event; no quota value is passed recursively.
 
@@ -170,9 +169,9 @@ top-p = 0.95
 min-p = 0.0
 ```
 
-Its 65,536-token router context fits the default combined retrieval budgets and output ceiling; the model supports up to 131,072 tokens. The pinned local llama.cpp fork includes the specialized MiniCPM5 XML tool-call parser.
+The chat router allocates 32,768 tokens and the reranker 4,096. Default retrieval caps chronological history at 4,096 tokens and semantic results at 2,048 tokens (16 candidates); larger per-call overrides may exceed the router context. MiniCPM5 itself supports up to 131,072 tokens. Reasoning is off by default because a reproduced long-thinking completion reached the 8,192-token output limit before answering; callers may explicitly enable it. The pinned local llama.cpp fork includes the specialized MiniCPM5 XML tool-call parser.
 
-Chat uses the embedded Jinja template through the default non-stream `/v1/chat/completions` route. Reranking uses the locked Nemotron reranker. Model origin and chat, rerank, and tokenizer paths can be edited in trusted `package/zinc.md`, independently of the safe preset's HTTP grants.
+Chat uses the embedded Jinja template and SSE `/v1/chat/completions` stream. Zinc assembles complete tool arguments before Eval, bounds response bytes during transfer, and reports HTTP status and phase diagnostics without recording prompts. Reranking uses the locked Nemotron reranker. Model origin and chat, rerank, and tokenizer paths can be edited in trusted `package/zinc.md`, independently of the safe preset's HTTP grants.
 
 Models remain external to release archives. `models.ini` identifies their Hugging Face repositories and files; the
 router resolves them through the standard Hugging Face cache. Build Cygnet data with:
@@ -206,7 +205,7 @@ cp "$(find .lux/5.5 -path '*/lib/lsqlite3complete.so' -type f -print -quit)" pac
 agent check package zinc
 ```
 
-Zinc requires Portable Agents protocol 1 with optional `pa.emit` support. CI pins commit
-`114e6fa5c395541e0ac2b435f38a2877c34d5cb9`.
+Zinc requires Portable Agents protocol 1 with `pa.emit_delta`, `pa.log`, and bounded streaming `pa.http`. CI pins commit
+`74b2c85c83c9734552b56d35aa9adebdb2b9c27f`.
 
 License: AGPL-3.0-only.

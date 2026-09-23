@@ -42,14 +42,17 @@ return function(endpoints, config)
     local chat, rerank = config.chat, config.rerank
 
     local function request(path, value, maximum)
+        pa.log("model.http.begin")
         local status, body = pa.http(endpoints.origin, "POST", path, json.encode(value, NULL), {
             ["content-type"] = "application/json",
             accept = "application/json",
-        })
-        assert(status >= 200 and status < 300, "model endpoint failed")
+        }, maximum)
+        pa.log("model.http.status." .. status)
+        assert(status >= 200 and status < 300, "model endpoint failed: HTTP " .. status)
         assert(not maximum or #body <= maximum, "model response is too large")
         local result = decode(body)
         assert(type(result) == "table" and type(result.error) ~= "table", "invalid model response")
+        pa.log("model.http.end")
         return result
     end
 
@@ -59,11 +62,13 @@ return function(endpoints, config)
     end
 
     local function tokens(model, path, content)
+        pa.log("model.tokenize.begin")
         local result = post(model, path, {
             content = content,
             add_special = false,
             parse_special = false,
         })
+        pa.log("model.tokenize.end")
         return #dense(result.tokens, "tokenizer tokens")
     end
 
@@ -74,32 +79,131 @@ return function(endpoints, config)
     end
 
     function api:chat(messages)
-        local result = post(chat, endpoints.chat.endpoint, {
+        local data = ""
+        local finished, done = nil, false
+        local contents, thoughts, calls = {}, {}, {}
+        local streamed_content, streamed_reasoning = false, false
+        local request_body = json.encode({
+            model = chat.name,
             messages = messages,
             tools = { TOOL },
             parallel_tool_calls = true,
             max_tokens = chat.maximum_output_tokens,
             chat_template_kwargs = { enable_thinking = chat.thinking },
-            stream = false,
-        }, chat.maximum_response_bytes)
-        local choices = dense(result.choices, "chat choices")
-        assert(#choices == 1, "chat response has the wrong choice count")
-        local choice = choices[1]
-        local message = assert(type(choice) == "table" and choice.message, "chat response has no message")
-        local reasoning = message.reasoning_content or message.reasoning
-        local content = message.content
-        if reasoning == NULL then
-            reasoning = nil
-        end
-        if content == NULL then
-            content = nil
-        end
+            stream = true,
+        }, NULL)
+        pa.log("model.http.begin")
+        local status = pa.http(
+            endpoints.origin,
+            "POST",
+            endpoints.chat.endpoint,
+            request_body,
+            {
+                ["content-type"] = "application/json",
+                accept = "text/event-stream",
+            },
+            chat.maximum_response_bytes,
+            function(code, chunk)
+                if code < 200 or code >= 300 then
+                    return
+                end
+                data = data .. chunk
+                while true do
+                    local boundary = data:find("\n", 1, true)
+                    if not boundary then
+                        break
+                    end
+                    local line = data:sub(1, boundary - 1)
+                    data = data:sub(boundary + 1)
+                    if line:sub(-1) == "\r" then
+                        line = line:sub(1, -2)
+                    end
+                    if line:sub(1, 6) == "data: " then
+                        local payload = line:sub(7)
+                        if payload == "[DONE]" then
+                            done = true
+                        else
+                            assert(not done and not finished, "unexpected chat stream data")
+                            local value = decode(payload)
+                            local choices = dense(value.choices, "chat stream choices")
+                            assert(#choices == 1, "chat stream has the wrong choice count")
+                            local choice = choices[1]
+                            local delta = assert(
+                                type(choice) == "table" and type(choice.delta) == "table" and choice.delta,
+                                "invalid chat delta"
+                            )
+                            if type(delta.reasoning_content) == "string" and delta.reasoning_content ~= "" then
+                                thoughts[#thoughts + 1] = delta.reasoning_content
+                                if chat.thinking then
+                                    local prefix = streamed_reasoning and "" or "> "
+                                    pa.emit_delta("reasoning", prefix .. delta.reasoning_content:gsub("\n", "\n> "))
+                                    streamed_reasoning = true
+                                end
+                            end
+                            if type(delta.content) == "string" and delta.content ~= "" then
+                                contents[#contents + 1] = delta.content
+                                if not chat.thinking then
+                                    pa.emit_delta("content", delta.content)
+                                    streamed_content = true
+                                end
+                            end
+                            for _, tool in ipairs(dense(delta.tool_calls or {}, "chat stream tool calls")) do
+                                local index = type(tool) == "table" and tool.index
+                                assert(
+                                    math.type(index) == "integer" and index >= 0 and index < chat.maximum_tool_calls,
+                                    "invalid tool call index"
+                                )
+                                local call = calls[index + 1]
+                                if not call then
+                                    call = { id = "", type = "function", ["function"] = { name = "", arguments = "" } }
+                                    calls[index + 1] = call
+                                end
+                                local fn = tool["function"]
+                                if type(tool.id) == "string" then
+                                    call.id = call.id .. tool.id
+                                end
+                                if type(fn) == "table" then
+                                    if type(fn.name) == "string" then
+                                        call["function"].name = call["function"].name .. fn.name
+                                    end
+                                    if type(fn.arguments) == "string" then
+                                        call["function"].arguments = call["function"].arguments .. fn.arguments
+                                        assert(
+                                            #call["function"].arguments <= chat.maximum_tool_argument_bytes,
+                                            "tool arguments are too large"
+                                        )
+                                    end
+                                end
+                            end
+                            if choice.finish_reason ~= nil and choice.finish_reason ~= NULL then
+                                finished = choice.finish_reason
+                                local timings = value.timings
+                                if type(timings) == "table" then
+                                    if math.type(timings.prompt_n) == "integer" then
+                                        pa.log("model.chat.prompt." .. timings.prompt_n)
+                                    end
+                                    if math.type(timings.predicted_n) == "integer" then
+                                        pa.log("model.chat.completion." .. timings.predicted_n)
+                                    end
+                                end
+                            end
+                        end
+                    end
+                end
+            end
+        )
+        pa.log("model.http.status." .. status)
+        assert(status >= 200 and status < 300, "model endpoint failed: HTTP " .. status)
+        assert(done and finished and data:match("^%s*$"), "chat stream ended early")
+        pa.log("model.http.end")
+        local reasoning = #thoughts > 0 and table.concat(thoughts) or nil
+        local content = #contents > 0 and table.concat(contents) or nil
         assert(reasoning == nil or type(reasoning) == "string" and utf8.len(reasoning), "invalid reasoning")
         assert(content == nil or type(content) == "string" and utf8.len(content), "invalid response")
 
-        local entries = message.tool_calls == NULL and {} or dense(message.tool_calls or {}, "chat tool calls")
+        local entries = dense(calls, "chat tool calls")
         assert(#entries <= chat.maximum_tool_calls, "tool call limit")
-        local calls, tool_calls, ids = {}, {}, {}
+        local decoded_calls, tool_calls, ids = {}, {}, {}
         for index, entry in ipairs(entries) do
             local fn = type(entry) == "table" and entry["function"]
             local id = type(entry) == "table" and entry.id
@@ -121,17 +225,26 @@ return function(endpoints, config)
                 "invalid tool source"
             )
             ids[id] = true
-            calls[index] = { id = id, code = decoded.code }
+            decoded_calls[index] = { id = id, code = decoded.code }
             tool_calls[index] = { id = id, type = "function", ["function"] = { name = name, arguments = arguments } }
         end
 
-        assert(choice.finish_reason ~= "length", "chat completion was truncated")
-        if #calls == 0 then
-            assert(choice.finish_reason == "stop" and content and content ~= "", "chat completion has no response")
+        pa.log("model.chat.finish." .. tostring(finished))
+        assert(finished ~= "length", "chat completion was truncated")
+        if #decoded_calls == 0 then
+            assert(finished == "stop" and content and content ~= "", "chat completion has no response")
         else
-            assert(choice.finish_reason == "tool_calls" or choice.finish_reason == "stop", "invalid tool completion")
+            assert(finished == "tool_calls" or finished == "stop", "invalid tool completion")
         end
-        return { reasoning = reasoning, content = content, calls = calls, tool_calls = tool_calls }
+        pa.log("model.chat.decoded")
+        return {
+            reasoning = reasoning,
+            content = content,
+            calls = decoded_calls,
+            tool_calls = tool_calls,
+            streamed_content = streamed_content,
+            streamed_reasoning = streamed_reasoning,
+        }
     end
 
     function api:rerank(query, passages)
@@ -151,11 +264,13 @@ return function(endpoints, config)
         if #selected == 0 then
             return {}
         end
+        pa.log("model.rerank.begin")
         local ranked = post(rerank, endpoints.rerank.endpoint, {
             documents = selected,
             query = query,
             top_n = #selected,
         }).results
+        pa.log("model.rerank.end")
         dense(ranked, "reranker results")
         assert(#ranked == #selected, "reranker response has the wrong count")
         local output, seen = {}, {}

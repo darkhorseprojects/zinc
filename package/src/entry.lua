@@ -136,6 +136,7 @@ return function(spec)
             selected.models.rerank.passage_tokens > 0 and selected.models.rerank.query_tokens > 0,
             "invalid reranker limits"
         )
+        assert(selected.run.maximum_tool_result_bytes >= 128, "tool result limit must be at least 128 bytes")
         value.run, value.models, value.retrieval = selected.run, selected.models, selected.retrieval
         return value
     end
@@ -189,7 +190,10 @@ return function(spec)
         )
         local config = configuration(opaque)
         local automatic = config.parent == nil
-        local parent = config.parent == NULL and nil or config.parent
+        local parent = config.parent
+        if parent == NULL then
+            parent = nil
+        end
         local call, final = runner:root({
             actor = config.actor,
             automatic = automatic,

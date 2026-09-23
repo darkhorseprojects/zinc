@@ -122,7 +122,9 @@ return function(spec, entry, make_model, documents)
             .. "\nEval quota: "
             .. store:quota(call.run)
             .. " tokens. Sources and results consume it."
+        pa.log("memory.context.begin")
         local context = memory:context(call.actor, call.memory, call.branch, call.question)
+        pa.log("memory.context.end")
         local user = call.question
         if call.memory ~= 0 then
             user = "History:\n" .. context .. "\n\nQuestion:\n" .. user
@@ -130,7 +132,9 @@ return function(spec, entry, make_model, documents)
         local messages = { { role = "system", content = system }, { role = "user", content = user } }
 
         for _ = 1, call.config.run.max_model_rounds do
+            pa.log("model.chat.begin")
             local completion = model:chat(messages)
+            pa.log("model.chat.end")
             local assistant = {
                 reasoning_content = completion.reasoning,
                 content = completion.content,
@@ -146,9 +150,9 @@ return function(spec, entry, make_model, documents)
             end
             local rows = #events > 0 and store:append(call.branch, events) or {}
             for _, event in ipairs(events) do
-                if event.kind == "reasoning" then
+                if event.kind == "reasoning" and not completion.streamed_reasoning then
                     pa.emit(quote(event.text))
-                elseif #completion.calls > 0 then
+                elseif event.kind == "response" and #completion.calls > 0 and not completion.streamed_content then
                     pa.emit(event.text)
                 end
             end
@@ -194,7 +198,9 @@ return function(spec, entry, make_model, documents)
             end
 
             local outputs, result_events = {}, {}
+            local available = math.max(0, store:quota(call.run))
             for index in ipairs(completion.calls) do
+                local admission = admitted[index]
                 local position = positions[index]
                 if position then
                     local result = evaluated[position]
@@ -204,15 +210,41 @@ return function(spec, entry, make_model, documents)
                     else
                         output = "run_lua failed: invalid Eval result"
                     end
+                    if output:sub(1, 15) == "run_lua failed:" then
+                        pa.log("tool.eval.failed")
+                    end
                     if output == "" or not utf8.len(output) then
                         output = "run_lua failed: invalid result"
                     end
+                    local original_bytes = #output
+                    local limit = call.config.run.maximum_tool_result_bytes
+                    if original_bytes > limit then
+                        local notice = string.format(
+                            "\n[result truncated: call #%d, original %d bytes]",
+                            admission.row.id,
+                            original_bytes
+                        )
+                        local length = limit - #notice
+                        while length > 0 and not utf8.len(output:sub(1, length)) do
+                            length = length - 1
+                        end
+                        output = output:sub(1, length) .. notice
+                        pa.log("tool.result.truncated")
+                    end
+                    local tokens = model:tokens(output)
+                    if tokens > available then
+                        output = string.format(
+                            "run_lua result omitted: quota exhausted (call #%d, original %d bytes)",
+                            admission.row.id,
+                            original_bytes
+                        )
+                        tokens = 0
+                        pa.log("tool.result.quota")
+                    else
+                        available = available - tokens
+                    end
                     outputs[index] = output
-                    result_events[#result_events + 1] = {
-                        kind = "result",
-                        text = output,
-                        tokens = model:tokens(output),
-                    }
+                    result_events[#result_events + 1] = { kind = "result", text = output, tokens = tokens }
                 else
                     outputs[index] = "quota exhausted"
                 end
@@ -236,11 +268,14 @@ return function(spec, entry, make_model, documents)
     end
 
     local function run(start, config)
+        pa.log("store.open.begin")
         local store = make_store(spec.store)
+        pa.log("store.open.end")
         local model = make_model(spec.model, config.models)
         local memory
         local result = table.pack(pcall(function()
             local call = start(store)
+            pa.log("branch." .. call.branch)
             memory = make_memory({
                 cygnet = spec.cygnet,
                 chronological = config.retrieval.chronological,
@@ -251,10 +286,13 @@ return function(spec, entry, make_model, documents)
         local memory_closed = not memory or pcall(memory.close, memory)
         local completed, complete_problem = true, nil
         if result[1] and memory_closed and not result[2].temporary then
+            pa.log("store.finish.begin")
             completed, complete_problem = pcall(store.finish, store, result[2].branch, result[3].id)
+            pa.log("store.finish.end")
         end
         local store_closed, store_problem = pcall(store.close, store)
         if not result[1] then
+            pa.log("run.failed")
             error(result[2], 0)
         end
         assert(memory_closed, "failed to close memory")

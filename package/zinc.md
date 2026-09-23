@@ -25,11 +25,11 @@ local config = {
     },
     defaults = {
         -- Eval source and results spend quota; rounds bound one model/tool loop.
-        run = { quota_tokens = 32768, max_model_rounds = 32 },
+        run = { quota_tokens = 32768, max_model_rounds = 32, maximum_tool_result_bytes = 8192 },
         models = {
             chat = {
                 name = "chat", -- Alias in models.ini.
-                thinking = true, -- Jinja enable_thinking template argument.
+                thinking = false, -- Long MiniCPM5 reasoning can exhaust the output limit before a reply.
                 maximum_output_tokens = 8192, -- Tokens generated per completion.
                 maximum_tool_calls = 16, -- Calls accepted from one completion.
                 maximum_tool_source_bytes = 65536, -- Decoded Lua source bytes per call.
@@ -38,22 +38,22 @@ local config = {
             },
             rerank = {
                 name = "rerank", -- Alias in models.ini.
-                passage_tokens = 8192, -- Maximum tokens in query plus one passage.
-                query_tokens = 8192, -- Oversized queries skip reranking.
+                passage_tokens = 2048, -- Maximum tokens in query plus one passage.
+                query_tokens = 2048, -- Oversized queries skip reranking.
             },
         },
         retrieval = {
             -- Keep the newest fitting history, then present it oldest first.
-            chronological = { records = 64, tokens = 16384 },
+            chronological = { records = 24, tokens = 4096 },
             semantic = {
                 language = "en", -- Cygnet language.
                 depth = 1, -- Cygnet concept-edge hops.
                 attention_cutoff = 0, -- Minimum information score for a grounded form.
-                terms = 512, -- FTS search terms after grounding and expansion.
-                grounding_tokens = 512, -- Cygnet tokenizer terms read from the question.
-                exact_forms = 64, -- Underscored literals considered for grounding.
-                candidates = 64, -- FTS records sent to the reranker.
-                tokens = 16384, -- Token budget for selected semantic records.
+                terms = 64, -- FTS search terms after grounding and expansion.
+                grounding_tokens = 64, -- Cygnet tokenizer terms read from the question.
+                exact_forms = 32, -- Underscored literals considered for grounding.
+                candidates = 16, -- FTS records sent to the reranker.
+                tokens = 2048, -- Token budget for selected semantic records.
             },
         },
     },

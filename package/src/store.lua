@@ -189,11 +189,16 @@ AND run IN (SELECT id FROM runs WHERE actor=?) RETURNING id]]
         local info = assert(rows(db, statements.branch_info, branch)[1], "branch is unavailable")
         local previous = rows(db, statements.last, branch)[1]
         local parent = previous and previous.id or info.base
+        local remaining = rows(db, statements.quota, info.run)[1].remaining
         local output = {}
         for index, event in ipairs(events) do
             assert(type(event.text) == "string" and event.text ~= "" and utf8.len(event.text), "invalid event text")
             local metered = event.kind == "call" or event.kind == "result"
             assert(metered == (math.type(event.tokens) == "integer" and event.tokens >= 0), "invalid event tokens")
+            if metered then
+                assert(event.tokens <= remaining, "Eval quota exhausted")
+                remaining = remaining - event.tokens
+            end
             local id = rows(db, statements.insert, branch, event.kind, event.tokens, event.text)[1].id
             if event.tokens then
                 local reset = statements.charge:reset()
