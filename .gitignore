@@ -1,4 +1,5 @@
 .lux/
+package/native/
 /dist/
 /store/
 /state/

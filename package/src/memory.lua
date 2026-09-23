@@ -56,6 +56,11 @@ CREATE VIRTUAL TABLE temp.grounding_vocabulary USING fts5vocab(grounding_tokeniz
             maximum = maximum,
             score = assert(db:prepare(SCORE), db:errmsg()),
             expand = assert(db:prepare(EXPAND), db:errmsg()),
+            insert = assert(db:prepare("INSERT INTO grounding_tokenizer(text) VALUES(?) RETURNING rowid"), db:errmsg()),
+            vocabulary = assert(
+                db:prepare("SELECT term FROM grounding_vocabulary ORDER BY offset LIMIT ?"),
+                db:errmsg()
+            ),
         }
     end)
     if not opened then
@@ -69,7 +74,7 @@ CREATE VIRTUAL TABLE temp.grounding_vocabulary USING fts5vocab(grounding_tokeniz
     end
 
     local function chronological(actor, boundary, branch)
-        local values = store:before(actor, boundary, branch, config.chronological_records)
+        local values = store:before(actor, boundary, branch, config.chronological.records)
         local function prefix(count)
             local result = { [0] = count }
             for index = count, 1, -1 do
@@ -77,13 +82,13 @@ CREATE VIRTUAL TABLE temp.grounding_vocabulary USING fts5vocab(grounding_tokeniz
             end
             return result
         end
-        if fits(prefix(#values), config.chronological_tokens) then
+        if fits(prefix(#values), config.chronological.tokens) then
             return prefix(#values)
         end
         local low, high = 0, #values
         while low + 1 < high do
             local middle = (low + high) // 2
-            if fits(prefix(middle), config.chronological_tokens) then
+            if fits(prefix(middle), config.chronological.tokens) then
                 low = middle
             else
                 high = middle
@@ -96,22 +101,21 @@ CREATE VIRTUAL TABLE temp.grounding_vocabulary USING fts5vocab(grounding_tokeniz
         local terms, tokens, exact, seen = {}, {}, {}, {}
         for literal in value:gmatch("%S+") do
             if literal:find("_", 1, true) then
-                assert(#exact < config.exact_forms, "grounding text exceeds exact form limit")
-                exact[#exact + 1] = literal
+                if #exact < config.semantic.exact_forms then
+                    exact[#exact + 1] = literal
+                end
             end
             local key = literal:lower()
-            if not seen[key] and #terms < config.semantic_terms then
+            if not seen[key] and #terms < config.semantic.terms then
                 terms[#terms + 1], seen[key] = literal, true
             end
         end
         assert(db:exec("DELETE FROM grounding_tokenizer") == sqlite.OK, db:errmsg())
-        query(db, "INSERT INTO grounding_tokenizer(text) VALUES(?) RETURNING rowid", value)
-        local vocabulary =
-            query(db, "SELECT term FROM grounding_vocabulary ORDER BY offset LIMIT ?", config.grounding_tokens + 1)
-        assert(#vocabulary <= config.grounding_tokens, "grounding text exceeds grounding token limit")
+        rows(db, state.insert, value)
+        local vocabulary = rows(db, state.vocabulary, config.semantic.grounding_tokens)
         for _, row in ipairs(vocabulary) do
             tokens[#tokens + 1] = row.term
-            if not seen[row.term] and #terms < config.semantic_terms then
+            if not seen[row.term] and #terms < config.semantic.terms then
                 terms[#terms + 1], seen[row.term] = row.term, true
             end
         end
@@ -122,12 +126,12 @@ CREATE VIRTUAL TABLE temp.grounding_vocabulary USING fts5vocab(grounding_tokeniz
         local forms, seen, offset = {}, {}, 1
         local function add(value)
             local form = value:lower():gsub("_", " "):gsub("%s+", " "):match("^%s*(.-)%s*$")
-            local score = rows(db, state.score, config.semantic_language, form)[1]
+            local score = rows(db, state.score, config.semantic.language, form)[1]
             if not score then
                 return false
             end
             local attention = -math.log(score.probability / score.normalization * score.vocabulary)
-            if attention < config.semantic_attention_cutoff then
+            if attention < config.semantic.attention_cutoff then
                 return false
             end
             if not seen[form] then
@@ -153,7 +157,7 @@ CREATE VIRTUAL TABLE temp.grounding_vocabulary USING fts5vocab(grounding_tokeniz
             seen[term:lower()] = true
         end
         for _, form in ipairs(forms) do
-            local remaining = config.semantic_terms - #terms
+            local remaining = config.semantic.terms - #terms
             if remaining == 0 then
                 break
             end
@@ -162,10 +166,10 @@ CREATE VIRTUAL TABLE temp.grounding_vocabulary USING fts5vocab(grounding_tokeniz
                     rows(
                         db,
                         state.expand,
-                        config.semantic_language,
+                        config.semantic.language,
                         form,
-                        config.semantic_depth,
-                        config.semantic_language,
+                        config.semantic.depth,
+                        config.semantic.language,
                         remaining
                     )
                 )
@@ -184,16 +188,19 @@ CREATE VIRTUAL TABLE temp.grounding_vocabulary USING fts5vocab(grounding_tokeniz
             return '{"chronological":[],"semantic":[]}'
         end
         local recent = chronological(actor, boundary, branch)
+        if config.semantic.tokens == 0 or config.semantic.terms == 0 or config.semantic.candidates == 0 then
+            return json.encode({ chronological = recent, semantic = { [0] = 0 } })
+        end
         local terms, tokens, exact = ground(anchor)
-        if #terms < config.semantic_terms then
+        if #terms < config.semantic.terms then
             expand(terms, tokens, exact)
         end
         local excluded, candidates = {}, {}
         for _, record in ipairs(recent) do
             excluded[record.id] = true
         end
-        for _, record in ipairs(store:search(actor, boundary, branch, terms, config.candidates + #recent)) do
-            if not excluded[record.id] and #candidates < config.candidates then
+        for _, record in ipairs(store:search(actor, boundary, branch, terms, config.semantic.candidates + #recent)) do
+            if not excluded[record.id] and #candidates < config.semantic.candidates then
                 excluded[record.id], candidates[#candidates + 1] = true, record
             end
         end
@@ -201,22 +208,37 @@ CREATE VIRTUAL TABLE temp.grounding_vocabulary USING fts5vocab(grounding_tokeniz
         for index, record in ipairs(candidates) do
             passages[index] = record.kind .. ":\n" .. record.text
         end
-        local semantic = {}
+        local ranked = {}
         for _, index in ipairs(model:rerank(anchor, passages)) do
-            semantic[#semantic + 1] = candidates[index]
-            if not fits(semantic, config.semantic_tokens) then
-                semantic[#semantic] = nil
+            ranked[#ranked + 1] = candidates[index]
+        end
+        local low, high = 0, #ranked + 1
+        while low + 1 < high do
+            local middle = (low + high) // 2
+            local selected = { [0] = middle }
+            for index = 1, middle do
+                selected[index] = ranked[index]
+            end
+            if fits(selected, config.semantic.tokens) then
+                low = middle
+            else
+                high = middle
             end
         end
-        semantic[0] = #semantic
+        local semantic = { [0] = low }
+        for index = 1, low do
+            semantic[index] = ranked[index]
+        end
         return json.encode({ chronological = recent, semantic = semantic })
     end
 
     function memory:close()
-        local first = state.score:finalize()
-        local second = state.expand:finalize()
-        local third = db:close()
-        assert(first == sqlite.OK and second == sqlite.OK and third == sqlite.OK, "failed to close Cygnet")
+        for _, statement in pairs(state) do
+            if type(statement) == "userdata" then
+                assert(statement:finalize() == sqlite.OK, db:errmsg())
+            end
+        end
+        assert(db:close() == sqlite.OK, "failed to close Cygnet")
     end
 
     return memory

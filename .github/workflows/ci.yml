@@ -12,7 +12,7 @@ permissions:
 env:
   CFLAGS: -DSQLITE_ENABLE_FTS5
   LUX_VERSION: 0.43.3
-  PORTABLE_AGENTS_COMMIT: 114e6fa5c395541e0ac2b435f38a2877c34d5cb9
+  PORTABLE_AGENTS_COMMIT: 0ca0908e7d6635f5a0dbb15d511e76d34dde488b
 
 jobs:
   verify:
@@ -61,8 +61,8 @@ jobs:
           mkdir -p "$RUNNER_TEMP/lua55/lib/pkgconfig" "$RUNNER_TEMP/lua55/bin"
           sources=$(find "$RUNNER_TEMP/lua-5.5.0/src" -maxdepth 1 -name '*.c' ! -name lua.c ! -name luac.c ! -name onelua.c ! -name ltests.c -print)
           case "$RUNNER_OS" in
-            Linux) zig cc -O2 -fPIC -DLUA_USE_LINUX -shared $sources -lm -ldl -Wl,-soname,liblua5.5.so -o "$RUNNER_TEMP/lua55/lib/liblua5.5.so" ;;
-            macOS) zig cc -O2 -fPIC -DLUA_USE_MACOSX -dynamiclib $sources -Wl,-install_name,"$RUNNER_TEMP/lua55/lib/liblua5.5.dylib" -o "$RUNNER_TEMP/lua55/lib/liblua5.5.dylib" ;;
+            Linux) zig cc -O2 -fPIC -DLUA_USE_LINUX -shared $sources -lm -ldl -Wl,-soname,liblua.so.5.5 -o "$RUNNER_TEMP/lua55/lib/liblua.so.5.5"; ln -s liblua.so.5.5 "$RUNNER_TEMP/lua55/lib/liblua5.5.so" ;;
+            macOS) zig cc -O2 -fPIC -DLUA_USE_MACOSX -dynamiclib $sources -Wl,-install_name,@rpath/liblua5.5.dylib -o "$RUNNER_TEMP/lua55/lib/liblua5.5.dylib" ;;
             Windows) zig cc -O2 -DLUA_BUILD_AS_DLL -shared $sources -Wl,--out-implib,"$RUNNER_TEMP/lua55/lib/liblua5.5.dll.a" -o "$RUNNER_TEMP/lua55/bin/lua5.5.dll" ;;
           esac
           cat > "$RUNNER_TEMP/lua55/lib/pkgconfig/lua5.5.pc" <<EOF
@@ -98,18 +98,20 @@ jobs:
           package=$(find .lux/5.5 -mindepth 1 -maxdepth 1 -type d -name '*-zinc@*' -print -quit)
           test -n "$package"
           source="$package/src"
+          mkdir -p "$source/native"
+          cp package/lunajson.lua "$source/"
+          cp -R package/lunajson "$source/"
+          if [[ "$RUNNER_OS" == Windows ]]; then suffix=dll; else suffix=so; fi
+          native=$(find .lux/5.5 -path "*/lib/lsqlite3complete.$suffix" -type f -print -quit)
+          test -n "$native"
+          cp "$native" "$source/native/"
           "$AGENT_BIN" check "$source" zinc
           if [[ "$GITHUB_REF" == refs/tags/* ]]; then
             root="zinc-${GITHUB_REF_NAME}-${{ matrix.id }}"
-            mkdir -p "$root/.lux/runtime/lua" "$root/.lux/runtime/lib" "$root/state"
+            mkdir -p "$root/state"
             cp ac.yaml models.ini models.lock README.md LICENSE NOTICE "$root/"
             cp -R "$source" "$root/package"
             cp -R data "$root/"
-            for package in .lux/5.5/*@*; do
-              [[ "$package" == *-zinc@* ]] && continue
-              [[ ! -d "$package/src" ]] || cp -R "$package/src/." "$root/.lux/runtime/lua/"
-              [[ ! -d "$package/lib" ]] || cp -R "$package/lib/." "$root/.lux/runtime/lib/"
-            done
             if [[ "$RUNNER_OS" == Windows ]]; then ROOT="$root" pwsh -NoProfile -Command 'Compress-Archive $env:ROOT ($env:ROOT + ".zip")';
             else tar -czf "$root.tar.gz" "$root"; fi
           fi

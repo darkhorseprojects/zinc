@@ -74,16 +74,14 @@ llama.cpp Nemotron reranker branch
 ----------------------------------
 Copyright (C) llama.cpp contributors.
 Source: https://github.com/kinexis-eu/llama.cpp
-Revision: 00fb89c0ca81b5732d42bed882b3de0e7b3b2e1e
+Revision: 88bfe5be79100efb61f4afd83c420bde451602a8
 License: MIT
-License text: https://github.com/kinexis-eu/llama.cpp/blob/00fb89c0ca81b5732d42bed882b3de0e7b3b2e1e/LICENSE
+License text: https://github.com/kinexis-eu/llama.cpp/blob/88bfe5be79100efb61f4afd83c420bde451602a8/LICENSE
 
-LFM2.5-2.6B-GGUF
-----------------
-Publisher: Liquid AI, Inc.
-Source: https://huggingface.co/LiquidAI/LFM2.5-2.6B-GGUF
-Revision: 84022ce711b28455e8c4fc364ce68c00cf995875
-License: LicenseRef-LFM-Open-License-1.0
-The LFM Open License v1.0 includes a commercial-use revenue threshold and
-redistribution obligations. Review the full terms before use or distribution.
-License text: https://www.liquid.ai/lfm-license
+MiniCPM5-2B-GGUF
+-----------------
+Publisher: OpenBMB.
+Source: https://huggingface.co/openbmb/MiniCPM5-2B-GGUF
+Revision: 2079a22f3beaa4e306449978533478fe0522f4b3
+License: Apache-2.0
+License text: https://github.com/OpenBMB/MiniCPM/blob/main/LICENSE

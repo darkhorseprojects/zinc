@@ -62,16 +62,33 @@ local function request(value, nested)
     return value
 end
 
-local function native(value, null)
-    if value == null then
-        return nil
-    end
-    if type(value) ~= "table" then
-        return value
-    end
+local function merge(defaults, overrides, path)
+    assert(type(overrides) == "table" and overrides ~= NULL, "invalid " .. path)
     local output = {}
-    for key, item in pairs(value) do
-        output[key] = native(item, null)
+    for name, value in pairs(defaults) do
+        local selected = overrides[name]
+        if selected == nil then
+            selected = value
+        end
+        local field = path .. "." .. name
+        if type(value) == "table" then
+            output[name] = merge(value, selected, field)
+        elseif type(value) == "number" then
+            assert(math.type(selected) == "integer" and selected >= 0, "invalid " .. field)
+            if not path:find("^config%.retrieval") then
+                assert(selected > 0, "invalid " .. field)
+            end
+            output[name] = selected
+        else
+            assert(
+                type(selected) == type(value) and (type(selected) ~= "string" or selected ~= ""),
+                "invalid " .. field
+            )
+            output[name] = selected
+        end
+    end
+    for name in pairs(overrides) do
+        assert(defaults[name] ~= nil, "unknown " .. path .. " field")
     end
     return output
 end
@@ -87,16 +104,19 @@ return function(spec)
     end
 
     local function configuration(source)
-        local value = object(
-            source,
-            { version = true, actor = true, preset = true, quota = true, imports = true, parent = true, memory = true },
-            spec.limits.config_bytes
-        )
+        local value = object(source, {
+            version = true,
+            actor = true,
+            preset = true,
+            parent = true,
+            memory = true,
+            run = true,
+            models = true,
+            retrieval = true,
+        }, spec.limits.config_bytes)
         assert(value.version == 1, "unsupported Zinc config version")
         assert(type(value.actor) == "string" and value.actor ~= "" and utf8.len(value.actor), "invalid actor")
         assert(spec.presets[value.preset], "unknown Zinc preset")
-        assert(value.quota == NULL or math.type(value.quota) == "integer" and value.quota > 0, "invalid quota")
-        assert(type(value.imports) == "table", "invalid Imports")
         local coordinates = value.parent ~= nil or value.memory ~= nil
         assert(
             not coordinates or value.parent ~= nil and value.memory ~= nil,
@@ -107,13 +127,16 @@ return function(spec)
             "invalid parent"
         )
         assert(value.memory == nil or math.type(value.memory) == "integer" and value.memory >= 0, "invalid memory")
-        for name, description in pairs(value.imports) do
-            assert(type(name) == "string" and name ~= "" and name ~= "pa" and utf8.len(name), "invalid Import name")
-            assert(
-                type(description) == "string" and description ~= "" and utf8.len(description),
-                "invalid Import description"
-            )
-        end
+        local selected = merge(spec.defaults, {
+            run = value.run or {},
+            models = value.models or {},
+            retrieval = value.retrieval or {},
+        }, "config")
+        assert(
+            selected.models.rerank.passage_tokens > 0 and selected.models.rerank.query_tokens > 0,
+            "invalid reranker limits"
+        )
+        value.run, value.models, value.retrieval = selected.run, selected.models, selected.retrieval
         return value
     end
 
@@ -147,14 +170,8 @@ return function(spec)
     function entry.zinc_call(value, opaque)
         local config = configuration(opaque)
         assert(type(value) == "table" and math.type(value.caller) == "integer", "invalid Zinc caller")
-        local call, final = runner:nested(config.actor, config.imports, value.caller, request(value.arguments[1], true))
-        return {
-            branch = call.branch,
-            id = final.id,
-            parent = final.parent,
-            memory = final.memory,
-            text = final.text,
-        }
+        local call, final = runner:nested(config, value.caller, request(value.arguments[1], true))
+        return { branch = call.branch, id = final.id, parent = final.parent, memory = final.memory, text = final.text }
     end
 
     function entry.zinc_destroy(value, opaque)
@@ -163,16 +180,6 @@ return function(spec)
         local branch = value.arguments and value.arguments[1]
         assert(math.type(branch) == "integer" and branch > 0, "invalid branch")
         return runner:destroy(config.actor, value.caller, branch)
-    end
-
-    function entry.agent(value, opaque)
-        local config = configuration(opaque)
-        assert(type(value) == "table" and math.type(value.caller) == "integer", "invalid Agent caller")
-        local name, call = value.arguments and value.arguments[1], value.arguments and value.arguments[2]
-        assert(type(name) == "string" and config.imports[name], "unknown Import")
-        runner:authorize(config.actor, value.caller)
-        local result = require(name)(json.encode(call, NULL))
-        return native(decode(result), NULL)
     end
 
     local function invoke(input, opaque)
@@ -186,13 +193,13 @@ return function(spec)
         local call, final = runner:root({
             actor = config.actor,
             automatic = automatic,
-            imports = config.imports,
+            config = config,
             memory = automatic and nil or config.memory,
             parent = parent,
             preset = spec.presets[config.preset],
             preset_name = config.preset,
             question = input,
-            quota = config.quota == NULL and spec.quota or config.quota,
+            quota = config.run.quota_tokens,
         })
         return final.text
             .. "\n\n-# result #"
@@ -205,7 +212,7 @@ return function(spec)
             .. final.memory
     end
 
-    runner = make_run(spec, entry, make_model(spec.model), documents)
+    runner = make_run(spec, entry, make_model, documents)
     return setmetatable(entry, {
         __call = function(_, input, opaque)
             return invoke(input, opaque)

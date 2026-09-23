@@ -14,7 +14,8 @@ CREATE TABLE branches(
  base INTEGER REFERENCES events(id) ON DELETE CASCADE,
  memory INTEGER REFERENCES events(id) ON DELETE CASCADE,
  preset TEXT NOT NULL,
- temporary INTEGER NOT NULL CHECK(temporary IN (0,1))
+ temporary INTEGER NOT NULL CHECK(temporary IN (0,1)),
+ result INTEGER REFERENCES events(id)
 ) STRICT;
 CREATE TABLE events(
  id INTEGER PRIMARY KEY,
@@ -41,41 +42,51 @@ WHEN EXISTS(
  WHERE current.id=new.run AND (
   new.base IS NOT NULL AND NOT EXISTS(
    SELECT 1 FROM events e JOIN branches b ON b.id=e.branch JOIN runs r ON r.id=b.run
-   WHERE e.id=new.base AND r.actor=current.actor AND (new.temporary=1 OR b.temporary=0)
+   WHERE e.id=new.base AND r.actor=current.actor AND (
+    b.temporary=0 AND b.result IS NOT NULL AND e.id<=b.result OR new.temporary=1 AND b.run=new.run
+   )
   ) OR
   new.memory IS NOT NULL AND NOT EXISTS(
    SELECT 1 FROM events e JOIN branches b ON b.id=e.branch JOIN runs r ON r.id=b.run
-   WHERE e.id=new.memory AND r.actor=current.actor AND (new.temporary=1 OR b.temporary=0)
+   WHERE e.id=new.memory AND r.actor=current.actor AND (
+    b.temporary=0 AND b.result IS NOT NULL AND e.id<=b.result OR new.temporary=1 AND b.run=new.run
+   )
   )
  )
 )
 BEGIN SELECT raise(ABORT,'invalid branch coordinates'); END;
-PRAGMA user_version=5;
+PRAGMA user_version=1;
 ]]
 
-local BEFORE = [[WITH RECURSIVE visible(id) AS (
- SELECT ? UNION
- SELECT parent.branch FROM visible v JOIN branches child ON child.id=v.id
- JOIN events parent ON parent.id=child.base
+local BEFORE = [[WITH RECURSIVE visible(id,ceiling) AS (
+ SELECT ?,? UNION ALL
+ SELECT parent.branch,min(v.ceiling,child.base) FROM visible v
+ JOIN branches child ON child.id=v.id JOIN events parent ON parent.id=child.base
 )
 SELECT e.id,b.id branch,
  COALESCE((SELECT max(previous.id) FROM events previous WHERE previous.branch=e.branch AND previous.id<e.id),b.base) parent,
  b.memory,e.kind,e.text
 FROM events e JOIN branches b ON b.id=e.branch JOIN runs r ON r.id=b.run
-WHERE r.actor=? AND e.id<=? AND (b.temporary=0 OR b.id IN visible)
+WHERE r.actor=? AND e.id<=? AND (
+ b.temporary=0 AND b.result IS NOT NULL AND b.result<=? OR
+ EXISTS(SELECT 1 FROM visible v WHERE v.id=b.id AND e.id<=v.ceiling)
+)
 ORDER BY e.id DESC LIMIT ?]]
 
-local SEARCH = [[WITH RECURSIVE visible(id) AS (
- SELECT ? UNION
- SELECT parent.branch FROM visible v JOIN branches child ON child.id=v.id
- JOIN events parent ON parent.id=child.base
+local SEARCH = [[WITH RECURSIVE visible(id,ceiling) AS (
+ SELECT ?,? UNION ALL
+ SELECT parent.branch,min(v.ceiling,child.base) FROM visible v
+ JOIN branches child ON child.id=v.id JOIN events parent ON parent.id=child.base
 )
 SELECT e.id,b.id branch,
  COALESCE((SELECT max(previous.id) FROM events previous WHERE previous.branch=e.branch AND previous.id<e.id),b.base) parent,
  b.memory,e.kind,e.text
 FROM event_fts JOIN events e ON e.id=event_fts.rowid
 JOIN branches b ON b.id=e.branch JOIN runs r ON r.id=b.run
-WHERE event_fts MATCH ? AND r.actor=? AND e.id<=? AND (b.temporary=0 OR b.id IN visible)
+WHERE event_fts MATCH ? AND r.actor=? AND e.id<=? AND (
+ b.temporary=0 AND b.result IS NOT NULL AND b.result<=? OR
+ EXISTS(SELECT 1 FROM visible v WHERE v.id=b.id AND e.id<=v.ceiling)
+)
 ORDER BY bm25(event_fts),e.id LIMIT ?]]
 
 local function prepare(db, source)
@@ -104,7 +115,7 @@ return function(config)
         local version_statement = prepare(db, "PRAGMA user_version")
         local version = rows(db, version_statement)[1].user_version
         assert(version_statement:finalize() == sqlite.OK, db:errmsg())
-        assert(version == 0 or version == 5, "Store format is unsupported")
+        assert(version == 0 or version == 1, "Store format is unsupported")
         if version == 0 then
             assert(db:exec(SCHEMA) == sqlite.OK, db:errmsg())
         end
@@ -114,7 +125,12 @@ return function(config)
                 db,
                 "INSERT INTO branches(run,base,memory,preset,temporary) VALUES(?,?,?,?,?) RETURNING id,run,base,memory,preset,temporary"
             ),
-            branch_info = prepare(db, "SELECT id,run,base,memory,preset,temporary FROM branches WHERE id=?"),
+            branch_info = prepare(db, "SELECT id,run,base,memory,preset,temporary,result FROM branches WHERE id=?"),
+            finish = prepare(
+                db,
+                [[UPDATE branches SET result=? WHERE id=? AND temporary=0 AND result IS NULL
+AND EXISTS(SELECT 1 FROM events WHERE id=? AND branch=? AND kind='response') RETURNING id]]
+            ),
             caller = prepare(
                 db,
                 [[SELECT r.id run,r.actor,r.budget,b.id branch,b.preset
@@ -128,7 +144,7 @@ WHERE e.id=? AND e.kind='call' AND r.actor=?]]
                 db,
                 [[SELECT e.id FROM events e
 JOIN branches b ON b.id=e.branch JOIN runs r ON r.id=b.run
-WHERE r.actor=? AND b.temporary=0 AND e.kind='response'
+WHERE r.actor=? AND b.temporary=0 AND b.result=e.id
 ORDER BY e.id DESC LIMIT 1]]
             ),
             quota = prepare(db, "SELECT budget-used remaining FROM runs WHERE id=?"),
@@ -209,6 +225,12 @@ AND run IN (SELECT id FROM runs WHERE actor=?) RETURNING id]]
         end)
     end
 
+    function store:finish(branch, result)
+        return transaction(function()
+            assert(rows(db, statements.finish, result, branch, result, branch)[1], "invalid terminal response")
+        end)
+    end
+
     function store:append(branch, events)
         return transaction(function()
             return append(branch, events)
@@ -255,7 +277,7 @@ AND run IN (SELECT id FROM runs WHERE actor=?) RETURNING id]]
         if memory == 0 then
             return {}
         end
-        return rows(db, statements.before, branch, actor, memory, limit)
+        return rows(db, statements.before, branch, memory, actor, memory, memory, limit)
     end
 
     function store:search(actor, memory, branch, terms, limit)
@@ -266,7 +288,7 @@ AND run IN (SELECT id FROM runs WHERE actor=?) RETURNING id]]
         for index, term in ipairs(terms) do
             literals[index] = '"' .. term:gsub('"', '""') .. '"'
         end
-        return rows(db, statements.search, branch, table.concat(literals, " OR "), actor, memory, limit)
+        return rows(db, statements.search, branch, memory, table.concat(literals, " OR "), actor, memory, memory, limit)
     end
 
     function store:close()

@@ -17,28 +17,23 @@ Construct Agents with `sourceDir: "./package"` and `entryModule: "zinc"`. Portab
 
 ## Config
 
-Opaque config is strict UTF-8 JSON with exactly these fields:
+Opaque config is strict UTF-8 JSON. The only required fields are:
+
+```json
+{"version":1,"actor":"account:42","preset":"safe"}
+```
+
+`actor` is a nonempty authenticated identity; `preset` is `unsafe`, `safe`, or `no-host`. Optional `parent` and `memory` select explicit actor-owned coordinates and must be supplied together. Optional nested `run`, `models`, and `retrieval` objects override the defaults in `package/zinc.md`. For example:
 
 ```json
 {
-  "version": 1,
-  "actor": "account:42",
-  "preset": "safe",
-  "quota": null,
-  "imports": {
-    "research": "Research agent."
-  }
+  "run": {"quota_tokens":12000,"max_model_rounds":12},
+  "models": {"chat":{"maximum_output_tokens":2048,"thinking":false}},
+  "retrieval": {"chronological":{"tokens":8000},"semantic":{"candidates":24}}
 }
 ```
 
-- `version` is `1`.
-- `actor` is a nonempty authenticated identity.
-- `preset` is `unsafe`, `safe`, or `no-host`.
-- `quota` is `null` for the package default or a positive per-run override.
-- `imports` maps configured PA Import names to concise descriptions.
-- Optional `parent` and `memory` fields select explicit actor-owned coordinates and must be supplied together.
-
-The default quota is configured in `package/zinc.md`.
+All nested keys are validated against the package defaults; unspecified values remain unchanged. PA resource ceilings and Connector concurrency are separate embedder policy, not Zinc config. Imports are discovered from PA grants and documented by each required module.
 
 ## Calls
 
@@ -88,16 +83,15 @@ return response.body
 return self.search.text("home", "dev/zinc", "event")
 ```
 
-Configured Imports appear under `self.agents`:
+Granted Imports are native Lua modules, accessed only through `require`:
 
 ```lua
-local result = self.agents["research"].call({
-    question = "Find the source.",
-    parent = nil,
-    memory = 0,
-})
-return result.text
+local discord = require("discord")
+local id = discord.create_message("hello")
+return id
 ```
+
+Each Import supplies its own `document()` member for generated prompt instructions.
 
 Each `run_lua` source returns one Lua value. Portable Agents renders complete table results as Lua, while string results remain unchanged. Independent sources in one model response execute concurrently and return in model order.
 
@@ -154,13 +148,13 @@ The first prompt contains the current balance. After every tool wave, the final 
 
 ## Store and memory
 
-Store format `5` normalizes state into runs, branches, and events:
+Store format `1` normalizes state into runs, branches, and events:
 
 - runs own actor and budget
-- branches own run, base, memory, preset, and lifetime
+- branches own run, base, memory, preset, lifetime, and the successful terminal response coordinate
 - events own branch, kind, text, and optional tool token count
 
-No migration is performed. Format `0` initializes; format `5` opens; every other version fails.
+No migration is performed. Format `0` initializes version `1`; version `1` opens; every other version fails. Incomplete durable branches remain auditable but cannot become the continuation head or enter normal retrieval.
 
 Normal retrieval sees durable actor events. A temporary branch also sees its own temporary ancestry. Chronological and semantic retrieval remain bounded by the inclusive memory coordinate. Cygnet format `2` and `relation-balanced-pagerank-v1` remain required.
 
@@ -168,13 +162,15 @@ No SQLite transaction spans model, HTTP, process, Eval, or imported-Agent work.
 
 ## Models
 
-`models.ini` configures LFM2.5-2.6B with its official generation settings:
+`models.ini` configures MiniCPM5-2B Q4_K_M with its recommended generation settings:
 
 ```text
-temperature = 0.1
-top-k = 50
-repetition penalty = 1.1
+temperature = 1.0
+top-p = 0.95
+min-p = 0.0
 ```
+
+Its 65,536-token router context fits the default combined retrieval budgets and output ceiling; the model supports up to 131,072 tokens. The pinned local llama.cpp fork includes the specialized MiniCPM5 XML tool-call parser.
 
 Chat uses the embedded Jinja template through non-stream `/v1/chat/completions`. Reranking uses the locked Nemotron reranker.
 
@@ -197,8 +193,7 @@ agc run .
 ```
 
 Connector expands the configured actor, supplies the optional Discord Import, streams Zinc's emitted Markdown, and
-passes per-command config overlays without interpreting Zinc's schema. Zinc owns continuation in its Store. The exact
-child environment must include the Lua 5.5 paths produced by `lx path full`.
+passes per-command config overlays without interpreting Zinc's schema. Zinc owns continuation in its Store. PA discovers pure Lua modules in the package Image and native modules under `package/native`. No Lua loader environment variables are needed. The PA binary and native module must both use ABI-compatible dynamic Lua 5.5.
 
 ## Development
 
@@ -206,6 +201,8 @@ child environment must include the Lua 5.5 paths produced by `lx path full`.
 python3 tools/format_fences.py
 lx --lua-version 5.5 fmt --backend stylua --path package/src
 CFLAGS=-DSQLITE_ENABLE_FTS5 lx --lua-version 5.5 build
+mkdir -p package/native
+cp "$(find .lux/5.5 -path '*/lib/lsqlite3complete.so' -type f -print -quit)" package/native/
 agent check package zinc
 ```
 

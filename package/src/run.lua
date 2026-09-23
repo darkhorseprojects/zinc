@@ -64,27 +64,22 @@ local function render(name, preset, documents)
     return { system = table.concat(lines, "\n"), names = members, adapters = adapters, prompt = preset.prompt }
 end
 
-local function import_prompt(imports)
-    local selected, lines = names(imports), {}
+local function import_prompt()
+    local selected, lines = pa.imports(), {}
+    table.sort(selected)
     if #selected > 0 then
         lines[1] = "Imports"
         for _, name in ipairs(selected) do
-            lines[#lines + 1] = string.format("self.agents[%q].call(request) -> result; %s", name, imports[name])
+            local document = require(name).document()
+            assert(type(document) == "string" and document ~= "", "invalid Import document")
+            lines[#lines + 1] = document
         end
     end
-    return selected, table.concat(lines, "\n")
+    return table.concat(lines, "\n")
 end
 
-local function source(prepared, imports, caller, call, code)
+local function source(prepared, caller, call, code)
     local adapters = table.concat(prepared.adapters, "\n")
-    local agents = { "self.agents={}" }
-    for _, name in ipairs(imports) do
-        agents[#agents + 1] = string.format(
-            'self.agents[%q]={call=function(request) return invoke("agent","call",%q,request) end}',
-            name,
-            name
-        )
-    end
     return "local self,input=(function(raw,callable)\nlocal caller="
         .. caller
         .. "\n"
@@ -94,8 +89,6 @@ end
 local self={}
 ]]
         .. adapters
-        .. "\n"
-        .. table.concat(agents, "\n")
         .. string.format(
             "\nreturn self,{question=%q,parent=%s,memory=%d}\nend)((...),callable)\ncallable=nil\n",
             call.question,
@@ -111,7 +104,7 @@ return output
 ]]
 end
 
-return function(spec, entry, model, documents)
+return function(spec, entry, make_model, documents)
     local prepared = {}
     for name, preset in pairs(spec.presets) do
         prepared[preset] = render(name, preset, documents)
@@ -119,9 +112,9 @@ return function(spec, entry, model, documents)
 
     local runner = {}
 
-    local function execute(store, memory, call)
+    local function execute(store, memory, model, call)
         local selected = prepared[call.preset]
-        local import_names, imports = import_prompt(call.imports)
+        local imports = import_prompt()
         local system = selected.system
             .. (imports ~= "" and "\n" .. imports or "")
             .. "\n"
@@ -136,7 +129,7 @@ return function(spec, entry, model, documents)
         end
         local messages = { { role = "system", content = system }, { role = "user", content = user } }
 
-        for _ = 1, spec.limits.model_rounds do
+        for _ = 1, call.config.run.max_model_rounds do
             local completion = model:chat(messages)
             local assistant = {
                 reasoning_content = completion.reasoning,
@@ -176,8 +169,7 @@ return function(spec, entry, model, documents)
             for index, admission in ipairs(admitted) do
                 if admission.accepted then
                     positions[index] = #sources + 1
-                    sources[#sources + 1] =
-                        source(selected, import_names, admission.row.id, call, completion.calls[index].code)
+                    sources[#sources + 1] = source(selected, admission.row.id, call, completion.calls[index].code)
                 end
             end
 
@@ -187,9 +179,6 @@ return function(spec, entry, model, documents)
                     zinc_call = entry.zinc_call,
                     zinc_destroy = entry.zinc_destroy,
                 }
-                if #import_names > 0 then
-                    view.agent = entry.agent
-                end
                 for _, name in ipairs(selected.names) do
                     view[name] = entry[name]
                 end
@@ -246,20 +235,32 @@ return function(spec, entry, model, documents)
         error("model round limit exhausted", 0)
     end
 
-    local function run(start)
+    local function run(start, config)
         local store = make_store(spec.store)
+        local model = make_model(spec.origin, config.models)
         local memory
         local result = table.pack(pcall(function()
             local call = start(store)
-            memory = make_memory(spec.memory, store, model)
-            return call, execute(store, memory, call)
+            memory = make_memory({
+                cygnet = spec.cygnet,
+                chronological = config.retrieval.chronological,
+                semantic = config.retrieval.semantic,
+            }, store, model)
+            return call, execute(store, memory, model, call)
         end))
         local memory_closed = not memory or pcall(memory.close, memory)
+        local completed, complete_problem = true, nil
+        if result[1] and memory_closed and not result[2].temporary then
+            completed, complete_problem = pcall(store.finish, store, result[2].branch, result[3].id)
+        end
         local store_closed, store_problem = pcall(store.close, store)
         if not result[1] then
             error(result[2], 0)
         end
         assert(memory_closed, "failed to close memory")
+        if not completed then
+            error(complete_problem, 0)
+        end
         if not store_closed then
             error(store_problem, 0)
         end
@@ -276,12 +277,12 @@ return function(spec, entry, model, documents)
                 store:start(call.actor, call.quota, call.parent, call.memory, call.preset_name, call.question)
             call.run, call.branch, call.start = run_id, branch, start.id
             return call
-        end)
+        end, call.config)
     end
 
-    function runner:nested(actor, imports, caller, request)
+    function runner:nested(config, caller, request)
         return run(function(store)
-            local context = store:caller(actor, caller)
+            local context = store:caller(config.actor, caller)
             local preset = request.preset or context.preset
             local available = false
             for _, target in ipairs(spec.presets[context.preset].targets) do
@@ -290,9 +291,10 @@ return function(spec, entry, model, documents)
             assert(available, "Zinc preset is unavailable")
             local branch = store:child(context.run, request.parent, request.memory, preset, request.question)
             return {
-                actor = actor,
+                actor = config.actor,
                 branch = branch,
-                imports = imports,
+                config = config,
+                temporary = true,
                 memory = request.memory,
                 parent = request.parent,
                 preset = spec.presets[preset],
@@ -300,7 +302,7 @@ return function(spec, entry, model, documents)
                 question = request.question,
                 run = context.run,
             }
-        end)
+        end, config)
     end
 
     local function access(work)
@@ -314,12 +316,6 @@ return function(spec, entry, model, documents)
             error(problem, 0)
         end
         return table.unpack(result, 2, result.n)
-    end
-
-    function runner:authorize(actor, caller)
-        return access(function(store)
-            return store:caller(actor, caller)
-        end)
     end
 
     function runner:destroy(actor, caller, branch)

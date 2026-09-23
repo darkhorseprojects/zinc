@@ -38,11 +38,11 @@ local function finite(value)
     return type(value) == "number" and value == value and value ~= math.huge and value ~= -math.huge
 end
 
-return function(config)
+return function(origin, config)
     local chat, rerank = config.chat, config.rerank
 
     local function request(path, value, maximum)
-        local status, body = pa.http(config.origin, "POST", path, json.encode(value, NULL), {
+        local status, body = pa.http(origin, "POST", path, json.encode(value, NULL), {
             ["content-type"] = "application/json",
             accept = "application/json",
         })
@@ -54,12 +54,12 @@ return function(config)
     end
 
     local function post(model, path, value, maximum)
-        value.model = model.model
+        value.model = model.name
         return request(path, value, maximum)
     end
 
     local function tokens(model, content)
-        local result = post(model, model.tokenize, {
+        local result = post(model, "/tokenize", {
             content = content,
             add_special = false,
             parse_special = false,
@@ -74,11 +74,12 @@ return function(config)
     end
 
     function api:chat(messages)
-        local result = post(chat, chat.endpoint, {
+        local result = post(chat, "/v1/chat/completions", {
             messages = messages,
             tools = { TOOL },
             parallel_tool_calls = true,
             max_tokens = chat.maximum_output_tokens,
+            chat_template_kwargs = { enable_thinking = chat.thinking },
             stream = false,
         }, chat.maximum_response_bytes)
         local choices = dense(result.choices, "chat choices")
@@ -134,6 +135,9 @@ return function(config)
     end
 
     function api:rerank(query, passages)
+        if #query > rerank.query_tokens and tokens(rerank, query) > rerank.query_tokens then
+            return {}
+        end
         local selected, source = {}, {}
         for index, passage in ipairs(passages) do
             local content = query .. "\n" .. passage
@@ -144,7 +148,7 @@ return function(config)
         if #selected == 0 then
             return {}
         end
-        local ranked = post(rerank, rerank.endpoint, {
+        local ranked = post(rerank, "/v1/rerank", {
             documents = selected,
             query = query,
             top_n = #selected,
