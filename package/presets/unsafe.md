@@ -1,6 +1,6 @@
 # Operations
 
-Roots, HTTP targets, and executables are arguments. Relative filesystem roots resolve from the package; `.` selects the package directory.
+Filesystem roots, HTTP targets, and absolute process executables are arguments. Relative filesystem roots resolve from the package; `.` selects that directory. `./` is optional before a file path. HTTP paths begin with `/`; headers are a table. Process arguments are a string array; input is stdin.
 
 ```lua
 local pa = require("pa")
@@ -12,12 +12,8 @@ return {
     members = {
         fs = {
             usage = {
-                [[self.fs.read(root,path) -> string
-local text = self.fs.read(".","./notes.txt")
-return text]],
-                [[self.fs.write(root,path,text) -> "written"
-local result = self.fs.write(".","./notes.txt","TEXT")
-return result]],
+                "self.fs.read(root,path) -> string (UTF-8 file text)",
+                [[self.fs.write(root,path,text) -> "written"]],
             },
             adapter = [[
 self.fs={
@@ -50,9 +46,7 @@ self.fs={
         },
         http = {
             usage = {
-                [[self.http.request(method,origin,path,body,headers) -> {status,body}
-local response = self.http.request("GET","https://example.com","/","",{})
-return response]],
+                "self.http.request(method,origin,path,body,headers) -> {status,body}",
             },
             adapter = [[
 self.http={request=function(method,origin,path,body,headers)
@@ -71,9 +65,7 @@ end}
         },
         process = {
             usage = {
-                [[self.process.run(executable,arguments,input) -> {code,stdout,stderr}
-local result = self.process.run("/usr/bin/rg",{"--files"},"")
-return result]],
+                "self.process.run(executable,arguments,input) -> {code,stdout,stderr}",
             },
             adapter = [[
 self.process={run=function(executable,arguments,input)

@@ -1,6 +1,6 @@
 # Operations
 
-Filesystem paths and search directories are relative to their named roots.
+Filesystem paths and search directories are relative to their named roots. `.` searches the whole root; `./` is optional before a file path. HTTP calls take a string body and a headers table.
 
 ```lua
 local pa = require("pa")
@@ -39,12 +39,8 @@ return {
     members = {
         fs = {
             usage = {
-                [[self.fs.read(root,path) -> string
-local text = self.fs.read("home","./PATH")
-return text]],
-                [[self.fs.write(root,path,text) -> "written"
-local result = self.fs.write("home","./PATH","TEXT")
-return result]],
+                "self.fs.read(root,path) -> string (UTF-8 file text)",
+                [[self.fs.write(root,path,text) -> "written"]],
             },
             adapter = [[
 self.fs={
@@ -69,9 +65,7 @@ self.fs={
         },
         http = {
             usage = {
-                [[self.http.call(action,body,headers) -> {status,body}
-local response = self.http.call("model_health","",{})
-return response]],
+                "self.http.call(action,body,headers) -> {status,body}",
             },
             adapter = [[
 self.http={call=function(action,body,headers) return invoke("http","call",action,body,headers or {}) end}
@@ -88,12 +82,8 @@ self.http={call=function(action,body,headers) return invoke("http","call",action
         },
         search = {
             usage = {
-                [[self.search.text(root,directory,query) -> string
-local matches = self.search.text("home",".","QUERY")
-return matches]],
-                [[self.search.files(root,directory) -> string
-local files = self.search.files("home",".")
-return files]],
+                "self.search.text(root,directory,query) -> string (matching lines)",
+                "self.search.files(root,directory) -> string (file paths)",
             },
             adapter = [[
 self.search={

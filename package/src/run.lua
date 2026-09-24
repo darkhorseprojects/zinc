@@ -6,12 +6,11 @@ local CORE_ADAPTER = [[
 callable(self,function(_,request) return invoke("zinc_call","call",request) end)
 self.destroy=function(branch) return invoke("zinc_destroy","destroy",branch) end
 ]]
-local NESTED_CALL = [[self({preset=P,question=Q,parent=%s,memory=%d}) -> {branch,id,parent,memory,text}
-P = %s
-self.destroy(branch) -> "destroyed"
-local child = self({question="QUESTION",parent=%s,memory=%d})
-self.destroy(child.branch)
-return child.text]]
+local NESTED_CALL = [[self({question=Q,parent=P,memory=M,preset=S}) -> {branch,id,parent,memory,text}
+Q: nonempty string; P: parent event id or nil (current %s)
+M: inclusive memory event id or 0 (current %d)
+S: optional preset; nil keeps the current preset; allowed: %s
+self.destroy(temporary_branch) -> "destroyed"]]
 
 local function names(value)
     local result = {}
@@ -130,7 +129,7 @@ return function(spec, entry, make_model, documents)
         local system = selected.system
             .. (imports ~= "" and "\n" .. imports or "")
             .. "\n"
-            .. string.format(NESTED_CALL, parent, call.memory, selected.targets, parent, call.memory)
+            .. string.format(NESTED_CALL, parent, call.memory, selected.targets)
             .. "\nEval quota: "
             .. store:quota(call.run)
             .. " tokens. Sources and results consume it."
