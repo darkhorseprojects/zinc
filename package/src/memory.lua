@@ -102,10 +102,8 @@ CREATE VIRTUAL TABLE temp.grounding_vocabulary USING fts5vocab(grounding_tokeniz
     local function ground(value)
         local terms, tokens, exact, seen = {}, {}, {}, {}
         for literal in value:gmatch("%S+") do
-            if literal:find("_", 1, true) then
-                if #exact < config.semantic.exact_forms then
-                    exact[#exact + 1] = literal
-                end
+            if literal:find("_", 1, true) and #exact < config.semantic.exact_forms then
+                exact[#exact + 1] = literal
             end
             local key = literal:lower()
             if not seen[key] and #terms < config.semantic.terms then
@@ -163,19 +161,16 @@ CREATE VIRTUAL TABLE temp.grounding_vocabulary USING fts5vocab(grounding_tokeniz
             if remaining == 0 then
                 break
             end
-            for _, row in
-                ipairs(
-                    rows(
-                        db,
-                        state.expand,
-                        config.semantic.language,
-                        form,
-                        config.semantic.depth,
-                        config.semantic.language,
-                        remaining
-                    )
-                )
-            do
+            local matches = rows(
+                db,
+                state.expand,
+                config.semantic.language,
+                form,
+                config.semantic.depth,
+                config.semantic.language,
+                remaining
+            )
+            for _, row in ipairs(matches) do
                 local key = row.term:lower()
                 if not seen[key] then
                     seen[key], terms[#terms + 1] = true, row.term

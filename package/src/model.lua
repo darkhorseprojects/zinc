@@ -254,11 +254,10 @@ return function(endpoints, config)
         pa.log("model.http.end")
         local reasoning = #thoughts > 0 and table.concat(thoughts) or nil
         local content = #contents > 0 and table.concat(contents) or nil
-        assert(reasoning == nil or type(reasoning) == "string" and utf8.len(reasoning), "invalid reasoning")
-        assert(content == nil or type(content) == "string" and utf8.len(content), "invalid response")
+        assert(not reasoning or utf8.len(reasoning), "invalid reasoning")
+        assert(not content or utf8.len(content), "invalid response")
 
         local entries = dense(calls, "chat tool calls")
-        assert(#entries <= chat.maximum_tool_calls, "tool call limit")
         local decoded_calls, tool_calls, ids = {}, {}, {}
         for index, entry in ipairs(entries) do
             local fn = type(entry) == "table" and entry["function"]
@@ -292,7 +291,7 @@ return function(endpoints, config)
         assert(finished == "stop" or finished == "tool_calls", "invalid tool completion")
         pa.log("model.chat.finish." .. finished)
         if #decoded_calls == 0 then
-            assert(finished == "stop" and content and content ~= "", "chat completion has no response")
+            assert(finished == "stop" and (content or reasoning), "chat completion has no response")
         end
         pa.log("model.chat.decoded")
         return {

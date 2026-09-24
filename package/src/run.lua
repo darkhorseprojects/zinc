@@ -182,12 +182,7 @@ return function(spec, entry, make_model, documents)
             pa.log("model.chat.begin")
             local completion = model:chat(messages)
             pa.log("model.chat.end")
-            local assistant = {
-                reasoning_content = completion.reasoning,
-                content = completion.content,
-                tool_calls = #completion.calls > 0 and completion.tool_calls or nil,
-                role = "assistant",
-            }
+            local tool_calls = #completion.calls > 0 and completion.tool_calls or nil
             local events = {}
             if completion.reasoning and completion.reasoning ~= "" then
                 events[#events + 1] = { kind = "reasoning", text = completion.reasoning }
@@ -196,120 +191,134 @@ return function(spec, entry, make_model, documents)
                 events[#events + 1] = { kind = "response", text = completion.content }
             end
             local rows = #events > 0 and store:append(call.branch, events) or {}
-            messages[#messages + 1] = assistant
+            local previous = messages[#messages]
+            if previous.role == "assistant" and previous.content == "" and not previous.tool_calls then
+                previous.reasoning_content = (previous.reasoning_content or "") .. (completion.reasoning or "")
+                previous.content = completion.content or ""
+                previous.tool_calls = tool_calls
+            else
+                messages[#messages + 1] = {
+                    role = "assistant",
+                    reasoning_content = completion.reasoning,
+                    content = completion.content or "",
+                    tool_calls = tool_calls,
+                }
+            end
             pa.emit("")
             if #completion.calls == 0 then
-                return assert(rows[#rows], "model returned no response")
-            end
-
-            local requests = {}
-            for index, tool in ipairs(completion.calls) do
-                requests[index] = { kind = "call", text = tool.code, tokens = model:tokens(tool.code) }
-            end
-            local admitted = store:admit(call.branch, requests)
-            for _, tool in ipairs(completion.calls) do
-                pa.emit(fenced("lua", tool.code))
-            end
-            local sources, positions = {}, {}
-            for index, admission in ipairs(admitted) do
-                if admission.accepted then
-                    positions[index] = #sources + 1
-                    sources[#sources + 1] = source(selected, admission.row.id, call, completion.calls[index].code)
-                end
-            end
-
-            local evaluated
-            if #sources > 0 then
-                local view = {
-                    zinc_call = entry.zinc_call,
-                    zinc_destroy = entry.zinc_destroy,
-                }
-                for _, name in ipairs(selected.names) do
-                    view[name] = entry[name]
-                end
-                if pa.profile then
-                    pa.log("tool.eval.begin")
-                end
-                local ok, value = pcall(pa.eval, view, sources, "")
-                if pa.profile then
-                    pa.log("tool.eval.end")
-                end
-                evaluated = ok and value or {}
-                if not ok then
-                    for index in ipairs(sources) do
-                        evaluated[index] = { false, tostring(value) }
-                    end
+                if completion.content then
+                    return assert(rows[#rows], "model returned no response")
                 end
             else
-                evaluated = {}
-            end
+                local requests = {}
+                for index, tool in ipairs(completion.calls) do
+                    requests[index] = { kind = "call", text = tool.code, tokens = model:tokens(tool.code) }
+                end
+                local admitted = store:admit(call.branch, requests)
+                for _, tool in ipairs(completion.calls) do
+                    pa.emit(fenced("lua", tool.code))
+                end
+                local sources, positions = {}, {}
+                for index, admission in ipairs(admitted) do
+                    if admission.accepted then
+                        positions[index] = #sources + 1
+                        sources[#sources + 1] = source(selected, admission.row.id, call, completion.calls[index].code)
+                    end
+                end
 
-            local outputs, result_events = {}, {}
-            local available = math.max(0, store:quota(call.run))
-            for index in ipairs(completion.calls) do
-                local admission = admitted[index]
-                local position = positions[index]
-                if position then
-                    local result = evaluated[position]
-                    local output
-                    if type(result) == "table" and type(result[1]) == "boolean" and type(result[2]) == "string" then
-                        output = result[1] and result[2] or "run_lua failed:\n" .. result[2]
-                    else
-                        output = "run_lua failed: invalid Eval result"
+                local evaluated
+                if #sources > 0 then
+                    local view = {
+                        zinc_call = entry.zinc_call,
+                        zinc_destroy = entry.zinc_destroy,
+                    }
+                    for _, name in ipairs(selected.names) do
+                        view[name] = entry[name]
                     end
-                    if output:sub(1, 15) == "run_lua failed:" then
-                        pa.log("tool.eval.failed")
+                    if pa.profile then
+                        pa.log("tool.eval.begin")
                     end
-                    if output == "" or not utf8.len(output) then
-                        output = "run_lua failed: invalid result"
+                    local ok, value = pcall(pa.eval, view, sources, "")
+                    if pa.profile then
+                        pa.log("tool.eval.end")
                     end
-                    local original_bytes = #output
-                    local limit = call.config.run.maximum_tool_result_bytes
-                    if original_bytes > limit then
-                        local notice = string.format(
-                            "\n[result truncated: call #%d, original %d bytes]",
-                            admission.row.id,
-                            original_bytes
-                        )
-                        local length = limit - #notice
-                        while length > 0 and not utf8.len(output:sub(1, length)) do
-                            length = length - 1
+                    evaluated = ok and value or {}
+                    if not ok then
+                        for index in ipairs(sources) do
+                            evaluated[index] = { false, tostring(value) }
                         end
-                        output = output:sub(1, length) .. notice
-                        pa.log("tool.result.truncated")
                     end
-                    local tokens = model:tokens(output)
-                    if tokens > available then
-                        output = string.format(
-                            "run_lua result omitted: quota exhausted (call #%d, original %d bytes)",
-                            admission.row.id,
-                            original_bytes
-                        )
-                        tokens = 0
-                        pa.log("tool.result.quota")
-                    else
-                        available = available - tokens
-                    end
-                    outputs[index] = output
-                    result_events[#result_events + 1] = { kind = "result", text = output, tokens = tokens }
                 else
-                    outputs[index] = "quota exhausted"
+                    evaluated = {}
                 end
-            end
-            if #result_events > 0 then
-                store:append(call.branch, result_events)
-            end
-            for _, output in ipairs(outputs) do
-                pa.emit(fenced("text", output))
-            end
-            pa.emit("")
-            local remaining = store:quota(call.run)
-            for index, tool in ipairs(completion.calls) do
-                local content = outputs[index]
-                if index == #completion.calls then
-                    content = content .. "\nquota_remaining=" .. remaining
+
+                local outputs, result_events = {}, {}
+                local available = math.max(0, store:quota(call.run))
+                for index in ipairs(completion.calls) do
+                    local admission = admitted[index]
+                    local position = positions[index]
+                    if position then
+                        local result = evaluated[position]
+                        local output
+                        if type(result) == "table" and type(result[1]) == "boolean" and type(result[2]) == "string" then
+                            output = result[1] and result[2] or "run_lua failed:\n" .. result[2]
+                        else
+                            output = "run_lua failed: invalid Eval result"
+                        end
+                        if output:sub(1, 15) == "run_lua failed:" then
+                            pa.log("tool.eval.failed")
+                        end
+                        if output == "" or not utf8.len(output) then
+                            output = "run_lua failed: invalid result"
+                        end
+                        local original_bytes = #output
+                        local limit = call.config.run.maximum_tool_result_bytes
+                        if original_bytes > limit then
+                            local notice = string.format(
+                                "\n[result truncated: call #%d, original %d bytes]",
+                                admission.row.id,
+                                original_bytes
+                            )
+                            local length = limit - #notice
+                            while length > 0 and not utf8.len(output:sub(1, length)) do
+                                length = length - 1
+                            end
+                            output = output:sub(1, length) .. notice
+                            pa.log("tool.result.truncated")
+                        end
+                        local tokens = model:tokens(output)
+                        if tokens > available then
+                            output = string.format(
+                                "run_lua result omitted: quota exhausted (call #%d, original %d bytes)",
+                                admission.row.id,
+                                original_bytes
+                            )
+                            tokens = 0
+                            pa.log("tool.result.quota")
+                        else
+                            available = available - tokens
+                        end
+                        outputs[index] = output
+                        result_events[#result_events + 1] = { kind = "result", text = output, tokens = tokens }
+                    else
+                        outputs[index] = "quota exhausted"
+                    end
                 end
-                messages[#messages + 1] = { role = "tool", tool_call_id = tool.id, content = content }
+                if #result_events > 0 then
+                    store:append(call.branch, result_events)
+                end
+                for _, output in ipairs(outputs) do
+                    pa.emit(fenced("text", output))
+                end
+                pa.emit("")
+                local remaining = store:quota(call.run)
+                for index, tool in ipairs(completion.calls) do
+                    local content = outputs[index]
+                    if index == #completion.calls then
+                        content = content .. "\nquota_remaining=" .. remaining
+                    end
+                    messages[#messages + 1] = { role = "tool", tool_call_id = tool.id, content = content }
+                end
             end
         end
         error("model round limit exhausted", 0)

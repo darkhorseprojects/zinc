@@ -21,6 +21,10 @@ local actions = {
 
 local function relative(path)
     assert(type(path) == "string" and not path:find("\\", 1, true), "invalid path")
+    if path == "." then
+        return ""
+    end
+    path = path:gsub("^%./", "")
     assert(path:sub(1, 1) ~= "/" and path:sub(-1) ~= "/" and not path:find("//", 1, true), "invalid path")
     for part in path:gmatch("[^/]+") do
         assert(part ~= "." and part ~= "..", "invalid path")
@@ -36,10 +40,10 @@ return {
         fs = {
             usage = {
                 [[self.fs.read(root,path) -> string
-local text = self.fs.read("home","PATH")
+local text = self.fs.read("home","./PATH")
 return text]],
                 [[self.fs.write(root,path,text) -> "written"
-local result = self.fs.write("home","PATH","TEXT")
+local result = self.fs.write("home","./PATH","TEXT")
 return result]],
             },
             adapter = [[
@@ -85,10 +89,10 @@ self.http={call=function(action,body,headers) return invoke("http","call",action
         search = {
             usage = {
                 [[self.search.text(root,directory,query) -> string
-local matches = self.search.text("home","DIRECTORY","QUERY")
+local matches = self.search.text("home",".","QUERY")
 return matches]],
                 [[self.search.files(root,directory) -> string
-local files = self.search.files("home","DIRECTORY")
+local files = self.search.files("home",".")
 return files]],
             },
             adapter = [[

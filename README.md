@@ -64,7 +64,7 @@ HTTP model_models = GET http://127.0.0.1:8000/v1/models
 
 Edit `package/presets/safe.md` to change those values. “Safe” means configured.
 
-The unsafe preset accepts caller-selected filesystem roots, HTTP coordinates, and absolute process executables. No-host adds no filesystem, HTTP, search, or process member.
+The unsafe preset accepts caller-selected filesystem roots, HTTP coordinates, and absolute process executables. Filesystem paths may start with `./`. Use `.` to search an entire root; in the unsafe preset, `.` as the filesystem root selects the package directory. Read and write still require a file. No-host adds no filesystem, HTTP, search, or process member.
 
 ## Generated Lua
 
@@ -168,7 +168,7 @@ No SQLite transaction spans model, HTTP, process, Eval, or imported-Agent work.
 
 The reranker has a separate 4,096-token slot. Default retrieval reserves up to 30,000 tokens each for chronological and semantic history (256 records and 64 candidates); available history may be smaller. Before every chat round Zinc applies the server's template with the tool schema, counts its tokens, reserves output, 4,096 tokens of headroom, and 4,096 tokens per attached image, then discards the oldest complete transient tool waves if necessary. The system, question, and retrieved history remain intact; an oversized base prompt fails rather than silently truncating. Numeric overrides cannot exceed the trusted package defaults. The model advertises 262,144 tokens, but this preset qualifies 131,072; longer contexts require separate VRAM and quality checks. Thinking is on by default and can be disabled per call.
 
-Chat uses the embedded Jinja template, `/apply-template` and `/tokenize` for prompt admission, `/props?model=chat` for effective slot size, and an SSE `/v1/chat/completions` stream. Zinc assembles complete tool arguments before Eval, bounds response bytes during transfer, and reports HTTP status and phase diagnostics without recording prompts. It emits an empty message when each assistant model turn completes; the Connector then sends that turn without live edits, even when tool execution continues. Connector passes Discord PNG, JPEG, and WebP attachments through a bounded image envelope; images are not stored for later turns. Reranking uses the locked BGE GGUF. Model origin and endpoint paths remain trusted settings in `package/zinc.md`.
+Chat uses the embedded Jinja template, `/apply-template` and `/tokenize` for prompt admission, `/props?model=chat` for effective slot size, and an SSE `/v1/chat/completions` stream. Zinc assembles complete tool arguments before Eval, bounds response bytes during transfer, and reports HTTP status and phase diagnostics without recording prompts. It emits an empty message when each assistant model turn completes; the Connector then sends that turn without live edits, even when tool execution continues. A reasoning-only turn is stored and emitted, then continued rather than treated as the final answer. Connector passes Discord PNG, JPEG, and WebP attachments through a bounded image envelope; images are not stored for later turns. Reranking uses the locked BGE GGUF. Model origin and endpoint paths remain trusted settings in `package/zinc.md`.
 
 Models remain external to release archives. `models.ini` identifies their Hugging Face repositories and files; the
 router resolves them through the standard Hugging Face cache. Build Cygnet data with:

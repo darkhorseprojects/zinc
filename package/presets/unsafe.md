@@ -1,6 +1,6 @@
 # Operations
 
-Roots, HTTP targets, and executables are arguments.
+Roots, HTTP targets, and executables are arguments. Relative filesystem roots resolve from the package; `.` selects the package directory.
 
 ```lua
 local pa = require("pa")
@@ -13,10 +13,10 @@ return {
         fs = {
             usage = {
                 [[self.fs.read(root,path) -> string
-local text = self.fs.read("/srv/data","notes.txt")
+local text = self.fs.read(".","./notes.txt")
 return text]],
                 [[self.fs.write(root,path,text) -> "written"
-local result = self.fs.write("/srv/data","notes.txt","TEXT")
+local result = self.fs.write(".","./notes.txt","TEXT")
 return result]],
             },
             adapter = [[
@@ -26,17 +26,25 @@ self.fs={
 }
 ]],
             call = function(action, arguments)
-                assert(type(arguments[1]) == "string" and type(arguments[2]) == "string", "invalid filesystem call")
-                local root <close> = pa.fs(arguments[1])
+                assert(
+                    type(arguments[1]) == "string" and arguments[1] ~= "" and type(arguments[2]) == "string",
+                    "invalid filesystem call"
+                )
+                local root_path = arguments[1]:gsub("^%./", "")
+                if root_path == "" or root_path == "." then
+                    root_path = nil
+                end
+                local root <close> = pa.fs(root_path)
+                local path = arguments[2]:gsub("^%./", "")
                 if action == "read" then
                     assert(#arguments == 2, "invalid read")
-                    local data = root:read(arguments[2])
+                    local data = root:read(path)
                     assert(utf8.len(data), "file is not UTF-8")
                     return data
                 end
                 assert(action == "write" and #arguments == 3, "invalid write")
                 assert(type(arguments[3]) == "string" and utf8.len(arguments[3]), "invalid text")
-                root:write(arguments[2], arguments[3])
+                root:write(path, arguments[3])
                 return "written"
             end,
         },

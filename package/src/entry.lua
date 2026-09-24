@@ -122,11 +122,7 @@ return function(spec)
         assert(value.version == 1, "unsupported Zinc config version")
         assert(type(value.actor) == "string" and value.actor ~= "" and utf8.len(value.actor), "invalid actor")
         assert(spec.presets[value.preset], "unknown Zinc preset")
-        local coordinates = value.parent ~= nil or value.memory ~= nil
-        assert(
-            not coordinates or value.parent ~= nil and value.memory ~= nil,
-            "parent and memory must be configured together"
-        )
+        assert((value.parent == nil) == (value.memory == nil), "parent and memory must be configured together")
         assert(
             value.parent == nil or value.parent == NULL or math.type(value.parent) == "integer" and value.parent > 0,
             "invalid parent"
