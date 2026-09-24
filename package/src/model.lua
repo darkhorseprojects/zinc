@@ -1,10 +1,11 @@
-local json = require("lunajson")
+local decode_json = require("lunajson.decoder")()
+local encode_json = require("lunajson.encoder")()
 local pa = require("pa")
 
 local NULL = {}
 
 local function decode(source)
-    local value, offset = json.decode(source, 1, NULL)
+    local value, offset = decode_json(source, 1, NULL)
     assert(source:sub(offset):match("^%s*$"), "JSON has trailing data")
     return value
 end
@@ -43,7 +44,7 @@ return function(endpoints, config)
 
     local function request(path, value, maximum)
         pa.log("model.http.begin")
-        local status, body = pa.http(endpoints.origin, "POST", path, json.encode(value, NULL), {
+        local status, body = pa.http(endpoints.origin, "POST", path, encode_json(value, NULL), {
             ["content-type"] = "application/json",
             accept = "application/json",
         }, maximum)
@@ -105,7 +106,13 @@ return function(endpoints, config)
     end
 
     function api:prompt_tokens(messages)
+        if pa.profile then
+            pa.log("model.template.begin")
+        end
         local result = request(endpoints.chat.template, chat_body(messages), chat.maximum_response_bytes)
+        if pa.profile then
+            pa.log("model.template.end")
+        end
         assert(type(result.prompt) == "string", "invalid chat template")
         return tokens(chat, endpoints.chat.tokenize, result.prompt, true)
     end
@@ -115,7 +122,9 @@ return function(endpoints, config)
         local finished, done = nil, false
         local contents, thoughts, calls = {}, {}, {}
         local streamed_kind
-        local request_body = json.encode(chat_body(messages), NULL)
+        local quote_start = false
+        local first_reasoning, first_content, first_tool = false, false, false
+        local request_body = encode_json(chat_body(messages), NULL)
         pa.log("model.http.begin")
         local status = pa.http(
             endpoints.origin,
@@ -160,17 +169,29 @@ return function(endpoints, config)
                                 "invalid chat delta"
                             )
                             if type(delta.reasoning_content) == "string" and delta.reasoning_content ~= "" then
+                                if pa.profile and not first_reasoning then
+                                    first_reasoning = true
+                                    pa.log("model.chat.first_reasoning")
+                                end
                                 thoughts[#thoughts + 1] = delta.reasoning_content
                                 if chat.thinking then
                                     if streamed_kind == "content" then
                                         pa.emit("")
                                     end
-                                    local prefix = streamed_kind == "reasoning" and "" or "> "
-                                    pa.emit(prefix .. delta.reasoning_content:gsub("\n", "\n> "), "append")
+                                    local prefix = (streamed_kind ~= "reasoning" or quote_start)
+                                            and delta.reasoning_content:sub(1, 1) ~= "\n"
+                                            and "> "
+                                        or ""
+                                    pa.emit(prefix .. delta.reasoning_content:gsub("\n([^\n])", "\n> %1"), "append")
+                                    quote_start = delta.reasoning_content:sub(-1) == "\n"
                                     streamed_kind = "reasoning"
                                 end
                             end
                             if type(delta.content) == "string" and delta.content ~= "" then
+                                if pa.profile and not first_content then
+                                    first_content = true
+                                    pa.log("model.chat.first_content")
+                                end
                                 contents[#contents + 1] = delta.content
                                 if streamed_kind == "reasoning" then
                                     pa.emit("")
@@ -198,6 +219,10 @@ return function(endpoints, config)
                                         call["function"].name = call["function"].name .. fn.name
                                     end
                                     if type(fn.arguments) == "string" then
+                                        if pa.profile and not first_tool and fn.arguments ~= "" then
+                                            first_tool = true
+                                            pa.log("model.chat.first_tool_argument")
+                                        end
                                         call["function"].arguments = call["function"].arguments .. fn.arguments
                                         assert(
                                             #call["function"].arguments <= chat.maximum_tool_argument_bytes,

@@ -1,4 +1,4 @@
-local json = require("lunajson")
+local encode_json = require("lunajson.encoder")()
 local sqlite = require("lsqlite3complete")
 
 local EXPAND = [[WITH RECURSIVE reachable(concept,depth) AS (
@@ -69,7 +69,7 @@ CREATE VIRTUAL TABLE temp.grounding_vocabulary USING fts5vocab(grounding_tokeniz
     end
 
     local function fits(records, maximum)
-        local encoded = json.encode(records)
+        local encoded = encode_json(records)
         return #encoded <= maximum or model:tokens(encoded) <= maximum
     end
 
@@ -195,7 +195,7 @@ CREATE VIRTUAL TABLE temp.grounding_vocabulary USING fts5vocab(grounding_tokeniz
             true
         )
         if config.semantic.tokens == 0 or config.semantic.terms == 0 or config.semantic.candidates == 0 then
-            return json.encode({ chronological = recent, semantic = { [0] = 0 } })
+            return encode_json({ chronological = recent, semantic = { [0] = 0 } })
         end
         local terms, tokens, exact = ground(anchor)
         if #terms < config.semantic.terms then
@@ -218,7 +218,7 @@ CREATE VIRTUAL TABLE temp.grounding_vocabulary USING fts5vocab(grounding_tokeniz
         for _, index in ipairs(model:rerank(anchor, passages)) do
             ranked[#ranked + 1] = candidates[index]
         end
-        return json.encode({ chronological = recent, semantic = fitting(ranked, config.semantic.tokens, false) })
+        return encode_json({ chronological = recent, semantic = fitting(ranked, config.semantic.tokens, false) })
     end
 
     function memory:close()

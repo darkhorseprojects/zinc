@@ -1,4 +1,4 @@
-local json = require("lunajson")
+local decode_json = require("lunajson.decoder")()
 local make_model = require("src.model")
 local make_run = require("src.run")
 
@@ -6,7 +6,7 @@ local NULL = {}
 
 local function decode(source, maximum)
     assert(type(source) == "string" and (not maximum or #source <= maximum) and utf8.len(source), "invalid JSON bytes")
-    local value, offset = json.decode(source, 1, NULL)
+    local value, offset = decode_json(source, 1, NULL)
     assert(source:sub(offset):match("^%s*$"), "JSON has trailing data")
     return value
 end

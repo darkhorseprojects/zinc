@@ -2,6 +2,9 @@ package = "zinc"
 version = "1.0.0"
 lua = "5.5"
 
+[source]
+url = "https://github.com/darkhorseprojects/zinc/archive/refs/tags/v$(VERSION).tar.gz"
+
 [dependencies]
 lsqlite3complete = "0.9.7-1"
 lunajson = "1.2.3-1"

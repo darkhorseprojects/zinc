@@ -142,17 +142,29 @@ return function(spec, entry, make_model, documents)
             user = "History:\n" .. context .. "\n\nQuestion:\n" .. user
         end
         local messages = { { role = "system", content = system }, { role = "user", content = user } }
+        if pa.profile then
+            pa.log("model.props.begin")
+        end
         local context_tokens = model:context()
+        if pa.profile then
+            pa.log("model.props.end")
+        end
         assert(context_tokens >= 120000, "chat model has less than 120k context")
         local maximum_prompt = context_tokens - call.config.models.chat.maximum_output_tokens - 4096
 
         for _ = 1, call.config.run.max_model_rounds do
+            if pa.profile then
+                pa.log("model.prompt.begin")
+            end
             while model:prompt_tokens(messages) > maximum_prompt do
                 assert(#messages > 2, "question and retrieval exceed chat context")
                 local count = messages[3].tool_calls and #messages[3].tool_calls or 0
                 for _ = 1, count + 1 do
                     table.remove(messages, 3)
                 end
+            end
+            if pa.profile then
+                pa.log("model.prompt.end")
             end
             pa.log("model.chat.begin")
             local completion = model:chat(messages)
@@ -201,7 +213,13 @@ return function(spec, entry, make_model, documents)
                 for _, name in ipairs(selected.names) do
                     view[name] = entry[name]
                 end
+                if pa.profile then
+                    pa.log("tool.eval.begin")
+                end
                 local ok, value = pcall(pa.eval, view, sources, "")
+                if pa.profile then
+                    pa.log("tool.eval.end")
+                end
                 evaluated = ok and value or {}
                 if not ok then
                     for index in ipairs(sources) do
@@ -291,11 +309,17 @@ return function(spec, entry, make_model, documents)
         local result = table.pack(pcall(function()
             local call = start(store)
             pa.log("branch." .. call.branch)
+            if pa.profile then
+                pa.log("memory.open.begin")
+            end
             memory = make_memory({
                 cygnet = spec.cygnet,
                 chronological = config.retrieval.chronological,
                 semantic = config.retrieval.semantic,
             }, store, model)
+            if pa.profile then
+                pa.log("memory.open.end")
+            end
             return call, execute(store, memory, model, call)
         end))
         local memory_closed = not memory or pcall(memory.close, memory)

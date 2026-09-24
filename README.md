@@ -13,7 +13,7 @@ package/presets/{unsafe,safe,no-host}.md
 package/src/{entry,memory,model,run,store}.lua
 ```
 
-Construct Agents from the assembled release `package/` with `sourceDir: "./package"` and `entryModule: "zinc"`. In a source checkout, build and stage the locked Lunajson and SQLite dependencies as described under Development before checking the Image. Portable Agents must be built with ABI-compatible dynamic Lua 5.5 through `-Dsystem-lua=true`.
+`package/` is the tracked PA source. Lux builds its locked Lua dependencies; CI assembles them and the source into `dist/zinc/package/`, with `ac.yaml`, model configuration, and Cygnet data at the release root. Release archives install that layout as `package/` beneath the Zinc directory. Use `entryModule: "zinc"`. Portable Agents must be built with ABI-compatible dynamic Lua 5.5 through `-Dsystem-lua=true`.
 
 ## Config
 
@@ -172,7 +172,9 @@ top-p = 0.95
 min-p = 0.0
 ```
 
-The chat router allocates a single 131,072-token slot and the reranker 4,096. Default retrieval reserves up to 30,000 tokens each for chronological and semantic history (256 records and 64 candidates); available history may be smaller. Before every chat round Zinc applies the server's template with the tool schema, counts its tokens, reserves the configured output maximum and 4,096 tokens of headroom, and discards the oldest complete transient tool waves if necessary. The system, question, and retrieved history remain intact; an oversized base prompt fails rather than silently truncating. Numeric overrides cannot exceed the trusted package defaults. MiniCPM5 itself supports up to 131,072 tokens. Reasoning is off by default because a reproduced long-thinking completion reached the 8,192-token output limit before answering; callers may explicitly enable it. The pinned local llama.cpp fork includes the specialized MiniCPM5 XML tool-call parser.
+The chat preset also uses `repeat-penalty = 1.05`, the author's suggested adjustment for repetitive output.
+
+The chat router allocates a single 131,072-token slot and the reranker 4,096. Default retrieval reserves up to 30,000 tokens each for chronological and semantic history (256 records and 64 candidates); available history may be smaller. Before every chat round Zinc applies the server's template with the tool schema, counts its tokens, reserves the configured output maximum and 4,096 tokens of headroom, and discards the oldest complete transient tool waves if necessary. The system, question, and retrieved history remain intact; an oversized base prompt fails rather than silently truncating. Numeric overrides cannot exceed the trusted package defaults. MiniCPM5 itself supports up to 131,072 tokens. Thinking is on by default. A reproduced long-thinking completion reached the 8,192-token output limit before answering; callers can explicitly set `models.chat.thinking` to `false` when they need a short answer. The pinned local llama.cpp fork includes the specialized MiniCPM5 XML tool-call parser.
 
 Chat uses the embedded Jinja template, `/apply-template` and `/tokenize` for exact prompt admission, `/props?model=chat` for effective slot size, and an SSE `/v1/chat/completions` stream. Zinc assembles complete tool arguments before Eval, bounds response bytes during transfer, and reports HTTP status and phase diagnostics without recording prompts. Reranking uses the locked Nemotron reranker. Model origin and chat, rerank, and tokenizer paths can be edited in trusted `package/zinc.md`, independently of the safe preset's HTTP grants.
 
@@ -202,14 +204,14 @@ passes per-command config overlays without interpreting Zinc's schema. Zinc owns
 ```sh
 python3 tools/format_fences.py
 lx --lua-version 5.5 fmt --backend stylua --path package/src
-CFLAGS=-DSQLITE_ENABLE_FTS5 lx --lua-version 5.5 build
-source=$(find .lux/5.5 -mindepth 1 -maxdepth 1 -type d -name '*-zinc@*' -print -quit)/src
-dep=$(find .lux/5.5 -mindepth 1 -maxdepth 1 -type d -name '*-lunajson@1.2.3-1' -print -quit)
-mkdir -p "$source/lunajson" "$source/native"
-cp package/lunajson.lua "$source/"
-cp "$dep/src/lunajson/decoder.lua" "$dep/src/lunajson/encoder.lua" "$source/lunajson/"
-cp "$(find .lux/5.5 -path '*/lib/lsqlite3complete.so' -type f -print -quit)" "$source/native/"
-agent check "$source" zinc
+CFLAGS=-DSQLITE_ENABLE_FTS5 lx --lua-version 5.5 build --only-deps
+agent check package zinc
+```
+
+`agent check package` checks tracked source syntax; CI's Package step assembles and checks the complete `dist/zinc/` release from Lux's locked dependencies. `lx generate-rockspec` describes the future Lux source rock, not the self-contained PA bundle. The latter needs the locked Lua dependency sources and an ABI-compatible SQLite module under `package/native/`. For a local metadata-only comparison against the running model router after running the CI packaging commands locally:
+
+```sh
+python3 tools/measure_local.py --agent PATH/agent --package dist/zinc/package --cygnet dist/zinc/data/cygnet.db --output PROFILE.jsonl --compare
 ```
 
 Zinc requires Portable Agents protocol 1 with `pa.emit(bytes, "append")`, `pa.log`, and bounded streaming `pa.http`. Connector and Zinc CI must pin the matched PA revision before publication.

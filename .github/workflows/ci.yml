@@ -12,7 +12,7 @@ permissions:
 env:
   CFLAGS: -DSQLITE_ENABLE_FTS5
   LUX_VERSION: 0.43.3
-  PORTABLE_AGENTS_COMMIT: b5d591d7fd56211c397cef9d410a1455f7aa4731
+  PORTABLE_AGENTS_COMMIT: b27118d91bc3ffce01763d721cb8cb41562e7645
 
 jobs:
   verify:
@@ -86,7 +86,7 @@ jobs:
         shell: bash
         run: |
           lx --lua-version 5.5 --lua-dir "$PWD/.lux/lua" install-lua
-          lx --lua-dir "$PWD/.lux/lua" --max-jobs 1 build
+          lx --lua-dir "$PWD/.lux/lua" --max-jobs 1 build --only-deps
           eval "$(lx path full --no-loader --no-bin)"
           curl -fsSL https://github.com/omwn/cygnet/releases/download/2026.05.12/cygnet.db.gz -o "$RUNNER_TEMP/cygnet.db.gz"
           test "$(sha256sum "$RUNNER_TEMP/cygnet.db.gz" | cut -d' ' -f1)" = 65e93f3620d7cc5444350d9e204259e961096138767d9ea73403ade38964cc48
@@ -95,28 +95,27 @@ jobs:
       - name: Package
         shell: bash
         run: |
-          package=$(find .lux/5.5 -mindepth 1 -maxdepth 1 -type d -name '*-zinc@*' -print -quit)
-          test -n "$package"
-          source="$package/src"
-          mkdir -p "$source/native"
-          dep=$(find .lux/5.5 -mindepth 1 -maxdepth 1 -type d -name '*-lunajson@1.2.3-1' -print -quit)
-          test -n "$dep"
-          cp package/lunajson.lua "$source/"
-          mkdir -p "$source/lunajson"
-          cp "$dep/src/lunajson/decoder.lua" "$dep/src/lunajson/encoder.lua" "$source/lunajson/"
-          if [[ "$RUNNER_OS" == Windows ]]; then suffix=dll; else suffix=so; fi
-          native=$(find .lux/5.5 -path "*/lib/lsqlite3complete.$suffix" -type f -print -quit)
-          test -n "$native"
-          cp "$native" "$source/native/"
-          "$AGENT_BIN" check "$source" zinc
+          root=dist/zinc
+          rm -rf "$root"
+          mkdir -p "$root/package/lunajson" "$root/package/native" "$root/data" "$root/state"
+          cp -R package/. "$root/package/"
+          cp ac.yaml models.ini models.lock README.md LICENSE NOTICE "$root/"
+          cp data/cygnet.db "$root/data/"
+          shopt -s nullglob
+          decoders=(.lux/5.5/*-lunajson@*/src/lunajson/decoder.lua)
+          encoders=(.lux/5.5/*-lunajson@*/src/lunajson/encoder.lua)
+          libraries=(.lux/5.5/*-lsqlite3complete@*/lib/lsqlite3complete.{so,dll})
+          test "${#decoders[@]}" -eq 1
+          test "${#encoders[@]}" -eq 1
+          test "${#libraries[@]}" -eq 1
+          cp "${decoders[0]}" "${encoders[0]}" "$root/package/lunajson/"
+          cp "${libraries[0]}" "$root/package/native/"
+          "$AGENT_BIN" check "$root/package" zinc
           if [[ "$GITHUB_REF" == refs/tags/* ]]; then
-            root="zinc-${GITHUB_REF_NAME}-${{ matrix.id }}"
-            mkdir -p "$root/state"
-            cp ac.yaml models.ini models.lock README.md LICENSE NOTICE "$root/"
-            cp -R "$source" "$root/package"
-            cp -R data "$root/"
-            if [[ "$RUNNER_OS" == Windows ]]; then ROOT="$root" pwsh -NoProfile -Command 'Compress-Archive $env:ROOT ($env:ROOT + ".zip")';
-            else tar -czf "$root.tar.gz" "$root"; fi
+            archive="zinc-${GITHUB_REF_NAME}-${{ matrix.id }}"
+            mv "$root" "$archive"
+            if [[ "$RUNNER_OS" == Windows ]]; then ROOT="$archive" pwsh -NoProfile -Command 'Compress-Archive $env:ROOT ($env:ROOT + ".zip")';
+            else tar -czf "$archive.tar.gz" "$archive"; fi
           fi
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
         if: startsWith(github.ref, 'refs/tags/v')
