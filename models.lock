@@ -10,22 +10,29 @@ expected = "build data/cygnet.db with tools/cygnet_index.lua; package only the g
 license = "LicenseRef-Cygnet-Aggregate"
 
 [[dependency]]
-name = "llama.cpp-nemotron"
-source = "https://github.com/kinexis-eu/llama.cpp.git"
-revision = "88bfe5be79100efb61f4afd83c420bde451602a8"
-expected = "router provides /v1/chat/completions and /v1/rerank"
+name = "llama.cpp-prism"
+source = "https://github.com/PrismML-Eng/llama.cpp.git"
+revision = "9a9394a895b96003ca842a6041cb28ac49a108f7"
+expected = "router provides Bonsai 2 vision chat and /v1/rerank"
 license = "MIT"
 
 [[dependency]]
-name = "MiniCPM5-2B-Q4_K_M.gguf"
-source = "https://huggingface.co/openbmb/MiniCPM5-2B-GGUF"
-revision = "2079a22f3beaa4e306449978533478fe0522f4b3"
-sha256 = "ec2d5801640099e97d8d7e8003ad4d81f336e757811f03a26173dddf386602fd"
+name = "Ternary-Bonsai-2-27B-PQ2_0.gguf"
+source = "https://huggingface.co/prism-ml/Ternary-Bonsai-2-27B-gguf"
+revision = "6ed5e12bf84b7a63069882c91dd9e9218647d17b"
+sha256 = "3907dc1658db1f78a9826bf8d5bcb8dc65db0d466388937af57f2294fae62ec1"
 license = "Apache-2.0"
 
 [[dependency]]
-name = "llama-nemotron-rerank-1b-v2-q8_0.gguf"
-source = "https://huggingface.co/kread/llama-nemotron-rerank-1b-v2-GGUF"
-revision = "a1b4ca67f0b6a41375a3d4eb58b7a09d8389ebac"
-sha256 = "ebfea26683f07258cff4543166a8f8fc736a7473174b70ced695b2bac0b966bb"
-license = "LicenseRef-NVIDIA-Open-Model-AND-Llama-3.2-Community"
+name = "Ternary-Bonsai-2-27B-mmproj-Q8_0.gguf"
+source = "https://huggingface.co/prism-ml/Ternary-Bonsai-2-27B-gguf"
+revision = "6ed5e12bf84b7a63069882c91dd9e9218647d17b"
+sha256 = "6807ede61d570bb86ba34b756a0fa109edc33668604de867c6ea6d8f1d631903"
+license = "Apache-2.0"
+
+[[dependency]]
+name = "bge-reranker-v2-m3-Q8_0.gguf"
+source = "https://huggingface.co/smarttasks/bge-reranker-v2-m3-GGUF"
+revision = "fc50d873dcd84a7be9760cfecd31f513d5ebc436"
+sha256 = "d32a877b7266f5275172458616824ce6728502416672052c2da795da3389201e"
+license = "Apache-2.0"

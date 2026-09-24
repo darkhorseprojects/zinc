@@ -176,7 +176,7 @@ return function(endpoints, config)
                                 thoughts[#thoughts + 1] = delta.reasoning_content
                                 if chat.thinking then
                                     if streamed_kind == "content" then
-                                        pa.emit("")
+                                        pa.emit("\n\n", "append")
                                     end
                                     local prefix = (streamed_kind ~= "reasoning" or quote_start)
                                             and delta.reasoning_content:sub(1, 1) ~= "\n"
@@ -194,7 +194,7 @@ return function(endpoints, config)
                                 end
                                 contents[#contents + 1] = delta.content
                                 if streamed_kind == "reasoning" then
-                                    pa.emit("")
+                                    pa.emit("\n\n", "append")
                                 end
                                 pa.emit(delta.content, "append")
                                 streamed_kind = "content"

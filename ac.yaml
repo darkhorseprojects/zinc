@@ -7,6 +7,7 @@ policies:
     memory_bytes: 100663296
     instructions: 200000000
     discord: true
+    images: true
     imports: {}
     overrides: [parent, memory, run, models, retrieval]
     config:

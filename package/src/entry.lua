@@ -193,6 +193,28 @@ return function(spec)
             type(input) == "string" and input ~= "" and #input <= spec.limits.request_bytes and utf8.len(input),
             "invalid Zinc input"
         )
+        local images
+        if input:sub(1, 1) == "\30" then
+            local value = object(input:sub(2), { question = true, images = true }, spec.limits.request_bytes)
+            assert(type(value.question) == "string" and type(value.images) == "table", "invalid image request")
+            assert(#value.images > 0 and #value.images <= 4, "invalid image count")
+            for _, image in ipairs(value.images) do
+                assert(
+                    type(image) == "table"
+                        and (image.type == "image/png" or image.type == "image/jpeg" or image.type == "image/webp"),
+                    "invalid image type"
+                )
+                assert(type(image.data) == "string" and image.data:match("^[A-Za-z0-9+/]+=?=?$"), "invalid image data")
+                for key in pairs(image) do
+                    assert(key == "type" or key == "data", "unknown image field")
+                end
+            end
+            for key in pairs(value.images) do
+                assert(math.type(key) == "integer" and key >= 1 and key <= #value.images, "invalid image array")
+            end
+            images, input = value.images, value.question
+        end
+        assert(#input <= spec.limits.question_bytes and utf8.len(input), "invalid Zinc question")
         local config = configuration(opaque)
         local automatic = config.parent == nil
         local parent = config.parent
@@ -208,6 +230,7 @@ return function(spec)
             preset = spec.presets[config.preset],
             preset_name = config.preset,
             question = input,
+            images = images,
             quota = config.run.quota_tokens,
         })
         return final.text

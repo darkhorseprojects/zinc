@@ -141,7 +141,17 @@ return function(spec, entry, make_model, documents)
         if call.memory ~= 0 then
             user = "History:\n" .. context .. "\n\nQuestion:\n" .. user
         end
-        local messages = { { role = "system", content = system }, { role = "user", content = user } }
+        local user_content = user
+        if call.images then
+            user_content = { { type = "text", text = user } }
+            for _, image in ipairs(call.images) do
+                user_content[#user_content + 1] = {
+                    type = "image_url",
+                    image_url = { url = "data:" .. image.type .. ";base64," .. image.data },
+                }
+            end
+        end
+        local messages = { { role = "system", content = system }, { role = "user", content = user_content } }
         if pa.profile then
             pa.log("model.props.begin")
         end
@@ -150,7 +160,10 @@ return function(spec, entry, make_model, documents)
             pa.log("model.props.end")
         end
         assert(context_tokens >= 120000, "chat model has less than 120k context")
-        local maximum_prompt = context_tokens - call.config.models.chat.maximum_output_tokens - 4096
+        local maximum_prompt = context_tokens
+            - call.config.models.chat.maximum_output_tokens
+            - 4096
+            - (call.images and #call.images * 4096 or 0)
 
         for _ = 1, call.config.run.max_model_rounds do
             if pa.profile then
@@ -184,6 +197,7 @@ return function(spec, entry, make_model, documents)
             end
             local rows = #events > 0 and store:append(call.branch, events) or {}
             messages[#messages + 1] = assistant
+            pa.emit("")
             if #completion.calls == 0 then
                 return assert(rows[#rows], "model returned no response")
             end

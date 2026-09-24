@@ -61,27 +61,24 @@ Resource provenance and licenses: https://github.com/omwn/cygnet
 Citation: Rowan Hall Maudslay and Francis Bond (2026), "Cygnet: Refactoring the
 Open Multilingual Wordnet," LREC 2026.
 
-Llama Nemotron Rerank 1B v2
----------------------------
-Publisher: NVIDIA Corporation.
-Source: https://huggingface.co/kread/llama-nemotron-rerank-1b-v2-GGUF
-Revision: a1b4ca67f0b6a41375a3d4eb58b7a09d8389ebac
-License: LicenseRef-NVIDIA-Open-Model-AND-Llama-3.2-Community
-License terms and required attribution are provided in the pinned model
-repository and its model card.
-
-llama.cpp Nemotron reranker branch
-----------------------------------
-Copyright (C) llama.cpp contributors.
-Source: https://github.com/kinexis-eu/llama.cpp
-Revision: 88bfe5be79100efb61f4afd83c420bde451602a8
-License: MIT
-License text: https://github.com/kinexis-eu/llama.cpp/blob/88bfe5be79100efb61f4afd83c420bde451602a8/LICENSE
-
-MiniCPM5-2B-GGUF
------------------
-Publisher: OpenBMB.
-Source: https://huggingface.co/openbmb/MiniCPM5-2B-GGUF
-Revision: 2079a22f3beaa4e306449978533478fe0522f4b3
+BGE Reranker v2 M3 GGUF
+-----------------------
+Original model: BAAI/bge-reranker-v2-m3.
+GGUF source: https://huggingface.co/smarttasks/bge-reranker-v2-m3-GGUF
+Revision: fc50d873dcd84a7be9760cfecd31f513d5ebc436
 License: Apache-2.0
-License text: https://github.com/OpenBMB/MiniCPM/blob/main/LICENSE
+
+llama.cpp Prism branch
+----------------------
+Copyright (C) llama.cpp contributors.
+Source: https://github.com/PrismML-Eng/llama.cpp
+Revision: 9a9394a895b96003ca842a6041cb28ac49a108f7
+License: MIT
+License text: https://github.com/PrismML-Eng/llama.cpp/blob/prism-b10709-9a9394a/LICENSE
+
+Ternary Bonsai 2 27B GGUF and vision projector
+-----------------------------------------------
+Publisher: PrismML.
+Source: https://huggingface.co/prism-ml/Ternary-Bonsai-2-27B-gguf
+Revision: 6ed5e12bf84b7a63069882c91dd9e9218647d17b
+License: Apache-2.0

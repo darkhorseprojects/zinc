@@ -63,7 +63,7 @@ local config = {
         },
     },
     -- UTF-8 byte ceilings before question processing and config decoding.
-    limits = { request_bytes = 1048576, config_bytes = 65536 },
+    limits = { request_bytes = 8388608, question_bytes = 1048576, config_bytes = 65536 },
 }
 
 return require("src.entry")(config)

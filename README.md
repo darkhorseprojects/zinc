@@ -164,19 +164,11 @@ No SQLite transaction spans model, HTTP, process, Eval, or imported-Agent work.
 
 ## Models
 
-`models.ini` configures MiniCPM5-2B Q4_K_M with its recommended generation settings:
+`models.ini` configures Prism's Ternary Bonsai 2 27B PQ2_0 with its Q8 vision projector, 131,072 context tokens, Q4 KV cache, and the BAAI BGE reranker v2 M3 Q8_0. Generation uses temperature 1.0, top-k 20, top-p 0.95, min-p 0.0, and repeat penalty 1.0. The projector stays in host RAM to preserve VRAM. The Prism llama.cpp release pinned in `models.lock` is required; upstream and the Nemotron fork cannot run these weights.
 
-```text
-temperature = 1.0
-top-p = 0.95
-min-p = 0.0
-```
+The reranker has a separate 4,096-token slot. Default retrieval reserves up to 30,000 tokens each for chronological and semantic history (256 records and 64 candidates); available history may be smaller. Before every chat round Zinc applies the server's template with the tool schema, counts its tokens, reserves output, 4,096 tokens of headroom, and 4,096 tokens per attached image, then discards the oldest complete transient tool waves if necessary. The system, question, and retrieved history remain intact; an oversized base prompt fails rather than silently truncating. Numeric overrides cannot exceed the trusted package defaults. The model advertises 262,144 tokens, but this preset qualifies 131,072; longer contexts require separate VRAM and quality checks. Thinking is on by default and can be disabled per call.
 
-The chat preset also uses `repeat-penalty = 1.05`, the author's suggested adjustment for repetitive output.
-
-The chat router allocates a single 131,072-token slot and the reranker 4,096. Default retrieval reserves up to 30,000 tokens each for chronological and semantic history (256 records and 64 candidates); available history may be smaller. Before every chat round Zinc applies the server's template with the tool schema, counts its tokens, reserves the configured output maximum and 4,096 tokens of headroom, and discards the oldest complete transient tool waves if necessary. The system, question, and retrieved history remain intact; an oversized base prompt fails rather than silently truncating. Numeric overrides cannot exceed the trusted package defaults. MiniCPM5 itself supports up to 131,072 tokens. Thinking is on by default. A reproduced long-thinking completion reached the 8,192-token output limit before answering; callers can explicitly set `models.chat.thinking` to `false` when they need a short answer. The pinned local llama.cpp fork includes the specialized MiniCPM5 XML tool-call parser.
-
-Chat uses the embedded Jinja template, `/apply-template` and `/tokenize` for exact prompt admission, `/props?model=chat` for effective slot size, and an SSE `/v1/chat/completions` stream. Zinc assembles complete tool arguments before Eval, bounds response bytes during transfer, and reports HTTP status and phase diagnostics without recording prompts. Reranking uses the locked Nemotron reranker. Model origin and chat, rerank, and tokenizer paths can be edited in trusted `package/zinc.md`, independently of the safe preset's HTTP grants.
+Chat uses the embedded Jinja template, `/apply-template` and `/tokenize` for prompt admission, `/props?model=chat` for effective slot size, and an SSE `/v1/chat/completions` stream. Zinc assembles complete tool arguments before Eval, bounds response bytes during transfer, and reports HTTP status and phase diagnostics without recording prompts. It emits an empty message when each assistant model turn completes; the Connector then sends that turn without live edits, even when tool execution continues. Connector passes Discord PNG, JPEG, and WebP attachments through a bounded image envelope; images are not stored for later turns. Reranking uses the locked BGE GGUF. Model origin and endpoint paths remain trusted settings in `package/zinc.md`.
 
 Models remain external to release archives. `models.ini` identifies their Hugging Face repositories and files; the
 router resolves them through the standard Hugging Face cache. Build Cygnet data with:
@@ -190,13 +182,13 @@ lua tools/cygnet_index.lua SOURCE.db data/cygnet.db SOURCE_SHA256
 The tracked `ac.yaml` defines the Zinc policy. Fill a member, channel, or guild route, then connect and run:
 
 ```sh
-../llama.cpp-nemotron/build/bin/llama-server --models-preset models.ini --port 8000
+llama-server --models-preset models.ini --port 8000
 agc connect .
 agc check .
 agc run .
 ```
 
-Connector expands the configured actor, supplies the optional Discord Import, streams Zinc's emitted Markdown, and
+Connector expands the configured actor, supplies the optional Discord Import, delivers each completed assistant turn, and
 passes per-command config overlays without interpreting Zinc's schema. Zinc owns continuation in its Store. PA discovers pure Lua modules in the package Image and native modules under `package/native`. No Lua loader environment variables are needed. The PA binary and native module must both use ABI-compatible dynamic Lua 5.5.
 
 ## Development
