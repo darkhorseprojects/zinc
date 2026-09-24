@@ -2,7 +2,7 @@
 
 Portable Agents compiles `package/` with `zinc.md` as its sole entry. Root and imported-Agent calls exchange bytes. Eval capabilities exchange native Lua values through isolated Portable Agents states.
 
-A top-level call creates one run and one durable branch. Runs own actor identity and tool-token budget. Branches own attachment, memory boundary, preset, lifetime, and the successful terminal result. Incomplete durable branches are excluded from continuation and retrieval. Events own kind, text, and tool token count. Nested Zinc calls create temporary branches in the same run. Explicit destruction removes a temporary branch and its descendants.
+A top-level call creates one run and one durable branch. Runs own actor identity and tool-token budget. Branches own attachment, memory boundary, preset, lifetime, and the successful terminal result. Stored events on incomplete durable branches remain visible to later actor-owned continuation and retrieval. Events own kind, text, and tool token count. Nested Zinc calls create temporary branches in the same run. Explicit destruction removes a temporary branch and its descendants.
 
 Quota counts exact chat-tokenizer tokens in accepted Lua sources and their complete results. Source admission is checked before Eval. Accepted results are always stored. Reasoning and regular responses are not charged. Every nested branch resolves the shared run through its caller event.
 

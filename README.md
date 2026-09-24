@@ -41,7 +41,7 @@ operator explicitly grants them. The trusted `model` table in `package/zinc.md` 
 ## Calls
 
 Root input is the nonempty UTF-8 question. When `parent` and `memory` are absent from config, Zinc continues from the
-latest durable response owned by `actor`; a new actor starts with no history. Set both fields for an explicit branch:
+latest stored durable event owned by `actor`, including an interrupted request; a new actor starts with no history. Set both fields for an explicit branch:
 
 ```json
 {"parent":42,"memory":42}
@@ -156,7 +156,7 @@ Store format `1` normalizes state into runs, branches, and events:
 - branches own run, base, memory, preset, lifetime, and the successful terminal response coordinate
 - events own branch, kind, text, and optional tool token count
 
-No migration is performed. Format `0` initializes version `1`; version `1` opens; every other version fails. Incomplete durable branches remain auditable but cannot become the continuation head or enter normal retrieval.
+Format `0` initializes version `1`; version `1` opens. Existing databases must be reset for the updated coordinate rule. Stored events on incomplete durable branches remain visible to later requests up to the selected memory boundary. In-progress model fragments are not stored until their turn completes.
 
 Normal retrieval sees durable actor events. A temporary branch also sees its own temporary ancestry. Chronological and semantic retrieval remain bounded by the inclusive memory coordinate. Cygnet format `2` and `relation-balanced-pagerank-v1` remain required.
 
