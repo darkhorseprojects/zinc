@@ -302,6 +302,7 @@ return function(spec, entry, make_model, documents)
             for _, output in ipairs(outputs) do
                 pa.emit(fenced("text", output))
             end
+            pa.emit("")
             local remaining = store:quota(call.run)
             for index, tool in ipairs(completion.calls) do
                 local content = outputs[index]

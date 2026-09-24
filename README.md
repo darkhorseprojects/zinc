@@ -164,7 +164,7 @@ No SQLite transaction spans model, HTTP, process, Eval, or imported-Agent work.
 
 ## Models
 
-`models.ini` configures Prism's Ternary Bonsai 2 27B PQ2_0 with its Q8 vision projector, 131,072 context tokens, Q4 KV cache, and the BAAI BGE reranker v2 M3 Q8_0. Generation uses temperature 1.0, top-k 20, top-p 0.95, min-p 0.0, and repeat penalty 1.0. The projector stays in host RAM to preserve VRAM. The Prism llama.cpp release pinned in `models.lock` is required; upstream and the Nemotron fork cannot run these weights.
+`models.ini` configures Prism's Ternary Bonsai 2 27B PQ2_0 with its Q8 vision projector, 131,072 context tokens, Q4 KV cache, and the BAAI BGE reranker v2 M3 Q8_0. Generation uses temperature 1.0, top-k 20, top-p 0.95, min-p 0.05, and repeat penalty 1.0. The projector stays in host RAM to preserve VRAM. The Prism llama.cpp release pinned in `models.lock` is required; upstream and the Nemotron fork cannot run these weights.
 
 The reranker has a separate 4,096-token slot. Default retrieval reserves up to 30,000 tokens each for chronological and semantic history (256 records and 64 candidates); available history may be smaller. Before every chat round Zinc applies the server's template with the tool schema, counts its tokens, reserves output, 4,096 tokens of headroom, and 4,096 tokens per attached image, then discards the oldest complete transient tool waves if necessary. The system, question, and retrieved history remain intact; an oversized base prompt fails rather than silently truncating. Numeric overrides cannot exceed the trusted package defaults. The model advertises 262,144 tokens, but this preset qualifies 131,072; longer contexts require separate VRAM and quality checks. Thinking is on by default and can be disabled per call.
 
