@@ -5,13 +5,13 @@ Zinc distributions bundle the locked Lua/SQLite closure and Cygnet data. The
 Portable Agents launcher, model servers, and model weights are released or
 provisioned separately. Each component remains subject to its own license terms.
 
-Portable Agents 1.0.0
+Portable Agents 0.1.0
 ---------------------
 Source: https://github.com/darkhorseprojects/portable-agents
 License: AGPL-3.0-only
-License text: https://github.com/darkhorseprojects/portable-agents/blob/v1.0.0/LICENSE
+License text: https://github.com/darkhorseprojects/portable-agents/blob/v0.1.0/LICENSE
 
-Lux 0.42.1
+Lux 0.43.3
 ----------
 Source: https://github.com/lumen-oss/lux
 License: MIT
