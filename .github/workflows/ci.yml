@@ -20,6 +20,8 @@ jobs:
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
         with: { persist-credentials: false }
+      - name: Install Lua runtime for native lint module
+        run: sudo apt-get update && sudo apt-get install --yes liblua5.4-0
       - name: Verify source
         shell: bash
         run: |
@@ -30,7 +32,8 @@ jobs:
           python3 tools/format_fences.py --check
           git diff --exit-code -- package/src tools
           find package/src tools -name '*.lua' -print0 | xargs -0 "$RUNNER_TEMP/lux/bin/lx" --lua-version 5.5 lua -- -e 'assert(loadfile(arg[0])); for i = 1, #arg do assert(loadfile(arg[i])) end; os.exit()'
-          for path in package/src tools; do "$RUNNER_TEMP/lux/bin/lx" --lua-version 5.4 lint --path "$path" -- --no-max-line-length; done
+          lua_library=$(ldconfig -p | awk '/liblua5[.]4[.]so[.]0 / { print $NF; exit }')
+          for path in package/src tools; do LD_PRELOAD="$lua_library" "$RUNNER_TEMP/lux/bin/lx" --lua-version 5.4 lint --path "$path" -- --no-max-line-length; done
 
   build:
     needs: verify
@@ -57,9 +60,11 @@ jobs:
           cargo install lux-cli --version "$LUX_VERSION" --root "$RUNNER_TEMP/lux" --no-default-features --features vendored --locked
           echo "$RUNNER_TEMP/lux/bin" >> "$GITHUB_PATH"
           curl -fsSL https://www.lua.org/ftp/lua-5.5.0.tar.gz -o "$RUNNER_TEMP/lua.tar.gz"
-          test "$(sha256sum "$RUNNER_TEMP/lua.tar.gz" | cut -d' ' -f1)" = 57ccc32bbbd005cab75bcc52444052535af691789dba2b9016d5c50640d68b3d
+          if command -v sha256sum >/dev/null; then actual=$(sha256sum "$RUNNER_TEMP/lua.tar.gz" | cut -d' ' -f1); elif command -v shasum >/dev/null; then actual=$(shasum -a 256 "$RUNNER_TEMP/lua.tar.gz" | cut -d' ' -f1); else actual=$(pwsh -NoProfile -Command '(Get-FileHash -Algorithm SHA256 (Join-Path $env:RUNNER_TEMP "lua.tar.gz")).Hash.ToLower()'); fi
+          test "$actual" = 57ccc32bbbd005cab75bcc52444052535af691789dba2b9016d5c50640d68b3d
           tar -xzf "$RUNNER_TEMP/lua.tar.gz" -C "$RUNNER_TEMP"
-          mkdir -p "$RUNNER_TEMP/lua55/lib/pkgconfig" "$RUNNER_TEMP/lua55/bin"
+          mkdir -p "$RUNNER_TEMP/lua55/include" "$RUNNER_TEMP/lua55/lib/pkgconfig" "$RUNNER_TEMP/lua55/bin"
+          cp "$RUNNER_TEMP/lua-5.5.0/src/"*.h "$RUNNER_TEMP/lua55/include/"
           sources=$(find "$RUNNER_TEMP/lua-5.5.0/src" -maxdepth 1 -name '*.c' ! -name lua.c ! -name luac.c ! -name onelua.c ! -name ltests.c -print)
           case "$RUNNER_OS" in
             Linux) zig cc -O2 -fPIC -DLUA_USE_LINUX -shared $sources -lm -ldl -Wl,-soname,liblua.so.5.5 -o "$RUNNER_TEMP/lua55/lib/liblua.so.5.5"; ln -s liblua.so.5.5 "$RUNNER_TEMP/lua55/lib/liblua5.5.so" ;;
@@ -69,10 +74,12 @@ jobs:
           cat > "$RUNNER_TEMP/lua55/lib/pkgconfig/lua5.5.pc" <<EOF
           prefix=$RUNNER_TEMP/lua55
           libdir=\${prefix}/lib
+          includedir=\${prefix}/include
           Name: Lua
           Description: Lua language engine
           Version: 5.5.0
           Libs: -L\${libdir} -llua5.5
+          Cflags: -I\${includedir}
           EOF
           echo "PKG_CONFIG_PATH=$RUNNER_TEMP/lua55/lib/pkgconfig" >> "$GITHUB_ENV"
           [[ "$RUNNER_OS" != Linux ]] || echo "LD_LIBRARY_PATH=$RUNNER_TEMP/lua55/lib" >> "$GITHUB_ENV"
@@ -90,7 +97,8 @@ jobs:
           lx --lua-dir "$PWD/.lux/lua" --max-jobs 1 build --only-deps
           eval "$(lx path full --no-loader --no-bin)"
           curl -fsSL https://github.com/omwn/cygnet/releases/download/2026.05.12/cygnet.db.gz -o "$RUNNER_TEMP/cygnet.db.gz"
-          test "$(sha256sum "$RUNNER_TEMP/cygnet.db.gz" | cut -d' ' -f1)" = 65e93f3620d7cc5444350d9e204259e961096138767d9ea73403ade38964cc48
+          if command -v sha256sum >/dev/null; then actual=$(sha256sum "$RUNNER_TEMP/cygnet.db.gz" | cut -d' ' -f1); elif command -v shasum >/dev/null; then actual=$(shasum -a 256 "$RUNNER_TEMP/cygnet.db.gz" | cut -d' ' -f1); else actual=$(pwsh -NoProfile -Command '(Get-FileHash -Algorithm SHA256 (Join-Path $env:RUNNER_TEMP "cygnet.db.gz")).Hash.ToLower()'); fi
+          test "$actual" = 65e93f3620d7cc5444350d9e204259e961096138767d9ea73403ade38964cc48
           gzip -dc "$RUNNER_TEMP/cygnet.db.gz" > "$RUNNER_TEMP/cygnet.db"
           lua tools/cygnet_index.lua "$RUNNER_TEMP/cygnet.db" data/cygnet.db aae2cdb1418c1435558584a91181e1cb94459f2506c16f2be4b00e81428deaff
       - name: Package
