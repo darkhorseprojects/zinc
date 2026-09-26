@@ -25,6 +25,7 @@ jobs:
         run: |
           cargo install lux-cli --version "$LUX_VERSION" --root "$RUNNER_TEMP/lux" --no-default-features --features vendored --locked
           echo "$RUNNER_TEMP/lux/bin" >> "$GITHUB_PATH"
+          export PATH="$RUNNER_TEMP/lux/bin:$PATH"
           for path in package/src tools; do "$RUNNER_TEMP/lux/bin/lx" --lua-version 5.5 fmt --backend stylua --path "$path"; done
           python3 tools/format_fences.py --check
           git diff --exit-code -- package/src tools
