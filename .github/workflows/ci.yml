@@ -12,7 +12,7 @@ permissions:
 env:
   CFLAGS: -DSQLITE_ENABLE_FTS5
   LUX_VERSION: 0.43.3
-  PORTABLE_AGENTS_COMMIT: ac095bc0808b66e06395a6a6c9d763e968420bb8
+  PORTABLE_AGENTS_COMMIT: 18d3449e1ff35488f16daed87f7e11a17fe7550d
 
 jobs:
   verify:
@@ -43,8 +43,8 @@ jobs:
         include:
           - { os: ubuntu-24.04, id: linux-x86_64 }
           - { os: ubuntu-24.04-arm, id: linux-aarch64 }
-          - { os: macos-13, id: macos-x86_64 }
-          - { os: macos-14, id: macos-aarch64 }
+          - { os: macos-15-intel, id: macos-x86_64 }
+          - { os: macos-15, id: macos-aarch64 }
           - { os: windows-latest, id: windows-x86_64 }
           - { os: windows-11-arm, id: windows-aarch64 }
     runs-on: ${{ matrix.os }}
@@ -140,8 +140,10 @@ jobs:
     environment: release
     permissions: { contents: write }
     steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with: { persist-credentials: false }
       - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093
         with: { pattern: zinc-*, path: artifacts, merge-multiple: true }
       - run: cd artifacts && sha256sum zinc-* > SHA256SUMS
       - uses: softprops/action-gh-release@3bb12739c298aeb8a4eeaf626c5b8d85266b0e65
-        with: { files: "artifacts/*", generate_release_notes: true }
+        with: { files: "artifacts/*", body_path: RELEASE_NOTES.md }
