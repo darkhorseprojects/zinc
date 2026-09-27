@@ -9,7 +9,7 @@ separately. Each component remains subject to its own license terms.
 Lux 0.43.3
 ----------
 Source: https://github.com/lumen-oss/lux
-License: MIT
+License: LGPL-3.0-or-later
 
 StyLua 2.5.2
 ------------
@@ -42,7 +42,7 @@ Source: https://lua.sqlite.org/
 License: MIT
 License text: https://lua.sqlite.org/home/doc/tip/doc/lsqlite3.wiki
 The complete binding contains its pinned SQLite amalgamation. SQLite is public domain.
-Zinc enables FTS5 and omits loadable-extension support.
+Zinc enables FTS5.
 
 Cygnet 2026.05.12 data
 ----------------------

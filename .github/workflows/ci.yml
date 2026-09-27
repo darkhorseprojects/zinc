@@ -1,62 +1,60 @@
 name: zinc
-
 on:
   pull_request:
-  push:
-    branches: [main]
-    tags: ["v*"]
+  push: { branches: [main], tags: ["v*"] }
   workflow_dispatch:
     inputs:
-      release_tag:
-        description: Existing release tag to publish
-        required: true
-        type: string
-
-permissions:
-  contents: read
-
+      release_tag: { description: Existing release tag to publish, required: true, type: string }
+permissions: { contents: read }
 concurrency:
   group: ${{ github.workflow }}-${{ inputs.release_tag || github.ref }}
   cancel-in-progress: ${{ !startsWith(github.ref, 'refs/tags/') }}
-
 env:
-  AGENT_CONNECTOR_FIXTURE_VERSION: v0.1.4
   CFLAGS: -DSQLITE_ENABLE_FTS5
   LUX_VERSION: 0.43.3
-  PORTABLE_AGENTS_FIXTURE_VERSION: v0.1.4
 
 jobs:
   verify:
-    runs-on: ubuntu-24.04
+    runs-on: ubuntu-26.04
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
-        with:
-          ref: ${{ inputs.release_tag || github.ref }}
-          persist-credentials: false
-      - name: Install Lua runtime for native lint module
-        run: sudo apt-get update && sudo apt-get install --yes liblua5.4-0
-      - name: Install Lux
+        with: { ref: "${{ inputs.release_tag || github.ref }}", persist-credentials: false }
+      - name: Install tools
         run: |
-          mkdir -p "$RUNNER_TEMP/lux/bin"
-          curl -fsSL "https://github.com/lumen-oss/lux/releases/download/v${LUX_VERSION}/lx-x86_64-unknown-linux-gnu.tar.gz" -o "$RUNNER_TEMP/lux.tar.gz"
-          echo '32f091c10dcfcb0e7ba990a65ebb14b92cf46a446738f5732e49cd68456ba9d2  '"$RUNNER_TEMP/lux.tar.gz" | sha256sum -c -
-          tar -xzf "$RUNNER_TEMP/lux.tar.gz" -C "$RUNNER_TEMP/lux/bin"
-          echo "$RUNNER_TEMP/lux/bin" >> "$GITHUB_PATH"
-      - name: Verify source
+          sudo apt-get update && sudo apt-get install --yes liblua5.4-0 liblua5.5-dev pkgconf
+          root=$RUNNER_TEMP/lux; mkdir -p "$root/bin" "$root/gpgme"
+          curl -fsSL https://github.com/lumen-oss/lux/releases/download/v0.43.3/lx-x86_64-unknown-linux-gnu.tar.gz -o "$root/lux.tgz"
+          echo '32f091c10dcfcb0e7ba990a65ebb14b92cf46a446738f5732e49cd68456ba9d2  '"$root/lux.tgz" | sha256sum -c -
+          curl -fsSL https://archive.ubuntu.com/ubuntu/pool/main/g/gpgme1.0/libgpgme11t64_1.18.0-4.1ubuntu4_amd64.deb -o "$root/gpgme.deb"
+          curl -fsSL https://archive.ubuntu.com/ubuntu/pool/main/liba/libassuan/libassuan0_2.5.6-1build1_amd64.deb -o "$root/assuan.deb"
+          echo 'b3640068e8af3becf16faec886ff139880736ed23a7fc605c1f0cece405a5606  '"$root/gpgme.deb" | sha256sum -c -
+          echo '59c6ee6aa6fffb5d181f37373baec18c26791f5d1c907ceeb62163460b11daf2  '"$root/assuan.deb" | sha256sum -c -
+          tar -xzf "$root/lux.tgz" -C "$root/bin"; dpkg-deb -x "$root/gpgme.deb" "$root/gpgme"; dpkg-deb -x "$root/assuan.deb" "$root/gpgme"
+          echo "$root/bin" >> "$GITHUB_PATH"; echo "LD_LIBRARY_PATH=$root/gpgme/usr/lib/x86_64-linux-gnu" >> "$GITHUB_ENV"
+      - name: Verify and prepare data
         run: |
           for path in package/src tools; do lx --lua-version 5.5 fmt --backend stylua --path "$path"; done
           python3 tools/format_fences.py --check
           git diff --exit-code -- package/src tools
-          find package/src tools -name '*.lua' -print0 | xargs -0 lx --lua-version 5.5 lua -- -e 'assert(loadfile(arg[0])); for i = 1, #arg do assert(loadfile(arg[i])) end; os.exit()'
-          lua_library=$(ldconfig -p | awk '/liblua5[.]4[.]so[.]0 / { print $NF; exit }')
-          for path in package/src tools; do LD_PRELOAD="$lua_library" lx --lua-version 5.4 lint --path "$path" -- --no-max-line-length; done
-          sh -n install.sh
-          pwsh -NoProfile -Command '[void][scriptblock]::Create((Get-Content -Raw install.ps1))'
+          find package/src tools -name '*.lua' -print0 | xargs -0 lx --lua-version 5.5 lua -- -e 'assert(loadfile(arg[0])); for i=1,#arg do assert(loadfile(arg[i])) end; os.exit()'
+          lua54=$(ldconfig -p | awk '/liblua5[.]4[.]so[.]0 /{print $NF; exit}')
+          for path in package/src tools; do LD_PRELOAD="$lua54" lx --lua-version 5.4 lint --path "$path" -- --no-max-line-length; done
+          sh -n install.sh; pwsh -NoProfile -Command '[void][scriptblock]::Create((Get-Content -Raw install.ps1))'
+          jq -e '.version == "0.1.0" and ([.dependencies.rocks[].version] | sort) == ["0.9.7-1","1.2.3-1"]' lux.lock
+          lx --lua-version 5.5 --max-jobs 1 build --only-deps; eval "$(lx path full --no-loader --no-bin)"
+          mkdir -p data
+          curl -fsSL https://github.com/omwn/cygnet/releases/download/2026.05.12/cygnet.db.gz -o "$RUNNER_TEMP/cygnet.db.gz"
+          echo '65e93f3620d7cc5444350d9e204259e961096138767d9ea73403ade38964cc48  '"$RUNNER_TEMP/cygnet.db.gz" | sha256sum -c -
+          gzip -dc "$RUNNER_TEMP/cygnet.db.gz" > "$RUNNER_TEMP/cygnet.db"
+          echo 'aae2cdb1418c1435558584a91181e1cb94459f2506c16f2be4b00e81428deaff  '"$RUNNER_TEMP/cygnet.db" | sha256sum -c -
+          lx --lua-version 5.5 lua -- tools/cygnet_index.lua "$RUNNER_TEMP/cygnet.db" data/cygnet.db aae2cdb1418c1435558584a91181e1cb94459f2506c16f2be4b00e81428deaff
+          echo '21c1e60b3a1e5a774e94276cce61719fa0ef9ddb29915a2f9a279058e83b7d98  data/cygnet.db' | sha256sum -c -
       - name: Verify tag
         if: startsWith(github.ref, 'refs/tags/') || inputs.release_tag != ''
-        env:
-          RELEASE_TAG: ${{ inputs.release_tag || github.ref_name }}
-        run: test "$RELEASE_TAG" = "v$(awk -F'"' '/^version =/{print $2; exit}' lux.toml)"
+        env: { TAG: "${{ inputs.release_tag || github.ref_name }}" }
+        run: test "$TAG" = "v$(awk -F'"' '/^version =/{print $2; exit}' lux.toml)"
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with: { name: zinc-data, path: data/cygnet.db, if-no-files-found: error }
 
   build:
     needs: verify
@@ -64,230 +62,102 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          - { os: ubuntu-26.04, id: linux-x86_64, lux: lx-x86_64-unknown-linux-gnu.tar.gz, lux_sha: 32f091c10dcfcb0e7ba990a65ebb14b92cf46a446738f5732e49cd68456ba9d2 }
-          - { os: ubuntu-26.04-arm, id: linux-aarch64, lux: lx-aarch64-unknown-linux-gnu.tar.gz, lux_sha: 40bb4186c47d53be0e9f4f6ab0814bde8eee0e4105bd116d397999898c19b56a }
-          - { os: macos-15-intel, id: macos-x86_64 }
-          - { os: macos-15, id: macos-aarch64, lux: lux-cli_0.43.3_aarch64.dmg, lux_sha: 4d410c4ea811c1e5d3809ebe229331e0c953d1c08087cddef6bdc28452b6a996 }
-          - { os: windows-latest, id: windows-x86_64, msystem: UCRT64, objdump: objdump }
-          - { os: windows-11-arm, id: windows-aarch64, msystem: CLANGARM64, objdump: llvm-objdump }
+          - { os: ubuntu-26.04, id: linux-x86_64, arch: x86_64, lux_sha: 32f091c10dcfcb0e7ba990a65ebb14b92cf46a446738f5732e49cd68456ba9d2, gpg_sha: b3640068e8af3becf16faec886ff139880736ed23a7fc605c1f0cece405a5606, assuan_sha: 59c6ee6aa6fffb5d181f37373baec18c26791f5d1c907ceeb62163460b11daf2 }
+          - { os: ubuntu-26.04-arm, id: linux-aarch64, arch: aarch64, lux_sha: 40bb4186c47d53be0e9f4f6ab0814bde8eee0e4105bd116d397999898c19b56a, gpg_sha: 676b6c03691c340b3671afb51dd19d0bcdb8353e4074a5cd0161ec3401fa5e34, assuan_sha: 7d6c7b49d63422d3cb813406d0b5f698439b4619d6491ef6a73c09bbf30ba625 }
+          - { os: macos-15-intel, id: macos-x86_64, source_lux: true }
+          - { os: macos-15, id: macos-aarch64 }
+          - { os: windows-latest, id: windows-x86_64, msystem: UCRT64, packages: "gcc:p binutils:p lua:p pkgconf:p", cc: gcc, objdump: objdump, machine: pei-x86-64 }
+          - { os: windows-11-arm, id: windows-aarch64, msystem: CLANGARM64, packages: "clang:p llvm:p lua:p pkgconf:p", cc: clang, objdump: llvm-objdump, machine: aarch64 }
     runs-on: ${{ matrix.os }}
     timeout-minutes: 90
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
-        with:
-          ref: ${{ inputs.release_tag || github.ref }}
-          persist-credentials: false
-      - name: Install Lua on Linux
-        if: runner.os == 'Linux'
-        run: sudo apt-get update && sudo apt-get install --yes liblua5.5-dev pkgconf
-      - name: Install Lua on macOS
-        if: runner.os == 'macOS'
-        run: brew install lua pkgconf
+        with: { ref: "${{ inputs.release_tag || github.ref }}", persist-credentials: false }
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093
+        with: { name: zinc-data, path: data }
+      - uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830
+        if: matrix.source_lux
+        with: { path: "${{ runner.temp }}/lux", key: "lux-${{ env.LUX_VERSION }}-${{ matrix.id }}" }
+      - name: Install Unix tools
+        if: runner.os != 'Windows'
+        env: { ID: "${{ matrix.id }}", ARCH: "${{ matrix.arch }}", LUX_SHA: "${{ matrix.lux_sha }}", GPG_SHA: "${{ matrix.gpg_sha }}", ASSUAN_SHA: "${{ matrix.assuan_sha }}" }
+        run: |
+          root=$RUNNER_TEMP/lux; mkdir -p "$root/bin" "$root/gpgme"
+          if [ "$RUNNER_OS" = Linux ]; then
+            sudo apt-get update && sudo apt-get install --yes liblua5.5-dev pkgconf
+            curl -fsSL "https://github.com/lumen-oss/lux/releases/download/v$LUX_VERSION/lx-$ARCH-unknown-linux-gnu.tar.gz" -o "$root/lux.tgz"
+            echo "$LUX_SHA  $root/lux.tgz" | sha256sum -c -; tar -xzf "$root/lux.tgz" -C "$root/bin"
+            case $ARCH in x86_64) debhost=archive.ubuntu.com/ubuntu; debarch=amd64; multiarch=x86_64-linux-gnu;; aarch64) debhost=ports.ubuntu.com/ubuntu-ports; debarch=arm64; multiarch=aarch64-linux-gnu;; esac
+            curl -fsSL "https://$debhost/pool/main/g/gpgme1.0/libgpgme11t64_1.18.0-4.1ubuntu4_$debarch.deb" -o "$root/gpgme.deb"
+            curl -fsSL "https://$debhost/pool/main/liba/libassuan/libassuan0_2.5.6-1build1_$debarch.deb" -o "$root/assuan.deb"
+            echo "$GPG_SHA  $root/gpgme.deb" | sha256sum -c -; echo "$ASSUAN_SHA  $root/assuan.deb" | sha256sum -c -
+            dpkg-deb -x "$root/gpgme.deb" "$root/gpgme"; dpkg-deb -x "$root/assuan.deb" "$root/gpgme"
+            echo "LD_LIBRARY_PATH=$root/gpgme/usr/lib/$multiarch" >> "$GITHUB_ENV"
+          else
+            brew install lua pkgconf
+            if [ "$ID" = macos-aarch64 ]; then
+              curl -fsSL "https://github.com/lumen-oss/lux/releases/download/v$LUX_VERSION/lux-cli_${LUX_VERSION}_aarch64.dmg" -o "$root/lux.dmg"
+              echo '4d410c4ea811c1e5d3809ebe229331e0c953d1c08087cddef6bdc28452b6a996  '"$root/lux.dmg" | shasum -a 256 -c -
+              mkdir "$root/mount"; hdiutil attach -quiet -acceptlicense -nobrowse -readonly -mountpoint "$root/mount" "$root/lux.dmg"
+              cp "$root/mount/lux-cli.app/Contents/MacOS/lx" "$root/bin/"; hdiutil detach -quiet "$root/mount"
+            elif [ ! -x "$root/bin/lx" ]; then cargo install lux-cli --version "$LUX_VERSION" --root "$root" --no-default-features --features vendored --locked; fi
+          fi
+          echo "$root/bin" >> "$GITHUB_PATH"
       - uses: msys2/setup-msys2@66cd2cce69caa17b53920067426061ca1de3a884
+        id: msys2
         if: runner.os == 'Windows'
-        with:
-          msystem: ${{ matrix.msystem }}
-          path-type: inherit
-          update: true
-          pacboy: toolchain:p lua:p pkgconf:p
-      - name: Install Lux on Linux
-        if: runner.os == 'Linux'
-        env:
-          LUX_ASSET: ${{ matrix.lux }}
-          LUX_SHA256: ${{ matrix.lux_sha }}
-        run: |
-          mkdir -p "$RUNNER_TEMP/lux/bin"
-          curl -fsSL "https://github.com/lumen-oss/lux/releases/download/v${LUX_VERSION}/${LUX_ASSET}" -o "$RUNNER_TEMP/lux.tar.gz"
-          echo "$LUX_SHA256  $RUNNER_TEMP/lux.tar.gz" | sha256sum -c -
-          tar -xzf "$RUNNER_TEMP/lux.tar.gz" -C "$RUNNER_TEMP/lux/bin"
-          echo "$RUNNER_TEMP/lux/bin" >> "$GITHUB_PATH"
-      - name: Install Lux on macOS ARM64
-        if: runner.os == 'macOS' && matrix.lux != ''
-        env:
-          LUX_ASSET: ${{ matrix.lux }}
-          LUX_SHA256: ${{ matrix.lux_sha }}
-        run: |
-          curl -fsSL "https://github.com/lumen-oss/lux/releases/download/v${LUX_VERSION}/${LUX_ASSET}" -o "$RUNNER_TEMP/lux.dmg"
-          echo "$LUX_SHA256  $RUNNER_TEMP/lux.dmg" | shasum -a 256 -c -
-          mkdir "$RUNNER_TEMP/lux-mount" "$RUNNER_TEMP/lux"
-          hdiutil attach -nobrowse -readonly -mountpoint "$RUNNER_TEMP/lux-mount" "$RUNNER_TEMP/lux.dmg"
-          cp -R "$RUNNER_TEMP/lux-mount/lux-cli.app" "$RUNNER_TEMP/lux/"
-          hdiutil detach "$RUNNER_TEMP/lux-mount"
-          echo "$RUNNER_TEMP/lux/lux-cli.app/Contents/MacOS" >> "$GITHUB_PATH"
-      - name: Build Lux on macOS Intel
-        if: runner.os == 'macOS' && matrix.lux == ''
-        run: |
-          cargo install lux-cli --version "$LUX_VERSION" --root "$RUNNER_TEMP/lux" --no-default-features --features vendored --locked
-          echo "$RUNNER_TEMP/lux/bin" >> "$GITHUB_PATH"
+        with: { msystem: "${{ matrix.msystem }}", path-type: inherit, update: true, pacboy: "${{ matrix.packages }}" }
       - name: Install Lux on Windows
         if: runner.os == 'Windows'
         shell: pwsh
-        env: { GH_TOKEN: "${{ github.token }}" }
         run: |
-          $msi = Join-Path $env:RUNNER_TEMP "lx_$env:LUX_VERSION`_x64_en-US.msi"
-          gh release download "v$env:LUX_VERSION" --repo lumen-oss/lux --pattern (Split-Path $msi -Leaf) --dir $env:RUNNER_TEMP
+          $msi="$env:RUNNER_TEMP\lux.msi"; Invoke-WebRequest "https://github.com/lumen-oss/lux/releases/download/v$env:LUX_VERSION/lx_$env:LUX_VERSION`_x64_en-US.msi" -OutFile $msi
           if ((Get-FileHash $msi -Algorithm SHA256).Hash.ToLowerInvariant() -ne '46fa7a8e4a2e1f3b8a741aa782ab72c2a36ce0bd674479d0f5fe971561c081fe') { throw 'Lux checksum mismatch' }
-          $installer = Start-Process msiexec.exe -Wait -PassThru -ArgumentList '/i', $msi, '/qn', '/norestart'
-          if ($installer.ExitCode -ne 0) { throw "Lux installation failed with status $($installer.ExitCode)" }
-          Join-Path $env:ProgramFiles 'lux-cli' | Out-File -FilePath $env:GITHUB_PATH -Append
-      - name: Install runtime fixtures on Unix
-        if: runner.os != 'Windows'
-        env:
-          GH_TOKEN: "${{ github.token }}"
-          TARGET_ID: ${{ matrix.id }}
-        run: |
-          set -euo pipefail
-          directory="$RUNNER_TEMP/runtime"
-          mkdir -p "$directory/bin" "$directory/ac" "$directory/pa"
-          ac_asset="agent-connector-${AGENT_CONNECTOR_FIXTURE_VERSION}-${TARGET_ID}.tar.gz"
-          pa_asset="portable-agents-${PORTABLE_AGENTS_FIXTURE_VERSION}-${TARGET_ID}.tar.gz"
-          gh release download "$AGENT_CONNECTOR_FIXTURE_VERSION" --repo darkhorseprojects/agent-connector --pattern "$ac_asset" --pattern SHA256SUMS --dir "$directory/ac"
-          gh release download "$PORTABLE_AGENTS_FIXTURE_VERSION" --repo darkhorseprojects/portable-agents --pattern "$pa_asset" --pattern SHA256SUMS --dir "$directory/pa"
-          if command -v sha256sum >/dev/null; then
-            (cd "$directory/ac" && grep -F "  $ac_asset" SHA256SUMS | sha256sum -c -)
-            (cd "$directory/pa" && grep -F "  $pa_asset" SHA256SUMS | sha256sum -c -)
-          else
-            (cd "$directory/ac" && grep -F "  $ac_asset" SHA256SUMS | shasum -a 256 -c -)
-            (cd "$directory/pa" && grep -F "  $pa_asset" SHA256SUMS | shasum -a 256 -c -)
-          fi
-          tar -xOf "$directory/ac/$ac_asset" "${ac_asset%.tar.gz}/agc" > "$directory/bin/agc"
-          tar -xOf "$directory/pa/$pa_asset" "${pa_asset%.tar.gz}/agent" > "$directory/bin/agent"
-          chmod +x "$directory/bin/agc" "$directory/bin/agent"
-          echo "$directory/bin" >> "$GITHUB_PATH"
-      - name: Install runtime fixtures on Windows
-        if: runner.os == 'Windows'
-        shell: pwsh
-        env:
-          GH_TOKEN: "${{ github.token }}"
-          TARGET_ID: ${{ matrix.id }}
-        run: |
-          $directory = Join-Path $env:RUNNER_TEMP 'runtime'
-          $acDirectory = Join-Path $directory 'ac'
-          $paDirectory = Join-Path $directory 'pa'
-          $bin = Join-Path $directory 'bin'
-          New-Item -ItemType Directory -Force -Path $acDirectory, $paDirectory, $bin | Out-Null
-          $acAsset = "agent-connector-$env:AGENT_CONNECTOR_FIXTURE_VERSION-$env:TARGET_ID.zip"
-          $paAsset = "portable-agents-$env:PORTABLE_AGENTS_FIXTURE_VERSION-$env:TARGET_ID.zip"
-          gh release download $env:AGENT_CONNECTOR_FIXTURE_VERSION --repo darkhorseprojects/agent-connector --pattern $acAsset --pattern SHA256SUMS --dir $acDirectory
-          gh release download $env:PORTABLE_AGENTS_FIXTURE_VERSION --repo darkhorseprojects/portable-agents --pattern $paAsset --pattern SHA256SUMS --dir $paDirectory
-          $acExpected = ((Get-Content (Join-Path $acDirectory 'SHA256SUMS') | Where-Object { $_.EndsWith("  $acAsset") }) -split '\s+')[0]
-          $acActual = (Get-FileHash (Join-Path $acDirectory $acAsset) -Algorithm SHA256).Hash.ToLowerInvariant()
-          if ($acActual -ne $acExpected) { throw 'Agent Connector fixture checksum mismatch' }
-          $paExpected = ((Get-Content (Join-Path $paDirectory 'SHA256SUMS') | Where-Object { $_.EndsWith("  $paAsset") }) -split '\s+')[0]
-          $paActual = (Get-FileHash (Join-Path $paDirectory $paAsset) -Algorithm SHA256).Hash.ToLowerInvariant()
-          if ($paActual -ne $paExpected) { throw 'Portable Agents fixture checksum mismatch' }
-          Expand-Archive (Join-Path $acDirectory $acAsset) $acDirectory
-          Expand-Archive (Join-Path $paDirectory $paAsset) $paDirectory
-          Copy-Item (Get-ChildItem $acDirectory -Filter agc.exe -Recurse | Select-Object -First 1) $bin
-          Copy-Item (Get-ChildItem $paDirectory -Filter agent.exe -Recurse | Select-Object -First 1) $bin
-          $bin | Out-File -FilePath $env:GITHUB_PATH -Append
-      - name: Build, install, and package on Unix
-        if: runner.os != 'Windows'
+          $p=Start-Process msiexec -Wait -PassThru -ArgumentList '/i',$msi,'/qn','/norestart'; if ($p.ExitCode) { throw "Lux install failed: $($p.ExitCode)" }
+          $prefix = if ('${{ matrix.msystem }}' -eq 'UCRT64') { 'ucrt64' } else { 'clangarm64' }
+          (Join-Path $env:ProgramFiles lux-cli), (Join-Path '${{ steps.msys2.outputs.msys2-location }}' "$prefix\bin") | Out-File $env:GITHUB_PATH -Append
+      - name: Build, test, and package
         shell: bash
         env:
-          TARGET_ID: ${{ matrix.id }}
+          GH_TOKEN: "${{ github.token }}"
+          TARGET_ID: "${{ matrix.id }}"
+          MATRIX_CC: "${{ matrix.cc }}"
+          OBJDUMP: "${{ matrix.objdump }}"
+          EXPECTED_MACHINE: "${{ matrix.machine }}"
         run: |
           set -euo pipefail
-          lx --lua-version 5.5 --max-jobs 1 build --only-deps
-          eval "$(lx path full --no-loader --no-bin)"
-          curl -fsSL https://github.com/omwn/cygnet/releases/download/2026.05.12/cygnet.db.gz -o "$RUNNER_TEMP/cygnet.db.gz"
-          if command -v sha256sum >/dev/null; then actual=$(sha256sum "$RUNNER_TEMP/cygnet.db.gz" | cut -d' ' -f1); else actual=$(shasum -a 256 "$RUNNER_TEMP/cygnet.db.gz" | cut -d' ' -f1); fi
-          test "$actual" = 65e93f3620d7cc5444350d9e204259e961096138767d9ea73403ade38964cc48
-          gzip -dc "$RUNNER_TEMP/cygnet.db.gz" > "$RUNNER_TEMP/cygnet.db"
-          lx --lua-version 5.5 lua -- tools/cygnet_index.lua "$RUNNER_TEMP/cygnet.db" data/cygnet.db aae2cdb1418c1435558584a91181e1cb94459f2506c16f2be4b00e81428deaff
-
-          root=dist/zinc
-          rm -rf "$root"
-          mkdir -p "$root/package/lunajson" "$root/package/native" "$root/data" "$root/state"
-          cp -R package/. "$root/package/"
+          if [[ $TARGET_ID = windows-* ]]; then export CRATE_CC_NO_DEFAULTS=1 CC_x86_64_pc_windows_msvc=$MATRIX_CC; fi
+          lx --lua-version 5.5 --max-jobs 1 --verbose build --only-deps
+          root=dist/zinc; rm -rf "$root"; mkdir -p "$root/package/lunajson" "$root/package/native" "$root/data" "$root/state"
+          cp -R package/. "$root/package/"; cp data/cygnet.db "$root/data/"
           cp ac.yaml install.sh install.ps1 lux.toml lux.lock models.ini models.lock README.md RELEASE_NOTES.md LICENSE NOTICE "$root/"
-          cp data/cygnet.db "$root/data/"
-          shopt -s nullglob
-          decoders=(.lux/5.5/*-lunajson@*/src/lunajson/decoder.lua)
-          encoders=(.lux/5.5/*-lunajson@*/src/lunajson/encoder.lua)
-          libraries=(.lux/5.5/*-lsqlite3complete@*/lib/lsqlite3complete.so)
-          test "${#decoders[@]}" -eq 1 && test "${#encoders[@]}" -eq 1 && test "${#libraries[@]}" -eq 1
-          if [[ "$RUNNER_OS" == macOS ]]; then
-            dependency=$(otool -L "${libraries[0]}" | awk '/liblua/{print $1; exit}')
-            install_name_tool -change "$dependency" @rpath/liblua.5.5.dylib "${libraries[0]}"
-            otool -L "${libraries[0]}" | grep -F '@rpath/liblua.5.5.dylib'
-          else
-            readelf -d "${libraries[0]}" | grep -F 'Shared library: [liblua5.5.so.0]'
-          fi
-          cp "${decoders[0]}" "${encoders[0]}" "$root/package/lunajson/"
-          cp "${libraries[0]}" "$root/package/native/"
-          chmod +x "$root/install.sh"
-          ! find "$root" -type f \( -name agent -o -name agent.exe -o -name agc -o -name agc.exe -o -name lua -o -name lua.exe -o -name 'liblua*' -o -name 'lua55.dll' \) | grep .
-
-          destination="$RUNNER_TEMP/zinc-installed"
-          "$root/install.sh" "$destination"
-          cp "$destination/ac.yaml" "$RUNNER_TEMP/ac.yaml"
-          cp "$destination/models.ini" "$RUNNER_TEMP/models.ini"
-          printf preserved > "$destination/state/preserved"
-          "$root/install.sh" "$destination"
-          cmp "$destination/ac.yaml" "$RUNNER_TEMP/ac.yaml"
-          cmp "$destination/models.ini" "$RUNNER_TEMP/models.ini"
-          grep -Fx preserved "$destination/state/preserved"
-          agc check "$destination"
-
-          version=$(awk -F'"' '/^version =/{print $2; exit}' lux.toml)
-          archive="zinc-v${version}-${TARGET_ID}"
-          mv "$root" "$archive"
-          tar -czf "$archive.tar.gz" "$archive"
-          tar -tvzf "$archive.tar.gz" | awk '$NF ~ /\/install[.]sh$/ { if (substr($1,4,1) != "x") exit 1; found=1 } END { exit !found }'
-      - name: Build, install, and package on Windows
-        if: runner.os == 'Windows'
-        shell: msys2 {0}
-        env:
-          OBJDUMP: ${{ matrix.objdump }}
-          TARGET_ID: ${{ matrix.id }}
-        run: |
-          set -euo pipefail
-          lx --lua-version 5.5 --max-jobs 1 build --only-deps
-          eval "$(lx path full --no-loader --no-bin)"
-          curl -fsSL https://github.com/omwn/cygnet/releases/download/2026.05.12/cygnet.db.gz -o "$RUNNER_TEMP/cygnet.db.gz"
-          test "$(sha256sum "$RUNNER_TEMP/cygnet.db.gz" | cut -d' ' -f1)" = 65e93f3620d7cc5444350d9e204259e961096138767d9ea73403ade38964cc48
-          gzip -dc "$RUNNER_TEMP/cygnet.db.gz" > "$RUNNER_TEMP/cygnet.db"
-          lx --lua-version 5.5 lua -- tools/cygnet_index.lua "$RUNNER_TEMP/cygnet.db" data/cygnet.db aae2cdb1418c1435558584a91181e1cb94459f2506c16f2be4b00e81428deaff
-
-          root=dist/zinc
-          rm -rf "$root"
-          mkdir -p "$root/package/lunajson" "$root/package/native" "$root/data" "$root/state"
-          cp -R package/. "$root/package/"
-          cp ac.yaml install.sh install.ps1 lux.toml lux.lock models.ini models.lock README.md RELEASE_NOTES.md LICENSE NOTICE "$root/"
-          cp data/cygnet.db "$root/data/"
-          shopt -s nullglob
-          decoders=(.lux/5.5/*-lunajson@*/src/lunajson/decoder.lua)
-          encoders=(.lux/5.5/*-lunajson@*/src/lunajson/encoder.lua)
-          libraries=(.lux/5.5/*-lsqlite3complete@*/lib/lsqlite3complete.dll)
-          test "${#decoders[@]}" -eq 1 && test "${#encoders[@]}" -eq 1 && test "${#libraries[@]}" -eq 1
-          "$OBJDUMP" -p "${libraries[0]}" | grep -Fi 'DLL Name: lua55.dll'
-          cp "${decoders[0]}" "${encoders[0]}" "$root/package/lunajson/"
-          cp "${libraries[0]}" "$root/package/native/"
-          chmod +x "$root/install.sh"
-          ! find "$root" -type f \( -name agent -o -name agent.exe -o -name agc -o -name agc.exe -o -name lua -o -name lua.exe -o -name 'liblua*' -o -name 'lua55.dll' \) | grep .
-
-          destination="$RUNNER_TEMP/zinc-installed"
-          pwsh -NoProfile -File "$root/install.ps1" -Destination "$(cygpath -w "$destination")"
-          cp "$destination/ac.yaml" "$RUNNER_TEMP/ac.yaml"
-          cp "$destination/models.ini" "$RUNNER_TEMP/models.ini"
-          printf preserved > "$destination/state/preserved"
-          pwsh -NoProfile -File "$root/install.ps1" -Destination "$(cygpath -w "$destination")"
-          cmp "$destination/ac.yaml" "$RUNNER_TEMP/ac.yaml"
-          cmp "$destination/models.ini" "$RUNNER_TEMP/models.ini"
-          grep -Fx preserved "$destination/state/preserved"
-          agc check "$destination"
-
-          version=$(awk -F'"' '/^version =/{print $2; exit}' lux.toml)
-          archive="zinc-v${version}-${TARGET_ID}"
-          mv "$root" "$archive"
-          ROOT="$archive" pwsh -NoProfile -Command 'Compress-Archive $env:ROOT ($env:ROOT + ".zip")'
+          shopt -s nullglob; dec=(.lux/5.5/*-lunajson@*/src/lunajson/decoder.lua); enc=(.lux/5.5/*-lunajson@*/src/lunajson/encoder.lua)
+          if [[ $TARGET_ID = windows-* ]]; then lib=(.lux/5.5/*-lsqlite3complete@*/lib/lsqlite3complete.dll); else lib=(.lux/5.5/*-lsqlite3complete@*/lib/lsqlite3complete.so); fi
+          test ${#dec[@]} = 1; test ${#enc[@]} = 1; test ${#lib[@]} = 1
+          case $TARGET_ID in
+            linux-*) readelf -d "${lib[0]}" | grep -F 'Shared library: [liblua5.5.so.0]' ;;
+            macos-*) dependency=$(otool -L "${lib[0]}" | awk '/liblua/{print $1; exit}'); install_name_tool -change "$dependency" @rpath/liblua.5.5.dylib "${lib[0]}"; otool -L "${lib[0]}" | grep -F '@rpath/liblua.5.5.dylib' ;;
+            windows-*) "$OBJDUMP" -f "${lib[0]}" | grep -Fi "$EXPECTED_MACHINE"; "$OBJDUMP" -p "${lib[0]}" | grep -Fi 'DLL Name: lua55.dll' ;;
+          esac
+          cp "${dec[0]}" "${enc[0]}" "$root/package/lunajson/"; cp "${lib[0]}" "$root/package/native/"; chmod +x "$root/install.sh"
+          ! find "$root" -type f \( -name agent -o -name agent.exe -o -name agc -o -name agc.exe -o -name lua -o -name lua.exe -o -name 'liblua*' -o -name lua55.dll \) | grep .
+          runtime=$RUNNER_TEMP/runtime; mkdir -p "$runtime"/{ac,pa,bin}; if [[ $TARGET_ID = windows-* ]]; then ext=zip; exe=.exe; else ext=tar.gz; exe=; fi
+          ac="agent-connector-v0.1.4-$TARGET_ID.$ext"; pa="portable-agents-v0.1.4-$TARGET_ID.$ext"
+          gh release download v0.1.4 --repo darkhorseprojects/agent-connector --pattern "$ac" --pattern SHA256SUMS --dir "$runtime/ac"
+          gh release download v0.1.4 --repo darkhorseprojects/portable-agents --pattern "$pa" --pattern SHA256SUMS --dir "$runtime/pa"
+          for pair in "ac:$ac" "pa:$pa"; do dir=${pair%%:*}; file=${pair#*:}; (cd "$runtime/$dir" && grep -F "  $file" SHA256SUMS | { if command -v sha256sum >/dev/null; then sha256sum -c -; else shasum -a 256 -c -; fi; }); done
+          if [ "$ext" = zip ]; then for dir in ac pa; do file=$ac; [ "$dir" = pa ] && file=$pa; pwsh -NoProfile -Command "Expand-Archive '$(cygpath -w "$runtime/$dir/$file")' '$(cygpath -w "$runtime/$dir/out")'"; done; else for dir in ac pa; do mkdir "$runtime/$dir/out"; file=$ac; [ "$dir" = pa ] && file=$pa; tar -xzf "$runtime/$dir/$file" -C "$runtime/$dir/out"; done; fi
+          cp "$(find "$runtime/ac/out" -name "agc$exe")" "$(find "$runtime/pa/out" -name "agent$exe")" "$runtime/bin/"; chmod +x "$runtime/bin/"*; export PATH="$runtime/bin:$PATH"
+          destination=$RUNNER_TEMP/zinc-installed
+          if [ "$ext" = zip ]; then pwsh -NoProfile -File "$root/install.ps1" -Destination "$(cygpath -w "$destination")"; else "$root/install.sh" "$destination"; fi
+          cp "$destination/ac.yaml" "$RUNNER_TEMP/ac.yaml"; cp "$destination/models.ini" "$RUNNER_TEMP/models.ini"; printf preserved > "$destination/state/preserved"
+          if [ "$ext" = zip ]; then pwsh -NoProfile -File "$root/install.ps1" -Destination "$(cygpath -w "$destination")"; else "$root/install.sh" "$destination"; fi
+          cmp "$destination/ac.yaml" "$RUNNER_TEMP/ac.yaml"; cmp "$destination/models.ini" "$RUNNER_TEMP/models.ini"; grep -Fx preserved "$destination/state/preserved"; agc check "$destination"
+          version=$(awk -F'"' '/^version =/{print $2; exit}' lux.toml); archive="zinc-v$version-$TARGET_ID"; mv "$root" "$archive"
+          if [ "$ext" = zip ]; then ROOT=$archive pwsh -NoProfile -Command 'Compress-Archive $env:ROOT ($env:ROOT + ".zip")'; else tar -czf "$archive.tar.gz" "$archive"; tar -tvzf "$archive.tar.gz" | grep -E '^-..x...... .*\/install[.]sh$'; fi
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
         if: startsWith(github.ref, 'refs/tags/v') || inputs.release_tag != ''
-        with:
-          name: zinc-${{ matrix.id }}
-          path: zinc-v*-${{ matrix.id }}.*
-          if-no-files-found: error
+        with: { name: "zinc-${{ matrix.id }}", path: "zinc-v*-${{ matrix.id }}.*", if-no-files-found: error }
 
   release:
     if: startsWith(github.ref, 'refs/tags/v') || inputs.release_tag != ''
@@ -297,34 +167,9 @@ jobs:
     permissions: { contents: write }
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
-        with:
-          ref: ${{ inputs.release_tag || github.ref }}
-          persist-credentials: false
+        with: { ref: "${{ inputs.release_tag || github.ref }}", persist-credentials: false }
       - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093
         with: { pattern: zinc-*, path: artifacts, merge-multiple: true }
-      - name: Verify archives
-        working-directory: artifacts
-        shell: bash
-        run: |
-          set -euo pipefail
-          test "$(find . -maxdepth 1 -type f | wc -l)" -eq 6
-          for archive in *.tar.gz; do
-            tar -tvzf "$archive" | awk '$NF ~ /\/install[.]sh$/ { if (substr($1,4,1) != "x") exit 1; found=1 } END { exit !found }'
-            test "$(tar -tzf "$archive" | grep -c '/package/native/lsqlite3complete[.]so$')" -eq 1
-            test "$(tar -tzf "$archive" | grep -c '/data/cygnet[.]db$')" -eq 1
-            ! tar -tzf "$archive" | grep -Ei '/(agent|agent[.]exe|agc|agc[.]exe|lua|lua[.]exe|liblua[^/]*|lua55[.]dll)$'
-          done
-          for archive in *.zip; do
-            test "$(unzip -Z1 "$archive" | grep -c '/package/native/lsqlite3complete[.]dll$')" -eq 1
-            test "$(unzip -Z1 "$archive" | grep -c '/data/cygnet[.]db$')" -eq 1
-            ! unzip -Z1 "$archive" | grep -Ei '/(agent|agent[.]exe|agc|agc[.]exe|lua|lua[.]exe|liblua[^/]*|lua55[.]dll)$'
-          done
-          sha256sum *.tar.gz *.zip > SHA256SUMS
+      - run: cd artifacts && test "$(find . -maxdepth 1 -type f | wc -l)" = 6 && sha256sum *.tar.gz *.zip > SHA256SUMS
       - uses: softprops/action-gh-release@3bb12739c298aeb8a4eeaf626c5b8d85266b0e65
-        with:
-          tag_name: ${{ inputs.release_tag || github.ref_name }}
-          files: |
-            artifacts/*.tar.gz
-            artifacts/*.zip
-            artifacts/SHA256SUMS
-          body_path: RELEASE_NOTES.md
+        with: { tag_name: "${{ inputs.release_tag || github.ref_name }}", files: "artifacts/*", body_path: RELEASE_NOTES.md }
