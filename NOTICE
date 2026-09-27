@@ -1,15 +1,10 @@
 Zinc third-party notices
 ========================
 
-Zinc distributions bundle the locked Lua/SQLite closure and Cygnet data. The
-Portable Agents launcher, model servers, and model weights are released or
-provisioned separately. Each component remains subject to its own license terms.
-
-Portable Agents 0.1.0
----------------------
-Source: https://github.com/darkhorseprojects/portable-agents
-License: AGPL-3.0-only
-License text: https://github.com/darkhorseprojects/portable-agents/blob/v0.1.0/LICENSE
+Zinc distributions bundle locked Lua package dependencies, the SQLite
+amalgamation, and Cygnet data. The Lua runtime, Portable Agents launcher, Agent
+Connector, model servers, and model weights are released or provisioned
+separately. Each component remains subject to its own license terms.
 
 Lux 0.43.3
 ----------
@@ -26,10 +21,11 @@ Busted 2.3.0 and LuaCov 0.17.0
 Sources: https://github.com/lunarmodules/busted and https://github.com/lunarmodules/luacov
 License: MIT
 
-Lua 5.5.0
----------
-Copyright (C) 1994-2025 Lua.org, PUC-Rio.
-Source: https://www.lua.org/ftp/lua-5.5.0.tar.gz
+Lua 5.5 runtime
+---------------
+Lua is an external runtime dependency and is not included in Zinc downloads.
+Copyright (C) 1994-2026 Lua.org, PUC-Rio.
+Source: https://www.lua.org/
 License: MIT
 License text: https://www.lua.org/license.html
 
