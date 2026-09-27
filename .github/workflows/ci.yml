@@ -35,10 +35,15 @@ jobs:
           persist-credentials: false
       - name: Install Lua runtime for native lint module
         run: sudo apt-get update && sudo apt-get install --yes liblua5.4-0
+      - name: Install Lux
+        run: |
+          mkdir -p "$RUNNER_TEMP/lux/bin"
+          curl -fsSL "https://github.com/lumen-oss/lux/releases/download/v${LUX_VERSION}/lx-x86_64-unknown-linux-gnu.tar.gz" -o "$RUNNER_TEMP/lux.tar.gz"
+          echo '32f091c10dcfcb0e7ba990a65ebb14b92cf46a446738f5732e49cd68456ba9d2  '"$RUNNER_TEMP/lux.tar.gz" | sha256sum -c -
+          tar -xzf "$RUNNER_TEMP/lux.tar.gz" -C "$RUNNER_TEMP/lux/bin"
+          echo "$RUNNER_TEMP/lux/bin" >> "$GITHUB_PATH"
       - name: Verify source
         run: |
-          cargo install lux-cli --version "$LUX_VERSION" --root "$RUNNER_TEMP/lux" --no-default-features --features vendored --locked
-          export PATH="$RUNNER_TEMP/lux/bin:$PATH"
           for path in package/src tools; do lx --lua-version 5.5 fmt --backend stylua --path "$path"; done
           python3 tools/format_fences.py --check
           git diff --exit-code -- package/src tools
@@ -59,10 +64,10 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          - { os: ubuntu-26.04, id: linux-x86_64 }
-          - { os: ubuntu-26.04-arm, id: linux-aarch64 }
+          - { os: ubuntu-26.04, id: linux-x86_64, lux: lx-x86_64-unknown-linux-gnu.tar.gz, lux_sha: 32f091c10dcfcb0e7ba990a65ebb14b92cf46a446738f5732e49cd68456ba9d2 }
+          - { os: ubuntu-26.04-arm, id: linux-aarch64, lux: lx-aarch64-unknown-linux-gnu.tar.gz, lux_sha: 40bb4186c47d53be0e9f4f6ab0814bde8eee0e4105bd116d397999898c19b56a }
           - { os: macos-15-intel, id: macos-x86_64 }
-          - { os: macos-15, id: macos-aarch64 }
+          - { os: macos-15, id: macos-aarch64, lux: lux-cli_0.43.3_aarch64.dmg, lux_sha: 4d410c4ea811c1e5d3809ebe229331e0c953d1c08087cddef6bdc28452b6a996 }
           - { os: windows-latest, id: windows-x86_64, msystem: UCRT64, objdump: objdump }
           - { os: windows-11-arm, id: windows-aarch64, msystem: CLANGARM64, objdump: llvm-objdump }
     runs-on: ${{ matrix.os }}
@@ -85,8 +90,32 @@ jobs:
           path-type: inherit
           update: true
           pacboy: toolchain:p lua:p pkgconf:p
-      - name: Install Lux on Unix
-        if: runner.os != 'Windows'
+      - name: Install Lux on Linux
+        if: runner.os == 'Linux'
+        env:
+          LUX_ASSET: ${{ matrix.lux }}
+          LUX_SHA256: ${{ matrix.lux_sha }}
+        run: |
+          mkdir -p "$RUNNER_TEMP/lux/bin"
+          curl -fsSL "https://github.com/lumen-oss/lux/releases/download/v${LUX_VERSION}/${LUX_ASSET}" -o "$RUNNER_TEMP/lux.tar.gz"
+          echo "$LUX_SHA256  $RUNNER_TEMP/lux.tar.gz" | sha256sum -c -
+          tar -xzf "$RUNNER_TEMP/lux.tar.gz" -C "$RUNNER_TEMP/lux/bin"
+          echo "$RUNNER_TEMP/lux/bin" >> "$GITHUB_PATH"
+      - name: Install Lux on macOS ARM64
+        if: runner.os == 'macOS' && matrix.lux != ''
+        env:
+          LUX_ASSET: ${{ matrix.lux }}
+          LUX_SHA256: ${{ matrix.lux_sha }}
+        run: |
+          curl -fsSL "https://github.com/lumen-oss/lux/releases/download/v${LUX_VERSION}/${LUX_ASSET}" -o "$RUNNER_TEMP/lux.dmg"
+          echo "$LUX_SHA256  $RUNNER_TEMP/lux.dmg" | shasum -a 256 -c -
+          mkdir "$RUNNER_TEMP/lux-mount" "$RUNNER_TEMP/lux"
+          hdiutil attach -nobrowse -readonly -mountpoint "$RUNNER_TEMP/lux-mount" "$RUNNER_TEMP/lux.dmg"
+          cp -R "$RUNNER_TEMP/lux-mount/lux-cli.app" "$RUNNER_TEMP/lux/"
+          hdiutil detach "$RUNNER_TEMP/lux-mount"
+          echo "$RUNNER_TEMP/lux/lux-cli.app/Contents/MacOS" >> "$GITHUB_PATH"
+      - name: Build Lux on macOS Intel
+        if: runner.os == 'macOS' && matrix.lux == ''
         run: |
           cargo install lux-cli --version "$LUX_VERSION" --root "$RUNNER_TEMP/lux" --no-default-features --features vendored --locked
           echo "$RUNNER_TEMP/lux/bin" >> "$GITHUB_PATH"
