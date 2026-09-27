@@ -21,7 +21,7 @@ jobs:
         with: { ref: "${{ inputs.release_tag || github.ref }}", persist-credentials: false }
       - name: Install tools
         run: |
-          sudo apt-get update && sudo apt-get install --yes liblua5.4-0 liblua5.5-dev pkgconf
+          sudo apt-get update && sudo apt-get install --yes liblua5.4-0 liblua5.5-dev lua5.5 pkgconf
           root=$RUNNER_TEMP/lux; mkdir -p "$root/bin" "$root/gpgme"
           curl -fsSL https://github.com/lumen-oss/lux/releases/download/v0.43.3/lx-x86_64-unknown-linux-gnu.tar.gz -o "$root/lux.tgz"
           echo '32f091c10dcfcb0e7ba990a65ebb14b92cf46a446738f5732e49cd68456ba9d2  '"$root/lux.tgz" | sha256sum -c -
