@@ -30,8 +30,10 @@ Extract the archive and run `install.sh` or `install.ps1`. The installer places 
 directory by default. A custom destination may be supplied. Reinstallation updates managed package and retrieval files
 while preserving `ac.yaml`, `models.ini`, and `state/`.
 
-Install Portable Agents, Agent Connector, and Lua 5.5 independently. `agent` and `agc` must be on `PATH`; Lua must be
-visible to the operating system's dynamic loader. The native module requests `liblua5.5.so.0` on Linux,
+Install Portable Agents, Agent Connector, and Lua 5.5 independently. These archives are tested with both agents at
+v0.1.5. Windows ARM64 requires Portable Agents v0.1.5 or newer; its v0.1.4 binary crashes on `agent call`. `agent` and
+`agc` must be on `PATH`; Lua must be visible to the operating system's dynamic loader. The native module requests
+`liblua5.5.so.0` on Linux,
 `@rpath/liblua.5.5.dylib` on macOS, and `lua55.dll` on Windows.
 
 The archives contain Zinc's Markdown and Lua modules, locked Lua package dependencies, a platform-native SQLite binding,
