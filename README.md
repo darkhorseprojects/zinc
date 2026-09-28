@@ -22,8 +22,10 @@ See the [Zinc wiki](https://github.com/darkhorseprojects/zinc/wiki) for the conf
 
 ## Install
 
-Install Portable Agents and Agent Connector independently, with both `agent` and `agc` available on `PATH`. Install an
-architecture-compatible Lua 5.5 shared library that the operating system's dynamic loader can find.
+Install Portable Agents and Agent Connector independently, with both `agent` and `agc` available on `PATH`. Zinc v0.1.0
+is tested with both at v0.1.5; Windows ARM64 requires Portable Agents v0.1.5 or newer because its v0.1.4 binary crashes
+on `agent call`. Install an architecture-compatible Lua 5.5 shared library that the operating system's dynamic loader
+can find.
 
 Download the Zinc archive for the machine running `agent`, extract it, and run Zinc's installer:
 
