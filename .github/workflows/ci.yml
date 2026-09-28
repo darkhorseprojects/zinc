@@ -178,6 +178,7 @@ jobs:
           archive="portable-agents-v0.1.5-$TARGET_ID.$ext"
           gh release download v0.1.5 --repo darkhorseprojects/portable-agents --pattern "$archive" --pattern SHA256SUMS --dir runtime/download
           (cd runtime/download && grep -F "  $archive" SHA256SUMS | { if command -v sha256sum >/dev/null; then sha256sum -c -; else shasum -a 256 -c -; fi; })
+          set -x
           if [ "$ext" = zip ]; then
             pwsh -NoProfile -Command "Expand-Archive '$(cygpath -w "runtime/download/$archive")' '$(cygpath -w runtime/out)'"
           else
@@ -204,6 +205,7 @@ jobs:
           else
             output=$("runtime/bin/agent$exe" call < request.json)
           fi
+          printf '%s\n' "$output"
           grep -F '"output":"b2s="' <<< "$output"
       - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093
         if: github.event_name != 'pull_request'
