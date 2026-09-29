@@ -74,14 +74,16 @@ local function merge(defaults, overrides, path)
         if type(value) == "table" then
             output[name] = merge(value, selected, field)
         elseif type(value) == "number" then
-            assert(
-                math.type(selected) == "integer"
-                    and selected >= 0
-                    and (field == "config.retrieval.semantic.attention_cutoff" or selected <= value),
-                "invalid " .. field
-            )
-            if not path:find("^config%.retrieval") then
-                assert(selected > 0, "invalid " .. field)
+            if field == "config.retrieval.semantic.minimum_score" then
+                assert(
+                    type(selected) == "number" and selected == selected and math.abs(selected) < math.huge,
+                    "invalid " .. field
+                )
+            else
+                assert(math.type(selected) == "integer" and selected >= 0 and selected <= value, "invalid " .. field)
+                if not path:find("^config%.retrieval") then
+                    assert(selected > 0, "invalid " .. field)
+                end
             end
             output[name] = selected
         else
@@ -118,8 +120,24 @@ return function(spec)
             run = true,
             models = true,
             retrieval = true,
+            model_gateway = true,
         }, spec.limits.config_bytes)
-        assert(value.version == 1, "unsupported Zinc config version")
+        assert(value.version == 2, "unsupported Zinc config version")
+        if value.model_gateway ~= nil then
+            assert(type(value.model_gateway) == "table", "invalid model gateway")
+            local gateway = value.model_gateway
+            assert(
+                type(gateway.origin) == "string"
+                    and gateway.origin:match("^http://127%.0%.0%.1:%d+$")
+                    and type(gateway.token) == "string"
+                    and gateway.token:match("^[a-f0-9]+$")
+                    and #gateway.token == 64,
+                "invalid model gateway"
+            )
+            for key in pairs(gateway) do
+                assert(key == "origin" or key == "token", "unknown model gateway field")
+            end
+        end
         assert(type(value.actor) == "string" and value.actor ~= "" and utf8.len(value.actor), "invalid actor")
         assert(spec.presets[value.preset], "unknown Zinc preset")
         assert((value.parent == nil) == (value.memory == nil), "parent and memory must be configured together")
@@ -134,8 +152,11 @@ return function(spec)
             retrieval = value.retrieval or {},
         }, "config")
         assert(
-            selected.models.rerank.passage_tokens > 0 and selected.models.rerank.query_tokens > 0,
-            "invalid reranker limits"
+            selected.models.rerank.maximum_pair_bytes > selected.models.rerank.maximum_query_bytes
+                and (selected.models.chat.provider == "local" or selected.models.chat.provider == "openrouter")
+                and selected.models.rerank.provider == "local"
+                and (selected.models.chat.provider ~= "openrouter" or value.model_gateway),
+            "model provider or reranker limits are invalid"
         )
         assert(selected.run.maximum_tool_result_bytes >= 128, "tool result limit must be at least 128 bytes")
         value.run, value.models, value.retrieval = selected.run, selected.models, selected.retrieval

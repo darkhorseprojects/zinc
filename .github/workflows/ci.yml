@@ -66,6 +66,7 @@ jobs:
           pwsh -NoProfile -Command '[void][scriptblock]::Create((Get-Content -Raw install.ps1))'
           lx --lua-version 5.5 --max-jobs 1 build --only-deps
           eval "$(lx path full --no-loader --no-bin)"
+          lua5.5 -e 'local s=require("lsqlite3complete"); local d=assert(s.open_memory()); assert(d:exec("CREATE VIRTUAL TABLE x USING fts5(v); CREATE VIRTUAL TABLE y USING fts5(v,tokenize=trigram,detail=none)")==s.OK,d:errmsg()); assert(d:close()==s.OK)'
           if [ ! -f data/cygnet.db ]; then
             mkdir -p data
             curl -fsSL https://github.com/omwn/cygnet/releases/download/2026.05.12/cygnet.db.gz -o "$RUNNER_TEMP/cygnet.db.gz"
@@ -74,7 +75,17 @@ jobs:
             echo 'aae2cdb1418c1435558584a91181e1cb94459f2506c16f2be4b00e81428deaff  '"$RUNNER_TEMP/cygnet.db" | sha256sum -c -
             lua5.5 tools/cygnet_index.lua "$RUNNER_TEMP/cygnet.db" data/cygnet.db aae2cdb1418c1435558584a91181e1cb94459f2506c16f2be4b00e81428deaff
           fi
-          python3 -c "import sqlite3; d=sqlite3.connect('file:data/cygnet.db?mode=ro',uri=True); m=dict(d.execute('select key,value from metadata')); assert m['format_version']=='2' and m['source_identity']=='aae2cdb1418c1435558584a91181e1cb94459f2506c16f2be4b00e81428deaff' and d.execute('pragma integrity_check').fetchone()==('ok',)"
+          python3 -c "import sqlite3; d=sqlite3.connect('file:data/cygnet.db?mode=ro',uri=True); m=dict(d.execute('select key,value from metadata')); assert m['format_version']=='4' and m['source_identity']=='aae2cdb1418c1435558584a91181e1cb94459f2506c16f2be4b00e81428deaff' and d.execute('pragma integrity_check').fetchone()==('ok',)"
+          lua5.5 - <<'LUA'
+          package.path = 'package/?.lua;package/?/init.lua;' .. package.path
+          local store = require('src.store')({path=os.getenv('RUNNER_TEMP') .. '/zinc-ci.db'})
+          local memory = require('src.memory')({
+            cygnet='data/cygnet.db', chronological={records=0,bytes=0},
+            semantic={language='en',depth=1,terms=1,candidates=1,bytes=1,minimum_score=0}
+          }, store, {})
+          memory:close()
+          store:close()
+          LUA
           mkdir -p inputs/lunajson inputs/lsqlite3
           cp .lux/5.5/*-lunajson@*/src/lunajson/{decoder,encoder}.lua inputs/lunajson/
           curl -fsSL 'https://lua.sqlite.org/home/zip/lsqlite3_v097.zip?uuid=v0.9.7' -o "$RUNNER_TEMP/lsqlite3.zip"
@@ -151,7 +162,7 @@ jobs:
           case $TARGET_ID in
             linux-*)
               cc -O2 -fPIC -shared $CFLAGS '-DLSQLITE_VERSION="0.9.7"' -Dluaopen_lsqlite3=luaopen_lsqlite3complete $(pkg-config --cflags lua5.5) inputs/lsqlite3/*.c -pthread -ldl -lm $(pkg-config --libs lua5.5) -o "$native"
-              readelf -d "$native" | grep -F 'Shared library: [liblua5.5.so.0]'
+              readelf -d "$native" | grep -E 'Shared library: \[liblua(5[.]5[.]so[.]0|[.]so[.]5[.]5)\]'
               ;;
             macos-*)
               cc -O2 -fPIC -bundle -undefined dynamic_lookup $CFLAGS '-DLSQLITE_VERSION="0.9.7"' -Dluaopen_lsqlite3=luaopen_lsqlite3complete $(pkg-config --cflags lua5.5) inputs/lsqlite3/*.c $(pkg-config --libs lua5.5) -o "$native"

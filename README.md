@@ -2,21 +2,21 @@
 
 Zinc is a [Portable Agents](https://github.com/darkhorseprojects/portable-agents) package for conversations that need
 durable, searchable memory and tightly configured tools. It combines actor-scoped history, chronological and semantic
-retrieval, Lua tool calls, and temporary nested agents. It uses a configured local model endpoint; it is not a hosted
-model or a general-purpose agent framework.
+retrieval, Lua tool calls, and temporary nested agents. Chat can use a local llama.cpp endpoint or OpenRouter through
+Agent Connector; reranking remains local. Zinc is not a general-purpose agent framework.
 
 ## What it does
 
 - **Carries memory across calls.** Each actor continues from stored history. Explicit branch coordinates provide
   controlled context when needed.
-- **Finds relevant past details.** Chronological history and Cygnet-backed semantic retrieval provide bounded model
-  context.
+- **Finds relevant past details.** Chronological history and actor-visible typo-aware lexical retrieval select a bounded
+  pool before Cygnet expansion and local reranking.
 - **Keeps tools configured.** Presets define Lua capabilities and grants. The `safe` preset means configured access, not
   a universal security guarantee; review its roots, endpoints, and permissions.
 - **Supports nested investigations.** A tool can start a temporary Zinc branch with a more restrictive preset, inspect
   its result, then discard it.
-- **Bounds tool work.** Per-run quotas meter accepted tool source and results. Separate limits constrain model rounds,
-  tool sizes, retrieval, and requests.
+- **Bounds tool work.** Per-run quotas use completed model requests' reported usage and stop subsequent requests when
+  exhausted. Separate limits constrain model rounds, tool sizes, retrieval bytes, and requests.
 
 See the [Zinc wiki](https://github.com/darkhorseprojects/zinc/wiki) for the configuration and memory model.
 
@@ -48,7 +48,10 @@ The default installation directories are:
 | Windows  | `%LOCALAPPDATA%\Zinc`                                 |
 
 Pass a destination as the first shell argument or as `-Destination` in PowerShell to install elsewhere. Reinstalling
-replaces Zinc's managed package and retrieval data while preserving `ac.yaml`, `models.ini`, and `state/`.
+replaces Zinc's managed package and retrieval data while preserving `ac.yaml`, `models.ini`, and `state/`. Existing
+`ac.yaml` is not migrated: before running, set its Zinc `config.version` to `2` and replace retired model/retrieval
+fields. Keep your route maps when making this change. On first use, Zinc upgrades a format-1 Store to format 2 in a
+transaction; large histories may take time to index. The installer does not erase history.
 
 The installer copies only Zinc. Release archives contain no `agent`, `agc`, Lua runtime, model server, or model weights.
 
@@ -66,7 +69,7 @@ agc run /path/to/zinc
 Minimal Zinc configuration is:
 
 ```json
-{"version":1,"actor":"account:42","preset":"safe"}
+{"version":2,"actor":"account:42","preset":"safe"}
 ```
 
 `actor` is the authenticated identity that owns the durable history. Select `unsafe`, `safe`, or `no-host` as the preset.
@@ -75,7 +78,8 @@ and retrieval settings.
 
 The package entry is `package/zinc.md`. The tracked Connector policy demonstrates actor identity and grants. The default
 model configuration expects the Prism llama.cpp build pinned in `models.lock`, with its chat and rerank models available
-through the Hugging Face cache. Model weights are not included.
+through the Hugging Face cache. For OpenRouter chat, run `agc login openrouter` globally and allowlist the selected model
+in the Connector policy. Model weights are not included.
 
 ## Runtime contract
 
@@ -91,7 +95,8 @@ modules request `liblua5.5.so.0` on Linux, `@rpath/liblua.5.5.dylib` on macOS, a
 
 - `package/` contains the Portable Agents source and presets.
 - `models.ini` configures chat and rerank aliases.
-- `data/cygnet.db` is generated from the locked Cygnet source during packaging.
+- `data/cygnet.db` is generated from the locked Cygnet source during packaging. Store format 2 keeps an actor-scoped
+  spelling lexicon for searchable events; Cygnet remains a read-only relation index.
 - `lux.lock` pins Zinc's Lua package dependencies.
 
 Build and validation commands:

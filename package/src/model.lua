@@ -39,8 +39,10 @@ local function finite(value)
     return type(value) == "number" and value == value and value ~= math.huge and value ~= -math.huge
 end
 
-return function(endpoints, config)
+return function(endpoints, config, gateway)
     local chat, rerank = config.chat, config.rerank
+    assert(rerank.provider == "local", "rerank provider is unsupported")
+    assert(chat.provider == "local" or chat.provider == "openrouter" and gateway, "chat provider is unavailable")
 
     local function request(path, value, maximum)
         pa.log("model.http.begin")
@@ -61,65 +63,29 @@ return function(endpoints, config)
         return request(path, value, maximum or chat.maximum_response_bytes)
     end
 
-    local function tokens(model, path, content, special)
-        pa.log("model.tokenize.begin")
-        local result = post(model, path, {
-            content = content,
-            add_special = false,
-            parse_special = special or false,
-        }, chat.maximum_response_bytes)
-        pa.log("model.tokenize.end")
-        return #dense(result.tokens, "tokenizer tokens")
-    end
-
     local api = {}
 
-    function api:tokens(content)
-        return tokens(chat, endpoints.chat.tokenize, content)
-    end
-
-    function api:context()
-        local path = endpoints.chat.props
-            .. "?model="
-            .. chat.name:gsub("([^%w%-._~])", function(byte)
-                return string.format("%%%02X", byte:byte())
-            end)
-        local status, body = pa.http(endpoints.origin, "GET", path, nil, nil, 65536)
-        assert(status >= 200 and status < 300, "model properties failed: HTTP " .. status)
-        local value = decode(body)
-        local settings = type(value) == "table" and value.default_generation_settings
-        local context = type(settings) == "table" and settings.n_ctx
-        assert(math.type(context) == "integer" and context > 0, "invalid context")
-        return context
-    end
-
     local function chat_body(messages)
-        return {
+        local body = {
             model = chat.name,
             messages = messages,
             tools = { TOOL },
             parallel_tool_calls = true,
             max_tokens = chat.maximum_output_tokens,
-            chat_template_kwargs = { enable_thinking = chat.thinking },
             stream = true,
+            stream_options = { include_usage = true },
         }
-    end
-
-    function api:prompt_tokens(messages)
-        if pa.profile then
-            pa.log("model.template.begin")
+        if chat.provider == "local" then
+            body.chat_template_kwargs = { enable_thinking = chat.thinking }
+        elseif chat.thinking then
+            body.reasoning = { effort = "medium" }
         end
-        local result = request(endpoints.chat.template, chat_body(messages), chat.maximum_response_bytes)
-        if pa.profile then
-            pa.log("model.template.end")
-        end
-        assert(type(result.prompt) == "string", "invalid chat template")
-        return tokens(chat, endpoints.chat.tokenize, result.prompt, true)
+        return body
     end
 
     function api:chat(messages)
         local fragments = {}
-        local finished, done = nil, false
+        local finished, done, usage = nil, false, nil
         local contents, thoughts, calls = {}, {}, {}
         local streamed_kind
         local quote_start = false
@@ -127,13 +93,14 @@ return function(endpoints, config)
         local request_body = encode_json(chat_body(messages), NULL)
         pa.log("model.http.begin")
         local status = pa.http(
-            endpoints.origin,
+            chat.provider == "local" and endpoints.origin or gateway.origin,
             "POST",
             endpoints.chat.endpoint,
             request_body,
             {
                 ["content-type"] = "application/json",
                 accept = "text/event-stream",
+                authorization = chat.provider == "openrouter" and "Bearer " .. gateway.token or nil,
             },
             chat.maximum_response_bytes,
             function(code, chunk)
@@ -159,87 +126,101 @@ return function(endpoints, config)
                         if payload == "[DONE]" then
                             done = true
                         else
-                            assert(not done and not finished, "unexpected chat stream data")
+                            assert(not done, "unexpected chat stream data")
                             local value = decode(payload)
+                            if type(value.usage) == "table" then
+                                assert(not usage, "duplicate chat usage")
+                                local count = value.usage.total_tokens
+                                assert(math.type(count) == "integer" and count >= 0, "invalid chat usage")
+                                usage = count
+                            end
                             local choices = dense(value.choices, "chat stream choices")
-                            assert(#choices == 1, "chat stream has the wrong choice count")
+                            if #choices == 0 then
+                                assert(usage and finished, "unexpected empty chat choices")
+                            else
+                                assert(#choices == 1 and not finished, "chat stream has the wrong choice count")
+                            end
                             local choice = choices[1]
-                            local delta = assert(
-                                type(choice) == "table" and type(choice.delta) == "table" and choice.delta,
-                                "invalid chat delta"
-                            )
-                            if type(delta.reasoning_content) == "string" and delta.reasoning_content ~= "" then
-                                if pa.profile and not first_reasoning then
-                                    first_reasoning = true
-                                    pa.log("model.chat.first_reasoning")
+                            if choice then
+                                local delta = assert(
+                                    type(choice) == "table" and type(choice.delta) == "table" and choice.delta,
+                                    "invalid chat delta"
+                                )
+                                local reasoning_delta = delta.reasoning_content or delta.reasoning
+                                if type(reasoning_delta) == "string" and reasoning_delta ~= "" then
+                                    if pa.profile and not first_reasoning then
+                                        first_reasoning = true
+                                        pa.log("model.chat.first_reasoning")
+                                    end
+                                    thoughts[#thoughts + 1] = reasoning_delta
+                                    if chat.thinking then
+                                        if streamed_kind == "content" then
+                                            pa.emit("\n\n", "append")
+                                        end
+                                        local prefix = (streamed_kind ~= "reasoning" or quote_start)
+                                                and reasoning_delta:sub(1, 1) ~= "\n"
+                                                and "> "
+                                            or ""
+                                        pa.emit(prefix .. reasoning_delta:gsub("\n([^\n])", "\n> %1"), "append")
+                                        quote_start = reasoning_delta:sub(-1) == "\n"
+                                        streamed_kind = "reasoning"
+                                    end
                                 end
-                                thoughts[#thoughts + 1] = delta.reasoning_content
-                                if chat.thinking then
-                                    if streamed_kind == "content" then
+                                if type(delta.content) == "string" and delta.content ~= "" then
+                                    if pa.profile and not first_content then
+                                        first_content = true
+                                        pa.log("model.chat.first_content")
+                                    end
+                                    contents[#contents + 1] = delta.content
+                                    if streamed_kind == "reasoning" then
                                         pa.emit("\n\n", "append")
                                     end
-                                    local prefix = (streamed_kind ~= "reasoning" or quote_start)
-                                            and delta.reasoning_content:sub(1, 1) ~= "\n"
-                                            and "> "
-                                        or ""
-                                    pa.emit(prefix .. delta.reasoning_content:gsub("\n([^\n])", "\n> %1"), "append")
-                                    quote_start = delta.reasoning_content:sub(-1) == "\n"
-                                    streamed_kind = "reasoning"
+                                    pa.emit(delta.content, "append")
+                                    streamed_kind = "content"
                                 end
-                            end
-                            if type(delta.content) == "string" and delta.content ~= "" then
-                                if pa.profile and not first_content then
-                                    first_content = true
-                                    pa.log("model.chat.first_content")
-                                end
-                                contents[#contents + 1] = delta.content
-                                if streamed_kind == "reasoning" then
-                                    pa.emit("\n\n", "append")
-                                end
-                                pa.emit(delta.content, "append")
-                                streamed_kind = "content"
-                            end
-                            for _, tool in ipairs(dense(delta.tool_calls or {}, "chat stream tool calls")) do
-                                local index = type(tool) == "table" and tool.index
-                                assert(
-                                    math.type(index) == "integer" and index >= 0 and index < chat.maximum_tool_calls,
-                                    "invalid tool call index"
-                                )
-                                local call = calls[index + 1]
-                                if not call then
-                                    call = { id = "", type = "function", ["function"] = { name = "", arguments = "" } }
-                                    calls[index + 1] = call
-                                end
-                                local fn = tool["function"]
-                                if type(tool.id) == "string" then
-                                    call.id = call.id .. tool.id
-                                end
-                                if type(fn) == "table" then
-                                    if type(fn.name) == "string" then
-                                        call["function"].name = call["function"].name .. fn.name
+                                for _, tool in ipairs(dense(delta.tool_calls or {}, "chat stream tool calls")) do
+                                    local index = type(tool) == "table" and tool.index
+                                    assert(
+                                        math.type(index) == "integer" and index >= 0 and index < chat.maximum_tool_calls,
+                                        "invalid tool call index"
+                                    )
+                                    local call = calls[index + 1]
+                                    if not call then
+                                        call =
+                                            { id = "", type = "function", ["function"] = { name = "", arguments = "" } }
+                                        calls[index + 1] = call
                                     end
-                                    if type(fn.arguments) == "string" then
-                                        if pa.profile and not first_tool and fn.arguments ~= "" then
-                                            first_tool = true
-                                            pa.log("model.chat.first_tool_argument")
+                                    local fn = tool["function"]
+                                    if type(tool.id) == "string" then
+                                        call.id = call.id .. tool.id
+                                    end
+                                    if type(fn) == "table" then
+                                        if type(fn.name) == "string" then
+                                            call["function"].name = call["function"].name .. fn.name
                                         end
-                                        call["function"].arguments = call["function"].arguments .. fn.arguments
-                                        assert(
-                                            #call["function"].arguments <= chat.maximum_tool_argument_bytes,
-                                            "tool arguments are too large"
-                                        )
+                                        if type(fn.arguments) == "string" then
+                                            if pa.profile and not first_tool and fn.arguments ~= "" then
+                                                first_tool = true
+                                                pa.log("model.chat.first_tool_argument")
+                                            end
+                                            call["function"].arguments = call["function"].arguments .. fn.arguments
+                                            assert(
+                                                #call["function"].arguments <= chat.maximum_tool_argument_bytes,
+                                                "tool arguments are too large"
+                                            )
+                                        end
                                     end
                                 end
-                            end
-                            if choice.finish_reason ~= nil and choice.finish_reason ~= NULL then
-                                finished = choice.finish_reason
-                                local timings = value.timings
-                                if type(timings) == "table" then
-                                    if math.type(timings.prompt_n) == "integer" then
-                                        pa.log("model.chat.prompt." .. timings.prompt_n)
-                                    end
-                                    if math.type(timings.predicted_n) == "integer" then
-                                        pa.log("model.chat.completion." .. timings.predicted_n)
+                                if choice.finish_reason ~= nil and choice.finish_reason ~= NULL then
+                                    finished = choice.finish_reason
+                                    local timings = value.timings
+                                    if type(timings) == "table" then
+                                        if math.type(timings.prompt_n) == "integer" then
+                                            pa.log("model.chat.prompt." .. timings.prompt_n)
+                                        end
+                                        if math.type(timings.predicted_n) == "integer" then
+                                            pa.log("model.chat.completion." .. timings.predicted_n)
+                                        end
                                     end
                                 end
                             end
@@ -250,92 +231,104 @@ return function(endpoints, config)
         )
         pa.log("model.http.status." .. status)
         assert(status >= 200 and status < 300, "model endpoint failed: HTTP " .. status)
-        assert(done and finished and table.concat(fragments):match("^%s*$"), "chat stream ended early")
+        assert(done and finished and usage and table.concat(fragments):match("^%s*$"), "chat stream ended early")
         pa.log("model.http.end")
-        local reasoning = #thoughts > 0 and table.concat(thoughts) or nil
-        local content = #contents > 0 and table.concat(contents) or nil
-        assert(not reasoning or utf8.len(reasoning), "invalid reasoning")
-        assert(not content or utf8.len(content), "invalid response")
-
-        local entries = dense(calls, "chat tool calls")
-        local decoded_calls, tool_calls, ids = {}, {}, {}
-        for index, entry in ipairs(entries) do
-            local fn = type(entry) == "table" and entry["function"]
-            local id = type(entry) == "table" and entry.id
-            local name = type(fn) == "table" and fn.name
-            local arguments = type(fn) == "table" and fn.arguments
-            assert(type(id) == "string" and id ~= "" and utf8.len(id) and not ids[id], "invalid tool call")
-            assert(name == "run_lua" and type(arguments) == "string", "invalid tool call")
-            assert(#arguments <= chat.maximum_tool_argument_bytes, "tool arguments are too large")
-            local decoded = decode(arguments)
-            assert(type(decoded) == "table", "invalid tool arguments")
-            for key in pairs(decoded) do
-                assert(key == "code", "unknown tool argument")
-            end
-            assert(
-                type(decoded.code) == "string"
-                    and decoded.code ~= ""
-                    and utf8.len(decoded.code)
-                    and #decoded.code <= chat.maximum_tool_source_bytes,
-                "invalid tool source"
-            )
-            ids[id] = true
-            decoded_calls[index] = { id = id, code = decoded.code }
-            tool_calls[index] = { id = id, type = "function", ["function"] = { name = name, arguments = arguments } }
-        end
-
         if finished == "length" then
             pa.log("model.chat.length")
-            error("chat completion was truncated", 0)
+            return { usage = usage, truncated = true }
         end
-        assert(finished == "stop" or finished == "tool_calls", "invalid tool completion")
-        pa.log("model.chat.finish." .. finished)
-        if #decoded_calls == 0 then
-            assert(finished == "stop" and (content or reasoning), "chat completion has no response")
+        local parsed = table.pack(pcall(function()
+            local reasoning = #thoughts > 0 and table.concat(thoughts) or nil
+            local content = #contents > 0 and table.concat(contents) or nil
+            assert(not reasoning or utf8.len(reasoning), "invalid reasoning")
+            assert(not content or utf8.len(content), "invalid response")
+
+            local entries = dense(calls, "chat tool calls")
+            local decoded_calls, tool_calls, ids = {}, {}, {}
+            for index, entry in ipairs(entries) do
+                local fn = type(entry) == "table" and entry["function"]
+                local id = type(entry) == "table" and entry.id
+                local name = type(fn) == "table" and fn.name
+                local arguments = type(fn) == "table" and fn.arguments
+                assert(type(id) == "string" and id ~= "" and utf8.len(id) and not ids[id], "invalid tool call")
+                assert(name == "run_lua" and type(arguments) == "string", "invalid tool call")
+                assert(#arguments <= chat.maximum_tool_argument_bytes, "tool arguments are too large")
+                local decoded = decode(arguments)
+                assert(type(decoded) == "table", "invalid tool arguments")
+                for key in pairs(decoded) do
+                    assert(key == "code", "unknown tool argument")
+                end
+                assert(
+                    type(decoded.code) == "string"
+                        and decoded.code ~= ""
+                        and utf8.len(decoded.code)
+                        and #decoded.code <= chat.maximum_tool_source_bytes,
+                    "invalid tool source"
+                )
+                ids[id] = true
+                decoded_calls[index] = { id = id, code = decoded.code }
+                tool_calls[index] =
+                    { id = id, type = "function", ["function"] = { name = name, arguments = arguments } }
+            end
+
+            assert(finished == "stop" or finished == "tool_calls", "invalid tool completion")
+            pa.log("model.chat.finish." .. finished)
+            if #decoded_calls == 0 then
+                assert(finished == "stop" and (content or reasoning), "chat completion has no response")
+            end
+            pa.log("model.chat.decoded")
+            return {
+                reasoning = reasoning,
+                content = content,
+                calls = decoded_calls,
+                tool_calls = tool_calls,
+                usage = usage,
+            }
+        end))
+        if not parsed[1] then
+            return { usage = usage, error = tostring(parsed[2]) }
         end
-        pa.log("model.chat.decoded")
-        return {
-            reasoning = reasoning,
-            content = content,
-            calls = decoded_calls,
-            tool_calls = tool_calls,
-        }
+        return parsed[2]
     end
 
     function api:rerank(query, passages)
-        if #query > rerank.query_tokens and tokens(rerank, endpoints.rerank.tokenize, query) > rerank.query_tokens then
-            return {}
+        if #query > rerank.maximum_query_bytes then
+            return {}, 0
         end
         local selected, source = {}, {}
         for index, passage in ipairs(passages) do
-            local content = query .. "\n" .. passage
-            if
-                #content <= rerank.passage_tokens
-                or tokens(rerank, endpoints.rerank.tokenize, content) <= rerank.passage_tokens
-            then
+            if #query + 1 + #passage <= rerank.maximum_pair_bytes then
                 selected[#selected + 1], source[#source + 1] = passage, index
             end
         end
         if #selected == 0 then
-            return {}
+            return {}, 0
         end
         pa.log("model.rerank.begin")
-        local ranked = post(rerank, endpoints.rerank.endpoint, {
+        local response = post(rerank, endpoints.rerank.endpoint, {
             documents = selected,
             query = query,
             top_n = #selected,
-        }).results
+        })
         pa.log("model.rerank.end")
-        dense(ranked, "reranker results")
-        assert(#ranked == #selected, "reranker response has the wrong count")
-        local output, seen = {}, {}
-        for _, entry in ipairs(ranked) do
-            local index = type(entry) == "table" and math.tointeger(entry.index)
-            assert(index and index >= 0 and index < #selected and not seen[index], "reranker index is invalid")
-            assert(finite(entry.relevance_score), "reranker score is invalid")
-            seen[index], output[#output + 1] = true, source[index + 1]
+        local usage = response.usage and response.usage.total_tokens
+        assert(math.type(usage) == "integer" and usage >= 0, "invalid reranker usage")
+        local parsed = table.pack(pcall(function()
+            local ranked = dense(response.results, "reranker results")
+            assert(#ranked == #selected, "reranker response has the wrong count")
+            local output, seen = {}, {}
+            for _, entry in ipairs(ranked) do
+                local index = type(entry) == "table" and math.tointeger(entry.index)
+                assert(index and index >= 0 and index < #selected and not seen[index], "reranker index is invalid")
+                assert(finite(entry.relevance_score), "reranker score is invalid")
+                seen[index], output[#output + 1] = true, { index = source[index + 1], score = entry.relevance_score }
+            end
+            return output
+        end))
+        if not parsed[1] then
+            return {}, usage, tostring(parsed[2])
         end
-        return output
+        return parsed[2], usage
     end
 
     return api

@@ -9,9 +9,9 @@ policies:
     discord: true
     images: true
     imports: {}
-    overrides: [parent, memory, run, models, retrieval]
+    overrides: [parent, memory, run, retrieval, models.chat.provider, models.chat.name, models.rerank.name]
     config:
-      version: 1
+      version: 2
       actor: "discord:${application}:${policy}:member:${member}:channel:${channel}"
       preset: safe
 

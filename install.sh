@@ -2,23 +2,31 @@
 set -eu
 
 source=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
-if [ ! -f "$source/data/cygnet.db" ] || ! find "$source/package/native" -type f -name 'lsqlite3complete.*' | grep -q .; then
-    printf 'Zinc release payload is incomplete\n' >&2
-    exit 1
-fi
-if [ "$#" -gt 1 ]; then
+if [ "$#" -gt 1 ] || { [ "$#" -eq 1 ] && [ -z "$1" ]; }; then
     printf 'usage: %s [DESTINATION]\n' "$0" >&2
     exit 2
 fi
 if [ "$#" -eq 1 ]; then
     destination=$1
 elif [ "$(uname -s)" = Darwin ]; then
-    destination=${HOME:?}/Library/Application Support/Zinc
+    destination="${HOME:?}/Library/Application Support/Zinc"
 else
     destination=${XDG_DATA_HOME:-${HOME:?}/.local/share}/zinc
 fi
-mkdir -p "$destination/state"
+for path in package/zinc.md package/native/lsqlite3complete.so data/cygnet.db ac.yaml models.ini \
+    install.sh install.ps1 lux.toml lux.lock models.lock README.md RELEASE_NOTES.md LICENSE NOTICE; do
+    if [ ! -s "$source/$path" ]; then
+        printf 'Zinc release payload is incomplete: %s\n' "$path" >&2
+        exit 1
+    fi
+done
+mkdir -p "$destination"
 destination=$(CDPATH= cd -- "$destination" && pwd)
+if [ "$destination" = / ]; then
+    printf 'Refusing to install Zinc at the filesystem root\n' >&2
+    exit 2
+fi
+mkdir -p "$destination/state"
 if [ "$source" != "$destination" ]; then
     for path in package data; do
         rm -rf "$destination/$path"
@@ -32,5 +40,8 @@ if [ "$source" != "$destination" ]; then
             cp "$source/$path" "$destination/$path"
         fi
     done
+    if ! cmp -s "$source/ac.yaml" "$destination/ac.yaml"; then
+        printf 'Preserved ac.yaml; verify its Zinc config is version 2 before running. Older config is not migrated.\n' >&2
+    fi
 fi
 printf '%s\n' "$destination"

@@ -5,7 +5,7 @@ retrieval, and controlled tool access. Zinc is a package, not a standalone agent
 
 ## Package capabilities
 
-- Chronological and Cygnet-backed semantic retrieval provide bounded context from stored history.
+- Chronological and actor-visible typo-aware retrieval select bounded history before Cygnet expansion and local reranking.
 - Actor ownership isolates histories. Explicit branch coordinates and temporary nested branches support controlled
   investigations.
 - The `unsafe`, `safe`, and `no-host` presets define distinct host capabilities. Review package code and grants before
@@ -28,7 +28,8 @@ Choose the archive for the machine running Portable Agents. Zinc's SQLite module
 
 Extract the archive and run `install.sh` or `install.ps1`. The installer places Zinc in the per-user application-data
 directory by default. A custom destination may be supplied. Reinstallation updates managed package and retrieval files
-while preserving `ac.yaml`, `models.ini`, and `state/`.
+while preserving `ac.yaml`, `models.ini`, and `state/`. First use transactionally upgrades a format-1 Store to format 2;
+large histories can take time to index.
 
 Install Portable Agents, Agent Connector, and Lua 5.5 independently. These archives are tested with both agents at
 v0.1.5. Windows ARM64 requires Portable Agents v0.1.5 or newer; its v0.1.4 binary crashes on `agent call`. `agent` and
