@@ -1,50 +1,43 @@
-# Zinc v0.1.0
+# Zinc v0.2.0
 
-First public release of Zinc, a Portable Agents package for conversations with actor-scoped durable history, semantic
-retrieval, and controlled tool access. Zinc is a package, not a standalone agent runtime.
+Coordinated breaking update for PA protocol 2 and Agent Connector YAML 2. These notes describe the source release;
+publication is a separate step.
 
-## Package capabilities
+- External requests/results and branch-tagged events are JSON. The Discord-specific Markdown result footer is gone.
+- Named `describe` and `models` entry members provide typed control metadata and normalized model discovery. `document`
+  and `design` provide package documents.
+- Actor identity, Store/Cygnet paths, providers, and tool grants are explicit private config. Generated tools cannot
+  replace actor identity.
+- Model references are `provider:id`. Unique bare IDs work; ambiguity fails. Known model capabilities constrain
+  requests.
+- Presets are renamed: `safe` → `configured`, `unsafe` → `unrestricted`, `no-host` → `none`. Configured host access
+  requires explicit grants.
+- OpenRouter usage/accounting frames no longer fail just because they repeat the finish reason; JSON null is not usage.
+  Malformed streams and provider errors still fail with useful diagnostics.
+- Fatal Eval failures propagate instead of being fabricated as ordinary tool results.
+- Automatic continuation is selected atomically with branch creation. Parent and history coordinates are separate
+  request fields.
+- Store format 3 removes obsolete per-event token fields and legacy migrations. It requires a fresh database. Quota uses
+  reported model usage.
+- Behavior-test fixtures/jobs are removed; builds and artifact checks remain. No spellfix extension or new retrieval
+  daemon is introduced.
 
-- Chronological and actor-visible typo-aware retrieval select bounded history before Cygnet expansion and local reranking.
-- Actor ownership isolates histories. Explicit branch coordinates and temporary nested branches support controlled
-  investigations.
-- The `unsafe`, `safe`, and `no-host` presets define distinct host capabilities. Review package code and grants before
-  exposing an agent; `safe` is not a universal security guarantee.
-- Independent limits bound model rounds, tool calls, HTTP response bytes, retrieval, accepted tool source, and results.
-- Model destinations are trusted package settings rather than caller-controlled overrides.
+## Migration
 
-## Install
+Stop Connector and other Store users. Preserve member/channel/guild routes while replacing YAML 1 with YAML 2. Policy
+`models` is the OpenRouter allowlist; `config.model` selects the chat reference. Replace `overrides` with authorized
+typed `options`, and supply an explicit JSON `input` template. Move PA ceilings under policy `limits`.
 
-Choose the archive for the machine running Portable Agents. Zinc's SQLite module is platform-specific.
+Config has no `version`, `models.chat`, or `retrieval` object: use `model`, `rerank`, `thinking`, `run`, `history`, and
+`search`. Move `parent`/`memory` out of config into request `parent`/`through`. Set `store`, `cygnet`, provider origins,
+and desired tool grants explicitly.
 
-| Platform            | Asset                              |
-| ------------------- | ---------------------------------- |
-| Linux x86-64        | `zinc-v0.1.0-linux-x86_64.tar.gz`  |
-| Linux ARM64         | `zinc-v0.1.0-linux-aarch64.tar.gz` |
-| macOS Intel         | `zinc-v0.1.0-macos-x86_64.tar.gz`  |
-| macOS Apple Silicon | `zinc-v0.1.0-macos-aarch64.tar.gz` |
-| Windows x86-64      | `zinc-v0.1.0-windows-x86_64.zip`   |
-| Windows ARM64       | `zinc-v0.1.0-windows-aarch64.zip`  |
+The installer preserves old state and YAML; it does not perform this migration or reset. Replace the old Store and its
+WAL/SHM companions explicitly, retaining an offline copy if needed. New Store files initialize as format 3.
 
-Extract the archive and run `install.sh` or `install.ps1`. The installer places Zinc in the per-user application-data
-directory by default. A custom destination may be supplied. Reinstallation updates managed package and retrieval files
-while preserving `ac.yaml`, `models.ini`, and `state/`. First use transactionally upgrades a format-1 Store to format 2;
-large histories can take time to index.
+Install PA, Connector, and the Lua 5.5 shared library independently, then run `agc check` on the installed Zinc
+directory. The local llama server is required for local catalog discovery and reranking; hosted chat alone does not
+provide reranking. No inference is necessary to check the package/control schema.
 
-Install Portable Agents, Agent Connector, and Lua 5.5 independently. These archives are tested with both agents at
-v0.1.5. Windows ARM64 requires Portable Agents v0.1.5 or newer; its v0.1.4 binary crashes on `agent call`. `agent` and
-`agc` must be on `PATH`; Lua must be visible to the operating system's dynamic loader. The native module requests
-`liblua5.5.so.0` on Linux,
-`@rpath/liblua.5.5.dylib` on macOS, and `lua55.dll` on Windows.
-
-The archives contain Zinc's Markdown and Lua modules, locked Lua package dependencies, a platform-native SQLite binding,
-the generated Cygnet index, installers, configuration, license, and notices. They contain no Lua runtime, Portable Agents,
-Agent Connector, model server, or model weights.
-
-Zinc uses Portable Agents protocol 1, append-mode process streaming, bounded HTTP responses, the Portable Agents package
-format, and the Lua 5.5 ABI. Compatibility does not require matching repository commits or release versions.
-
-Configure the model endpoint and obtain the models described in `models.lock`; the defaults expect the Prism llama.cpp
-build. After installation, run `agc check` against the Zinc directory. Verify downloads with `SHA256SUMS`. Setup and
-configuration are covered in the [README](https://github.com/darkhorseprojects/zinc#install) and
-[wiki](https://github.com/darkhorseprojects/zinc/wiki).
+Release jobs target Linux x86-64/ARM64, macOS Intel/Apple Silicon, and Windows x86-64/ARM64. Native SQLite must share
+PA's Lua ABI. Publish PA 0.2 binaries/SDK, then Connector, then Zinc. Verify published archives against `SHA256SUMS`.

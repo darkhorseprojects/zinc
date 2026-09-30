@@ -7,7 +7,7 @@ local pa = require("pa")
 
 return {
     document = pa.document(),
-    targets = { "unsafe", "safe", "no-host" },
+    targets = { "unrestricted", "configured", "none" },
     whitelist = {},
     members = {
         fs = {

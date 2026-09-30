@@ -1,105 +1,111 @@
 # Zinc
 
-Zinc is a [Portable Agents](https://github.com/darkhorseprojects/portable-agents) package for conversations that need
-durable, searchable memory and tightly configured tools. It combines actor-scoped history, chronological and semantic
-retrieval, Lua tool calls, and temporary nested agents. Chat can use a local llama.cpp endpoint or OpenRouter through
-Agent Connector; reranking remains local. Zinc is not a general-purpose agent framework.
-
-## What it does
-
-- **Carries memory across calls.** Each actor continues from stored history. Explicit branch coordinates provide
-  controlled context when needed.
-- **Finds relevant past details.** Chronological history and actor-visible typo-aware lexical retrieval select a bounded
-  pool before Cygnet expansion and local reranking.
-- **Keeps tools configured.** Presets define Lua capabilities and grants. The `safe` preset means configured access, not
-  a universal security guarantee; review its roots, endpoints, and permissions.
-- **Supports nested investigations.** A tool can start a temporary Zinc branch with a more restrictive preset, inspect
-  its result, then discard it.
-- **Bounds tool work.** Per-run quotas use completed model requests' reported usage and stop subsequent requests when
-  exhausted. Separate limits constrain model rounds, tool sizes, retrieval bytes, and requests.
-
-See the [Zinc wiki](https://github.com/darkhorseprojects/zinc/wiki) for the configuration and memory model.
+Zinc is a [Portable Agents](https://github.com/darkhorseprojects/portable-agents) package with actor-scoped durable
+history, typo-aware retrieval, configured Lua tools, and temporary nested branches. Chat uses llama.cpp or OpenRouter;
+reranking uses llama.cpp. Zinc owns model requests and state. Portable Agents executes it; Agent Connector handles
+Discord routing, credentials, and presentation.
 
 ## Install
 
-Install Portable Agents and Agent Connector independently, with both `agent` and `agc` available on `PATH`. Zinc v0.1.0
-is tested with both at v0.1.5; Windows ARM64 requires Portable Agents v0.1.5 or newer because its v0.1.4 binary crashes
-on `agent call`. Install an architecture-compatible Lua 5.5 shared library that the operating system's dynamic loader
-can find.
+Zinc 0.2 requires Portable Agents protocol 2 and Agent Connector YAML 2. Install `agent`, `agc`, and an
+architecture-compatible shared Lua 5.5 runtime independently. Release archives do not include these binaries, a model
+server, or weights.
 
-Download the Zinc archive for the machine running `agent`, extract it, and run Zinc's installer:
+Extract the platform-specific Zinc archive, then run:
 
 ```sh
-./install.sh
+./install.sh /path/to/zinc
 ```
 
 On Windows:
 
 ```powershell
-.\install.ps1
+.\install.ps1 -Destination C:\Agents\Zinc
 ```
 
-The default installation directories are:
+Without a destination, installers use `${XDG_DATA_HOME:-$HOME/.local/share}/zinc` on Linux,
+`$HOME/Library/Application Support/Zinc` on macOS, or `%LOCALAPPDATA%\Zinc` on Windows.
 
-| Platform | Directory                                             |
-| -------- | ----------------------------------------------------- |
-| Linux    | `${XDG_DATA_HOME:-$HOME/.local/share}/zinc`           |
-| macOS    | `$HOME/Library/Application Support/Zinc`              |
-| Windows  | `%LOCALAPPDATA%\Zinc`                                 |
-
-Pass a destination as the first shell argument or as `-Destination` in PowerShell to install elsewhere. Reinstalling
-replaces Zinc's managed package and retrieval data while preserving `ac.yaml`, `models.ini`, and `state/`. Existing
-`ac.yaml` is not migrated: before running, set its Zinc `config.version` to `2` and replace retired model/retrieval
-fields. Keep your route maps when making this change. On first use, Zinc upgrades a format-1 Store to format 2 in a
-transaction; large histories may take time to index. The installer does not erase history.
-
-The installer copies only Zinc. Release archives contain no `agent`, `agc`, Lua runtime, model server, or model weights.
-
-## Connect
-
-The installed `ac.yaml` contains a Zinc policy. Start the configured model server, then use the installation directory
-with Agent Connector:
+Reinstalling replaces managed package/data files while preserving `ac.yaml`, `models.ini`, and `state/`. **The installer
+does not migrate YAML or erase the Store.** For this breaking update, migrate `ac.yaml` to YAML 2 while preserving
+routes, and explicitly replace the old Store with an empty format-3 Store before running. Old formats are rejected, not
+upgraded. Stop all users of the database before replacing it; its WAL and SHM files belong to that database too. Retain
+an offline copy first if its history is needed.
 
 ```sh
-agc connect /path/to/zinc
 agc check /path/to/zinc
+agc connect /path/to/zinc
 agc run /path/to/zinc
 ```
 
-Minimal Zinc configuration is:
+`connect` is needed for new Discord credentials; an existing directory-scoped credential can be reused. `run` refreshes
+the typed `/agent` command. Empty route maps deny access.
+
+## Requests and config
+
+External input is UTF-8 JSON:
 
 ```json
-{"version":2,"actor":"account:42","preset":"safe"}
+{ "text": "What did we decide?" }
 ```
 
-`actor` is the authenticated identity that owns the durable history. Select `unsafe`, `safe`, or `no-host` as the preset.
-Optional `parent` and `memory` values select an explicit branch. Trusted callers can also override allowed run, model,
-and retrieval settings.
+Optional `images` contains `{type,data}` MIME/base64 objects. `parent` selects the attachment event; `through` selects
+the inclusive history boundary. Omitted parent continues from the actor's latest durable event, selected inside the
+Store transaction. Omitted through defaults to that parent. `parent:0` starts fresh; `through:0` disables history
+independently. Images are not persisted.
 
-The package entry is `package/zinc.md`. The tracked Connector policy demonstrates actor identity and grants. The default
-model configuration expects the Prism llama.cpp build pinned in `models.lock`, with its chat and rerank models available
-through the Hugging Face cache. For OpenRouter chat, run `agc login openrouter` globally and allowlist the selected model
-in the Connector policy. Model weights are not included.
+Private UTF-8 JSON config is separate:
 
-## Runtime contract
+```json
+{
+  "actor": "account:42",
+  "preset": "configured",
+  "store": "/srv/zinc/state/zinc.db",
+  "cygnet": "/srv/zinc/data/cygnet.db",
+  "providers": { "llama": { "url": "http://127.0.0.1:8000" } },
+  "model": "llama:chat",
+  "rerank": "llama:rerank"
+}
+```
 
-Zinc uses Portable Agents protocol 1, including append-mode process streaming and bounded HTTP responses. Compatibility
-is determined by the protocol, package format, required capabilities, and Lua 5.5 ABI—not matching repository commits or
-release numbers.
+Paths, provider origins, tokens, tool grants, actor, and preset are trusted deployment settings. Defaults cover
+`thinking`, `run`, `history`, `search`, and model `limits`. Unknown fields fail. Numeric ceilings can only be reduced;
+`search.score` is a finite raw reranker cutoff. The tracked `ac.yaml` expands trusted directory/identity templates and
+exposes selected tuning fields as typed Discord options, not a free-form YAML override.
 
-The platform-native SQLite module and `agent` must load an ABI-compatible Lua 5.5 runtime from the same provider. Release
-modules request `liblua5.5.so.0` on Linux, `@rpath/liblua.5.5.dylib` on macOS, and `lua55.dll` on Windows. `PATH` locates
-`agent` and `agc`; the operating system's dynamic loader locates Lua.
+Presets are `configured`, `unrestricted`, and `none`. Configured tools use explicit `tools.roots`, `tools.actions`, and
+an optional absolute `tools.search` executable; no home root is inferred. Unrestricted tools accept request-selected PA
+capabilities. None grants no host tools. Imports remain a separate embedder grant, including under `none`.
+
+## Models and usage
+
+Select `provider:id` references, such as `llama:chat` or `openrouter:provider/model`. Unique unqualified IDs are
+accepted; ambiguous or unavailable IDs fail. `/v1/models` supplies a normalized catalog. Known tool, reasoning, image,
+and output capabilities constrain chat requests. Discovery uses substring matching; execution never silently
+fuzzy-matches a model.
+
+Start the pinned local model router with `llama-server --models-preset models.ini --port 8000`. Weights and the Prism
+llama.cpp revision are described in `models.lock`. For OpenRouter, run `agc login openrouter`, authorize exact
+references in policy `models`, and configure the provider using `${openrouter.url}` and `${openrouter.token}`. These
+resolve to a revocable loopback grant, not the account key. Local reranking still needs its server. Catalog discovery
+contacts the configured providers; an offline provider fails discovery rather than being silently omitted.
+
+Quota counts provider-reported total tokens for completed chat/rerank requests. It is checked before subsequent requests
+and may overshoot on a final or concurrent request. Sources and results have byte limits, not tokenizer accounting.
+Missing usage and malformed/incomplete streams fail explicitly. OpenRouter's repeated-finish accounting frames and
+`usage:null` are handled without accepting new content after finish.
+
+## Results and events
+
+The terminal JSON contains `text`, `run`, `branch`, `event`, `parent`, `through`, and `usage.total_tokens`. JSON
+emissions are branch-tagged `start`, `delta`, `turn`, `tool`, and `tool_result` records. Connector renders completed
+root-branch content only; it does not parse Markdown footers or expose reasoning and nested content. Final-only calls
+remain valid.
+
+Ordinary tool-source failures become tool results. Call-level Eval failures propagate. PA terminal diagnostics include
+bounded source-aware details; Connector retains them privately under an incident ID.
 
 ## Development
-
-- `package/` contains the Portable Agents source and presets.
-- `models.ini` configures chat and rerank aliases.
-- `data/cygnet.db` is generated from the locked Cygnet source during packaging. Store format 2 keeps an actor-scoped
-  spelling lexicon for searchable events; Cygnet remains a read-only relation index.
-- `lux.lock` pins Zinc's Lua package dependencies.
-
-Build and validation commands:
 
 ```sh
 python3 tools/format_fences.py
@@ -108,15 +114,10 @@ CFLAGS=-DSQLITE_ENABLE_FTS5 lx --lua-version 5.5 build --only-deps
 agent check package zinc
 ```
 
-Development and release builds use a provider-neutral system Lua 5.5 installation. The six release jobs build the native
-SQLite module on its target architecture, install Zinc into a clean destination, and validate it with independently
-released `agc` and `agent` fixtures.
+The source check compiles tracked modules only. A complete runnable package also needs lunajson modules, the
+platform-native SQLite binding under `package/native/`, and Cygnet data. CI assembles this layout and builds six target
+archives without behavior tests. SQLite requires FTS5/trigram; Cygnet remains format 4. No spellfix extension is
+bundled.
 
-## Learn more
-
-- [Zinc wiki](https://github.com/darkhorseprojects/zinc/wiki) — configuration, presets, memory, retrieval, quotas, and
-  model setup
-- [Portable Agents](https://github.com/darkhorseprojects/portable-agents) — package runtime and embedding API
-- [Agent Connector](https://github.com/darkhorseprojects/agent-connector) — Discord integration and policy routing
-
-License: [AGPL-3.0-only](LICENSE).
+See the [wiki](https://github.com/darkhorseprojects/zinc/wiki) for defaults, retrieval, models, and ownership. License:
+[AGPL-3.0-only](LICENSE).

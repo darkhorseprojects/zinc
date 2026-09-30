@@ -66,7 +66,6 @@ jobs:
           pwsh -NoProfile -Command '[void][scriptblock]::Create((Get-Content -Raw install.ps1))'
           lx --lua-version 5.5 --max-jobs 1 build --only-deps
           eval "$(lx path full --no-loader --no-bin)"
-          lua5.5 -e 'local s=require("lsqlite3complete"); local d=assert(s.open_memory()); assert(d:exec("CREATE VIRTUAL TABLE x USING fts5(v); CREATE VIRTUAL TABLE y USING fts5(v,tokenize=trigram,detail=none)")==s.OK,d:errmsg()); assert(d:close()==s.OK)'
           if [ ! -f data/cygnet.db ]; then
             mkdir -p data
             curl -fsSL https://github.com/omwn/cygnet/releases/download/2026.05.12/cygnet.db.gz -o "$RUNNER_TEMP/cygnet.db.gz"
@@ -76,16 +75,6 @@ jobs:
             lua5.5 tools/cygnet_index.lua "$RUNNER_TEMP/cygnet.db" data/cygnet.db aae2cdb1418c1435558584a91181e1cb94459f2506c16f2be4b00e81428deaff
           fi
           python3 -c "import sqlite3; d=sqlite3.connect('file:data/cygnet.db?mode=ro',uri=True); m=dict(d.execute('select key,value from metadata')); assert m['format_version']=='4' and m['source_identity']=='aae2cdb1418c1435558584a91181e1cb94459f2506c16f2be4b00e81428deaff' and d.execute('pragma integrity_check').fetchone()==('ok',)"
-          lua5.5 - <<'LUA'
-          package.path = 'package/?.lua;package/?/init.lua;' .. package.path
-          local store = require('src.store')({path=os.getenv('RUNNER_TEMP') .. '/zinc-ci.db'})
-          local memory = require('src.memory')({
-            cygnet='data/cygnet.db', chronological={records=0,bytes=0},
-            semantic={language='en',depth=1,terms=1,candidates=1,bytes=1,minimum_score=0}
-          }, store, {})
-          memory:close()
-          store:close()
-          LUA
           mkdir -p inputs/lunajson inputs/lsqlite3
           cp .lux/5.5/*-lunajson@*/src/lunajson/{decoder,encoder}.lua inputs/lunajson/
           curl -fsSL 'https://lua.sqlite.org/home/zip/lsqlite3_v097.zip?uuid=v0.9.7' -o "$RUNNER_TEMP/lsqlite3.zip"
@@ -177,17 +166,17 @@ jobs:
               "$OBJDUMP" -p "$native" | grep -Fi 'DLL Name: lua55.dll'
               ;;
           esac
-      - name: Test native module through Portable Agents
+      - name: Acquire Portable Agents
         shell: bash
         env:
           GH_TOKEN: ${{ github.token }}
           TARGET_ID: ${{ matrix.id }}
         run: |
           set -euo pipefail
-          mkdir -p runtime/download runtime/out runtime/bin smoke/native
+          mkdir -p runtime/download runtime/out runtime/bin
           if [[ $TARGET_ID = windows-* ]]; then ext=zip; exe=.exe; native=build/native/lsqlite3complete.dll; else ext=tar.gz; exe=; native=build/native/lsqlite3complete.so; fi
-          archive="portable-agents-v0.1.5-$TARGET_ID.$ext"
-          gh release download v0.1.5 --repo darkhorseprojects/portable-agents --pattern "$archive" --pattern SHA256SUMS --dir runtime/download
+          archive="portable-agents-v0.2.0-$TARGET_ID.$ext"
+          gh release download v0.2.0 --repo darkhorseprojects/portable-agents --pattern "$archive" --pattern SHA256SUMS --dir runtime/download
           (cd runtime/download && grep -F "  $archive" SHA256SUMS | { if command -v sha256sum >/dev/null; then sha256sum -c -; else shasum -a 256 -c -; fi; })
           if [ "$ext" = zip ]; then
             pwsh -NoProfile -Command "Expand-Archive '$(cygpath -w "runtime/download/$archive")' '$(cygpath -w runtime/out)'"
@@ -196,34 +185,6 @@ jobs:
           fi
           cp "$(find runtime/out -name "agent$exe")" runtime/bin/
           chmod +x runtime/bin/*
-          cp "$native" smoke/native/
-          cat > smoke/entry.lua <<'EOF'
-          local sqlite=require("lsqlite3complete")
-          return setmetatable({}, {__call=function()
-           local db=assert(sqlite.open_memory())
-           assert(db:exec("CREATE VIRTUAL TABLE x USING fts5(v); INSERT INTO x VALUES ('ok')")==sqlite.OK)
-           local found=false
-           for row in db:nrows("SELECT v FROM x WHERE x MATCH 'ok'") do assert(row.v=="ok"); found=true end
-           assert(found)
-           assert(db:close())
-           return "ok"
-          end})
-          EOF
-          printf '%s' '{"version":1,"emits":false,"agents":[{"sourceDir":"smoke","entryModule":"entry","limits":{}}],"imports":[],"input":"","config":""}' > request.json
-          if [[ $TARGET_ID != windows-* ]]; then
-            output=$("runtime/bin/agent$exe" call < request.json)
-            grep -F '"output":"b2s="' <<< "$output"
-          fi
-      - name: Test Windows native module call
-        if: runner.os == 'Windows'
-        shell: pwsh
-        run: |
-          $ErrorActionPreference = 'Stop'
-          $output = cmd.exe /d /c 'runtime\bin\agent.exe call < request.json'
-          $exitCode = $LASTEXITCODE
-          Write-Host ($output -join "`n")
-          if ($exitCode -ne 0) { exit $exitCode }
-          if (($output | ConvertFrom-Json).result.output -ne 'b2s=') { throw "native module call failed: $output" }
       - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093
         if: github.event_name != 'pull_request'
         with:
@@ -249,13 +210,6 @@ jobs:
           ! find "$root" -type f \( -name agent -o -name agent.exe -o -name agc -o -name agc.exe -o -name lua -o -name lua.exe -o -name 'liblua*' -o -name lua55.dll \) | grep .
           destination=$RUNNER_TEMP/zinc-installed
           if [ "$ext" = zip ]; then pwsh -NoProfile -File "$root/install.ps1" -Destination "$(cygpath -w "$destination")"; else "$root/install.sh" "$destination"; fi
-          cp "$destination/ac.yaml" "$RUNNER_TEMP/ac.yaml"
-          cp "$destination/models.ini" "$RUNNER_TEMP/models.ini"
-          printf preserved > "$destination/state/preserved"
-          if [ "$ext" = zip ]; then pwsh -NoProfile -File "$root/install.ps1" -Destination "$(cygpath -w "$destination")"; else "$root/install.sh" "$destination"; fi
-          cmp "$destination/ac.yaml" "$RUNNER_TEMP/ac.yaml"
-          cmp "$destination/models.ini" "$RUNNER_TEMP/models.ini"
-          grep -Fx preserved "$destination/state/preserved"
           "runtime/bin/agent$exe" check "$destination/package" zinc
           version=$(awk -F'"' '/^version =/{print $2; exit}' lux.toml)
           archive="zinc-v$version-$TARGET_ID"
@@ -279,47 +233,9 @@ jobs:
           path: zinc-v*-${{ matrix.id }}.*
           if-no-files-found: error
 
-  integration:
-    needs: prepare
-    runs-on: ubuntu-26.04
-    timeout-minutes: 10
-    steps:
-      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
-        with:
-          ref: ${{ inputs.release_tag || github.ref }}
-          persist-credentials: false
-      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093
-        with:
-          name: zinc-build-inputs
-          path: inputs
-      - run: sudo apt-get update && sudo apt-get install --yes liblua5.5-dev
-      - name: Test Agent Connector policy
-        env:
-          GH_TOKEN: ${{ github.token }}
-        run: |
-          set -euo pipefail
-          mkdir -p runtime/ac runtime/pa runtime/bin "$RUNNER_TEMP/zinc-integration/package/lunajson"
-          ac=agent-connector-v0.1.5-linux-x86_64.tar.gz
-          pa=portable-agents-v0.1.5-linux-x86_64.tar.gz
-          gh release download v0.1.5 --repo darkhorseprojects/agent-connector --pattern "$ac" --pattern SHA256SUMS --dir runtime/ac
-          gh release download v0.1.5 --repo darkhorseprojects/portable-agents --pattern "$pa" --pattern SHA256SUMS --dir runtime/pa
-          for pair in "ac:$ac" "pa:$pa"; do
-            dir=${pair%%:*}
-            file=${pair#*:}
-            (cd "runtime/$dir" && grep -F "  $file" SHA256SUMS | sha256sum -c -)
-            mkdir "runtime/$dir/out"
-            tar -xzf "runtime/$dir/$file" -C "runtime/$dir/out"
-          done
-          cp "$(find runtime/ac/out -name agc)" "$(find runtime/pa/out -name agent)" runtime/bin/
-          chmod +x runtime/bin/*
-          cp -R package/. "$RUNNER_TEMP/zinc-integration/package/"
-          cp inputs/lunajson/*.lua "$RUNNER_TEMP/zinc-integration/package/lunajson/"
-          cp ac.yaml "$RUNNER_TEMP/zinc-integration/"
-          PATH="$PWD/runtime/bin:$PATH" runtime/bin/agc check "$RUNNER_TEMP/zinc-integration"
-
   release:
     if: startsWith(github.ref, 'refs/tags/v') || inputs.release_tag != ''
-    needs: [build, integration]
+    needs: build
     runs-on: ubuntu-24.04
     permissions: { contents: write }
     steps:

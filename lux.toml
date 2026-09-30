@@ -1,5 +1,5 @@
 package = "zinc"
-version = "0.1.0"
+version = "0.2.0"
 lua = "5.5"
 
 [source]
@@ -15,9 +15,9 @@ type = "builtin"
 [build.modules]
 "zinc" = "package/zinc.md"
 "design" = "package/design.md"
-"presets.unsafe" = "package/presets/unsafe.md"
-"presets.safe" = "package/presets/safe.md"
-"presets.no-host" = "package/presets/no-host.md"
+"presets.unrestricted" = "package/presets/unrestricted.md"
+"presets.configured" = "package/presets/configured.md"
+"presets.none" = "package/presets/none.md"
 "src.entry" = "package/src/entry.lua"
 "src.memory" = "package/src/memory.lua"
 "src.model" = "package/src/model.lua"

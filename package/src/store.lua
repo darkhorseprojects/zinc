@@ -20,9 +20,7 @@ CREATE TABLE events(
  id INTEGER PRIMARY KEY,
  branch INTEGER NOT NULL REFERENCES branches(id) ON DELETE CASCADE,
  kind TEXT NOT NULL CHECK(kind IN ('user','reasoning','response','call','result')),
- tokens INTEGER,
- text TEXT NOT NULL CHECK(length(text)>0),
- CHECK((kind IN ('call','result'))=(tokens IS NOT NULL))
+ text TEXT NOT NULL CHECK(length(text)>0)
 ) STRICT;
 CREATE INDEX branches_by_run ON branches(run,id);
 CREATE INDEX events_by_branch ON events(branch,id);
@@ -149,44 +147,18 @@ return function(config)
         local version_statement = prepare(db, "PRAGMA user_version")
         local version = rows(db, version_statement)[1].user_version
         assert(version_statement:finalize() == sqlite.OK, db:errmsg())
-        assert(version == 0 or version == 1 or version == 2, "Store format is unsupported")
+        assert(version == 0 or version == 3, "Store format is unsupported; Zinc 0.2 requires a fresh Store")
         assert(db:exec([[
 CREATE VIRTUAL TABLE temp.event_tokenizer USING fts5(text,tokenize='unicode61 remove_diacritics 0');
 CREATE VIRTUAL TABLE temp.event_vocabulary USING fts5vocab(event_tokenizer,'row');
 ]]) == sqlite.OK, db:errmsg())
-        if version < 2 then
-            if version == 0 then
-                assert(db:exec("PRAGMA journal_mode=WAL") == sqlite.OK, db:errmsg())
-            end
+        if version == 0 then
+            assert(db:exec("PRAGMA journal_mode=WAL") == sqlite.OK, db:errmsg())
             assert(db:exec("BEGIN IMMEDIATE") == sqlite.OK, db:errmsg())
-            local migrated, problem = pcall(function()
-                if version == 0 then
-                    assert(db:exec(SCHEMA) == sqlite.OK, db:errmsg())
-                end
-                assert(db:exec(LEXICON) == sqlite.OK, db:errmsg())
-                if version == 1 then
-                    assert(db:exec([[
-CREATE VIRTUAL TABLE temp.old_vocabulary USING fts5vocab(main,event_fts,'instance');
-CREATE TEMP TABLE old_terms(event INTEGER NOT NULL,term TEXT NOT NULL,
- PRIMARY KEY(event,term)) WITHOUT ROWID;
-INSERT INTO temp.old_terms(event,term)
-SELECT DISTINCT v.doc,v.term FROM temp.old_vocabulary v JOIN events e ON e.id=v.doc
-WHERE e.kind IN ('user','response','result') AND length(v.term)<=128;
-INSERT INTO lexemes(actor,term,documents)
-SELECT r.actor,t.term,count(*) FROM temp.old_terms t
-JOIN events e ON e.id=t.event JOIN branches b ON b.id=e.branch JOIN runs r ON r.id=b.run
-GROUP BY r.actor,t.term;
-INSERT INTO event_lexemes(event,lexeme)
-SELECT t.event,l.id FROM temp.old_terms t
-JOIN events e ON e.id=t.event JOIN branches b ON b.id=e.branch JOIN runs r ON r.id=b.run
-JOIN lexemes l ON l.actor=r.actor AND l.term=t.term;
-DROP TABLE temp.old_terms;
-DROP TABLE temp.old_vocabulary;
-]]) == sqlite.OK, db:errmsg())
-                end
-                assert(db:exec("PRAGMA user_version=2") == sqlite.OK, db:errmsg())
+            local created, problem = pcall(function()
+                assert(db:exec(SCHEMA .. LEXICON .. "PRAGMA user_version=3") == sqlite.OK, db:errmsg())
             end)
-            if not migrated then
+            if not created then
                 db:exec("ROLLBACK")
                 error(problem, 0)
             end
@@ -234,7 +206,7 @@ AND EXISTS(SELECT 1 FROM events WHERE id=? AND branch=? AND kind='response') RET
 FROM events e JOIN branches b ON b.id=e.branch JOIN runs r ON r.id=b.run
 WHERE e.id=? AND e.kind='call' AND r.actor=?]]
             ),
-            insert = prepare(db, "INSERT INTO events(branch,kind,tokens,text) VALUES(?,?,?,?) RETURNING id"),
+            insert = prepare(db, "INSERT INTO events(branch,kind,text) VALUES(?,?,?) RETURNING id"),
             charge = prepare(db, "UPDATE runs SET used=used+? WHERE id=? RETURNING id"),
             last = prepare(db, "SELECT id FROM events WHERE branch=? ORDER BY id DESC LIMIT 1"),
             head = prepare(
@@ -244,7 +216,7 @@ JOIN branches b ON b.id=e.branch JOIN runs r ON r.id=b.run
 WHERE r.actor=? AND b.temporary=0
 ORDER BY e.id DESC LIMIT 1]]
             ),
-            quota = prepare(db, "SELECT budget-used remaining FROM runs WHERE id=?"),
+            quota = prepare(db, "SELECT budget-used remaining,used FROM runs WHERE id=?"),
             destroy = prepare(
                 db,
                 [[WITH RECURSIVE ancestors(id) AS (
@@ -283,9 +255,7 @@ AND run IN (SELECT id FROM runs WHERE actor=?) RETURNING id]]
         local output = {}
         for index, event in ipairs(events) do
             assert(type(event.text) == "string" and event.text ~= "" and utf8.len(event.text), "invalid event text")
-            local metered = event.kind == "call" or event.kind == "result"
-            assert(metered == (event.tokens == 0), "invalid event tokens")
-            local id = rows(db, statements.insert, branch, event.kind, event.tokens, event.text)[1].id
+            local id = rows(db, statements.insert, branch, event.kind, event.text)[1].id
             if event.kind == "user" or event.kind == "response" or event.kind == "result" then
                 assert(db:exec("DELETE FROM temp.event_tokenizer") == sqlite.OK, db:errmsg())
                 assert(rows(db, statements.tokenize, event.text)[1], "failed to tokenize event")
@@ -298,7 +268,6 @@ AND run IN (SELECT id FROM runs WHERE actor=?) RETURNING id]]
                 parent = parent,
                 memory = info.memory or 0,
                 kind = event.kind,
-                tokens = event.tokens,
                 text = event.text,
             }
             parent = id
@@ -308,8 +277,15 @@ AND run IN (SELECT id FROM runs WHERE actor=?) RETURNING id]]
 
     local store = {}
 
-    function store:start(actor, budget, base, memory, preset, question)
+    function store:start(actor, budget, base, memory, preset, question, automatic)
         return transaction(function()
+            if automatic then
+                local head = rows(db, statements.head, actor)[1]
+                base = head and head.id or nil
+            end
+            if memory == nil then
+                memory = base or 0
+            end
             local run = rows(db, statements.start_run, actor, budget)[1].id
             local branch = rows(db, statements.branch, run, base, memory ~= 0 and memory or nil, preset, 0)[1]
             return run, branch.id, append(branch.id, { { kind = "user", text = question } })[1]
@@ -346,13 +322,9 @@ AND run IN (SELECT id FROM runs WHERE actor=?) RETURNING id]]
         return assert(rows(db, statements.caller, event, actor)[1], "caller is unavailable")
     end
 
-    function store:head(actor)
-        local row = rows(db, statements.head, actor)[1]
-        return row and row.id or nil
-    end
-
     function store:quota(run)
-        return assert(rows(db, statements.quota, run)[1], "run is unavailable").remaining
+        local row = assert(rows(db, statements.quota, run)[1], "run is unavailable")
+        return row.remaining, row.used
     end
 
     function store:destroy(actor, caller_branch, branch)

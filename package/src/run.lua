@@ -1,3 +1,4 @@
+local encode_json = require("lunajson.encoder")()
 local make_memory = require("src.memory")
 local make_store = require("src.store")
 local pa = require("pa")
@@ -6,9 +7,9 @@ local CORE_ADAPTER = [[
 callable(self,function(_,request) return invoke("zinc_call","call",request) end)
 self.destroy=function(branch) return invoke("zinc_destroy","destroy",branch) end
 ]]
-local NESTED_CALL = [[self({question=Q,parent=P,memory=M,preset=S}) -> {branch,id,parent,memory,text}
-Q: nonempty string; P: parent event id or nil (current %s)
-M: inclusive memory event id or 0 (current %d)
+local NESTED_CALL = [[self({text=Q,parent=P,through=M,preset=S}) -> {branch,event,parent,through,text}
+Q: nonempty string; P: parent event id or 0 (current %s)
+M: inclusive history event id or 0 (current %d)
 S: optional preset; nil keeps the current preset; allowed: %s
 self.destroy(temporary_branch) -> "destroyed"]]
 
@@ -21,32 +22,19 @@ local function names(value)
     return result
 end
 
-local function fenced(language, text)
-    local size = 3
-    for marker in text:gmatch("`+") do
-        size = math.max(size, #marker + 1)
-    end
-    local marker = string.rep("`", size)
-    return marker .. language .. "\n" .. text .. "\n" .. marker
-end
-
-local function render(name, preset, documents)
+local function render(name, preset, documents, tools)
     local lines = {
         documents.base,
         documents.presets[name],
     }
-    local whitelist = preset.whitelist
-    if whitelist.roots then
+    if name == "configured" then
         lines[#lines + 1] = "Roots"
-        for _, root in ipairs(names(whitelist.roots)) do
-            local selected = whitelist.roots[root]
-            lines[#lines + 1] = root .. " = " .. selected.path .. " [" .. table.concat(selected.operations, ", ") .. "]"
+        for _, root in ipairs(names(tools.roots)) do
+            lines[#lines + 1] = root .. " = " .. tools.roots[root] .. " [read, write, search]"
         end
-    end
-    if whitelist.actions then
         lines[#lines + 1] = "HTTP"
-        for _, action in ipairs(names(whitelist.actions)) do
-            local selected = whitelist.actions[action]
+        for _, action in ipairs(names(tools.actions)) do
+            local selected = tools.actions[action]
             lines[#lines + 1] = action .. " = " .. selected.method .. " " .. selected.origin .. selected.path
         end
     end
@@ -100,9 +88,9 @@ local self={}
 ]]
         .. adapters
         .. string.format(
-            "\nreturn self,{question=%q,parent=%s,memory=%d}\nend)((...),callable)\ncallable=nil\n",
+            "\nreturn self,{text=%q,parent=%s,through=%d}\nend)((...),callable)\ncallable=nil\n",
             call.question,
-            call.parent and tostring(call.parent) or "nil",
+            call.parent and tostring(call.parent) or "0",
             call.memory
         )
         .. [[local output=(function()
@@ -115,17 +103,12 @@ return output
 end
 
 return function(spec, entry, make_model, documents)
-    local prepared = {}
-    for name, preset in pairs(spec.presets) do
-        prepared[preset] = render(name, preset, documents)
-    end
-
     local runner = {}
 
     local function execute(store, memory, model, call)
-        local selected = prepared[call.preset]
+        local selected = render(call.preset_name, call.preset, documents, call.config.tools)
         local imports = import_prompt()
-        local parent = call.parent and tostring(call.parent) or "nil"
+        local parent = call.parent and tostring(call.parent) or "0"
         local system = selected.system
             .. (imports ~= "" and "\n" .. imports or "")
             .. "\n"
@@ -152,13 +135,15 @@ return function(spec, entry, make_model, documents)
             end
         end
         local messages = { { role = "system", content = system }, { role = "user", content = user_content } }
-        for _ = 1, call.config.run.max_model_rounds do
+        for _ = 1, call.config.run.rounds do
             assert(store:quota(call.run) > 0, "model quota exhausted")
             pa.log("model.chat.begin")
-            local completion = model:chat(messages)
-            store:charge(call.run, completion.usage)
+            local completion = model:chat(messages, call.branch)
+            if completion.usage then
+                store:charge(call.run, completion.usage)
+            end
             pa.log("model.chat.end")
-            assert(not completion.truncated, "chat completion was truncated")
+            assert(not completion.truncated, "chat completion was truncated; lower context or raise the output limit")
             assert(not completion.error, completion.error)
             local tool_calls = #completion.calls > 0 and completion.tool_calls or nil
             local events = {}
@@ -182,7 +167,11 @@ return function(spec, entry, make_model, documents)
                     tool_calls = tool_calls,
                 }
             end
-            pa.emit("")
+            pa.emit(encode_json({
+                type = "turn",
+                branch = call.branch,
+                final = #completion.calls == 0 and completion.content ~= nil,
+            }))
             if #completion.calls == 0 then
                 if completion.content then
                     return assert(rows[#rows], "model returned no response")
@@ -190,12 +179,14 @@ return function(spec, entry, make_model, documents)
             else
                 local requests = {}
                 for index, tool in ipairs(completion.calls) do
-                    requests[index] = { kind = "call", text = tool.code, tokens = 0 }
+                    requests[index] = { kind = "call", text = tool.code }
                 end
                 local admitted = store:append(call.branch, requests)
                 local sources = {}
                 for index, tool in ipairs(completion.calls) do
-                    pa.emit(fenced("lua", tool.code))
+                    pa.emit(
+                        encode_json({ type = "tool", branch = call.branch, call = admitted[index].id, code = tool.code })
+                    )
                     sources[index] = source(selected, admitted[index].id, call, tool.code)
                 end
 
@@ -211,15 +202,9 @@ return function(spec, entry, make_model, documents)
                     if pa.profile then
                         pa.log("tool.eval.begin")
                     end
-                    local ok, value = pcall(pa.eval, view, sources, "")
+                    evaluated = pa.eval(view, sources, "")
                     if pa.profile then
                         pa.log("tool.eval.end")
-                    end
-                    evaluated = ok and value or {}
-                    if not ok then
-                        for index in ipairs(sources) do
-                            evaluated[index] = { false, tostring(value) }
-                        end
                     end
                 else
                     evaluated = {}
@@ -228,20 +213,15 @@ return function(spec, entry, make_model, documents)
                 local outputs, result_events = {}, {}
                 for index in ipairs(completion.calls) do
                     local result = evaluated[index]
-                    local output
-                    if type(result) == "table" and type(result[1]) == "boolean" and type(result[2]) == "string" then
-                        output = result[1] and result[2] or "run_lua failed:\n" .. result[2]
-                    else
-                        output = "run_lua failed: invalid Eval result"
-                    end
-                    if output:sub(1, 15) == "run_lua failed:" then
+                    local output = result[1] and result[2] or "run_lua failed:\n" .. result[2]
+                    if not result[1] then
                         pa.log("tool.eval.failed")
                     end
                     if output == "" or not utf8.len(output) then
                         output = "run_lua failed: invalid result"
                     end
                     local original_bytes = #output
-                    local limit = call.config.run.maximum_tool_result_bytes
+                    local limit = call.config.run.tool_bytes
                     if original_bytes > limit then
                         local notice = string.format(
                             "\n[result truncated: call #%d, original %d bytes]",
@@ -256,13 +236,18 @@ return function(spec, entry, make_model, documents)
                         pa.log("tool.result.truncated")
                     end
                     outputs[index] = output
-                    result_events[index] = { kind = "result", text = output, tokens = 0 }
+                    result_events[index] = { kind = "result", text = output }
                 end
                 store:append(call.branch, result_events)
-                for _, output in ipairs(outputs) do
-                    pa.emit(fenced("text", output))
+                for index, output in ipairs(outputs) do
+                    pa.emit(encode_json({
+                        type = "tool_result",
+                        branch = call.branch,
+                        call = admitted[index].id,
+                        ok = evaluated[index][1],
+                        text = output,
+                    }))
                 end
-                pa.emit("")
                 local remaining = store:quota(call.run)
                 for index, tool in ipairs(completion.calls) do
                     local content = outputs[index]
@@ -278,57 +263,72 @@ return function(spec, entry, make_model, documents)
 
     local function run(start, config)
         pa.log("store.open.begin")
-        local store = make_store(spec.store)
+        local store = make_store({ path = config.store })
         pa.log("store.open.end")
-        local model = make_model(spec.model, config.models, config.model_gateway)
+        local model = make_model(config)
         local memory
-        local result = table.pack(pcall(function()
+        local result = table.pack(xpcall(function()
             local call = start(store)
             pa.log("branch." .. call.branch)
+            pa.emit(encode_json({ type = "start", branch = call.branch, root = not call.temporary }))
             if pa.profile then
                 pa.log("memory.open.begin")
             end
             memory = make_memory({
-                cygnet = spec.cygnet,
-                chronological = config.retrieval.chronological,
-                semantic = config.retrieval.semantic,
+                cygnet = config.cygnet,
+                chronological = config.history,
+                semantic = config.search,
             }, store, model)
             if pa.profile then
                 pa.log("memory.open.end")
             end
             return call, execute(store, memory, model, call)
-        end))
-        local memory_closed = not memory or pcall(memory.close, memory)
+        end, debug.traceback))
+        local memory_closed, memory_problem = true, nil
+        if memory then
+            memory_closed, memory_problem = pcall(memory.close, memory)
+        end
         local completed, complete_problem = true, nil
         if result[1] and memory_closed and not result[2].temporary then
             pa.log("store.finish.begin")
             completed, complete_problem = pcall(store.finish, store, result[2].branch, result[3].id)
             pa.log("store.finish.end")
         end
+        local usage
+        if result[1] then
+            local _
+            _, usage = store:quota(result[2].run)
+        end
         local store_closed, store_problem = pcall(store.close, store)
         if not result[1] then
             pa.log("run.failed")
             error(result[2], 0)
         end
-        assert(memory_closed, "failed to close memory")
+        if not memory_closed then
+            error(memory_problem, 0)
+        end
         if not completed then
             error(complete_problem, 0)
         end
         if not store_closed then
             error(store_problem, 0)
         end
-        return result[2], result[3]
+        return result[2], result[3], usage
     end
 
     function runner:root(call)
         return run(function(store)
-            if call.automatic then
-                call.parent = store:head(call.actor)
-                call.memory = call.parent or 0
-            end
-            local run_id, branch, start =
-                store:start(call.actor, call.quota, call.parent, call.memory, call.preset_name, call.question)
+            local run_id, branch, start = store:start(
+                call.actor,
+                call.quota,
+                call.parent,
+                call.memory,
+                call.preset_name,
+                call.question,
+                call.automatic
+            )
             call.run, call.branch, call.start = run_id, branch, start.id
+            call.parent, call.memory = start.parent, start.memory
             return call
         end, call.config)
     end
@@ -358,8 +358,8 @@ return function(spec, entry, make_model, documents)
         end, config)
     end
 
-    local function access(work)
-        local store = make_store(spec.store)
+    local function access(config, work)
+        local store = make_store({ path = config.store })
         local result = table.pack(pcall(work, store))
         local closed, problem = pcall(store.close, store)
         if not result[1] then
@@ -371,10 +371,10 @@ return function(spec, entry, make_model, documents)
         return table.unpack(result, 2, result.n)
     end
 
-    function runner:destroy(actor, caller, branch)
-        return access(function(store)
-            local context = store:caller(actor, caller)
-            store:destroy(actor, context.branch, branch)
+    function runner:destroy(config, caller, branch)
+        return access(config, function(store)
+            local context = store:caller(config.actor, caller)
+            store:destroy(config.actor, context.branch, branch)
             return "destroyed"
         end)
     end

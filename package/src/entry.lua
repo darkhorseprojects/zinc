@@ -1,4 +1,5 @@
 local decode_json = require("lunajson.decoder")()
+local encode_json = require("lunajson.encoder")()
 local make_model = require("src.model")
 local make_run = require("src.run")
 
@@ -16,7 +17,7 @@ local function object(source, fields, maximum)
     local value = decode(source, maximum)
     assert(type(value) == "table", "JSON value must be an object")
     for key in pairs(value) do
-        assert(fields[key], "unknown JSON field")
+        assert(fields[key], "unknown JSON field: " .. tostring(key))
     end
     return value
 end
@@ -48,17 +49,19 @@ end
 
 local function request(value, nested)
     assert(type(value) == "table", "invalid Zinc request")
-    local fields = { question = true, parent = true, memory = true }
-    if nested then
-        fields.preset = true
-    end
+    local fields = { text = true, parent = true, through = true, images = not nested, preset = nested }
     for key in pairs(value) do
-        assert(fields[key], "unknown Zinc request field")
+        assert(fields[key], "unknown Zinc request field: " .. tostring(key))
     end
-    assert(type(value.question) == "string" and value.question ~= "" and utf8.len(value.question), "invalid question")
-    assert(value.parent == nil or math.type(value.parent) == "integer" and value.parent > 0, "invalid parent")
-    assert(math.type(value.memory) == "integer" and value.memory >= 0, "invalid memory")
+    assert(type(value.text) == "string" and value.text ~= "" and utf8.len(value.text), "invalid text")
+    assert(value.parent == nil or math.type(value.parent) == "integer" and value.parent >= 0, "invalid parent")
+    assert(value.through == nil or math.type(value.through) == "integer" and value.through >= 0, "invalid through")
+    assert(not nested or value.through ~= nil, "nested calls require parent and through")
     assert(not nested or value.preset == nil or type(value.preset) == "string", "invalid preset")
+    value.question, value.memory, value.automatic = value.text, value.through, value.parent == nil
+    if value.parent == 0 then
+        value.parent = nil
+    end
     return value
 end
 
@@ -74,14 +77,14 @@ local function merge(defaults, overrides, path)
         if type(value) == "table" then
             output[name] = merge(value, selected, field)
         elseif type(value) == "number" then
-            if field == "config.retrieval.semantic.minimum_score" then
+            if field == "config.search.score" then
                 assert(
                     type(selected) == "number" and selected == selected and math.abs(selected) < math.huge,
                     "invalid " .. field
                 )
             else
                 assert(math.type(selected) == "integer" and selected >= 0 and selected <= value, "invalid " .. field)
-                if not path:find("^config%.retrieval") then
+                if not path:find("^config%.history") and not path:find("^config%.search") then
                     assert(selected > 0, "invalid " .. field)
                 end
             end
@@ -95,7 +98,7 @@ local function merge(defaults, overrides, path)
         end
     end
     for name in pairs(overrides) do
-        assert(defaults[name] ~= nil, "unknown " .. path .. " field")
+        assert(defaults[name] ~= nil, "unknown " .. path .. " field: " .. tostring(name))
     end
     return output
 end
@@ -111,59 +114,139 @@ return function(spec)
     end
 
     local function configuration(source)
-        local value = object(source, {
-            version = true,
-            actor = true,
-            preset = true,
-            parent = true,
-            memory = true,
-            run = true,
-            models = true,
-            retrieval = true,
-            model_gateway = true,
-        }, spec.limits.config_bytes)
-        assert(value.version == 2, "unsupported Zinc config version")
-        if value.model_gateway ~= nil then
-            assert(type(value.model_gateway) == "table", "invalid model gateway")
-            local gateway = value.model_gateway
-            assert(
-                type(gateway.origin) == "string"
-                    and gateway.origin:match("^http://127%.0%.0%.1:%d+$")
-                    and type(gateway.token) == "string"
-                    and gateway.token:match("^[a-f0-9]+$")
-                    and #gateway.token == 64,
-                "invalid model gateway"
-            )
-            for key in pairs(gateway) do
-                assert(key == "origin" or key == "token", "unknown model gateway field")
-            end
+        local fields = { actor = true, preset = true, store = true, cygnet = true, providers = true, tools = true }
+        for name in pairs(spec.defaults) do
+            fields[name] = true
         end
+        local value = object(source, fields, spec.limits.config_bytes)
         assert(type(value.actor) == "string" and value.actor ~= "" and utf8.len(value.actor), "invalid actor")
         assert(spec.presets[value.preset], "unknown Zinc preset")
-        assert((value.parent == nil) == (value.memory == nil), "parent and memory must be configured together")
+        assert(type(value.store) == "string" and value.store ~= "", "store path is required")
+        assert(type(value.cygnet) == "string" and value.cygnet ~= "", "Cygnet path is required")
         assert(
-            value.parent == nil or value.parent == NULL or math.type(value.parent) == "integer" and value.parent > 0,
-            "invalid parent"
+            type(value.providers) == "table" and value.providers ~= NULL and next(value.providers),
+            "providers are required"
         )
-        assert(value.memory == nil or math.type(value.memory) == "integer" and value.memory >= 0, "invalid memory")
-        local selected = merge(spec.defaults, {
-            run = value.run or {},
-            models = value.models or {},
-            retrieval = value.retrieval or {},
-        }, "config")
+        for name, provider in pairs(value.providers) do
+            assert(name == "llama" or name == "openrouter", "unsupported model provider: " .. tostring(name))
+            assert(type(provider) == "table" and type(provider.url) == "string", "invalid provider: " .. name)
+            assert(provider.url:match("^https?://[^/%s?#]+$"), "provider URL must be an HTTP origin")
+            assert(
+                provider.token == nil or type(provider.token) == "string" and provider.token ~= "",
+                "invalid provider token"
+            )
+            for key in pairs(provider) do
+                assert(key == "url" or key == "token", "unknown provider field: " .. tostring(key))
+            end
+        end
+        local overrides = {}
+        for name in pairs(spec.defaults) do
+            overrides[name] = value[name]
+        end
+        local selected = merge(spec.defaults, overrides, "config")
+        assert(selected.limits.rerank.pair_bytes > selected.limits.rerank.query_bytes, "invalid rerank limits")
+        assert(selected.run.tool_bytes >= 128, "tool result limit must be at least 128 bytes")
+        for name, item in pairs(selected) do
+            value[name] = item
+        end
+        local tools = value.tools or {}
+        assert(type(tools) == "table" and tools ~= NULL, "invalid tools")
+        for key in pairs(tools) do
+            assert(key == "roots" or key == "actions" or key == "search", "unknown tools field: " .. tostring(key))
+        end
+        tools.roots, tools.actions = tools.roots or {}, tools.actions or {}
+        assert(type(tools.roots) == "table" and type(tools.actions) == "table", "invalid tool grants")
+        for name, path in pairs(tools.roots) do
+            assert(type(name) == "string" and type(path) == "string" and path ~= "", "invalid tool root")
+        end
+        for name, action in pairs(tools.actions) do
+            assert(type(name) == "string" and type(action) == "table", "invalid HTTP action")
+            for key in pairs(action) do
+                assert(key == "method" or key == "origin" or key == "path", "unknown HTTP action field")
+            end
+            assert(
+                type(action.method) == "string" and type(action.origin) == "string" and type(action.path) == "string",
+                "invalid HTTP action"
+            )
+        end
         assert(
-            selected.models.rerank.maximum_pair_bytes > selected.models.rerank.maximum_query_bytes
-                and (selected.models.chat.provider == "local" or selected.models.chat.provider == "openrouter")
-                and selected.models.rerank.provider == "local"
-                and (selected.models.chat.provider ~= "openrouter" or value.model_gateway),
-            "model provider or reranker limits are invalid"
+            tools.search == nil or type(tools.search) == "string" and tools.search ~= "",
+            "invalid search executable"
         )
-        assert(selected.run.maximum_tool_result_bytes >= 128, "tool result limit must be at least 128 bytes")
-        value.run, value.models, value.retrieval = selected.run, selected.models, selected.retrieval
+        value.tools = tools
         return value
     end
 
     local entry, runner = {}, nil
+
+    function entry.describe(input, opaque)
+        assert(input == "", "describe takes empty input")
+        local value = decode(opaque, spec.limits.config_bytes)
+        local overrides = {}
+        for name in pairs(spec.defaults) do
+            overrides[name] = value[name]
+        end
+        local config = merge(spec.defaults, overrides, "config")
+        local parameters = {
+            {
+                name = "model",
+                path = "config.model",
+                type = "string",
+                description = "Chat model",
+                autocomplete = "chat",
+            },
+            {
+                name = "rerank",
+                path = "config.rerank",
+                type = "string",
+                description = "Rerank model",
+                autocomplete = "rerank",
+            },
+            { name = "thinking", path = "config.thinking", type = "boolean", description = "Enable model thinking" },
+            {
+                name = "parent",
+                path = "input.parent",
+                type = "integer",
+                description = "Parent event; zero starts a fresh branch",
+                minimum = 0,
+            },
+            {
+                name = "through",
+                path = "input.through",
+                type = "integer",
+                description = "Inclusive history event; zero disables history",
+                minimum = 0,
+            },
+        }
+        for _, field in ipairs({
+            { "tokens", "run", "tokens", "Run token quota", 1 },
+            { "rounds", "run", "rounds", "Maximum model rounds", 1 },
+            { "tool_bytes", "run", "tool_bytes", "Tool result byte limit", 128 },
+            { "history_records", "history", "records", "Recent history records", 0 },
+            { "history_bytes", "history", "bytes", "Recent history byte limit", 0 },
+            { "candidates", "search", "candidates", "Search candidates", 0 },
+            { "search_bytes", "search", "bytes", "Retrieved history byte limit", 0 },
+            { "depth", "search", "depth", "Relation expansion depth", 0 },
+            { "terms", "search", "terms", "Search term limit", 0 },
+        }) do
+            parameters[#parameters + 1] = {
+                name = field[1],
+                path = "config." .. field[2] .. "." .. field[3],
+                type = "integer",
+                description = field[4],
+                minimum = field[5],
+                maximum = config[field[2]][field[3]],
+            }
+        end
+        parameters[#parameters + 1] =
+            { name = "score", path = "config.search.score", type = "number", description = "Minimum rerank score" }
+        return encode_json({ input = "json", output = "json", parameters = parameters })
+    end
+
+    function entry.models(input, opaque)
+        assert(input == "chat" or input == "rerank", "models takes chat or rerank")
+        return encode_json(make_model(configuration(opaque)):models(input))
+    end
 
     function entry.document(input, opaque)
         configuration(opaque)
@@ -186,7 +269,7 @@ return function(spec)
                 type(value) == "table" and type(value.action) == "string" and type(value.arguments) == "table",
                 "invalid capability call"
             )
-            return descriptor.call(value.action, value.arguments)
+            return descriptor.call(value.action, value.arguments, config.tools)
         end
     end
 
@@ -194,7 +277,13 @@ return function(spec)
         local config = configuration(opaque)
         assert(type(value) == "table" and math.type(value.caller) == "integer", "invalid Zinc caller")
         local call, final = runner:nested(config, value.caller, request(value.arguments[1], true))
-        return { branch = call.branch, id = final.id, parent = final.parent, memory = final.memory, text = final.text }
+        return {
+            branch = call.branch,
+            event = final.id,
+            parent = final.parent,
+            through = final.memory,
+            text = final.text,
+        }
     end
 
     function entry.zinc_destroy(value, opaque)
@@ -202,63 +291,55 @@ return function(spec)
         assert(type(value) == "table" and math.type(value.caller) == "integer", "invalid Zinc caller")
         local branch = value.arguments and value.arguments[1]
         assert(math.type(branch) == "integer" and branch > 0, "invalid branch")
-        return runner:destroy(config.actor, value.caller, branch)
+        return runner:destroy(config, value.caller, branch)
     end
 
     local function invoke(input, opaque)
-        assert(
-            type(input) == "string" and input ~= "" and #input <= spec.limits.request_bytes and utf8.len(input),
-            "invalid Zinc input"
+        local value = request(
+            object(input, { text = true, images = true, parent = true, through = true }, spec.limits.request_bytes),
+            false
         )
-        local images
-        if input:sub(1, 1) == "\30" then
-            local value = object(input:sub(2), { question = true, images = true }, spec.limits.request_bytes)
-            assert(type(value.question) == "string" and type(value.images) == "table", "invalid image request")
-            assert(#value.images > 0 and #value.images <= 4, "invalid image count")
-            for _, image in ipairs(value.images) do
+        assert(#value.text <= spec.limits.question_bytes, "Zinc text is too large")
+        if value.images then
+            assert(type(value.images) == "table" and value.images ~= NULL and #value.images <= 4, "invalid image count")
+            for key, image in pairs(value.images) do
+                assert(math.type(key) == "integer" and key >= 1 and key <= #value.images, "invalid image array")
                 assert(
                     type(image) == "table"
                         and (image.type == "image/png" or image.type == "image/jpeg" or image.type == "image/webp"),
                     "invalid image type"
                 )
                 assert(type(image.data) == "string" and image.data:match("^[A-Za-z0-9+/]+=?=?$"), "invalid image data")
-                for key in pairs(image) do
-                    assert(key == "type" or key == "data", "unknown image field")
+                for name in pairs(image) do
+                    assert(name == "type" or name == "data", "unknown image field")
                 end
             end
-            for key in pairs(value.images) do
-                assert(math.type(key) == "integer" and key >= 1 and key <= #value.images, "invalid image array")
+            if #value.images == 0 then
+                value.images = nil
             end
-            images, input = value.images, value.question
         end
-        assert(#input <= spec.limits.question_bytes and utf8.len(input), "invalid Zinc question")
         local config = configuration(opaque)
-        local automatic = config.parent == nil
-        local parent = config.parent
-        if parent == NULL then
-            parent = nil
-        end
-        local call, final = runner:root({
+        local call, final, usage = runner:root({
             actor = config.actor,
-            automatic = automatic,
+            automatic = value.automatic,
             config = config,
-            memory = automatic and nil or config.memory,
-            parent = parent,
+            memory = value.memory,
+            parent = value.parent,
             preset = spec.presets[config.preset],
             preset_name = config.preset,
-            question = input,
-            images = images,
-            quota = config.run.quota_tokens,
+            question = value.question,
+            images = value.images,
+            quota = config.run.tokens,
         })
-        return final.text
-            .. "\n\n-# result #"
-            .. final.id
-            .. " · start #"
-            .. call.start
-            .. " · parent "
-            .. (final.parent and "#" .. final.parent or "none")
-            .. " · memory #"
-            .. final.memory
+        return encode_json({
+            text = final.text,
+            run = call.run,
+            branch = call.branch,
+            event = final.id,
+            parent = final.parent or 0,
+            through = final.memory,
+            usage = { total_tokens = usage },
+        })
     end
 
     runner = make_run(spec, entry, make_model, documents)

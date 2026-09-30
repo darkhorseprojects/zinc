@@ -5,7 +5,7 @@ local pa = require("pa")
 
 return {
     document = pa.document(),
-    targets = { "no-host" },
+    targets = { "none" },
     whitelist = {},
     members = {},
 }

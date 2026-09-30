@@ -39,7 +39,7 @@ if ($Source -ne $Destination) {
         if (-not (Test-Path -LiteralPath $output)) {
             Copy-Item -LiteralPath (Join-Path $Source $path) -Destination $output
         } elseif ($path -eq 'ac.yaml') {
-            Write-Warning 'Preserved ac.yaml; verify its Zinc config is version 2 before running. Older config is not migrated.'
+            Write-Warning 'Preserved ac.yaml; verify Connector YAML 2 and Zinc 0.2 settings before running. Older config is not migrated.'
         }
     }
 }

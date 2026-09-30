@@ -264,7 +264,7 @@ CREATE VIRTUAL TABLE temp.grounding_vocabulary USING fts5vocab(grounding_tokeniz
             store:charge(run, usage)
             assert(not problem, problem)
             for _, result in ipairs(results) do
-                if result.score >= semantic.minimum_score then
+                if result.score >= semantic.score then
                     ranked[#ranked + 1] = candidates[result.index]
                 end
             end

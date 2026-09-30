@@ -1,20 +1,25 @@
-version: 1
+version: 2
 
 policies:
   zinc:
     source: package
     entry: zinc
-    memory_bytes: 100663296
-    instructions: 200000000
+    limits:
+      memory_bytes: 100663296
+      instructions: 200000000
     discord: true
     images: true
-    imports: {}
-    overrides: [parent, memory, run, retrieval, models.chat.provider, models.chat.name, models.rerank.name]
+    options: [model, rerank, thinking, tokens, rounds, tool_bytes, parent, through, history_records, history_bytes, candidates, search_bytes, depth, terms, score]
+    input:
+      text: "${prompt}"
+      images: "${images}"
     config:
-      version: 2
       actor: "discord:${application}:${policy}:member:${member}:channel:${channel}"
-      preset: safe
+      preset: configured
+      store: "${directory}/state/zinc.db"
+      cygnet: "${directory}/data/cygnet.db"
+      providers:
+        llama:
+          url: http://127.0.0.1:8000
 
 members: {}
-channels: {}
-guilds: {}

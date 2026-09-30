@@ -41,7 +41,7 @@ if [ "$source" != "$destination" ]; then
         fi
     done
     if ! cmp -s "$source/ac.yaml" "$destination/ac.yaml"; then
-        printf 'Preserved ac.yaml; verify its Zinc config is version 2 before running. Older config is not migrated.\n' >&2
+        printf 'Preserved ac.yaml; verify Connector YAML 2 and Zinc 0.2 settings before running. Older config is not migrated.\n' >&2
     fi
 fi
 printf '%s\n' "$destination"
