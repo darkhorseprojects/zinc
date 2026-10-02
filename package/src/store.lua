@@ -139,102 +139,20 @@ end
 return function(config)
     local db = assert(sqlite.open(config.path))
     db:busy_timeout(5000)
-    local opened, statements = pcall(function()
-        assert(
-            db:exec("PRAGMA trusted_schema=OFF; PRAGMA synchronous=FULL; PRAGMA foreign_keys=ON") == sqlite.OK,
-            db:errmsg()
-        )
-        local version_statement = prepare(db, "PRAGMA user_version")
-        local version = rows(db, version_statement)[1].user_version
-        assert(version_statement:finalize() == sqlite.OK, db:errmsg())
-        assert(version == 0 or version == 3, "Store format is unsupported; Zinc 0.2 requires a fresh Store")
-        assert(db:exec([[
-CREATE VIRTUAL TABLE temp.event_tokenizer USING fts5(text,tokenize='unicode61 remove_diacritics 0');
-CREATE VIRTUAL TABLE temp.event_vocabulary USING fts5vocab(event_tokenizer,'row');
-]]) == sqlite.OK, db:errmsg())
-        if version == 0 then
-            assert(db:exec("PRAGMA journal_mode=WAL") == sqlite.OK, db:errmsg())
-            assert(db:exec("BEGIN IMMEDIATE") == sqlite.OK, db:errmsg())
-            local created, problem = pcall(function()
-                assert(db:exec(SCHEMA .. LEXICON .. "PRAGMA user_version=3") == sqlite.OK, db:errmsg())
-            end)
-            if not created then
-                db:exec("ROLLBACK")
-                error(problem, 0)
+    local statements, store = {}, {}
+
+    function store:close(original)
+        local problem
+        for _, statement in pairs(statements) do
+            if statement:finalize() ~= sqlite.OK then
+                problem = problem or db:errmsg()
             end
-            assert(db:exec("COMMIT") == sqlite.OK, db:errmsg())
         end
-        return {
-            tokenize = prepare(db, "INSERT INTO temp.event_tokenizer(text) VALUES(?) RETURNING rowid"),
-            lexeme_insert = prepare(
-                db,
-                [[INSERT INTO lexemes(actor,term,documents)
-SELECT ?,term,1 FROM temp.event_vocabulary WHERE length(term)<=128
-ON CONFLICT(actor,term) DO UPDATE SET documents=documents+1]]
-            ),
-            lexeme_link = prepare(
-                db,
-                [[INSERT INTO event_lexemes(event,lexeme)
-SELECT ?,l.id FROM temp.event_vocabulary v JOIN lexemes l ON l.actor=? AND l.term=v.term
-WHERE length(v.term)<=128]]
-            ),
-            lexeme_exact = prepare(db, "SELECT id,term FROM lexemes WHERE actor=? AND term=?"),
-            lexeme_near = prepare(db, VISIBLE .. [[SELECT l.id,l.term FROM lexeme_grams
-JOIN lexemes l ON l.id=lexeme_grams.rowid WHERE lexeme_grams MATCH ? AND l.actor=?
-AND EXISTS(SELECT 1 FROM event_lexemes link JOIN events e ON e.id=link.event
-JOIN branches b ON b.id=e.branch JOIN runs r ON r.id=b.run
-WHERE link.lexeme=l.id AND ]] .. SCOPE .. [[)
-ORDER BY bm25(lexeme_grams),l.id LIMIT ?]]),
-            start_run = prepare(db, "INSERT INTO runs(actor,budget) VALUES(?,?) RETURNING id"),
-            branch = prepare(
-                db,
-                "INSERT INTO branches(run,base,memory,preset,temporary) VALUES(?,?,?,?,?) RETURNING id,run,base,memory,preset,temporary"
-            ),
-            branch_info = prepare(
-                db,
-                [[SELECT b.id,b.run,b.base,b.memory,b.preset,b.temporary,b.result,r.actor
-FROM branches b JOIN runs r ON r.id=b.run WHERE b.id=?]]
-            ),
-            finish = prepare(
-                db,
-                [[UPDATE branches SET result=? WHERE id=? AND temporary=0 AND result IS NULL
-AND EXISTS(SELECT 1 FROM events WHERE id=? AND branch=? AND kind='response') RETURNING id]]
-            ),
-            caller = prepare(
-                db,
-                [[SELECT r.id run,r.actor,r.budget,b.id branch,b.preset
-FROM events e JOIN branches b ON b.id=e.branch JOIN runs r ON r.id=b.run
-WHERE e.id=? AND e.kind='call' AND r.actor=?]]
-            ),
-            insert = prepare(db, "INSERT INTO events(branch,kind,text) VALUES(?,?,?) RETURNING id"),
-            charge = prepare(db, "UPDATE runs SET used=used+? WHERE id=? RETURNING id"),
-            last = prepare(db, "SELECT id FROM events WHERE branch=? ORDER BY id DESC LIMIT 1"),
-            head = prepare(
-                db,
-                [[SELECT e.id FROM events e
-JOIN branches b ON b.id=e.branch JOIN runs r ON r.id=b.run
-WHERE r.actor=? AND b.temporary=0
-ORDER BY e.id DESC LIMIT 1]]
-            ),
-            quota = prepare(db, "SELECT budget-used remaining,used FROM runs WHERE id=?"),
-            destroy = prepare(
-                db,
-                [[WITH RECURSIVE ancestors(id) AS (
- SELECT ? UNION
- SELECT parent.branch FROM ancestors a JOIN branches child ON child.id=a.id
- JOIN events parent ON parent.id=child.base
-)
-DELETE FROM branches WHERE id=? AND temporary=1 AND id NOT IN ancestors
-AND run IN (SELECT id FROM runs WHERE actor=?) RETURNING id]]
-            ),
-            before = prepare(db, BEFORE),
-            search = prepare(db, SEARCH),
-            frequency = prepare(db, FREQUENCY),
-        }
-    end)
-    if not opened then
-        db:close()
-        error(statements, 0)
+        local closed = db:close()
+        if original == nil then
+            assert(not problem, problem)
+            assert(closed == sqlite.OK, "failed to close Store")
+        end
     end
 
     local function transaction(body)
@@ -248,6 +166,81 @@ AND run IN (SELECT id FROM runs WHERE actor=?) RETURNING id]]
         error(result[2], 0)
     end
 
+    local opened, problem = pcall(function()
+        assert(
+            db:exec("PRAGMA trusted_schema=OFF; PRAGMA synchronous=FULL; PRAGMA foreign_keys=ON") == sqlite.OK,
+            db:errmsg()
+        )
+        statements.version = prepare(db, "PRAGMA user_version")
+        local version = rows(db, statements.version)[1].user_version
+        local finalized = statements.version:finalize()
+        statements.version = nil
+        assert(finalized == sqlite.OK, db:errmsg())
+        assert(version == 0 or version == 3, "Store format is unsupported; Zinc 0.2 requires a fresh Store")
+        assert(db:exec([[
+CREATE VIRTUAL TABLE temp.event_tokenizer USING fts5(text,tokenize='unicode61 remove_diacritics 0');
+CREATE VIRTUAL TABLE temp.event_vocabulary USING fts5vocab(event_tokenizer,'row');
+CREATE VIRTUAL TABLE temp.event_positions USING fts5vocab(event_tokenizer,'instance');
+]]) == sqlite.OK, db:errmsg())
+        if version == 0 then
+            assert(db:exec("PRAGMA journal_mode=WAL") == sqlite.OK, db:errmsg())
+            transaction(function()
+                assert(db:exec(SCHEMA .. LEXICON .. "PRAGMA user_version=3") == sqlite.OK, db:errmsg())
+            end)
+        end
+        local queries = {
+            tokenize = "INSERT INTO temp.event_tokenizer(rowid,text) VALUES(?,?) RETURNING rowid",
+            tokens = "SELECT term FROM temp.event_positions WHERE doc=? ORDER BY offset LIMIT ?",
+            lexeme_insert = [[INSERT INTO lexemes(actor,term,documents)
+SELECT ?,term,1 FROM temp.event_vocabulary WHERE length(term)<=128
+ON CONFLICT(actor,term) DO UPDATE SET documents=documents+1]],
+            lexeme_link = [[INSERT INTO event_lexemes(event,lexeme)
+SELECT ?,l.id FROM temp.event_vocabulary v JOIN lexemes l ON l.actor=? AND l.term=v.term
+WHERE length(v.term)<=128]],
+            lexeme_exact = "SELECT id,term FROM lexemes WHERE actor=? AND term=?",
+            lexeme_near = VISIBLE .. [[SELECT l.id,l.term FROM lexeme_grams
+JOIN lexemes l ON l.id=lexeme_grams.rowid WHERE lexeme_grams MATCH ? AND l.actor=?
+AND EXISTS(SELECT 1 FROM event_lexemes link JOIN events e ON e.id=link.event
+JOIN branches b ON b.id=e.branch JOIN runs r ON r.id=b.run
+WHERE link.lexeme=l.id AND ]] .. SCOPE .. [[)
+ORDER BY bm25(lexeme_grams),l.id LIMIT ?]],
+            start_run = "INSERT INTO runs(actor,budget) VALUES(?,?) RETURNING id",
+            branch = "INSERT INTO branches(run,base,memory,preset,temporary) VALUES(?,?,?,?,?) RETURNING id,run,base,memory,preset,temporary",
+            branch_info = [[SELECT b.id,b.run,b.base,b.memory,b.preset,b.temporary,b.result,r.actor
+FROM branches b JOIN runs r ON r.id=b.run WHERE b.id=?]],
+            finish = [[UPDATE branches SET result=? WHERE id=? AND temporary=0 AND result IS NULL
+AND EXISTS(SELECT 1 FROM events WHERE id=? AND branch=? AND kind='response') RETURNING id]],
+            caller = [[SELECT r.id run,r.actor,r.budget,b.id branch,b.preset
+FROM events e JOIN branches b ON b.id=e.branch JOIN runs r ON r.id=b.run
+WHERE e.id=? AND e.kind='call' AND r.actor=?]],
+            insert = "INSERT INTO events(branch,kind,text) VALUES(?,?,?) RETURNING id",
+            charge = "UPDATE runs SET used=used+? WHERE id=? RETURNING id",
+            last = "SELECT id FROM events WHERE branch=? ORDER BY id DESC LIMIT 1",
+            head = [[SELECT e.id FROM events e
+JOIN branches b ON b.id=e.branch JOIN runs r ON r.id=b.run
+WHERE r.actor=? AND b.temporary=0
+ORDER BY e.id DESC LIMIT 1]],
+            quota = "SELECT budget-used remaining,used FROM runs WHERE id=?",
+            destroy = [[WITH RECURSIVE ancestors(id) AS (
+ SELECT ? UNION
+ SELECT parent.branch FROM ancestors a JOIN branches child ON child.id=a.id
+ JOIN events parent ON parent.id=child.base
+)
+DELETE FROM branches WHERE id=? AND temporary=1 AND id NOT IN ancestors
+AND run IN (SELECT id FROM runs WHERE actor=?) RETURNING id]],
+            before = BEFORE,
+            search = SEARCH,
+            frequency = FREQUENCY,
+        }
+        for name, query in pairs(queries) do
+            statements[name] = prepare(db, query)
+        end
+    end)
+    if not opened then
+        store:close(problem)
+        error(problem, 0)
+    end
+
     local function append(branch, events)
         local info = assert(rows(db, statements.branch_info, branch)[1], "branch is unavailable")
         local previous = rows(db, statements.last, branch)[1]
@@ -258,7 +251,7 @@ AND run IN (SELECT id FROM runs WHERE actor=?) RETURNING id]]
             local id = rows(db, statements.insert, branch, event.kind, event.text)[1].id
             if event.kind == "user" or event.kind == "response" or event.kind == "result" then
                 assert(db:exec("DELETE FROM temp.event_tokenizer") == sqlite.OK, db:errmsg())
-                assert(rows(db, statements.tokenize, event.text)[1], "failed to tokenize event")
+                assert(rows(db, statements.tokenize, id, event.text)[1], "failed to tokenize event")
                 rows(db, statements.lexeme_insert, info.actor)
                 rows(db, statements.lexeme_link, id, info.actor)
             end
@@ -274,8 +267,6 @@ AND run IN (SELECT id FROM runs WHERE actor=?) RETURNING id]]
         end
         return output
     end
-
-    local store = {}
 
     function store:start(actor, budget, base, memory, preset, question, automatic)
         return transaction(function()
@@ -300,9 +291,7 @@ AND run IN (SELECT id FROM runs WHERE actor=?) RETURNING id]]
     end
 
     function store:finish(branch, result)
-        return transaction(function()
-            assert(rows(db, statements.finish, result, branch, result, branch)[1], "invalid terminal response")
-        end)
+        assert(rows(db, statements.finish, result, branch, result, branch)[1], "invalid terminal response")
     end
 
     function store:append(branch, events)
@@ -313,9 +302,7 @@ AND run IN (SELECT id FROM runs WHERE actor=?) RETURNING id]]
 
     function store:charge(run, tokens)
         assert(math.type(tokens) == "integer" and tokens >= 0, "invalid model usage")
-        return transaction(function()
-            assert(rows(db, statements.charge, tokens, run)[1], "run is unavailable")
-        end)
+        assert(rows(db, statements.charge, tokens, run)[1], "run is unavailable")
     end
 
     function store:caller(actor, event)
@@ -328,9 +315,7 @@ AND run IN (SELECT id FROM runs WHERE actor=?) RETURNING id]]
     end
 
     function store:destroy(actor, caller_branch, branch)
-        return transaction(function()
-            assert(rows(db, statements.destroy, caller_branch, branch, actor)[1], "branch is unavailable")
-        end)
+        assert(rows(db, statements.destroy, caller_branch, branch, actor)[1], "branch is unavailable")
     end
 
     function store:before(actor, memory, branch, limit)
@@ -352,6 +337,10 @@ AND run IN (SELECT id FROM runs WHERE actor=?) RETURNING id]]
         return found
     end
 
+    function store:tokens(event, limit)
+        return rows(db, statements.tokens, event, limit)
+    end
+
     function store:frequency(actor, memory, branch, lexeme)
         if memory == 0 then
             return 0
@@ -370,12 +359,5 @@ AND run IN (SELECT id FROM runs WHERE actor=?) RETURNING id]]
         return rows(db, statements.search, branch, memory, table.concat(literals, " OR "), actor, memory, limit)
     end
 
-    function store:close()
-        for _, statement in pairs(statements) do
-            assert(statement:finalize() == sqlite.OK, db:errmsg())
-        end
-        assert(db:close() == sqlite.OK, "failed to close Store")
-    end
-
-    return store
+    return setmetatable(store, { __close = store.close })
 end

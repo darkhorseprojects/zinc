@@ -10,7 +10,7 @@ publication is a separate step.
   replace actor identity.
 - Model references are `provider:id`. Unique bare IDs work; ambiguity fails. Known model capabilities constrain
   requests.
-- Presets are renamed: `safe` → `configured`, `unsafe` → `unrestricted`, `no-host` → `none`. Configured host access
+- Presets are renamed: `safe` → `configured`, `unsafe` → `unrestricted`, `no-host` → `empty`. Configured host access
   requires explicit grants.
 - OpenRouter usage/accounting frames no longer fail just because they repeat the finish reason; JSON null is not usage.
   Malformed streams and provider errors still fail with useful diagnostics.
@@ -30,7 +30,7 @@ typed `options`, and supply an explicit JSON `input` template. Move PA ceilings 
 
 Config has no `version`, `models.chat`, or `retrieval` object: use `model`, `rerank`, `thinking`, `run`, `history`, and
 `search`. Move `parent`/`memory` out of config into request `parent`/`through`. Set `store`, `cygnet`, provider origins,
-and desired tool grants explicitly.
+and desired tool grants explicitly. Replace any intermediate `none` preset selection with `empty`; no alias is retained.
 
 The installer preserves old state and YAML; it does not perform this migration or reset. Replace the old Store and its
 WAL/SHM companions explicitly, retaining an offline copy if needed. New Store files initialize as format 3.

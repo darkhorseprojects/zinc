@@ -4,86 +4,97 @@ Filesystem roots, HTTP targets, and absolute process executables are arguments. 
 
 ```lua
 local pa = require("pa")
-
-return {
+local capability = {
+    __tostring = function(self)
+        return table.concat(self, "\n")
+    end,
+    __call = function(self, value, tools)
+        local fn = assert(rawget(self, value.action), "invalid capability action")
+        assert(type(fn) == "function", "invalid capability action")
+        local count = debug.getinfo(fn, "u").nparams - 1
+        assert(value.arguments.n == count, "invalid capability arguments")
+        return fn(tools, table.unpack(value.arguments, 1, count))
+    end,
+}
+local preset = setmetatable({}, {
     document = pa.document(),
-    targets = { "unrestricted", "configured", "none" },
-    whitelist = {},
-    members = {
-        fs = {
-            usage = {
-                "self.fs.read(root,path) -> string (UTF-8 file text)",
-                [[self.fs.write(root,path,text) -> "written"]],
-            },
-            adapter = [[
-self.fs={
- read=function(root,path) return invoke("fs","read",root,path) end,
- write=function(root,path,text) return invoke("fs","write",root,path,text) end,
-}
-]],
-            call = function(action, arguments)
-                assert(
-                    type(arguments[1]) == "string" and arguments[1] ~= "" and type(arguments[2]) == "string",
-                    "invalid filesystem call"
-                )
-                local root_path = arguments[1]:gsub("^%./", "")
-                if root_path == "" or root_path == "." then
-                    root_path = nil
-                end
-                local root <close> = pa.fs(root_path)
-                local path = arguments[2]:gsub("^%./", "")
-                if action == "read" then
-                    assert(#arguments == 2, "invalid read")
-                    local data = root:read(path)
-                    assert(utf8.len(data), "file is not UTF-8")
-                    return data
-                end
-                assert(action == "write" and #arguments == 3, "invalid write")
-                assert(type(arguments[3]) == "string" and utf8.len(arguments[3]), "invalid text")
-                root:write(path, arguments[3])
-                return "written"
-            end,
-        },
-        http = {
-            usage = {
-                "self.http.request(method,origin,path,body,headers) -> {status,body}",
-            },
-            adapter = [[
-self.http={request=function(method,origin,path,body,headers)
- return invoke("http","request",method,origin,path,body,headers or {})
-end}
-]],
-            call = function(action, arguments)
-                assert(action == "request" and #arguments == 5, "invalid HTTP call")
-                for index = 1, 4 do
-                    assert(type(arguments[index]) == "string", "invalid HTTP call")
-                end
-                local status, body = pa.http(arguments[2], arguments[1], arguments[3], arguments[4], arguments[5])
-                assert(utf8.len(body), "HTTP body is not UTF-8")
-                return { status = status, body = body }
-            end,
-        },
-        process = {
-            usage = {
-                "self.process.run(executable,arguments,input) -> {code,stdout,stderr}",
-            },
-            adapter = [[
-self.process={run=function(executable,arguments,input)
- return invoke("process","run",executable,arguments,input or "")
-end}
-]],
-            call = function(action, arguments)
-                assert(action == "run" and #arguments == 3, "invalid process call")
-                assert(type(arguments[1]) == "string" and type(arguments[2]) == "table", "invalid process call")
-                assert(type(arguments[3]) == "string", "invalid process input")
-                for _, argument in ipairs(arguments[2]) do
-                    assert(type(argument) == "string", "invalid process arguments")
-                end
-                local code, stdout, stderr = pa.process(arguments[1], arguments[2], arguments[3])
-                assert(utf8.len(stdout) and utf8.len(stderr), "process output is not UTF-8")
-                return { code = code, stdout = stdout, stderr = stderr }
-            end,
-        },
-    },
-}
+    targets = { "unrestricted", "configured", "empty" },
+    __tostring = function(self)
+        local names, lines = {}, { tostring(getmetatable(self).document) }
+        for name in pairs(self) do
+            names[#names + 1] = name
+        end
+        table.sort(names)
+        for _, name in ipairs(names) do
+            lines[#lines + 1] = tostring(self[name])
+        end
+        return table.concat(lines, "\n")
+    end,
+})
+```
+
+## Filesystem
+
+```lua
+local function open(root, path)
+    assert(type(root) == "string" and root ~= "" and type(path) == "string", "invalid filesystem call")
+    root = root:gsub("^%./", "")
+    if root == "" or root == "." then
+        root = nil
+    end
+    return pa.fs(root), path:gsub("^%./", "")
+end
+preset.fs = setmetatable({
+    "self.fs.read(root,path) -> string (UTF-8 file text)",
+    [[self.fs.write(root,path,text) -> "written"]],
+    read = function(_, root, path)
+        local directory <close>, filename = open(root, path)
+        local data = directory:read(filename)
+        assert(utf8.len(data), "file is not UTF-8")
+        return data
+    end,
+    write = function(_, root, path, text)
+        local directory <close>, filename = open(root, path)
+        assert(type(text) == "string" and utf8.len(text), "invalid text")
+        directory:write(filename, text)
+        return "written"
+    end,
+}, capability)
+```
+
+## HTTP
+
+```lua
+preset.http = setmetatable({
+    "self.http.request(method,origin,path,body,headers) -> {status,body}",
+    request = function(_, method, origin, path, body, headers)
+        assert(
+            type(method) == "string" and type(origin) == "string" and type(path) == "string" and type(body) == "string",
+            "invalid HTTP call"
+        )
+        local status, response = pa.http(origin, method, path, body, headers or {})
+        assert(utf8.len(response), "HTTP body is not UTF-8")
+        return { status = status, body = response }
+    end,
+}, capability)
+```
+
+## Process
+
+```lua
+preset.process = setmetatable({
+    "self.process.run(executable,arguments,input) -> {code,stdout,stderr}",
+    run = function(_, executable, arguments, input)
+        input = input or ""
+        assert(type(executable) == "string" and type(arguments) == "table", "invalid process call")
+        assert(type(input) == "string", "invalid process input")
+        for _, argument in ipairs(arguments) do
+            assert(type(argument) == "string", "invalid process arguments")
+        end
+        local code, stdout, stderr = pa.process(executable, arguments, input)
+        assert(utf8.len(stdout) and utf8.len(stderr), "process output is not UTF-8")
+        return { code = code, stdout = stdout, stderr = stderr }
+    end,
+}, capability)
+return preset
 ```

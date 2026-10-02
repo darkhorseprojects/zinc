@@ -167,7 +167,11 @@ return function(config)
         local fragments, data, error_body = {}, {}, {}
         local finished, done, usage, problem = nil, false, nil, nil
         local contents, thoughts, calls = {}, {}, {}
-        local first_reasoning, first_content, first_tool = false, false, false
+        local channels = {
+            { name = "reasoning", field = "reasoning_content", parts = thoughts, emit = config.thinking },
+            { name = "content", field = "content", parts = contents, emit = true },
+        }
+        local first_tool = false
         local request_body = encode_json(chat_body(messages, model), NULL)
         pa.log("model.http.begin")
         local status = pa.http(
@@ -248,34 +252,24 @@ return function(config)
                                         type(choice) == "table" and type(choice.delta) == "table" and choice.delta,
                                         "invalid chat delta"
                                     )
-                                    local reasoning_delta = delta.reasoning_content or delta.reasoning
-                                    if type(reasoning_delta) == "string" and reasoning_delta ~= "" then
-                                        if pa.profile and not first_reasoning then
-                                            first_reasoning = true
-                                            pa.log("model.chat.first_reasoning")
+                                    for _, channel in ipairs(channels) do
+                                        local text = delta[channel.field]
+                                            or (channel.name == "reasoning" and delta.reasoning)
+                                        if type(text) == "string" and text ~= "" then
+                                            if pa.profile and not channel.first then
+                                                channel.first = true
+                                                pa.log("model.chat.first_" .. channel.name)
+                                            end
+                                            channel.parts[#channel.parts + 1] = text
+                                            if channel.emit then
+                                                pa.emit(encode_json({
+                                                    type = "delta",
+                                                    branch = branch,
+                                                    channel = channel.name,
+                                                    text = text,
+                                                }))
+                                            end
                                         end
-                                        thoughts[#thoughts + 1] = reasoning_delta
-                                        if config.thinking then
-                                            pa.emit(encode_json({
-                                                type = "delta",
-                                                branch = branch,
-                                                channel = "reasoning",
-                                                text = reasoning_delta,
-                                            }))
-                                        end
-                                    end
-                                    if type(delta.content) == "string" and delta.content ~= "" then
-                                        if pa.profile and not first_content then
-                                            first_content = true
-                                            pa.log("model.chat.first_content")
-                                        end
-                                        contents[#contents + 1] = delta.content
-                                        pa.emit(encode_json({
-                                            type = "delta",
-                                            branch = branch,
-                                            channel = "content",
-                                            text = delta.content,
-                                        }))
                                     end
                                     for _, tool in ipairs(dense(delta.tool_calls or {}, "chat stream tool calls")) do
                                         local index = type(tool) == "table" and tool.index
@@ -348,14 +342,14 @@ return function(config)
             pa.log("model.chat.length")
             return { usage = usage, truncated = true }
         end
-        local parsed = table.pack(pcall(function()
+        local decoded, result = pcall(function()
             local reasoning = #thoughts > 0 and table.concat(thoughts) or nil
             local content = #contents > 0 and table.concat(contents) or nil
             assert(not reasoning or utf8.len(reasoning), "invalid reasoning")
             assert(not content or utf8.len(content), "invalid response")
 
             local entries = dense(calls, "chat tool calls")
-            local decoded_calls, tool_calls, ids = {}, {}, {}
+            local decoded_calls, ids = {}, {}
             for index, entry in ipairs(entries) do
                 local fn = type(entry) == "table" and entry["function"]
                 local id = type(entry) == "table" and entry.id
@@ -378,8 +372,6 @@ return function(config)
                 )
                 ids[id] = true
                 decoded_calls[index] = { id = id, code = decoded.code }
-                tool_calls[index] =
-                    { id = id, type = "function", ["function"] = { name = name, arguments = arguments } }
             end
 
             assert(finished == "stop" or finished == "tool_calls", "invalid tool completion")
@@ -392,14 +384,14 @@ return function(config)
                 reasoning = reasoning,
                 content = content,
                 calls = decoded_calls,
-                tool_calls = tool_calls,
+                tool_calls = entries,
                 usage = usage,
             }
-        end))
-        if not parsed[1] then
-            return { usage = usage, error = tostring(parsed[2]) }
+        end)
+        if not decoded then
+            return { usage = usage, error = tostring(result) }
         end
-        return parsed[2]
+        return result
     end
 
     function api:rerank(query, passages)
@@ -426,7 +418,7 @@ return function(config)
         pa.log("model.rerank.end")
         local usage = response.usage and response.usage.total_tokens
         assert(math.type(usage) == "integer" and usage >= 0, "invalid reranker usage")
-        local parsed = table.pack(pcall(function()
+        local decoded, result = pcall(function()
             local ranked = dense(response.results, "reranker results")
             assert(#ranked == #selected, "reranker response has the wrong count")
             local output, seen = {}, {}
@@ -437,11 +429,11 @@ return function(config)
                 seen[index], output[#output + 1] = true, { index = source[index + 1], score = entry.relevance_score }
             end
             return output
-        end))
-        if not parsed[1] then
-            return {}, usage, tostring(parsed[2])
+        end)
+        if not decoded then
+            return {}, usage, tostring(result)
         end
-        return parsed[2], usage
+        return result, usage
     end
 
     return api

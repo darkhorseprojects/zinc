@@ -73,9 +73,9 @@ Paths, provider origins, tokens, tool grants, actor, and preset are trusted depl
 `search.score` is a finite raw reranker cutoff. The tracked `ac.yaml` expands trusted directory/identity templates and
 exposes selected tuning fields as typed Discord options, not a free-form YAML override.
 
-Presets are `configured`, `unrestricted`, and `none`. Configured tools use explicit `tools.roots`, `tools.actions`, and
+Presets are `configured`, `unrestricted`, and `empty`. Configured tools use explicit `tools.roots`, `tools.actions`, and
 an optional absolute `tools.search` executable; no home root is inferred. Unrestricted tools accept request-selected PA
-capabilities. None grants no host tools. Imports remain a separate embedder grant, including under `none`.
+capabilities. Empty grants no host tools. Imports remain a separate embedder grant, including under `empty`.
 
 ## Models and usage
 
