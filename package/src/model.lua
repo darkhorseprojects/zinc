@@ -49,47 +49,50 @@ return function(config)
         assert(role == "chat" or role == "rerank", "unsupported model role")
         local output = { [0] = 0 }
         for name, provider in pairs(config.providers) do
-            if role == "chat" or name == "llama" then
-                if not catalogs[name] then
-                    local status, body = pa.http(provider.url, "GET", "/v1/models", "", {
-                        accept = "application/json",
-                        authorization = provider.token and "Bearer " .. provider.token or nil,
-                    }, chat.response_bytes)
-                    assert(
-                        status >= 200 and status < 300,
-                        name .. " model catalog failed: HTTP " .. status .. "\n" .. body:sub(1, 2048)
-                    )
-                    local records = {}
-                    for _, value in ipairs(dense(decode(body).data, "model catalog")) do
-                        assert(type(value.id) == "string" and value.id ~= "", "invalid model ID")
-                        local record = {
-                            ref = name .. ":" .. value.id,
-                            provider = name,
-                            id = value.id,
-                            name = value.name or value.id,
-                        }
-                        if name == "openrouter" then
-                            record.input = value.architecture and value.architecture.input_modalities
-                            record.context_tokens = value.context_length
-                            record.output_tokens = value.top_provider and value.top_provider.max_completion_tokens
-                            record.thinking, record.tools = false, false
-                            for _, parameter in ipairs(value.supported_parameters or {}) do
-                                record.thinking = record.thinking
-                                    or parameter == "reasoning"
-                                    or parameter == "reasoning_effort"
-                                record.tools = record.tools or parameter == "tools"
-                            end
-                        elseif value.meta then
-                            record.context_tokens = value.meta.n_ctx
-                        end
-                        records[#records + 1] = record
-                    end
-                    catalogs[name] = records
+            local key = name .. ":" .. role
+            if not catalogs[key] then
+                local path = "/v1/models"
+                if name == "openrouter" then
+                    path = path .. "?output_modalities=" .. (role == "chat" and "text" or "rerank")
                 end
-                for _, record in ipairs(catalogs[name]) do
-                    if role ~= "chat" or record.tools ~= false then
-                        output[#output + 1] = record
+                local status, body = pa.http(provider.url, "GET", path, "", {
+                    accept = "application/json",
+                    authorization = provider.token and "Bearer " .. provider.token or nil,
+                }, chat.response_bytes)
+                assert(
+                    status >= 200 and status < 300,
+                    name .. " model catalog failed: HTTP " .. status .. "\n" .. body:sub(1, 2048)
+                )
+                local records = {}
+                for _, value in ipairs(dense(decode(body).data, "model catalog")) do
+                    assert(type(value.id) == "string" and value.id ~= "", "invalid model ID")
+                    local record = {
+                        ref = name .. ":" .. value.id,
+                        provider = name,
+                        id = value.id,
+                        name = value.name or value.id,
+                    }
+                    if name == "openrouter" then
+                        record.input = value.architecture and value.architecture.input_modalities
+                        record.context_tokens = value.context_length
+                        record.output_tokens = value.top_provider and value.top_provider.max_completion_tokens
+                        record.thinking, record.tools = false, false
+                        for _, parameter in ipairs(value.supported_parameters or {}) do
+                            record.thinking = record.thinking
+                                or parameter == "reasoning"
+                                or parameter == "reasoning_effort"
+                            record.tools = record.tools or parameter == "tools"
+                        end
+                    elseif value.meta then
+                        record.context_tokens = value.meta.n_ctx
                     end
+                    records[#records + 1] = record
+                end
+                catalogs[key] = records
+            end
+            for _, record in ipairs(catalogs[key]) do
+                if role ~= "chat" or record.tools ~= false then
+                    output[#output + 1] = record
                 end
             end
         end
@@ -100,11 +103,10 @@ return function(config)
         return output
     end
 
-    local function selection(reference, role)
+    local function selection(reference)
         local name, id = reference:match("^([%w_-]+):(.+)$")
         assert(name, "model reference must be provider-qualified: " .. reference)
         local provider = assert(config.providers[name], "model provider is not configured: " .. name)
-        assert(role ~= "rerank" or name == "llama", "rerank provider is unsupported")
         return { ref = reference, provider = name, id = id }, provider
     end
 
@@ -142,7 +144,7 @@ return function(config)
     end
 
     function api:chat(messages, branch)
-        local model, provider = selection(config.model, "chat")
+        local model, provider = selection(config.chat)
         local fragments, data, error_body = {}, {}, {}
         local finished, done, usage, problem = nil, false, nil, nil
         local contents, thoughts, calls = {}, {}, {}
@@ -398,7 +400,7 @@ return function(config)
             return {}, 0
         end
         pa.log("model.rerank.begin")
-        local model, provider = selection(config.rerank, "rerank")
+        local model, provider = selection(config.rerank)
         local response = request(provider, "/v1/rerank", {
             model = model.id,
             documents = selected,

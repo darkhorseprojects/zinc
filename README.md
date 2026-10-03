@@ -1,8 +1,8 @@
 # Zinc
 
 Zinc is a [Portable Agents](https://github.com/darkhorseprojects/portable-agents) package with actor-scoped durable
-history, typo-aware retrieval, configured Lua tools, and temporary nested branches. Chat uses llama.cpp or OpenRouter;
-reranking uses llama.cpp. Zinc owns model requests and state. Portable Agents executes it; Agent Connector handles
+history, typo-aware retrieval, configured Lua tools, and temporary nested branches. Chat and reranking independently
+use llama.cpp or OpenRouter. Zinc owns model requests and state. Portable Agents executes it; Agent Connector handles
 Discord routing, credentials, and presentation.
 
 ## Install
@@ -63,7 +63,7 @@ Private UTF-8 JSON config is separate:
   "store": "/srv/zinc/state/zinc.db",
   "cygnet": "/srv/zinc/data/cygnet.db",
   "providers": { "llama": { "url": "http://127.0.0.1:8000" } },
-  "model": "llama:chat",
+  "chat": "llama:chat",
   "rerank": "llama:rerank"
 }
 ```
@@ -71,7 +71,12 @@ Private UTF-8 JSON config is separate:
 Paths, provider origins, tokens, tool grants, actor, and preset are trusted deployment settings. Defaults cover
 `thinking`, `run`, `history`, `search`, and model `limits`. Unknown fields fail. Numeric ceilings can only be reduced;
 `search.score` is a finite raw reranker cutoff. The tracked `ac.yaml` expands trusted directory/identity templates and
-exposes selected tuning fields as typed Discord options, not a free-form YAML override.
+includes the complete config shape and exposes selected schema paths as typed Discord options, not a free-form YAML
+override. `package/zinc.md` owns the schema and defaults; omitted settings retain those defaults. Policy `options`
+authorizes paths such as `config.chat`, `config.run.tokens`, and `input.parent`. Discord names derive from those paths,
+such as `chat`, `run_tokens`, and `input_parent`. All scalar config fields are discoverable; object-valued provider and
+tool settings stay in trusted YAML. Do not authorize actor, preset, or database-path controls for untrusted callers.
+The old `model` key and option-name aliases are rejected.
 
 Presets are `configured`, `unrestricted`, and `empty`. Configured tools use explicit `tools.roots`, `tools.actions`, and
 an optional absolute `tools.search` executable; no home root is inferred. Unrestricted tools accept request-selected PA
@@ -87,8 +92,10 @@ fuzzy matching or fallback.
 Start the pinned local model router with `llama-server --models-preset models.ini --port 8000`. Weights and the Prism
 llama.cpp revision are described in `models.lock`. For OpenRouter, run `agc login openrouter`, authorize exact
 references in policy `models`, and configure the provider using `${openrouter.url}` and `${openrouter.token}`. These
-resolve to a revocable loopback grant, not the account key. Local reranking still needs its server. Catalog discovery
-contacts the configured providers; an offline provider fails discovery rather than being silently omitted.
+resolve to a revocable loopback grant, not the account key. Select independent references in `config.chat` and
+`config.rerank`; allowlist both remote references. OpenRouter reranking uses `/v1/rerank`; discovery selects `text` or
+`rerank` output modality. Local models still need their server. Catalog discovery contacts the configured providers;
+an offline provider fails discovery rather than being silently omitted.
 
 Quota counts provider-reported total tokens for completed chat/rerank requests. It is checked before subsequent requests
 and may overshoot on a final or concurrent request. Sources and results have byte limits, not tokenizer accounting.

@@ -53,7 +53,7 @@ local function merge(schema, values, path, partial, parameters)
             output[name] = selected
             if parameters and rule.description then
                 parameters[#parameters + 1] = {
-                    name = rule.option or name,
+                    name = field:gsub("^config%.", ""):gsub("%.", "_"),
                     path = field,
                     type = rule.type,
                     description = rule.description,
