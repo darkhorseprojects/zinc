@@ -220,9 +220,7 @@ return function(config)
                                     if finished then
                                         local accounting = choices[1]
                                         assert(
-                                            type(value.usage) == "table"
-                                                and value.usage ~= NULL
-                                                and type(accounting) == "table"
+                                            type(accounting) == "table"
                                                 and type(accounting.delta) == "table"
                                                 and next(accounting.delta) == nil
                                                 and accounting.finish_reason == finished,
