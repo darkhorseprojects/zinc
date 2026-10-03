@@ -539,6 +539,7 @@ return function(spec)
             text = final.text,
             run = call.run,
             branch = call.branch,
+            start = call.id,
             event = final.id,
             parent = final.parent or 0,
             through = final.memory,
