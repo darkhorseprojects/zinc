@@ -219,19 +219,32 @@ return function(config)
                                     assert(#choices == 1, "chat stream has the wrong choice count")
                                     if finished then
                                         local accounting = choices[1]
+                                        local delta = type(accounting) == "table" and accounting.delta
+                                        local reason = type(accounting) == "table" and accounting.finish_reason
                                         assert(
                                             type(accounting) == "table"
-                                                and type(accounting.delta) == "table"
-                                                and next(accounting.delta) == nil
-                                                and accounting.finish_reason == finished,
-                                            "unexpected chat data after finish"
+                                                and (delta == nil or delta == NULL or type(delta) == "table" and next(
+                                                    delta
+                                                ) == nil)
+                                                and (reason == nil or reason == NULL or reason == finished),
+                                            "unexpected chat data after finish (delta="
+                                                .. (type(delta) == "table" and (next(delta) and "nonempty" or "empty") or type(
+                                                    delta
+                                                ))
+                                                .. ", finish_reason="
+                                                .. (type(reason) == "string" and reason or type(reason))
+                                                .. ")"
                                         )
                                     end
                                 end
                                 local choice = choices[1]
                                 if choice then
-                                    local delta = assert(
-                                        type(choice) == "table" and type(choice.delta) == "table" and choice.delta,
+                                    local delta = choice and choice.delta
+                                    if finished and (delta == nil or delta == NULL) then
+                                        delta = {}
+                                    end
+                                    delta = assert(
+                                        type(choice) == "table" and type(delta) == "table" and delta,
                                         "invalid chat delta"
                                     )
                                     for _, channel in ipairs(channels) do
