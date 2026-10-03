@@ -1,50 +1,66 @@
 # Zinc v0.2.0
 
-Coordinated breaking update for PA protocol 2 and Agent Connector YAML 2. These notes describe the source release;
-publication is a separate step.
+## Requirements
 
-- External requests/results and branch-tagged events are JSON. The Discord-specific Markdown result footer is gone.
-- Named `describe` and `models` entry members provide typed control metadata and normalized model discovery. `document`
-  and `design` provide package documents.
-- Actor identity, Store/Cygnet paths, providers, and tool grants are explicit private config. Generated tools cannot
-  replace actor identity.
-- Independent `chat` and `rerank` references use `provider:id`; bare IDs and the old `model` key are rejected.
-  Execution sends configured limits to the provider; discovery metadata is not an execution preflight.
-- `package/zinc.md` declares the complete config schema and scalar control descriptions. Policy `options` authorizes
-  exact `config.*` or `input.*` paths; Discord names derive from those paths instead of separate aliases.
-- OpenRouter supports chat and reranking through the same scoped grant. Role-specific catalogs and both request
-  endpoints enforce the policy's remote model allowlist.
-- Presets are renamed: `safe` → `configured`, `unsafe` → `unrestricted`, `no-host` → `empty`. Configured host access
-  requires explicit grants.
-- OpenRouter usage/accounting frames no longer fail just because they repeat the finish reason; JSON null is not usage.
-  Malformed streams and provider errors still fail with useful diagnostics.
-- Fatal Eval failures propagate instead of being fabricated as ordinary tool results.
-- Automatic continuation is selected atomically with branch creation. Parent and history coordinates are separate
-  request fields.
-- Store format 3 removes obsolete per-event token fields and legacy migrations. It requires a fresh database. Quota uses
-  reported model usage.
-- Behavior-test fixtures/jobs are removed; builds and artifact checks remain. No spellfix extension or new retrieval
-  daemon is introduced.
+- Portable Agents protocol 2 and Lua 5.5
+- Agent Connector YAML 2
+- SQLite Store format 3
 
-## Migration
+## Migrate configuration
 
-Stop Connector and other Store users. Preserve member/channel/guild routes while replacing YAML 1 with YAML 2. Policy
-`models` is the OpenRouter allowlist; `config.chat` and `config.rerank` select independent references. Allowlist both
-when hosted. Replace `overrides` or option aliases with authorized schema paths, such as `config.chat`,
-`config.run.tokens`, `input.parent`, and `input.through`, and supply an explicit JSON `input` template. Move PA ceilings
-under policy `limits`.
+Stop Connector and other users of the Store before upgrading. Back up configuration and state.
+The installer preserves `ac.yaml`, `models.ini`, and `state/`; it does not migrate them.
 
-Config has no `version`, `models.chat`, or `retrieval` object: rename `model` to `chat` and use `rerank`, `thinking`, `run`, `history`, and
-`search`. Move `parent`/`memory` out of config into request `parent`/`through`. Set `store`, `cygnet`, provider origins,
-and desired tool grants explicitly. Replace any intermediate `none` preset selection with `empty`; no alias is retained.
+For older Connector YAML:
 
-The installer preserves old state and YAML; it does not perform this migration or reset. Replace the old Store and its
-WAL/SHM companions explicitly, retaining an offline copy if needed. New Store files initialize as format 3.
+- Set `version: 2` and preserve member/channel/guild routes.
+- Move PA ceilings under policy `limits`.
+- Rename `model_access` to `models`.
+- Replace free-form `overrides` with authorized `options` paths and a JSON `input` template.
 
-Install PA, Connector, and the Lua 5.5 shared library independently, then run `agc check` on the installed Zinc
-directory. A local llama server is required only for configured local model requests and discovery. Hosted reranking
-requires its own selected and allowlisted rerank reference. No inference is necessary to check the package/control
-schema. Renaming chat/options does not change Store format or require resetting an existing format-3 Store.
+For older Zinc configuration:
 
-Release jobs target Linux x86-64/ARM64, macOS Intel/Apple Silicon, and Windows x86-64/ARM64. Native SQLite must share
-PA's Lua ABI. Publish PA 0.2 binaries/SDK, then Connector, then Zinc. Verify published archives against `SHA256SUMS`.
+| Old setting | Current setting |
+| --- | --- |
+| `model` | `chat` |
+| `models.chat` | `chat` using a `provider:id` reference |
+| config `parent` / `memory` | request `parent` / `through` |
+| preset `safe` | `configured` |
+| preset `unsafe` | `unrestricted` |
+| preset `no-host` or `none` | `empty` |
+
+Replace caller option aliases with these paths:
+
+| Old option | Current path |
+| --- | --- |
+| `model` / `rerank` | `config.chat` / `config.rerank` |
+| `thinking` | `config.thinking` |
+| `tokens` / `rounds` / `tool_bytes` | `config.run.tokens` / `config.run.rounds` / `config.run.tool_bytes` |
+| `history_records` / `history_bytes` | `config.history.records` / `config.history.bytes` |
+| `depth` / `terms` / `candidates` / `search_bytes` / `score` | `config.search.depth` / `config.search.terms` / `config.search.candidates` / `config.search.bytes` / `config.search.score` |
+| `parent` / `through` | `input.parent` / `input.through` |
+
+Remove config `version` and translate older retrieval settings into `history` and `search`;
+see [Configuration](https://github.com/darkhorseprojects/zinc/wiki/Configuration).
+Set actor, Store/Cygnet paths, providers, and tool grants explicitly.
+
+`chat` and `rerank` select independent references. Put every hosted reference in policy `models`.
+For example, an enabled caller control uses `options: [config.chat, config.run.tokens, input.parent]`.
+Use the shipped `ac.yaml` as the full YAML-2 example; old names are not accepted.
+
+## Store compatibility
+
+Keep an existing format-3 Store. Chat/option renames do not change its format.
+
+Older Store formats cannot be opened by Zinc 0.2. Retain an offline copy if you need their history,
+then replace the old database and its WAL/SHM companions together. A missing database initializes
+as format 3 on the next request.
+
+After migrating, run:
+
+```sh
+agc check /path/to/zinc
+```
+
+This validates package loading and controls, not model availability. Verify configured providers
+before starting Connector.

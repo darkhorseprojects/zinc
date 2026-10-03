@@ -1,17 +1,16 @@
 # Zinc
 
-Zinc is a [Portable Agents](https://github.com/darkhorseprojects/portable-agents) package with actor-scoped durable
-history, typo-aware retrieval, configured Lua tools, and temporary nested branches. Chat and reranking independently
-use llama.cpp or OpenRouter. Zinc owns model requests and state. Portable Agents executes it; Agent Connector handles
-Discord routing, credentials, and presentation.
+Zinc runs chat models with persistent history and Lua tools. It is a
+[Portable Agents](https://github.com/darkhorseprojects/portable-agents) package;
+[Agent Connector](https://github.com/darkhorseprojects/agent-connector) connects it to Discord.
+Chat and reranking can use llama.cpp or OpenRouter independently.
 
 ## Install
 
-Zinc 0.2 requires Portable Agents protocol 2 and Agent Connector YAML 2. Install `agent`, `agc`, and an
-architecture-compatible shared Lua 5.5 runtime independently. Release archives do not include these binaries, a model
-server, or weights.
+Install `agent` with protocol 2, `agc` with YAML 2 support, and the matching Lua 5.5 shared library.
+Zinc archives do not include these programs, model weights, or a model server.
 
-Extract the platform-specific Zinc archive, then run:
+Extract the archive for your platform, then run:
 
 ```sh
 ./install.sh /path/to/zinc
@@ -23,14 +22,28 @@ On Windows:
 .\install.ps1 -Destination C:\Agents\Zinc
 ```
 
-Without a destination, installers use `${XDG_DATA_HOME:-$HOME/.local/share}/zinc` on Linux,
-`$HOME/Library/Application Support/Zinc` on macOS, or `%LOCALAPPDATA%\Zinc` on Windows.
+Without a destination, the installer uses `${XDG_DATA_HOME:-$HOME/.local/share}/zinc` on Linux,
+`~/Library/Application Support/Zinc` on macOS, or `%LOCALAPPDATA%\Zinc` on Windows.
 
-Reinstalling replaces managed package/data files while preserving `ac.yaml`, `models.ini`, and `state/`. **The installer
-does not migrate YAML or erase the Store.** For this breaking update, migrate `ac.yaml` to YAML 2 while preserving
-routes, and explicitly replace the old Store with an empty format-3 Store before running. Old formats are rejected, not
-upgraded. Stop all users of the database before replacing it; its WAL and SHM files belong to that database too. Retain
-an offline copy first if its history is needed.
+Reinstalling preserves `ac.yaml`, `models.ini`, and `state/`. Existing format-3 Stores do not need resetting.
+For older config or Store formats, follow [release notes](RELEASE_NOTES.md) before upgrading.
+
+## Start locally
+
+From the installed directory, start the Prism llama.cpp build specified in `models.lock`:
+
+```sh
+llama-server --models-preset models.ini --port 8000
+```
+
+In `ac.yaml`, replace the empty member route with your Discord user ID:
+
+```yaml
+members:
+  "123456789012345678": zinc
+```
+
+In another terminal:
 
 ```sh
 agc check /path/to/zinc
@@ -38,81 +51,32 @@ agc connect /path/to/zinc
 agc run /path/to/zinc
 ```
 
-`connect` is needed for new Discord credentials; an existing directory-scoped credential can be reused. `run` refreshes
-the typed `/agent` command. Empty route maps deny access.
+`connect` stores your bot credential; skip it if this directory is already connected.
+Message the bot in a DM, mention it in a server, or use:
 
-## Requests and config
-
-External input is UTF-8 JSON:
-
-```json
-{ "text": "What did we decide?" }
+```text
+/agent zinc prompt: draw a heart thinking: false input_parent: 0 input_through: 0
 ```
 
-Optional `images` contains `{type,data}` MIME/base64 objects. `parent` selects the attachment event; `through` selects
-the inclusive history boundary. Omitted parent continues from the actor's latest durable event, selected inside the
-Store transaction. Omitted through defaults to that parent. `parent:0` starts fresh; `through:0` disables history
-independently. Images are not persisted.
+Reasoning appears as quotes, tool calls as Lua blocks, and tool results as text blocks.
+The shipped configuration grants no filesystem or HTTP tools. Enable only the
+[tool permissions](https://github.com/darkhorseprojects/zinc/wiki/Configuration#tool-permissions) you need.
 
-Private UTF-8 JSON config is separate:
+## Configure
+
+Edit `policies.zinc.config` in `ac.yaml`. `chat` and `rerank` select independent `provider:id` references.
+See [Models](https://github.com/darkhorseprojects/zinc/wiki/Models) for hosted setup and troubleshooting.
+
+JSON requests accept `text`, optional `images`, and optional `parent`/`through` history coordinates:
 
 ```json
-{
-  "actor": "account:42",
-  "preset": "configured",
-  "store": "/srv/zinc/state/zinc.db",
-  "cygnet": "/srv/zinc/data/cygnet.db",
-  "providers": { "llama": { "url": "http://127.0.0.1:8000" } },
-  "chat": "llama:chat",
-  "rerank": "llama:rerank"
-}
+{ "text": "Start a new topic", "parent": 0, "through": 0 }
 ```
 
-Paths, provider origins, tokens, tool grants, actor, and preset are trusted deployment settings. Defaults cover
-`thinking`, `run`, `history`, `search`, and model `limits`. Unknown fields fail. Numeric ceilings can only be reduced;
-`search.score` is a finite raw reranker cutoff. The tracked `ac.yaml` expands trusted directory/identity templates and
-includes the complete config shape and exposes selected schema paths as typed Discord options, not a free-form YAML
-override. `package/zinc.md` owns the schema and defaults; omitted settings retain those defaults. Policy `options`
-authorizes paths such as `config.chat`, `config.run.tokens`, and `input.parent`. Discord names derive from those paths,
-such as `chat`, `run_tokens`, and `input_parent`. All scalar config fields are discoverable; object-valued provider and
-tool settings stay in trusted YAML. Do not authorize actor, preset, or database-path controls for untrusted callers.
-The old `model` key and option-name aliases are rejected.
+See [Configuration](https://github.com/darkhorseprojects/zinc/wiki/Configuration) for settings and defaults,
+and [History and retrieval](https://github.com/darkhorseprojects/zinc/wiki/History-and-Retrieval) for continuation examples.
 
-Presets are `configured`, `unrestricted`, and `empty`. Configured tools use explicit `tools.roots`, `tools.actions`, and
-an optional absolute `tools.search` executable; no home root is inferred. Unrestricted tools accept request-selected PA
-capabilities. Empty grants no host tools. Imports remain a separate embedder grant, including under `empty`.
-
-## Models and usage
-
-Select `provider:id` references, such as `llama:chat` or `openrouter:provider/model`. Unqualified IDs are
-not accepted. `/v1/models` supplies discovery metadata; it is not an execution preflight. Providers validate model
-availability and capabilities. Discovery uses substring matching; execution sends the exact configured ID without
-fuzzy matching or fallback.
-
-Start the pinned local model router with `llama-server --models-preset models.ini --port 8000`. Weights and the Prism
-llama.cpp revision are described in `models.lock`. For OpenRouter, run `agc login openrouter`, authorize exact
-references in policy `models`, and configure the provider using `${openrouter.url}` and `${openrouter.token}`. These
-resolve to a revocable loopback grant, not the account key. Select independent references in `config.chat` and
-`config.rerank`; allowlist both remote references. OpenRouter reranking uses `/v1/rerank`; discovery selects `text` or
-`rerank` output modality. Local models still need their server. Catalog discovery contacts the configured providers;
-an offline provider fails discovery rather than being silently omitted.
-
-Quota counts provider-reported total tokens for completed chat/rerank requests. It is checked before subsequent requests
-and may overshoot on a final or concurrent request. Sources and results have byte limits, not tokenizer accounting.
-Missing usage and malformed/incomplete streams fail explicitly. OpenRouter's repeated-finish accounting frames and
-`usage:null` are handled without accepting new content after finish.
-
-## Results and events
-
-The terminal JSON contains `text`, `run`, `branch`, `event`, `parent`, `through`, and `usage.total_tokens`. JSON
-emissions are branch-tagged `start`, `delta`, `turn`, `tool`, and `tool_result` records. Connector renders each completed
-root turn with quoted reasoning and response text, tool calls as Lua blocks, and results as text blocks. Nested content
-is not rendered and Markdown footers are not parsed. Final-only calls remain valid.
-
-Ordinary tool-source failures become tool results. Call-level Eval failures propagate. PA terminal diagnostics include
-bounded source-aware details; Connector retains them privately under an incident ID.
-
-## Development
+## Build from source
 
 ```sh
 python3 tools/format_fences.py
@@ -121,10 +85,8 @@ CFLAGS=-DSQLITE_ENABLE_FTS5 lx --lua-version 5.5 build --only-deps
 agent check package zinc
 ```
 
-The source check compiles tracked modules only. A complete runnable package also needs lunajson modules, the
-platform-native SQLite binding under `package/native/`, and Cygnet data. CI assembles and loads this package on six
-targets; release runs additionally prepare Cygnet data and build archives. SQLite requires FTS5/trigram; Cygnet remains
-format 4. No spellfix extension is bundled.
+A runnable package needs lunajson, the Lua 5.5 SQLite binding under `package/native/`, and Cygnet format-4 data.
+SQLite must support FTS5 and trigram tokenization. See [Development](https://github.com/darkhorseprojects/zinc/wiki/Development)
+for dependency layout.
 
-See the [wiki](https://github.com/darkhorseprojects/zinc/wiki) for defaults, retrieval, models, and ownership. License:
-[AGPL-3.0-only](LICENSE).
+License: [AGPL-3.0-only](LICENSE).

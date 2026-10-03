@@ -300,7 +300,14 @@ return function(spec)
                 store:charge(call.run, completion.usage)
             end
             pa.log("model.chat.end")
-            assert(not completion.truncated, "chat completion was truncated; lower context or raise the output limit")
+            if completion.truncated then
+                error(
+                    string.format(
+                        "chat completion was truncated (finish_reason=length, output limit=%d tokens); reduce thinking or history",
+                        config.limits.chat.tokens
+                    )
+                )
+            end
             assert(not completion.error, completion.error)
             local tool_calls = #completion.calls > 0 and completion.tool_calls or nil
             local events = {}
