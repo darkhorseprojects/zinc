@@ -1,6 +1,6 @@
 # Operations
 
-Filesystem paths and search directories are relative to their named roots. `.` searches the whole root; `./` is optional before a file path. HTTP calls take a string body and a headers table.
+Filesystem paths are relative to their named roots. Search covers the whole named root. `./` is optional before a file path. HTTP calls take a string body and a headers table.
 
 ```lua
 local pa = require("pa")
@@ -89,15 +89,9 @@ preset.http = setmetatable({
 ## Search
 
 ```lua
-local function search(tools, root, directory, query)
+local function search(tools, root, query)
     root = assert(tools.roots[root], "unknown root")
-    directory = relative(directory)
     local command = { "--no-follow" }
-    if directory ~= "" then
-        local path = (root .. "/" .. directory):gsub("[*?%[%]{}\\]", "\\%0"):gsub("^/", "")
-        command[#command + 1] = "--glob"
-        command[#command + 1] = "**/" .. path .. "/**"
-    end
     if query then
         command[#command + 1] = "--"
         command[#command + 1] = query
@@ -111,14 +105,14 @@ local function search(tools, root, directory, query)
     return stdout
 end
 preset.search = setmetatable({
-    "self.search.text(root,directory,query) -> string (matching lines)",
-    "self.search.files(root,directory) -> string (file paths)",
-    text = function(tools, root, directory, query)
+    "self.search.text(root,query) -> string (matching lines)",
+    "self.search.files(root) -> string (file paths)",
+    text = function(tools, root, query)
         assert(type(query) == "string", "invalid search")
-        return search(tools, root, directory, query)
+        return search(tools, root, query)
     end,
-    files = function(tools, root, directory)
-        return search(tools, root, directory)
+    files = function(tools, root)
+        return search(tools, root)
     end,
 }, capability)
 return preset

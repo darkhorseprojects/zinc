@@ -79,10 +79,10 @@ capabilities. Empty grants no host tools. Imports remain a separate embedder gra
 
 ## Models and usage
 
-Select `provider:id` references, such as `llama:chat` or `openrouter:provider/model`. Unique unqualified IDs are
-accepted; ambiguous or unavailable IDs fail. `/v1/models` supplies a normalized catalog. Known tool, reasoning, image,
-and output capabilities constrain chat requests. Discovery uses substring matching; execution never silently
-fuzzy-matches a model.
+Select `provider:id` references, such as `llama:chat` or `openrouter:provider/model`. Unqualified IDs are
+not accepted. `/v1/models` supplies discovery metadata; it is not an execution preflight. Providers validate model
+availability and capabilities. Discovery uses substring matching; execution sends the exact configured ID without
+fuzzy matching or fallback.
 
 Start the pinned local model router with `llama-server --models-preset models.ini --port 8000`. Weights and the Prism
 llama.cpp revision are described in `models.lock`. For OpenRouter, run `agc login openrouter`, authorize exact
@@ -115,9 +115,9 @@ agent check package zinc
 ```
 
 The source check compiles tracked modules only. A complete runnable package also needs lunajson modules, the
-platform-native SQLite binding under `package/native/`, and Cygnet data. CI assembles this layout and builds six target
-archives without behavior tests. SQLite requires FTS5/trigram; Cygnet remains format 4. No spellfix extension is
-bundled.
+platform-native SQLite binding under `package/native/`, and Cygnet data. CI assembles and loads this package on six
+targets; release runs additionally prepare Cygnet data and build archives. SQLite requires FTS5/trigram; Cygnet remains
+format 4. No spellfix extension is bundled.
 
 See the [wiki](https://github.com/darkhorseprojects/zinc/wiki) for defaults, retrieval, models, and ownership. License:
 [AGPL-3.0-only](LICENSE).

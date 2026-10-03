@@ -190,7 +190,15 @@ CREATE VIRTUAL TABLE temp.event_positions USING fts5vocab(event_tokenizer,'insta
         if version == 0 then
             assert(db:exec("PRAGMA journal_mode=WAL") == sqlite.OK, db:errmsg())
             transaction(function()
-                assert(db:exec(SCHEMA .. LEXICON .. "PRAGMA user_version=3") == sqlite.OK, db:errmsg())
+                for row in db:nrows("PRAGMA user_version") do
+                    assert(
+                        row.user_version == 0 or row.user_version == 3,
+                        "Store format is unsupported; Zinc 0.2 requires a fresh Store"
+                    )
+                    if row.user_version == 0 then
+                        assert(db:exec(SCHEMA .. LEXICON .. "PRAGMA user_version=3") == sqlite.OK, db:errmsg())
+                    end
+                end
             end)
         end
         local queries = {

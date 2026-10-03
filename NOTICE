@@ -16,11 +16,6 @@ StyLua 2.5.2
 Source: https://github.com/JohnnyMorganz/StyLua/releases/tag/v2.5.2
 License: MPL-2.0
 
-Busted 2.3.0 and LuaCov 0.17.0
------------------------------
-Sources: https://github.com/lunarmodules/busted and https://github.com/lunarmodules/luacov
-License: MIT
-
 Lua 5.5 runtime
 ---------------
 Lua is an external runtime dependency and is not included in Zinc downloads.

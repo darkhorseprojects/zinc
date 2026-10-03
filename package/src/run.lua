@@ -96,7 +96,12 @@ local function render(name, preset, document, tools)
     if name == "configured" then
         lines[#lines + 1] = "Roots"
         for _, root in ipairs(names(tools.roots)) do
-            lines[#lines + 1] = root .. " = " .. tools.roots[root] .. " [read, write, search]"
+            lines[#lines + 1] = root
+                .. " = "
+                .. tools.roots[root]
+                .. " [read, write"
+                .. (tools.search and ", search" or "")
+                .. "]"
         end
         lines[#lines + 1] = "HTTP"
         for _, action in ipairs(names(tools.actions)) do
@@ -153,8 +158,8 @@ local function import_prompt()
     if #selected > 0 then
         lines[1] = "Imports"
         for _, name in ipairs(selected) do
-            local document = require(name).document()
-            assert(type(document) == "string" and document ~= "", "invalid Import document")
+            local document = tostring(require(name))
+            assert(document ~= "", "invalid Import document")
             lines[#lines + 1] = document
         end
     end
