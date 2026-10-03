@@ -221,11 +221,22 @@ return function(config)
                                         local accounting = choices[1]
                                         local delta = type(accounting) == "table" and accounting.delta
                                         local reason = type(accounting) == "table" and accounting.finish_reason
+                                        local content_free = delta == nil or delta == NULL
+                                        if type(delta) == "table" then
+                                            content_free = true
+                                            for key, value in pairs(delta) do
+                                                if key == "content" then
+                                                    content_free = content_free and (value == NULL or value == "")
+                                                elseif key == "role" then
+                                                    content_free = content_free and value == "assistant"
+                                                else
+                                                    content_free = false
+                                                end
+                                            end
+                                        end
                                         assert(
                                             type(accounting) == "table"
-                                                and (delta == nil or delta == NULL or type(delta) == "table" and next(
-                                                    delta
-                                                ) == nil)
+                                                and content_free
                                                 and (reason == nil or reason == NULL or reason == finished),
                                             "unexpected chat data after finish (delta="
                                                 .. (type(delta) == "table" and (next(delta) and "nonempty" or "empty") or type(
