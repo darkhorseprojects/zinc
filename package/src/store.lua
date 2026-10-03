@@ -125,7 +125,12 @@ local function prepare(db, source)
     return assert(db:prepare(source), db:errmsg())
 end
 
-local function rows(db, statement, ...)
+local function rows(db, statements, name, ...)
+    local statement = statements[name]
+    if type(statement) == "string" then
+        statement = prepare(db, statement)
+        statements[name] = statement
+    end
     local reset = statement:reset()
     assert(reset == sqlite.OK or reset == sqlite.DONE, db:errmsg())
     assert(statement:bind_values(...) == sqlite.OK, db:errmsg())
@@ -144,7 +149,7 @@ return function(config)
     function store:close(original)
         local problem
         for _, statement in pairs(statements) do
-            if statement:finalize() ~= sqlite.OK then
+            if type(statement) == "userdata" and statement:finalize() ~= sqlite.OK then
                 problem = problem or db:errmsg()
             end
         end
@@ -172,7 +177,7 @@ return function(config)
             db:errmsg()
         )
         statements.version = prepare(db, "PRAGMA user_version")
-        local version = rows(db, statements.version)[1].user_version
+        local version = rows(db, statements, "version")[1].user_version
         local finalized = statements.version:finalize()
         statements.version = nil
         assert(finalized == sqlite.OK, db:errmsg())
@@ -206,7 +211,8 @@ WHERE link.lexeme=l.id AND ]] .. SCOPE .. [[)
 ORDER BY bm25(lexeme_grams),l.id LIMIT ?]],
             start_run = "INSERT INTO runs(actor,budget) VALUES(?,?) RETURNING id",
             branch = "INSERT INTO branches(run,base,memory,preset,temporary) VALUES(?,?,?,?,?) RETURNING id,run,base,memory,preset,temporary",
-            branch_info = [[SELECT b.id,b.run,b.base,b.memory,b.preset,b.temporary,b.result,r.actor
+            branch_info = [[SELECT b.memory,r.actor,
+COALESCE((SELECT max(e.id) FROM events e WHERE e.branch=b.id),b.base) parent
 FROM branches b JOIN runs r ON r.id=b.run WHERE b.id=?]],
             finish = [[UPDATE branches SET result=? WHERE id=? AND temporary=0 AND result IS NULL
 AND EXISTS(SELECT 1 FROM events WHERE id=? AND branch=? AND kind='response') RETURNING id]],
@@ -215,7 +221,6 @@ FROM events e JOIN branches b ON b.id=e.branch JOIN runs r ON r.id=b.run
 WHERE e.id=? AND e.kind='call' AND r.actor=?]],
             insert = "INSERT INTO events(branch,kind,text) VALUES(?,?,?) RETURNING id",
             charge = "UPDATE runs SET used=used+? WHERE id=? RETURNING id",
-            last = "SELECT id FROM events WHERE branch=? ORDER BY id DESC LIMIT 1",
             head = [[SELECT e.id FROM events e
 JOIN branches b ON b.id=e.branch JOIN runs r ON r.id=b.run
 WHERE r.actor=? AND b.temporary=0
@@ -233,7 +238,7 @@ AND run IN (SELECT id FROM runs WHERE actor=?) RETURNING id]],
             frequency = FREQUENCY,
         }
         for name, query in pairs(queries) do
-            statements[name] = prepare(db, query)
+            statements[name] = query
         end
     end)
     if not opened then
@@ -242,18 +247,17 @@ AND run IN (SELECT id FROM runs WHERE actor=?) RETURNING id]],
     end
 
     local function append(branch, events)
-        local info = assert(rows(db, statements.branch_info, branch)[1], "branch is unavailable")
-        local previous = rows(db, statements.last, branch)[1]
-        local parent = previous and previous.id or info.base
+        local info = assert(rows(db, statements, "branch_info", branch)[1], "branch is unavailable")
+        local parent = info.parent
         local output = {}
         for index, event in ipairs(events) do
             assert(type(event.text) == "string" and event.text ~= "" and utf8.len(event.text), "invalid event text")
-            local id = rows(db, statements.insert, branch, event.kind, event.text)[1].id
+            local id = rows(db, statements, "insert", branch, event.kind, event.text)[1].id
             if event.kind == "user" or event.kind == "response" or event.kind == "result" then
                 assert(db:exec("DELETE FROM temp.event_tokenizer") == sqlite.OK, db:errmsg())
-                assert(rows(db, statements.tokenize, id, event.text)[1], "failed to tokenize event")
-                rows(db, statements.lexeme_insert, info.actor)
-                rows(db, statements.lexeme_link, id, info.actor)
+                assert(rows(db, statements, "tokenize", id, event.text)[1], "failed to tokenize event")
+                rows(db, statements, "lexeme_insert", info.actor)
+                rows(db, statements, "lexeme_link", id, info.actor)
             end
             output[index] = {
                 id = id,
@@ -271,27 +275,27 @@ AND run IN (SELECT id FROM runs WHERE actor=?) RETURNING id]],
     function store:start(actor, budget, base, memory, preset, question, automatic)
         return transaction(function()
             if automatic then
-                local head = rows(db, statements.head, actor)[1]
+                local head = rows(db, statements, "head", actor)[1]
                 base = head and head.id or nil
             end
             if memory == nil then
                 memory = base or 0
             end
-            local run = rows(db, statements.start_run, actor, budget)[1].id
-            local branch = rows(db, statements.branch, run, base, memory ~= 0 and memory or nil, preset, 0)[1]
+            local run = rows(db, statements, "start_run", actor, budget)[1].id
+            local branch = rows(db, statements, "branch", run, base, memory ~= 0 and memory or nil, preset, 0)[1]
             return run, branch.id, append(branch.id, { { kind = "user", text = question } })[1]
         end)
     end
 
     function store:child(run, base, memory, preset, question)
         return transaction(function()
-            local branch = rows(db, statements.branch, run, base, memory ~= 0 and memory or nil, preset, 1)[1]
+            local branch = rows(db, statements, "branch", run, base, memory ~= 0 and memory or nil, preset, 1)[1]
             return branch.id, append(branch.id, { { kind = "user", text = question } })[1]
         end)
     end
 
     function store:finish(branch, result)
-        assert(rows(db, statements.finish, result, branch, result, branch)[1], "invalid terminal response")
+        assert(rows(db, statements, "finish", result, branch, result, branch)[1], "invalid terminal response")
     end
 
     function store:append(branch, events)
@@ -302,50 +306,52 @@ AND run IN (SELECT id FROM runs WHERE actor=?) RETURNING id]],
 
     function store:charge(run, tokens)
         assert(math.type(tokens) == "integer" and tokens >= 0, "invalid model usage")
-        assert(rows(db, statements.charge, tokens, run)[1], "run is unavailable")
+        assert(rows(db, statements, "charge", tokens, run)[1], "run is unavailable")
     end
 
     function store:caller(actor, event)
-        return assert(rows(db, statements.caller, event, actor)[1], "caller is unavailable")
+        return assert(rows(db, statements, "caller", event, actor)[1], "caller is unavailable")
     end
 
     function store:quota(run)
-        local row = assert(rows(db, statements.quota, run)[1], "run is unavailable")
+        local row = assert(rows(db, statements, "quota", run)[1], "run is unavailable")
         return row.remaining, row.used
     end
 
     function store:destroy(actor, caller_branch, branch)
-        assert(rows(db, statements.destroy, caller_branch, branch, actor)[1], "branch is unavailable")
+        assert(rows(db, statements, "destroy", caller_branch, branch, actor)[1], "branch is unavailable")
     end
 
     function store:before(actor, memory, branch, limit)
         if memory == 0 then
             return {}
         end
-        return rows(db, statements.before, branch, memory, actor, memory, limit)
+        return rows(db, statements, "before", branch, memory, actor, memory, limit)
     end
 
     function store:lexemes(actor, memory, branch, term, grams, limit)
-        local found = rows(db, statements.lexeme_exact, actor, term)
-        if grams ~= "" and memory ~= 0 then
-            for _, row in ipairs(rows(db, statements.lexeme_near, branch, memory, grams, actor, actor, memory, limit)) do
-                if row.term ~= term then
-                    found[#found + 1] = row
-                end
+        local found = rows(db, statements, "lexeme_exact", actor, term)
+        local hits = found[1] and self:frequency(actor, memory, branch, found[1].id) or 0
+        if hits > 0 or grams == "" or memory == 0 then
+            return found, hits
+        end
+        for _, row in ipairs(rows(db, statements, "lexeme_near", branch, memory, grams, actor, actor, memory, limit)) do
+            if row.term ~= term then
+                found[#found + 1] = row
             end
         end
-        return found
+        return found, hits
     end
 
     function store:tokens(event, limit)
-        return rows(db, statements.tokens, event, limit)
+        return rows(db, statements, "tokens", event, limit)
     end
 
     function store:frequency(actor, memory, branch, lexeme)
         if memory == 0 then
             return 0
         end
-        return rows(db, statements.frequency, branch, memory, lexeme, actor, memory, 32)[1].hits
+        return rows(db, statements, "frequency", branch, memory, lexeme, actor, memory, 32)[1].hits
     end
 
     function store:search(actor, memory, branch, terms, limit)
@@ -356,7 +362,7 @@ AND run IN (SELECT id FROM runs WHERE actor=?) RETURNING id]],
         for index, term in ipairs(terms) do
             literals[index] = '"' .. term:gsub('"', '""') .. '"'
         end
-        return rows(db, statements.search, branch, memory, table.concat(literals, " OR "), actor, memory, limit)
+        return rows(db, statements, "search", branch, memory, table.concat(literals, " OR "), actor, memory, limit)
     end
 
     return setmetatable(store, { __close = store.close })

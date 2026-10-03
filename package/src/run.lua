@@ -10,75 +10,61 @@ local NULL = {}
 local function decode(source, maximum)
     assert(type(source) == "string" and (not maximum or #source <= maximum) and utf8.len(source), "invalid JSON bytes")
     local value, offset = decode_json(source, 1, NULL)
-    assert(source:sub(offset):match("^%s*$"), "JSON has trailing data")
+    assert(source:sub(offset):match("^[ \t\r\n]*$"), "JSON has trailing data")
     return value
 end
 
-local function object(source, fields, maximum)
-    assert(source:match("^%s*{"), "JSON value must be an object")
+local function object(source, maximum)
     local value = decode(source, maximum)
-    assert(type(value) == "table", "JSON value must be an object")
-    for key in pairs(value) do
-        assert(fields[key], "unknown JSON field: " .. tostring(key))
-    end
+    assert(source:match("^[ \t\r\n]*{"), "JSON value must be an object")
     return value
 end
 
-local function request(value, nested)
-    assert(type(value) == "table", "invalid Zinc request")
-    local fields = { text = true, parent = true, through = true, images = not nested, preset = nested }
-    for key in pairs(value) do
-        assert(fields[key], "unknown Zinc request field: " .. tostring(key))
+local function merge(schema, values, path, partial, parameters)
+    assert(type(values) == "table" and values ~= NULL, "invalid " .. path)
+    for name in pairs(values) do
+        assert(schema[name], "unknown " .. path .. " field: " .. tostring(name))
     end
-    assert(type(value.text) == "string" and value.text ~= "" and utf8.len(value.text), "invalid text")
-    assert(value.parent == nil or math.type(value.parent) == "integer" and value.parent >= 0, "invalid parent")
-    assert(value.through == nil or math.type(value.through) == "integer" and value.through >= 0, "invalid through")
-    assert(not nested or value.through ~= nil, "nested calls require parent and through")
-    assert(not nested or value.preset == nil or type(value.preset) == "string", "invalid preset")
-    value.automatic = value.parent == nil
-    if value.parent == 0 then
-        value.parent = nil
-    end
-    return value
-end
-
-local function merge(defaults, overrides, path)
-    assert(type(overrides) == "table" and overrides ~= NULL, "invalid " .. path)
     local output = {}
-    for name, value in pairs(defaults) do
-        local selected = overrides[name]
-        if selected == nil then
-            selected = value
-        end
+    for name, rule in pairs(schema) do
         local field = path .. "." .. name
-        if type(value) == "table" then
-            output[name] = merge(value, selected, field)
-        elseif type(value) == "number" then
-            if field == "config.search.score" then
-                assert(
-                    type(selected) == "number" and selected == selected and math.abs(selected) < math.huge,
-                    "invalid " .. field
-                )
-            else
-                assert(math.type(selected) == "integer" and selected >= 0 and selected <= value, "invalid " .. field)
-                if not path:find("^config%.history") and not path:find("^config%.search") then
-                    assert(selected > 0, "invalid " .. field)
+        local selected = values[name]
+        if rule.type then
+            if selected == nil then
+                selected = rule.default
+            end
+            if selected ~= nil or not (partial or rule.optional) then
+                if rule.type == "integer" then
+                    assert(
+                        math.type(selected) == "integer"
+                            and (rule.minimum == nil or selected >= rule.minimum)
+                            and (rule.default == nil or selected <= rule.default),
+                        "invalid " .. field
+                    )
+                else
+                    assert(type(selected) == rule.type and selected ~= NULL, "invalid " .. field)
+                    if rule.type == "number" then
+                        assert(selected == selected and math.abs(selected) < math.huge, "invalid " .. field)
+                    elseif rule.type == "string" then
+                        assert(selected ~= "" and utf8.len(selected), "invalid " .. field)
+                    end
                 end
             end
             output[name] = selected
+            if parameters and rule.description then
+                parameters[#parameters + 1] = {
+                    name = rule.option or name,
+                    path = field,
+                    type = rule.type,
+                    description = rule.description,
+                    minimum = rule.minimum,
+                    maximum = rule.type == "integer" and selected or nil,
+                    autocomplete = rule.autocomplete,
+                }
+            end
         else
-            assert(
-                type(selected) == type(value) and (type(selected) ~= "string" or selected ~= ""),
-                "invalid " .. field
-            )
-            output[name] = selected
+            output[name] = merge(rule, selected == nil and {} or selected, field, partial, parameters)
         end
-    end
-    for name in pairs(overrides) do
-        assert(defaults[name] ~= nil, "unknown " .. path .. " field: " .. tostring(name))
-    end
-    if path == "config.run" then
-        assert(output.tool_bytes >= 128, "invalid config.run.tool_bytes")
     end
     return output
 end
@@ -156,7 +142,7 @@ local function render(name, preset, document, tools)
     return {
         system = table.concat(lines, "\n"),
         names = members,
-        adapters = adapters,
+        adapters = table.concat(adapters, "\n"),
         targets = table.concat(targets, " | "),
     }
 end
@@ -176,8 +162,7 @@ local function import_prompt()
 end
 
 local function source(prepared, caller, call, code)
-    local adapters = table.concat(prepared.adapters, "\n")
-    return "local self,input=(function(raw,callable)\nlocal caller="
+    return "local self,input=(function(raw,text,callable)\nlocal caller="
         .. caller
         .. string.format("\nlocal preset=%q\n", call.preset_name)
         .. [[local function invoke(member,action,...)
@@ -185,10 +170,9 @@ local function source(prepared, caller, call, code)
 end
 local self={}
 ]]
-        .. adapters
+        .. prepared.adapters
         .. string.format(
-            "\nreturn self,{text=%q,parent=%s,through=%d}\nend)((...),callable)\ncallable=nil\n",
-            call.text,
+            "\nreturn self,{text=text,parent=%s,through=%d}\nend)((...),select(2,...),callable)\ncallable=nil\n",
             call.parent and tostring(call.parent) or "0",
             call.memory
         )
@@ -202,23 +186,29 @@ return output
 end
 
 return function(spec)
-    local defaults = spec.defaults
     local document = tostring(spec.document)
+    local cached_source, cached_config
 
-    local function configuration(source)
-        local fields = { actor = true, preset = true, store = true, cygnet = true, providers = true, tools = true }
-        for name in pairs(defaults) do
-            fields[name] = true
+    local function request(value, nested)
+        value = merge(spec.input, value, "input")
+        assert(#value.text <= spec.limits.question_bytes, "Zinc text is too large")
+        assert(nested or value.preset == nil, "preset is private")
+        assert(not nested or value.images == nil, "nested calls cannot supply images")
+        assert(not nested or value.parent ~= nil and value.through ~= nil, "nested calls require parent and through")
+        value.automatic = value.parent == nil
+        if value.parent == 0 then
+            value.parent = nil
         end
-        local value = object(source, fields, spec.limits.config_bytes)
-        assert(type(value.actor) == "string" and value.actor ~= "" and utf8.len(value.actor), "invalid actor")
+        return value
+    end
+
+    local function configuration(opaque)
+        if cached_config and opaque == cached_source then
+            return cached_config
+        end
+        local value = merge(spec.config, object(opaque, spec.limits.config_bytes), "config")
         assert(spec.presets[value.preset], "unknown Zinc preset")
-        assert(type(value.store) == "string" and value.store ~= "", "store path is required")
-        assert(type(value.cygnet) == "string" and value.cygnet ~= "", "Cygnet path is required")
-        assert(
-            type(value.providers) == "table" and value.providers ~= NULL and next(value.providers),
-            "providers are required"
-        )
+        assert(next(value.providers), "providers are required")
         for name, provider in pairs(value.providers) do
             assert(name == "llama" or name == "openrouter", "unsupported model provider: " .. tostring(name))
             assert(type(provider) == "table" and type(provider.url) == "string", "invalid provider: " .. name)
@@ -231,15 +221,7 @@ return function(spec)
                 assert(key == "url" or key == "token", "unknown provider field: " .. tostring(key))
             end
         end
-        local overrides = {}
-        for name in pairs(defaults) do
-            overrides[name] = value[name]
-        end
-        local selected = merge(defaults, overrides, "config")
-        assert(selected.limits.rerank.pair_bytes > selected.limits.rerank.query_bytes, "invalid rerank limits")
-        for name, item in pairs(selected) do
-            value[name] = item
-        end
+        assert(value.limits.rerank.pair_bytes > value.limits.rerank.query_bytes, "invalid rerank limits")
         local tools = value.tools or {}
         assert(type(tools) == "table" and tools ~= NULL, "invalid tools")
         for key in pairs(tools) do
@@ -265,6 +247,7 @@ return function(spec)
             "invalid search executable"
         )
         value.tools = tools
+        cached_source, cached_config = opaque, value
         return value
     end
 
@@ -323,28 +306,19 @@ return function(spec)
                 events[#events + 1] = { kind = "response", text = completion.content }
             end
             local rows = #events > 0 and store:append(call.branch, events) or {}
-            local previous = messages[#messages]
-            if previous.role == "assistant" and previous.content == "" and not previous.tool_calls then
-                previous.reasoning_content = (previous.reasoning_content or "") .. (completion.reasoning or "")
-                previous.content = completion.content or ""
-                previous.tool_calls = tool_calls
-            else
-                messages[#messages + 1] = {
-                    role = "assistant",
-                    reasoning_content = completion.reasoning,
-                    content = completion.content or "",
-                    tool_calls = tool_calls,
-                }
-            end
+            messages[#messages + 1] = {
+                role = "assistant",
+                reasoning_content = completion.reasoning,
+                content = completion.content or "",
+                tool_calls = tool_calls,
+            }
             pa.emit(encode_json({
                 type = "turn",
                 branch = call.branch,
                 final = #completion.calls == 0 and completion.content ~= nil,
             }))
             if #completion.calls == 0 then
-                if completion.content then
-                    return assert(rows[#rows], "model returned no response")
-                end
+                return assert(rows[#rows], "model returned no response")
             else
                 local requests = {}
                 for index, tool in ipairs(completion.calls) do
@@ -362,7 +336,7 @@ return function(spec)
                 if pa.profile then
                     pa.log("tool.eval.begin")
                 end
-                local evaluated = pa.eval(view, sources, "")
+                local evaluated = pa.eval(view, sources, call.text)
                 if pa.profile then
                     pa.log("tool.eval.end")
                 end
@@ -386,9 +360,7 @@ return function(spec)
                             original_bytes
                         )
                         local length = limit - #notice
-                        while length > 0 and not utf8.len(output:sub(1, length)) do
-                            length = length - 1
-                        end
+                        length = utf8.offset(output, 0, length + 1) - 1
                         output = output:sub(1, length) .. notice
                         pa.log("tool.result.truncated")
                     end
@@ -420,57 +392,42 @@ return function(spec)
         local store <close> = make_store({ path = config.store })
         pa.log("store.open.end")
         local model = make_model(config)
-        local completed, call, final = xpcall(function()
-            local preset, run_id, _, start = config.preset
-            if caller then
-                local context = store:caller(config.actor, caller)
-                preset = value.preset or context.preset
-                local available = false
-                for _, target in ipairs(getmetatable(spec.presets[context.preset]).targets) do
-                    available = available or target == preset
-                end
-                assert(available, "Zinc preset is unavailable")
-                run_id = context.run
-                _, start = store:child(run_id, value.parent, value.through, preset, value.text)
-            else
-                run_id, _, start = store:start(
-                    config.actor,
-                    config.run.tokens,
-                    value.parent,
-                    value.through,
-                    preset,
-                    value.text,
-                    value.automatic
-                )
+        local preset, run_id, _, start = config.preset
+        if caller then
+            local context = store:caller(config.actor, caller)
+            preset = value.preset or context.preset
+            local available = false
+            for _, target in ipairs(getmetatable(spec.presets[context.preset]).targets) do
+                available = available or target == preset
             end
-            start.run, start.preset_name, start.temporary, start.images = run_id, preset, caller ~= nil, value.images
-            local call = start
-            pa.log("branch." .. call.branch)
-            pa.emit(encode_json({ type = "start", branch = call.branch, root = not call.temporary }))
-            if pa.profile then
-                pa.log("memory.open.begin")
-            end
-            local memory <close> = make_memory({
-                cygnet = config.cygnet,
-                chronological = config.history,
-                semantic = config.search,
-            }, store, model)
-            if pa.profile then
-                pa.log("memory.open.end")
-            end
-            return call, execute(store, memory, model, config, call)
-        end, debug.traceback)
-        if not completed then
-            pa.log("run.failed")
-            error(call, 0)
+            assert(available, "Zinc preset is unavailable")
+            run_id = context.run
+            _, start = store:child(run_id, value.parent, value.through, preset, value.text)
+        else
+            run_id, _, start = store:start(
+                config.actor,
+                config.run.tokens,
+                value.parent,
+                value.through,
+                preset,
+                value.text,
+                value.automatic
+            )
         end
+        start.run, start.preset_name, start.temporary, start.images = run_id, preset, caller ~= nil, value.images
+        local call = start
+        pa.log("branch." .. call.branch)
+        pa.emit(encode_json({ type = "start", branch = call.branch, root = not call.temporary }))
+        local memory <close> = make_memory({
+            cygnet = config.cygnet,
+            chronological = config.history,
+            semantic = config.search,
+        }, store, model)
+        local final = execute(store, memory, model, config, call)
         if not call.temporary then
             pa.log("store.finish.begin")
-            local finished, problem = pcall(store.finish, store, call.branch, final.id)
+            store:finish(call.branch, final.id)
             pa.log("store.finish.end")
-            if not finished then
-                error(problem, 0)
-            end
         end
         local _, usage = store:quota(call.run)
         return call, final, usage
@@ -478,65 +435,12 @@ return function(spec)
 
     function entry.describe(input, opaque)
         assert(input == "", "describe takes empty input")
-        local value = decode(opaque, spec.limits.config_bytes)
-        local overrides = {}
-        for name in pairs(defaults) do
-            overrides[name] = value[name]
-        end
-        local config = merge(defaults, overrides, "config")
-        local parameters = {
-            {
-                name = "model",
-                path = "config.model",
-                type = "string",
-                description = "Chat model",
-                autocomplete = "chat",
-            },
-            {
-                name = "rerank",
-                path = "config.rerank",
-                type = "string",
-                description = "Rerank model",
-                autocomplete = "rerank",
-            },
-            { name = "thinking", path = "config.thinking", type = "boolean", description = "Enable model thinking" },
-            {
-                name = "parent",
-                path = "input.parent",
-                type = "integer",
-                description = "Parent event; zero starts a fresh branch",
-                minimum = 0,
-            },
-            {
-                name = "through",
-                path = "input.through",
-                type = "integer",
-                description = "Inclusive history event; zero disables history",
-                minimum = 0,
-            },
-        }
-        for _, field in ipairs({
-            { "tokens", "run", "tokens", "Run token quota", 1 },
-            { "rounds", "run", "rounds", "Maximum model rounds", 1 },
-            { "tool_bytes", "run", "tool_bytes", "Tool result byte limit", 128 },
-            { "history_records", "history", "records", "Recent history records", 0 },
-            { "history_bytes", "history", "bytes", "Recent history byte limit", 0 },
-            { "candidates", "search", "candidates", "Search candidates", 0 },
-            { "search_bytes", "search", "bytes", "Retrieved history byte limit", 0 },
-            { "depth", "search", "depth", "Relation expansion depth", 0 },
-            { "terms", "search", "terms", "Search term limit", 0 },
-        }) do
-            parameters[#parameters + 1] = {
-                name = field[1],
-                path = "config." .. field[2] .. "." .. field[3],
-                type = "integer",
-                description = field[4],
-                minimum = field[5],
-                maximum = config[field[2]][field[3]],
-            }
-        end
-        parameters[#parameters + 1] =
-            { name = "score", path = "config.search.score", type = "number", description = "Minimum rerank score" }
+        local parameters = {}
+        merge(spec.config, object(opaque, spec.limits.config_bytes), "config", true, parameters)
+        merge(spec.input, {}, "input", true, parameters)
+        table.sort(parameters, function(a, b)
+            return a.name < b.name
+        end)
         return encode_json({ input = "json", output = "json", parameters = parameters })
     end
 
@@ -566,8 +470,8 @@ return function(spec)
                         type(value) == "table" and type(value.action) == "string" and type(value.arguments) == "table",
                         "invalid capability call"
                     )
-                    local preset = assert(spec.presets[value.preset], "invalid capability preset")
-                    local selected = assert(preset[member], member .. " is unavailable")
+                    local selected_preset = assert(spec.presets[value.preset], "invalid capability preset")
+                    local selected = assert(selected_preset[member], member .. " is unavailable")
                     return selected(value, config.tools)
                 end
             end
@@ -599,11 +503,7 @@ return function(spec)
     end
 
     local function invoke(input, opaque)
-        local value = request(
-            object(input, { text = true, images = true, parent = true, through = true }, spec.limits.request_bytes),
-            false
-        )
-        assert(#value.text <= spec.limits.question_bytes, "Zinc text is too large")
+        local value = request(object(input, spec.limits.request_bytes), false)
         if value.images then
             assert(type(value.images) == "table" and value.images ~= NULL and #value.images <= 4, "invalid image count")
             for key, image in pairs(value.images) do

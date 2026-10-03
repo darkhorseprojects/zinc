@@ -6,7 +6,7 @@ local NULL = {}
 
 local function decode(source)
     local value, offset = decode_json(source, 1, NULL)
-    assert(source:sub(offset):match("^%s*$"), "JSON has trailing data")
+    assert(source:sub(offset):match("^[ \t\r\n]*$"), "JSON has trailing data")
     return value
 end
 
@@ -28,10 +28,12 @@ local TOOL = {
 
 local function dense(value, name)
     assert(type(value) == "table", name .. " must be an array")
-    local size = #value
+    local size, count = #value, 0
     for key in pairs(value) do
         assert(math.type(key) == "integer" and key >= 1 and key <= size, name .. " must be dense")
+        count = count + 1
     end
+    assert(count == size, name .. " must be dense")
     return value
 end
 
@@ -43,11 +45,11 @@ return function(config)
     local chat, rerank = config.limits.chat, config.limits.rerank
     local api, catalogs = {}, {}
 
-    function api:models(role, selected)
+    function api:models(role)
         assert(role == "chat" or role == "rerank", "unsupported model role")
         local output = { [0] = 0 }
         for name, provider in pairs(config.providers) do
-            if (not selected or name == selected) and (role == "chat" or name == "llama") then
+            if role == "chat" or name == "llama" then
                 if not catalogs[name] then
                     local status, body = pa.http(provider.url, "GET", "/v1/models", "", {
                         accept = "application/json",
@@ -99,22 +101,11 @@ return function(config)
     end
 
     local function selection(reference, role)
-        local provider, id = reference:match("^([%w_-]+):(.+)$")
-        if provider then
-            assert(config.providers[provider], "model provider is not configured: " .. provider)
-            assert(role ~= "rerank" or provider == "llama", "rerank provider is unsupported")
-        else
-            id = reference
-        end
-        local selected
-        for _, record in ipairs(api:models(role, provider)) do
-            if record.id == id then
-                assert(not selected, "ambiguous model ID; use a provider-qualified reference: " .. reference)
-                selected = record
-            end
-        end
-        assert(selected, "model is unavailable for " .. role .. ": " .. reference)
-        return selected, config.providers[selected.provider]
+        local name, id = reference:match("^([%w_-]+):(.+)$")
+        assert(name, "model reference must be provider-qualified: " .. reference)
+        local provider = assert(config.providers[name], "model provider is not configured: " .. name)
+        assert(role ~= "rerank" or name == "llama", "rerank provider is unsupported")
+        return { ref = reference, provider = name, id = id }, provider
     end
 
     local function request(provider, path, value, maximum)
@@ -138,7 +129,7 @@ return function(config)
             messages = messages,
             tools = { TOOL },
             parallel_tool_calls = true,
-            max_tokens = math.min(chat.tokens, model.output_tokens or chat.tokens),
+            max_tokens = chat.tokens,
             stream = true,
             stream_options = { include_usage = true },
         }
@@ -152,18 +143,6 @@ return function(config)
 
     function api:chat(messages, branch)
         local model, provider = selection(config.model, "chat")
-        assert(not config.thinking or model.thinking ~= false, "model does not support thinking: " .. model.ref)
-        if model.input then
-            for _, message in ipairs(messages) do
-                if type(message.content) == "table" then
-                    local images = false
-                    for _, modality in ipairs(model.input) do
-                        images = images or modality == "image"
-                    end
-                    assert(images, "model does not support images: " .. model.ref)
-                end
-            end
-        end
         local fragments, data, error_body = {}, {}, {}
         local finished, done, usage, problem = nil, false, nil, nil
         local contents, thoughts, calls = {}, {}, {}
@@ -216,6 +195,7 @@ return function(config)
                         local payload = table.concat(data, "\n")
                         data = {}
                         if payload == "[DONE]" then
+                            assert(not done, "duplicate chat completion marker")
                             done = true
                         else
                             assert(not done, "unexpected chat stream data")
@@ -280,30 +260,32 @@ return function(config)
                                         local call = calls[index + 1]
                                         if not call then
                                             call = {
-                                                id = "",
-                                                type = "function",
-                                                ["function"] = { name = "", arguments = "" },
+                                                ids = {},
+                                                names = {},
+                                                arguments = {},
+                                                bytes = 0,
                                             }
                                             calls[index + 1] = call
                                         end
                                         local fn = tool["function"]
                                         if type(tool.id) == "string" then
-                                            call.id = call.id .. tool.id
+                                            call.ids[#call.ids + 1] = tool.id
                                         end
                                         if type(fn) == "table" then
                                             if type(fn.name) == "string" then
-                                                call["function"].name = call["function"].name .. fn.name
+                                                call.names[#call.names + 1] = fn.name
                                             end
                                             if type(fn.arguments) == "string" then
                                                 if pa.profile and not first_tool and fn.arguments ~= "" then
                                                     first_tool = true
                                                     pa.log("model.chat.first_tool_argument")
                                                 end
-                                                call["function"].arguments = call["function"].arguments .. fn.arguments
+                                                call.bytes = call.bytes + #fn.arguments
                                                 assert(
-                                                    #call["function"].arguments <= chat.argument_bytes,
+                                                    call.bytes <= chat.argument_bytes,
                                                     "tool arguments are too large"
                                                 )
+                                                call.arguments[#call.arguments + 1] = fn.arguments
                                             end
                                         end
                                     end
@@ -348,13 +330,16 @@ return function(config)
             assert(not reasoning or utf8.len(reasoning), "invalid reasoning")
             assert(not content or utf8.len(content), "invalid response")
 
-            local entries = dense(calls, "chat tool calls")
-            local decoded_calls, ids = {}, {}
-            for index, entry in ipairs(entries) do
-                local fn = type(entry) == "table" and entry["function"]
-                local id = type(entry) == "table" and entry.id
-                local name = type(fn) == "table" and fn.name
-                local arguments = type(fn) == "table" and fn.arguments
+            local entries, decoded_calls, ids = {}, {}, {}
+            for index, call in ipairs(dense(calls, "chat tool calls")) do
+                local id = table.concat(call.ids)
+                local name = table.concat(call.names)
+                local arguments = table.concat(call.arguments)
+                entries[index] = {
+                    id = id,
+                    type = "function",
+                    ["function"] = { name = name, arguments = arguments },
+                }
                 assert(type(id) == "string" and id ~= "" and utf8.len(id) and not ids[id], "invalid tool call")
                 assert(name == "run_lua" and type(arguments) == "string", "invalid tool call")
                 assert(#arguments <= chat.argument_bytes, "tool arguments are too large")
@@ -377,7 +362,7 @@ return function(config)
             assert(finished == "stop" or finished == "tool_calls", "invalid tool completion")
             pa.log("model.chat.finish." .. finished)
             if #decoded_calls == 0 then
-                assert(finished == "stop" and (content or reasoning), "chat completion has no response")
+                assert(finished == "stop" and content, "chat completion has no response")
             end
             pa.log("model.chat.decoded")
             return {

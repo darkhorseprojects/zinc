@@ -52,10 +52,13 @@ local function rows(db, statement, ...)
 end
 
 return function(config, store, model)
-    local db = assert(sqlite.open(config.cygnet, sqlite.OPEN_READONLY))
+    local db
     local state, memory = {}, {}
 
     function memory:close(original)
+        if not db then
+            return
+        end
         local problem
         for _, statement in pairs(state) do
             if type(statement) == "userdata" and statement:finalize() ~= sqlite.OK then
@@ -67,22 +70,6 @@ return function(config, store, model)
             assert(not problem, problem)
             assert(closed == sqlite.OK, "failed to close Cygnet")
         end
-    end
-
-    local opened, problem = pcall(function()
-        assert(db:exec("PRAGMA trusted_schema=OFF") == sqlite.OK, db:errmsg())
-        local maximum
-        for row in db:nrows(META) do
-            maximum = tonumber(row.value)
-        end
-        assert(maximum and maximum > 0, "Cygnet format is unsupported")
-        state.maximum = maximum
-        state.form = assert(db:prepare("SELECT 1 FROM form_concepts WHERE language=? AND form=? LIMIT 1"), db:errmsg())
-        state.expand = assert(db:prepare(EXPAND), db:errmsg())
-    end)
-    if not opened then
-        memory:close(problem)
-        error(problem, 0)
     end
 
     local function fitting(values, maximum, reverse)
@@ -137,6 +124,19 @@ return function(config, store, model)
         if semantic.bytes == 0 or semantic.terms == 0 or semantic.candidates == 0 then
             return encode_json({ chronological = recent, semantic = { [0] = 0 } })
         end
+        if not db then
+            db = assert(sqlite.open(config.cygnet, sqlite.OPEN_READONLY))
+            assert(db:exec("PRAGMA trusted_schema=OFF") == sqlite.OK, db:errmsg())
+            local maximum
+            for row in db:nrows(META) do
+                maximum = tonumber(row.value)
+            end
+            assert(maximum and maximum > 0, "Cygnet format is unsupported")
+            state.maximum = maximum
+            state.form =
+                assert(db:prepare("SELECT 1 FROM form_concepts WHERE language=? AND form=? LIMIT 1"), db:errmsg())
+            state.expand = assert(db:prepare(EXPAND), db:errmsg())
+        end
         local terms, tokens = ground(anchor, event)
         local groups, rarest = {}, 32
         for _, term in ipairs(terms) do
@@ -154,12 +154,12 @@ return function(config, store, model)
             end
             local best = { original = term, term = term, edits = math.huge, hits = 0 }
             local maximum = #characters >= 8 and 2 or 1
-            for _, row in
-                ipairs(store:lexemes(actor, boundary, branch, term, table.concat(grams, " OR "), semantic.candidates))
-            do
+            local lexemes, exact_hits =
+                store:lexemes(actor, boundary, branch, term, table.concat(grams, " OR "), semantic.candidates)
+            for _, row in ipairs(lexemes) do
                 local edits = row.term == term and 0 or distance(characters, row.term, maximum)
                 if edits <= maximum then
-                    local hits = store:frequency(actor, boundary, branch, row.id)
+                    local hits = row.term == term and exact_hits or store:frequency(actor, boundary, branch, row.id)
                     if
                         hits > 0
                         and (
@@ -228,8 +228,8 @@ return function(config, store, model)
                             local synonym = row.term
                             local available = synonym:find(" ", 1, true) ~= nil
                             if not available then
-                                local lexeme = store:lexemes(actor, boundary, branch, synonym, "", 0)[1]
-                                available = lexeme and store:frequency(actor, boundary, branch, lexeme.id) > 0
+                                local _, hits = store:lexemes(actor, boundary, branch, synonym, "", 0)
+                                available = hits > 0
                             end
                             if available and not word_seen[synonym] then
                                 word_seen[synonym], words[#words + 1] = true, synonym
