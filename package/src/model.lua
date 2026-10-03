@@ -210,54 +210,33 @@ return function(config)
                                 problem = model.ref .. ": " .. tostring(value.error.message or value.error.code)
                             elseif not problem then
                                 local choices = dense(value.choices, "chat stream choices")
+                                assert(#choices <= 1, "chat stream has the wrong choice count")
+                                local choice = choices[1]
                                 if #choices == 0 then
                                     assert(
-                                        type(value.usage) == "table" and value.usage ~= NULL and finished,
+                                        finished and type(value.usage) == "table" and value.usage ~= NULL,
                                         "unexpected empty chat choices"
                                     )
                                 else
-                                    assert(#choices == 1, "chat stream has the wrong choice count")
-                                    if finished then
-                                        local accounting = choices[1]
-                                        local delta = type(accounting) == "table" and accounting.delta
-                                        local reason = type(accounting) == "table" and accounting.finish_reason
-                                        local content_free = delta == nil or delta == NULL
-                                        if type(delta) == "table" then
-                                            content_free = true
-                                            for key, value in pairs(delta) do
-                                                if key == "content" then
-                                                    content_free = content_free and (value == NULL or value == "")
-                                                elseif key == "role" then
-                                                    content_free = content_free and value == "assistant"
-                                                else
-                                                    content_free = false
-                                                end
-                                            end
-                                        end
-                                        assert(
-                                            type(accounting) == "table"
-                                                and content_free
-                                                and (reason == nil or reason == NULL or reason == finished),
-                                            "unexpected chat data after finish (delta="
-                                                .. (type(delta) == "table" and (next(delta) and "nonempty" or "empty") or type(
-                                                    delta
-                                                ))
-                                                .. ", finish_reason="
-                                                .. (type(reason) == "string" and reason or type(reason))
-                                                .. ")"
-                                        )
-                                    end
-                                end
-                                local choice = choices[1]
-                                if choice then
-                                    local delta = choice and choice.delta
+                                    assert(type(choice) == "table" and choice ~= NULL, "invalid chat choice")
+                                    local delta, reason = choice.delta, choice.finish_reason
                                     if finished and (delta == nil or delta == NULL) then
                                         delta = {}
                                     end
-                                    delta = assert(
-                                        type(choice) == "table" and type(delta) == "table" and delta,
-                                        "invalid chat delta"
-                                    )
+                                    assert(type(delta) == "table" and delta ~= NULL, "invalid chat delta")
+                                    if finished then
+                                        assert(
+                                            reason == nil or reason == NULL or reason == finished,
+                                            "chat finish reason changed"
+                                        )
+                                        for key, item in pairs(delta) do
+                                            assert(
+                                                key == "content" and (item == "" or item == NULL)
+                                                    or key == "role" and item == "assistant",
+                                                "unexpected chat delta after finish: " .. tostring(key)
+                                            )
+                                        end
+                                    end
                                     for _, channel in ipairs(channels) do
                                         local text = delta[channel.field]
                                             or (channel.name == "reasoning" and delta.reasoning)
@@ -315,8 +294,8 @@ return function(config)
                                             end
                                         end
                                     end
-                                    if choice.finish_reason ~= nil and choice.finish_reason ~= NULL then
-                                        finished = choice.finish_reason
+                                    if not finished and reason ~= nil and reason ~= NULL then
+                                        finished = reason
                                         local timings = value.timings
                                         if type(timings) == "table" then
                                             if math.type(timings.prompt_n) == "integer" then

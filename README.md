@@ -98,9 +98,9 @@ Missing usage and malformed/incomplete streams fail explicitly. OpenRouter's rep
 ## Results and events
 
 The terminal JSON contains `text`, `run`, `branch`, `event`, `parent`, `through`, and `usage.total_tokens`. JSON
-emissions are branch-tagged `start`, `delta`, `turn`, `tool`, and `tool_result` records. Connector renders completed
-root-branch content only; it does not parse Markdown footers or expose reasoning and nested content. Final-only calls
-remain valid.
+emissions are branch-tagged `start`, `delta`, `turn`, `tool`, and `tool_result` records. Connector renders each completed
+root turn with quoted reasoning and response text, tool calls as Lua blocks, and results as text blocks. Nested content
+is not rendered and Markdown footers are not parsed. Final-only calls remain valid.
 
 Ordinary tool-source failures become tool results. Call-level Eval failures propagate. PA terminal diagnostics include
 bounded source-aware details; Connector retains them privately under an incident ID.
