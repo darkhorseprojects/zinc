@@ -45,55 +45,40 @@ return function(config)
     local chat, rerank = config.limits.chat, config.limits.rerank
     local api, catalogs = {}, {}
 
+    local function request(provider, method, path, value)
+        pa.log("model.http.begin")
+        local status, body = pa.http(provider.url, method, path, value and encode_json(value, NULL) or "", {
+            ["content-type"] = value and "application/json" or nil,
+            accept = "application/json",
+            authorization = provider.token and "Bearer " .. provider.token or nil,
+        }, chat.response_bytes)
+        pa.log("model.http.status." .. status)
+        assert(status >= 200 and status < 300, "model endpoint failed: HTTP " .. status .. "\n" .. body:sub(1, 2048))
+        local result = decode(body)
+        assert(type(result) == "table" and (result.error == nil or result.error == NULL), "invalid model response")
+        pa.log("model.http.end")
+        return result
+    end
+
+    local function catalog(name, role)
+        local key = name .. ":" .. role
+        if not catalogs[key] then
+            local path = "/v1/models"
+            if name == "openrouter" then
+                path = path .. "?output_modalities=" .. (role == "chat" and "text" or "rerank")
+            end
+            catalogs[key] = dense(request(config.providers[name], "GET", path).data, "model catalog")
+        end
+        return catalogs[key]
+    end
+
     function api:models(role)
         assert(role == "chat" or role == "rerank", "unsupported model role")
         local output = { [0] = 0 }
-        for name, provider in pairs(config.providers) do
-            local key = name .. ":" .. role
-            if not catalogs[key] then
-                local path = "/v1/models"
-                if name == "openrouter" then
-                    path = path .. "?output_modalities=" .. (role == "chat" and "text" or "rerank")
-                end
-                local status, body = pa.http(provider.url, "GET", path, "", {
-                    accept = "application/json",
-                    authorization = provider.token and "Bearer " .. provider.token or nil,
-                }, chat.response_bytes)
-                assert(
-                    status >= 200 and status < 300,
-                    name .. " model catalog failed: HTTP " .. status .. "\n" .. body:sub(1, 2048)
-                )
-                local records = {}
-                for _, value in ipairs(dense(decode(body).data, "model catalog")) do
-                    assert(type(value.id) == "string" and value.id ~= "", "invalid model ID")
-                    local record = {
-                        ref = name .. ":" .. value.id,
-                        provider = name,
-                        id = value.id,
-                        name = value.name or value.id,
-                    }
-                    if name == "openrouter" then
-                        record.input = value.architecture and value.architecture.input_modalities
-                        record.context_tokens = value.context_length
-                        record.output_tokens = value.top_provider and value.top_provider.max_completion_tokens
-                        record.thinking, record.tools = false, false
-                        for _, parameter in ipairs(value.supported_parameters or {}) do
-                            record.thinking = record.thinking
-                                or parameter == "reasoning"
-                                or parameter == "reasoning_effort"
-                            record.tools = record.tools or parameter == "tools"
-                        end
-                    elseif value.meta then
-                        record.context_tokens = value.meta.n_ctx
-                    end
-                    records[#records + 1] = record
-                end
-                catalogs[key] = records
-            end
-            for _, record in ipairs(catalogs[key]) do
-                if role ~= "chat" or record.tools ~= false then
-                    output[#output + 1] = record
-                end
+        for name in pairs(config.providers) do
+            for _, value in ipairs(catalog(name, role)) do
+                assert(type(value.id) == "string" and value.id ~= "", "invalid model ID")
+                output[#output + 1] = { ref = name .. ":" .. value.id, name = value.name or value.id }
             end
         end
         table.sort(output, function(a, b)
@@ -103,57 +88,118 @@ return function(config)
         return output
     end
 
-    local function selection(reference)
+    function api:select(reference, role)
         local name, id = reference:match("^([%w_-]+):(.+)$")
         assert(name, "model reference must be provider-qualified: " .. reference)
         local provider = assert(config.providers[name], "model provider is not configured: " .. name)
-        return { ref = reference, provider = name, id = id }, provider
+        local model = { ref = reference, provider = name, id = id }
+        if role == "rerank" then
+            return model, provider
+        end
+        assert(role == "chat", "unsupported model role")
+        if name == "llama" then
+            local query = id:gsub("[^%w_.~-]", function(byte)
+                return string.format("%%%02X", byte:byte())
+            end)
+            local props = request(provider, "GET", "/props?model=" .. query)
+            local caps = assert(props.chat_template_caps, "missing template capabilities")
+            model.context_tokens = props.default_generation_settings.n_ctx
+            model.images = props.modalities.vision == true
+            model.tools = caps.supports_tools == true and caps.supports_tool_calls == true
+            model.parallel = caps.supports_parallel_tool_calls == true
+            model.reasoning = caps.supports_reasoning_effort and "reasoning_effort" or nil
+        else
+            local record
+            for _, value in ipairs(catalog(name, "chat")) do
+                if value.id == id then
+                    record = value
+                    break
+                end
+            end
+            assert(record, "chat model is not available: " .. reference)
+            local top = assert(record.top_provider, "missing model capacity")
+            assert(
+                math.type(record.context_length) == "integer"
+                    and record.context_length > 1
+                    and math.type(top.context_length) == "integer"
+                    and top.context_length > 1,
+                "invalid model context"
+            )
+            assert(
+                top.max_completion_tokens == NULL
+                    or math.type(top.max_completion_tokens) == "integer" and top.max_completion_tokens > 0,
+                "invalid model output ceiling"
+            )
+            model.context_tokens = math.min(record.context_length, top.context_length)
+            model.output_tokens = top.max_completion_tokens ~= NULL and top.max_completion_tokens or nil
+            local parameters = {}
+            for _, parameter in ipairs(dense(record.supported_parameters, "model parameters")) do
+                parameters[parameter] = true
+            end
+            model.tools = parameters.tools == true
+            model.parallel = parameters.parallel_tool_calls == true
+            model.reasoning = parameters.reasoning and "reasoning"
+                or parameters.reasoning_effort and "reasoning_effort"
+                or nil
+            model.images = false
+            for _, modality in ipairs(dense(record.architecture.input_modalities, "input modalities")) do
+                model.images = model.images or modality == "image"
+            end
+            local reasoning = record.reasoning ~= NULL and record.reasoning or nil
+            if config.thinking == "none" then
+                assert(not (reasoning and reasoning.mandatory), reference .. " requires reasoning")
+            else
+                local efforts = reasoning and reasoning.supported_efforts
+                local allowed = efforts == NULL
+                    or reasoning and reasoning.supports_max_tokens == true and efforts == nil
+                for _, effort in ipairs(efforts ~= NULL and efforts or {}) do
+                    allowed = allowed or effort == config.thinking
+                end
+                assert(allowed, reference .. " does not support thinking=" .. config.thinking)
+            end
+        end
+        assert(math.type(model.context_tokens) == "integer" and model.context_tokens > 1, "invalid model context")
+        assert(
+            config.thinking == "none" or model.reasoning,
+            reference .. " has no reasoning control; use thinking=none"
+        )
+        return model, provider
     end
 
-    local function request(provider, path, value, maximum)
-        pa.log("model.http.begin")
-        local status, body = pa.http(provider.url, "POST", path, encode_json(value, NULL), {
-            ["content-type"] = "application/json",
-            accept = "application/json",
-            authorization = provider.token and "Bearer " .. provider.token or nil,
-        }, maximum)
-        pa.log("model.http.status." .. status)
-        assert(status >= 200 and status < 300, "model endpoint failed: HTTP " .. status .. "\n" .. body:sub(1, 2048))
-        local result = decode(body)
-        assert(type(result) == "table" and type(result.error) ~= "table", "invalid model response")
-        pa.log("model.http.end")
-        return result
-    end
-
-    local function chat_body(messages, model)
+    function api:chat(messages, branch, model, remaining)
+        local provider = config.providers[model.provider]
         local body = {
             model = model.id,
             messages = messages,
-            tools = { TOOL },
-            parallel_tool_calls = true,
-            max_tokens = chat.tokens,
+            max_tokens = math.min(model.output_tokens, remaining),
             stream = true,
             stream_options = { include_usage = true },
         }
-        if model.provider == "llama" then
-            body.chat_template_kwargs = { enable_thinking = config.thinking }
-        elseif config.thinking then
-            body.reasoning = { effort = "medium" }
+        if model.tools then
+            body.tools = { TOOL }
+            if model.parallel then
+                body.parallel_tool_calls = true
+            end
         end
-        return body
-    end
-
-    function api:chat(messages, branch)
-        local model, provider = selection(config.chat)
+        if model.reasoning == "reasoning" then
+            body.reasoning = config.thinking == "none" and { enabled = false } or { effort = config.thinking }
+        elseif model.reasoning == "reasoning_effort" then
+            body.reasoning_effort = config.thinking
+        end
+        if model.provider == "openrouter" then
+            body.provider = { require_parameters = true, allow_fallbacks = false }
+        else
+            request(provider, "POST", "/apply-template", body)
+        end
         local fragments, data, error_body = {}, {}, {}
         local finished, done, usage, problem = nil, false, nil, nil
-        local contents, thoughts, calls = {}, {}, {}
+        local contents, thoughts, calls, details = {}, {}, {}, {}
         local channels = {
-            { name = "reasoning", field = "reasoning_content", parts = thoughts, emit = config.thinking },
+            { name = "reasoning", field = "reasoning_content", parts = thoughts, emit = config.thinking ~= "none" },
             { name = "content", field = "content", parts = contents, emit = true },
         }
         local first_tool = false
-        local request_body = encode_json(chat_body(messages, model), NULL)
+        local request_body = encode_json(body, NULL)
         pa.log("model.http.begin")
         local status = pa.http(
             provider.url,
@@ -206,7 +252,7 @@ return function(config)
                                 assert(not usage, "duplicate chat usage")
                                 local count = value.usage.total_tokens
                                 assert(math.type(count) == "integer" and count >= 0, "invalid chat usage")
-                                usage = count
+                                usage = value.usage
                             end
                             if value.error ~= NULL and type(value.error) == "table" then
                                 problem = model.ref .. ": " .. tostring(value.error.message or value.error.code)
@@ -238,6 +284,9 @@ return function(config)
                                                 "unexpected chat delta after finish: " .. tostring(key)
                                             )
                                         end
+                                    end
+                                    for _, detail in ipairs(dense(delta.reasoning_details or {}, "reasoning details")) do
+                                        details[#details + 1] = detail
                                     end
                                     for _, channel in ipairs(channels) do
                                         local text = delta[channel.field]
@@ -320,7 +369,7 @@ return function(config)
             return { error = model.ref .. " failed: HTTP " .. status .. "\n" .. table.concat(error_body) }
         end
         if problem then
-            return { usage = usage, error = problem }
+            return { usage = usage and usage.total_tokens, error = problem }
         end
         assert(
             done and finished and usage and #data == 0 and table.concat(fragments):match("^%s*$"),
@@ -329,7 +378,7 @@ return function(config)
         pa.log("model.http.end")
         if finished == "length" then
             pa.log("model.chat.length")
-            return { usage = usage, truncated = true }
+            return { usage = usage.total_tokens, truncated = true, limit = body.max_tokens, accounting = usage }
         end
         local decoded, result = pcall(function()
             local reasoning = #thoughts > 0 and table.concat(thoughts) or nil
@@ -367,6 +416,7 @@ return function(config)
             end
 
             assert(finished == "stop" or finished == "tool_calls", "invalid tool completion")
+            assert(model.tools or #decoded_calls == 0, "model returned unsupported tool calls")
             pa.log("model.chat.finish." .. finished)
             if #decoded_calls == 0 then
                 assert(finished == "stop" and content, "chat completion has no response")
@@ -374,14 +424,15 @@ return function(config)
             pa.log("model.chat.decoded")
             return {
                 reasoning = reasoning,
+                reasoning_details = #details > 0 and details or nil,
                 content = content,
                 calls = decoded_calls,
                 tool_calls = entries,
-                usage = usage,
+                usage = usage.total_tokens,
             }
         end)
         if not decoded then
-            return { usage = usage, error = tostring(result) }
+            return { usage = usage.total_tokens, error = tostring(result) }
         end
         return result
     end
@@ -400,13 +451,13 @@ return function(config)
             return {}, 0
         end
         pa.log("model.rerank.begin")
-        local model, provider = selection(config.rerank)
-        local response = request(provider, "/v1/rerank", {
+        local model, provider = self:select(config.rerank, "rerank")
+        local response = request(provider, "POST", "/v1/rerank", {
             model = model.id,
             documents = selected,
             query = query,
             top_n = #selected,
-        }, chat.response_bytes)
+        })
         pa.log("model.rerank.end")
         local usage = response.usage and response.usage.total_tokens
         assert(math.type(usage) == "integer" and usage >= 0, "invalid reranker usage")

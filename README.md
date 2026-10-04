@@ -55,7 +55,7 @@ agc run /path/to/zinc
 Message the bot in a DM, mention it in a server, or use:
 
 ```text
-/agent zinc prompt: draw a heart thinking: false input_parent: 0 input_through: 0
+/agent zinc prompt: draw a heart thinking: medium input_parent: 0 input_through: 0
 ```
 
 Reasoning appears as quotes, tool calls as Lua blocks, and tool results as text blocks.
@@ -65,6 +65,8 @@ The shipped configuration grants no filesystem or HTTP tools. Enable only the
 ## Configure
 
 Edit `policies.zinc.config` in `ac.yaml`. `chat` and `rerank` select independent `provider:id` references.
+`thinking` selects an explicit effort (`medium` by default, `none` to disable). `run.tokens: 0` and
+`limits.chat.tokens: 0` use model-derived budgets; positive settings remain caps.
 See [Models](https://github.com/darkhorseprojects/zinc/wiki/Models) for hosted setup and troubleshooting.
 
 JSON requests accept `text`, optional `images`, and optional `parent`/`through` history coordinates:

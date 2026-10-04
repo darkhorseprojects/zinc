@@ -36,9 +36,20 @@ return require("src.run")({
             description = "Rerank model",
             autocomplete = "rerank",
         },
-        thinking = { type = "boolean", default = true, description = "Enable model thinking" },
+        thinking = {
+            type = "string",
+            default = "medium",
+            choices = { "none", "minimal", "low", "medium", "high", "xhigh", "max" },
+            description = "Reasoning effort; none disables reasoning",
+        },
         run = {
-            tokens = { type = "integer", default = 32768, minimum = 1, description = "Run token quota" },
+            tokens = {
+                type = "integer",
+                default = 0,
+                minimum = 0,
+                maximum = 1048576,
+                description = "Run token budget; zero uses model context",
+            },
             rounds = { type = "integer", default = 32, minimum = 1, description = "Maximum model rounds" },
             tool_bytes = { type = "integer", default = 8192, minimum = 128, description = "Tool result byte limit" },
         },
@@ -73,9 +84,10 @@ return require("src.run")({
             chat = {
                 tokens = {
                     type = "integer",
-                    default = 8192,
-                    minimum = 1,
-                    description = "Chat output token limit",
+                    default = 0,
+                    minimum = 0,
+                    maximum = 1048576,
+                    description = "Output ceiling; zero uses model limits",
                 },
                 calls = {
                     type = "integer",

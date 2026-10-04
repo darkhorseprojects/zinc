@@ -40,9 +40,9 @@ policies:
           url: http://127.0.0.1:8000
       chat: llama:chat
       rerank: llama:rerank
-      thinking: true
+      thinking: medium
       run:
-        tokens: 32768
+        tokens: 0
         rounds: 32
         tool_bytes: 8192
       history:
@@ -57,7 +57,7 @@ policies:
         score: 0
       limits:
         chat:
-          tokens: 8192
+          tokens: 0
           calls: 16
           source_bytes: 65536
           argument_bytes: 524288

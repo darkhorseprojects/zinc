@@ -20,6 +20,12 @@ For older Connector YAML:
 
 For older Zinc configuration:
 
+- Change boolean `thinking: true` to an explicit effort such as `medium`, or `false` to `none`.
+  There is no `auto`; unsupported efforts fail. Mandatory-reasoning models cannot use `none`.
+- Set `run.tokens: 0` and `limits.chat.tokens: 0` for model-derived allowances. Existing positive values remain caps,
+  so upgrading alone does not remove an old 8,192-token output setting.
+- Image-input models no longer need tool support. Context, images, tools, and effort controls are checked when selected.
+
 | Old setting | Current setting |
 | --- | --- |
 | `model` | `chat` |
@@ -50,7 +56,7 @@ Use the shipped `ac.yaml` as the full YAML-2 example; old names are not accepted
 
 ## Store compatibility
 
-Keep an existing format-3 Store. Chat/option renames do not change its format.
+Keep an existing format-3 Store. Model, effort, budget, and option changes do not change its format.
 
 Older Store formats cannot be opened by Zinc 0.2. Retain an offline copy if you need their history,
 then replace the old database and its WAL/SHM companions together. A missing database initializes

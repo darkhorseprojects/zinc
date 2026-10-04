@@ -30,6 +30,7 @@ local function merge(schema, values, path, partial, parameters)
         local field = path .. "." .. name
         local selected = values[name]
         if rule.type then
+            local maximum = rule.maximum or rule.default
             if selected == nil then
                 selected = rule.default
             end
@@ -38,7 +39,7 @@ local function merge(schema, values, path, partial, parameters)
                     assert(
                         math.type(selected) == "integer"
                             and (rule.minimum == nil or selected >= rule.minimum)
-                            and (rule.default == nil or selected <= rule.default),
+                            and (maximum == nil or selected <= maximum),
                         "invalid " .. field
                     )
                 else
@@ -47,6 +48,13 @@ local function merge(schema, values, path, partial, parameters)
                         assert(selected == selected and math.abs(selected) < math.huge, "invalid " .. field)
                     elseif rule.type == "string" then
                         assert(selected ~= "" and utf8.len(selected), "invalid " .. field)
+                        if rule.choices then
+                            local allowed = false
+                            for _, choice in ipairs(rule.choices) do
+                                allowed = allowed or selected == choice
+                            end
+                            assert(allowed, "invalid " .. field)
+                        end
                     end
                 end
             end
@@ -57,9 +65,11 @@ local function merge(schema, values, path, partial, parameters)
                     path = field,
                     type = rule.type,
                     description = rule.description,
-                    minimum = rule.minimum,
-                    maximum = rule.type == "integer" and selected or nil,
+                    minimum = rule.maximum and selected ~= 0 and 1 or rule.minimum,
+                    maximum = rule.type == "integer" and (rule.maximum and selected == 0 and maximum or selected)
+                        or nil,
                     autocomplete = rule.autocomplete,
+                    choices = rule.choices,
                 }
             end
         else
@@ -258,18 +268,21 @@ return function(spec)
 
     local entry = {}
 
-    local function execute(store, memory, model, config, call)
+    local function execute(store, memory, model, profile, config, call)
         local selected = render(call.preset_name, spec.presets[call.preset_name], document, config.tools)
         local view = { zinc_call = entry.zinc_call, zinc_destroy = entry.zinc_destroy }
         for _, name in ipairs(selected.names) do
             view[name] = entry[name]
         end
-        local imports = import_prompt()
-        local parent = call.parent and tostring(call.parent) or "0"
-        local system = selected.system
-            .. (imports ~= "" and "\n" .. imports or "")
-            .. "\n"
-            .. string.format(NESTED_CALL, parent, call.memory, selected.targets)
+        local system = document
+        if profile.tools then
+            local imports = import_prompt()
+            local parent = call.parent and tostring(call.parent) or "0"
+            system = selected.system
+                .. (imports ~= "" and "\n" .. imports or "")
+                .. "\n"
+                .. string.format(NESTED_CALL, parent, call.memory, selected.targets)
+        end
         pa.log("memory.context.begin")
         local context = memory:context(config.actor, call.memory, call.branch, call.text, call.run, call.id)
         pa.log("memory.context.end")
@@ -293,18 +306,30 @@ return function(spec)
         end
         local messages = { { role = "system", content = system }, { role = "user", content = user_content } }
         for _ = 1, config.run.rounds do
-            assert(store:quota(call.run) > 0, "model quota exhausted")
+            local remaining = store:quota(call.run)
+            assert(remaining > 0, "model quota exhausted")
             pa.log("model.chat.begin")
-            local completion = model:chat(messages, call.branch)
+            local completion = model:chat(messages, call.branch, profile, remaining)
             if completion.usage then
                 store:charge(call.run, completion.usage)
             end
             pa.log("model.chat.end")
             if completion.truncated then
+                local usage = completion.accounting
+                local details = usage.completion_tokens_details
                 error(
                     string.format(
-                        "chat completion was truncated (finish_reason=length, output limit=%d tokens); reduce thinking or history",
-                        config.limits.chat.tokens
+                        "%s stopped before completion (finish_reason=length, output allowance=%d, context=%d, "
+                            .. "prompt=%s, completion=%s, reasoning=%s tokens); incomplete turn discarded",
+                        config.chat,
+                        completion.limit,
+                        profile.context_tokens,
+                        type(usage.prompt_tokens) == "number" and usage.prompt_tokens or "unknown",
+                        type(usage.completion_tokens) == "number" and usage.completion_tokens or "unknown",
+                        type(details) == "table"
+                                and type(details.reasoning_tokens) == "number"
+                                and details.reasoning_tokens
+                            or "unknown"
                     )
                 )
             end
@@ -320,7 +345,11 @@ return function(spec)
             local rows = #events > 0 and store:append(call.branch, events) or {}
             messages[#messages + 1] = {
                 role = "assistant",
-                reasoning_content = completion.reasoning,
+                reasoning = profile.provider == "openrouter"
+                        and not completion.reasoning_details
+                        and completion.reasoning
+                    or nil,
+                reasoning_details = profile.provider == "openrouter" and completion.reasoning_details or nil,
                 content = completion.content or "",
                 tool_calls = tool_calls,
             }
@@ -379,7 +408,7 @@ return function(spec)
                     result_events[index] = { kind = "result", text = output }
                 end
                 store:append(call.branch, result_events)
-                local remaining = store:quota(call.run)
+                remaining = store:quota(call.run)
                 for index, tool in ipairs(completion.calls) do
                     local content = result_events[index].text
                     pa.emit(encode_json({
@@ -400,10 +429,23 @@ return function(spec)
     end
 
     local function run(config, value, caller)
+        local model = make_model(config)
+        local profile = model:select(config.chat, "chat")
+        assert(not value.images or profile.images, config.chat .. " does not support image input")
+        local ceiling = profile.output_tokens or profile.context_tokens
+        local output = config.limits.chat.tokens
+        if output == 0 then
+            output = profile.output_tokens or profile.context_tokens // 2
+        end
+        profile.output_tokens =
+            math.min(output, ceiling, profile.context_tokens, spec.config.limits.chat.tokens.maximum)
+        local budget = config.run.tokens
+        if budget == 0 then
+            budget = math.min(profile.context_tokens, spec.config.run.tokens.maximum)
+        end
         pa.log("store.open.begin")
         local store <close> = make_store({ path = config.store })
         pa.log("store.open.end")
-        local model = make_model(config)
         local preset, run_id, _, start = config.preset
         if caller then
             local context = store:caller(config.actor, caller)
@@ -416,15 +458,8 @@ return function(spec)
             run_id = context.run
             _, start = store:child(run_id, value.parent, value.through, preset, value.text)
         else
-            run_id, _, start = store:start(
-                config.actor,
-                config.run.tokens,
-                value.parent,
-                value.through,
-                preset,
-                value.text,
-                value.automatic
-            )
+            run_id, _, start =
+                store:start(config.actor, budget, value.parent, value.through, preset, value.text, value.automatic)
         end
         start.run, start.preset_name, start.temporary, start.images = run_id, preset, caller ~= nil, value.images
         local call = start
@@ -435,7 +470,7 @@ return function(spec)
             chronological = config.history,
             semantic = config.search,
         }, store, model)
-        local final = execute(store, memory, model, config, call)
+        local final = execute(store, memory, model, profile, config, call)
         if not call.temporary then
             pa.log("store.finish.begin")
             store:finish(call.branch, final.id)
