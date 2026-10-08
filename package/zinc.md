@@ -42,90 +42,61 @@ return require("src.run")({
             choices = { "none", "minimal", "low", "medium", "high", "xhigh", "max" },
             description = "Reasoning effort; none disables reasoning",
         },
-        run = {
-            tokens = {
+        model = {
+            output_tokens = {
                 type = "integer",
                 default = 0,
                 minimum = 0,
                 maximum = 1048576,
-                description = "Run token budget; zero uses model context",
+                description = "Output ceiling; zero uses provider capacity",
             },
-            rounds = { type = "integer", default = 32, minimum = 1, description = "Maximum model rounds" },
-            tool_bytes = { type = "integer", default = 8192, minimum = 128, description = "Tool result byte limit" },
         },
-        history = {
-            records = {
-                type = "integer",
-                default = 256,
-                minimum = 0,
-                description = "Recent history records",
-            },
-            bytes = {
+        run = {
+            tool_quota = {
                 type = "integer",
                 default = 32768,
-                minimum = 0,
-                description = "Recent history byte limit",
+                minimum = 1,
+                maximum = 1048576,
+                description = "Tool input/output units; one unit per four UTF-8 bytes",
             },
-        },
-        search = {
-            language = { type = "string", default = "en", description = "Search language" },
-            depth = { type = "integer", default = 1, minimum = 0, description = "Relation expansion depth" },
-            terms = { type = "integer", default = 64, minimum = 0, description = "Search term limit" },
-            candidates = { type = "integer", default = 16, minimum = 0, description = "Search candidates" },
-            bytes = {
+            rounds = { type = "integer", default = 32, minimum = 1, description = "Maximum committed model rounds" },
+            tool_result_tokens = {
                 type = "integer",
-                default = 32768,
-                minimum = 0,
-                description = "Retrieved history byte limit",
+                default = 2048,
+                minimum = 32,
+                description = "Stored tool-result estimated-token limit",
             },
-            score = { type = "number", default = 0, description = "Minimum rerank score" },
         },
-        limits = {
-            chat = {
+        memory = {
+            chronological = {
                 tokens = {
                     type = "integer",
                     default = 0,
                     minimum = 0,
                     maximum = 1048576,
-                    description = "Output ceiling; zero uses model limits",
-                },
-                calls = {
-                    type = "integer",
-                    default = 16,
-                    minimum = 1,
-                    description = "Tool calls per model turn",
-                },
-                source_bytes = {
-                    type = "integer",
-                    default = 65536,
-                    minimum = 1,
-                    description = "Tool source byte limit",
-                },
-                argument_bytes = {
-                    type = "integer",
-                    default = 524288,
-                    minimum = 1,
-                    description = "Tool argument byte limit",
-                },
-                response_bytes = {
-                    type = "integer",
-                    default = 8388608,
-                    minimum = 1,
-                    description = "Chat response byte limit",
+                    description = "Chronological budget; zero uses half the provider context",
                 },
             },
-            rerank = {
-                pair_bytes = {
+            semantic = {
+                tokens = {
                     type = "integer",
-                    default = 3968,
-                    minimum = 1,
-                    description = "Rerank query-document byte limit",
+                    default = 8192,
+                    minimum = 0,
+                    maximum = 1048576,
+                    description = "Semantic budget; zero uses half the provider context",
                 },
-                query_bytes = {
+                language = { type = "string", default = "en", description = "Search language" },
+                depth = { type = "integer", default = 1, minimum = 0, description = "Relation expansion depth" },
+                terms = { type = "integer", default = 64, minimum = 0, description = "Search vocabulary limit" },
+                candidates = { type = "integer", default = 16, minimum = 0, description = "Rerank candidates" },
+                score = { type = "number", default = 0, description = "Minimum rerank score" },
+            },
+            summary = {
+                tokens = {
                     type = "integer",
-                    default = 2048,
-                    minimum = 1,
-                    description = "Rerank query byte limit",
+                    default = 128,
+                    minimum = 32,
+                    description = "Summary representation estimated-token limit",
                 },
             },
         },
@@ -138,11 +109,16 @@ return require("src.run")({
             minimum = 0,
             description = "Parent event; zero starts a fresh branch",
         },
-        through = {
-            type = "integer",
-            optional = true,
-            minimum = 0,
-            description = "Inclusive history event; zero disables history",
+        persist = { type = "boolean", default = true, description = "Save history and permit recovery" },
+        request = { type = "string", optional = true },
+        memory_range = {
+            start = {
+                type = "integer",
+                optional = true,
+                minimum = 0,
+                description = "First memory event; zero with end zero disables history",
+            },
+            ["end"] = { type = "integer", optional = true, minimum = 0, description = "Last memory event, inclusive" },
         },
         images = { type = "table", optional = true },
         preset = { type = "string", optional = true },
@@ -151,6 +127,8 @@ return require("src.run")({
         request_bytes = 8388608,
         question_bytes = 1048576,
         config_bytes = 65536,
+        response_bytes = 8388608,
+        tool_calls = 16,
     },
 })
 ```

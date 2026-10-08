@@ -1,78 +1,68 @@
 local sqlite = require("lsqlite3complete")
+local encode_json = require("lunajson.encoder")()
+local decode_json = require("lunajson.decoder")()
 
 local SCHEMA = [[
 CREATE TABLE runs(
  id INTEGER PRIMARY KEY,
+ request TEXT UNIQUE,
  actor TEXT NOT NULL,
- budget INTEGER NOT NULL CHECK(budget>0),
- used INTEGER NOT NULL DEFAULT 0 CHECK(used>=0)
+ config TEXT NOT NULL CHECK(json_valid(config))
 ) STRICT;
 CREATE TABLE branches(
  id INTEGER PRIMARY KEY,
  run INTEGER NOT NULL REFERENCES runs(id),
- base INTEGER REFERENCES events(id) ON DELETE CASCADE,
- memory INTEGER REFERENCES events(id) ON DELETE CASCADE,
+ caller INTEGER REFERENCES events(id),
+ base INTEGER REFERENCES events(id),
+ memory_start INTEGER REFERENCES events(id),
+ memory_end INTEGER REFERENCES events(id),
  preset TEXT NOT NULL,
- temporary INTEGER NOT NULL CHECK(temporary IN (0,1)),
- result INTEGER REFERENCES events(id)
+ CHECK((memory_start IS NULL AND memory_end IS NULL) OR
+       (memory_start IS NOT NULL AND memory_end IS NOT NULL AND memory_start<=memory_end))
 ) STRICT;
+CREATE UNIQUE INDEX root_branch_by_run ON branches(run) WHERE caller IS NULL;
+CREATE INDEX branches_by_run ON branches(run,id);
 CREATE TABLE events(
  id INTEGER PRIMARY KEY,
- branch INTEGER NOT NULL REFERENCES branches(id) ON DELETE CASCADE,
- kind TEXT NOT NULL CHECK(kind IN ('user','reasoning','response','call','result')),
- text TEXT NOT NULL CHECK(length(text)>0)
+ run INTEGER NOT NULL REFERENCES runs(id),
+ branch INTEGER REFERENCES branches(id),
+ call INTEGER REFERENCES events(id),
+ kind TEXT NOT NULL CHECK(kind IN (
+  'user','response','call','result','context','summary','ambiguity',
+  'completed','abort','error','quota_charge'
+ )),
+ created_at TEXT NOT NULL DEFAULT(strftime('%Y-%m-%dT%H:%M:%fZ','now')),
+ text TEXT NOT NULL DEFAULT '',
+ data TEXT NOT NULL CHECK(json_valid(data)),
+ estimated_tokens INTEGER NOT NULL DEFAULT 0 CHECK(estimated_tokens>=0)
 ) STRICT;
-CREATE INDEX branches_by_run ON branches(run,id);
+CREATE INDEX runs_by_actor ON runs(actor,id);
+CREATE INDEX events_by_run ON events(run,id);
 CREATE INDEX events_by_branch ON events(branch,id);
+CREATE UNIQUE INDEX result_by_call ON events(call) WHERE kind='result';
+CREATE UNIQUE INDEX ambiguity_by_call ON events(call) WHERE kind='ambiguity';
+CREATE UNIQUE INDEX branch_completion ON events(branch) WHERE kind='completed';
+CREATE UNIQUE INDEX run_abort ON events(run) WHERE kind='abort';
+CREATE UNIQUE INDEX context_by_branch ON events(branch) WHERE kind='context';
+CREATE INDEX summaries_by_range ON events(
+ json_extract(data,'$.memory_range.start'),json_extract(data,'$.memory_range.end')
+) WHERE kind='summary';
+CREATE TABLE summary_children(
+ child INTEGER PRIMARY KEY REFERENCES events(id),
+ parent INTEGER NOT NULL REFERENCES events(id)
+) STRICT;
 CREATE VIRTUAL TABLE event_fts USING fts5(
  text,content='events',content_rowid='id',tokenize='unicode61 remove_diacritics 0'
 );
 CREATE TRIGGER event_fts_insert AFTER INSERT ON events
-WHEN new.kind IN ('user','response','result') BEGIN
+WHEN new.kind IN ('user','response','completed','result') AND length(new.text)>0 BEGIN
  INSERT INTO event_fts(rowid,text) VALUES(new.id,new.text);
 END;
-CREATE TRIGGER event_fts_delete AFTER DELETE ON events
-WHEN old.kind IN ('user','response','result') BEGIN
- INSERT INTO event_fts(event_fts,rowid,text) VALUES('delete',old.id,old.text);
-END;
-CREATE TRIGGER branch_coordinates BEFORE INSERT ON branches
-WHEN EXISTS(
- SELECT 1 FROM runs current
- WHERE current.id=new.run AND (
-  new.base IS NOT NULL AND NOT EXISTS(
-   SELECT 1 FROM events e JOIN branches b ON b.id=e.branch JOIN runs r ON r.id=b.run
-   WHERE e.id=new.base AND r.actor=current.actor AND (
-    b.temporary=0 OR new.temporary=1 AND b.run=new.run
-   )
-  ) OR
-  new.memory IS NOT NULL AND NOT EXISTS(
-   SELECT 1 FROM events e JOIN branches b ON b.id=e.branch JOIN runs r ON r.id=b.run
-   WHERE e.id=new.memory AND r.actor=current.actor AND (
-    b.temporary=0 OR
-    new.temporary=1 AND b.run=new.run AND b.id IN (
-     WITH RECURSIVE lineage(id) AS (
-      SELECT branch FROM events WHERE id=new.base UNION ALL
-      SELECT parent.branch FROM lineage l JOIN branches child ON child.id=l.id
-      JOIN events parent ON parent.id=child.base
-     ) SELECT id FROM lineage
-    )
-   )
-  )
- )
-)
-BEGIN SELECT raise(ABORT,'invalid branch coordinates'); END;
-]]
-local LEXICON = [[
 CREATE TABLE lexemes(
- id INTEGER PRIMARY KEY,
- actor TEXT NOT NULL,
- term TEXT NOT NULL,
- documents INTEGER NOT NULL CHECK(documents>=0),
- UNIQUE(actor,term)
+ id INTEGER PRIMARY KEY,actor TEXT NOT NULL,term TEXT NOT NULL,UNIQUE(actor,term)
 ) STRICT;
 CREATE TABLE event_lexemes(
- event INTEGER NOT NULL REFERENCES events(id) ON DELETE CASCADE,
- lexeme INTEGER NOT NULL REFERENCES lexemes(id),
+ event INTEGER NOT NULL REFERENCES events(id),lexeme INTEGER NOT NULL REFERENCES lexemes(id),
  PRIMARY KEY(event,lexeme)
 ) WITHOUT ROWID;
 CREATE INDEX event_lexemes_by_lexeme ON event_lexemes(lexeme,event);
@@ -82,74 +72,60 @@ CREATE VIRTUAL TABLE lexeme_grams USING fts5(
 CREATE TRIGGER lexeme_grams_insert AFTER INSERT ON lexemes BEGIN
  INSERT INTO lexeme_grams(rowid,term) VALUES(new.id,new.term);
 END;
-CREATE TRIGGER lexeme_grams_delete AFTER DELETE ON lexemes BEGIN
- INSERT INTO lexeme_grams(lexeme_grams,rowid,term) VALUES('delete',old.id,old.term);
+CREATE TRIGGER immutable_events_update BEFORE UPDATE ON events BEGIN
+ SELECT raise(ABORT,'events are immutable');
 END;
-CREATE TRIGGER event_lexemes_delete AFTER DELETE ON event_lexemes BEGIN
- UPDATE lexemes SET documents=documents-1 WHERE id=old.lexeme;
- DELETE FROM lexemes WHERE id=old.lexeme AND documents=0;
+CREATE TRIGGER immutable_events_delete BEFORE DELETE ON events BEGIN
+ SELECT raise(ABORT,'events are immutable');
 END;
 ]]
+local RECORD = "SELECT e.* FROM events e JOIN runs r ON r.id=e.run "
+local SCOPE = "r.actor=? AND e.id BETWEEN ? AND ? "
+local MEMORY =
+    "e.kind IN ('user','response','completed','call','result','ambiguity','abort','error') AND length(e.text)>0 AND EXISTS(SELECT 1 FROM branches b WHERE b.run=e.run) "
 
-local VISIBLE = [[WITH RECURSIVE visible(id,ceiling) AS (
- SELECT ?,? UNION ALL
- SELECT parent.branch,min(v.ceiling,child.base) FROM visible v
- JOIN branches child ON child.id=v.id JOIN events parent ON parent.id=child.base
-)
-]]
-local RECORD = [[SELECT e.id,b.id branch,
- COALESCE((SELECT max(previous.id) FROM events previous WHERE previous.branch=e.branch AND previous.id<e.id),b.base) parent,
- b.memory,e.kind,e.text
-FROM events e JOIN branches b ON b.id=e.branch JOIN runs r ON r.id=b.run
-]]
-local SCOPE = [[r.actor=? AND e.id<=? AND (
- b.temporary=0 OR
- EXISTS(SELECT 1 FROM visible v WHERE v.id=b.id AND e.id<=v.ceiling)
-)
-]]
-local BEFORE = VISIBLE .. RECORD .. "WHERE " .. SCOPE .. "ORDER BY e.id DESC LIMIT ?"
-local SEARCH = VISIBLE
-    .. RECORD
-    .. "JOIN event_fts ON event_fts.rowid=e.id WHERE event_fts MATCH ? AND "
-    .. SCOPE
-    .. "AND e.kind IN ('user','response','result') ORDER BY bm25(event_fts),e.id LIMIT ?"
-local FREQUENCY = VISIBLE
-    .. [[SELECT count(*) hits FROM (
-SELECT 1 FROM event_lexemes link JOIN events e ON e.id=link.event
-JOIN branches b ON b.id=e.branch JOIN runs r ON r.id=b.run
-WHERE link.lexeme=? AND ]]
-    .. SCOPE
-    .. "LIMIT ?)"
-
-local function prepare(db, source)
-    return assert(db:prepare(source), db:errmsg())
-end
-
-local function rows(db, statements, name, ...)
-    local statement = statements[name]
-    if type(statement) == "string" then
-        statement = prepare(db, statement)
-        statements[name] = statement
-    end
-    local reset = statement:reset()
-    assert(reset == sqlite.OK or reset == sqlite.DONE, db:errmsg())
-    assert(statement:bind_values(...) == sqlite.OK, db:errmsg())
-    local output = {}
-    for row in statement:nrows() do
-        output[#output + 1] = row
-    end
-    return output
-end
-
-return function(config)
-    local db = assert(sqlite.open(config.path))
+return function(config, null)
+    local db = assert(sqlite.open(config.store))
     db:busy_timeout(5000)
     local statements, store = {}, {}
+
+    local function rows(sql, ...)
+        local statement = statements[sql]
+        if not statement then
+            statement = assert(db:prepare(sql), db:errmsg())
+            statements[sql] = statement
+        end
+        statement:reset()
+        assert(statement:bind_values(...) == sqlite.OK, db:errmsg())
+        local output = {}
+        for row in statement:nrows() do
+            if row.data then
+                row.data = decode_json(row.data, 1, null)
+            end
+            output[#output + 1] = row
+        end
+        assert(db:errcode() == sqlite.OK or db:errcode() == sqlite.DONE, db:errmsg())
+        return output
+    end
+
+    local function transaction(body)
+        assert(db:exec("BEGIN IMMEDIATE") == sqlite.OK, db:errmsg())
+        local result = table.pack(pcall(body))
+        if result[1] then
+            local committed = db:exec("COMMIT")
+            if committed == sqlite.OK then
+                return table.unpack(result, 2, result.n)
+            end
+        end
+        local problem = result[1] and db:errmsg() or result[2]
+        db:exec("ROLLBACK")
+        error(problem, 0)
+    end
 
     function store:close(original)
         local problem
         for _, statement in pairs(statements) do
-            if type(statement) == "userdata" and statement:finalize() ~= sqlite.OK then
+            if statement:finalize() ~= sqlite.OK then
                 problem = problem or db:errmsg()
             end
         end
@@ -160,217 +136,508 @@ return function(config)
         end
     end
 
-    local function transaction(body)
-        assert(db:exec("BEGIN IMMEDIATE") == sqlite.OK, db:errmsg())
-        local result = table.pack(pcall(body))
-        if result[1] then
-            assert(db:exec("COMMIT") == sqlite.OK, db:errmsg())
-            return table.unpack(result, 2, result.n)
-        end
-        db:exec("ROLLBACK")
-        error(result[2], 0)
-    end
-
     local opened, problem = pcall(function()
         assert(
             db:exec("PRAGMA trusted_schema=OFF; PRAGMA synchronous=FULL; PRAGMA foreign_keys=ON") == sqlite.OK,
             db:errmsg()
         )
-        statements.version = prepare(db, "PRAGMA user_version")
-        local version = rows(db, statements, "version")[1].user_version
-        local finalized = statements.version:finalize()
-        statements.version = nil
-        assert(finalized == sqlite.OK, db:errmsg())
-        assert(version == 0 or version == 3, "Store format is unsupported; Zinc 0.2 requires a fresh Store")
+        local version = rows("PRAGMA user_version")[1].user_version
+        assert(version == 0 or version == 6, "unsupported Store format; use a fresh Store")
+        assert(db:exec("PRAGMA journal_mode=WAL") == sqlite.OK, db:errmsg())
+        if version == 0 then
+            transaction(function()
+                local current = rows("PRAGMA user_version")[1].user_version
+                assert(current == 0 or current == 6, "unsupported Store format; use a fresh Store")
+                if current == 0 then
+                    assert(db:exec(SCHEMA .. "PRAGMA user_version=6") == sqlite.OK, db:errmsg())
+                end
+            end)
+        end
         assert(db:exec([[
 CREATE VIRTUAL TABLE temp.event_tokenizer USING fts5(text,tokenize='unicode61 remove_diacritics 0');
 CREATE VIRTUAL TABLE temp.event_vocabulary USING fts5vocab(event_tokenizer,'row');
 CREATE VIRTUAL TABLE temp.event_positions USING fts5vocab(event_tokenizer,'instance');
 ]]) == sqlite.OK, db:errmsg())
-        if version == 0 then
-            assert(db:exec("PRAGMA journal_mode=WAL") == sqlite.OK, db:errmsg())
-            transaction(function()
-                for row in db:nrows("PRAGMA user_version") do
-                    assert(
-                        row.user_version == 0 or row.user_version == 3,
-                        "Store format is unsupported; Zinc 0.2 requires a fresh Store"
-                    )
-                    if row.user_version == 0 then
-                        assert(db:exec(SCHEMA .. LEXICON .. "PRAGMA user_version=3") == sqlite.OK, db:errmsg())
-                    end
-                end
-            end)
-        end
-        local queries = {
-            tokenize = "INSERT INTO temp.event_tokenizer(rowid,text) VALUES(?,?) RETURNING rowid",
-            tokens = "SELECT term FROM temp.event_positions WHERE doc=? ORDER BY offset LIMIT ?",
-            lexeme_insert = [[INSERT INTO lexemes(actor,term,documents)
-SELECT ?,term,1 FROM temp.event_vocabulary WHERE length(term)<=128
-ON CONFLICT(actor,term) DO UPDATE SET documents=documents+1]],
-            lexeme_link = [[INSERT INTO event_lexemes(event,lexeme)
-SELECT ?,l.id FROM temp.event_vocabulary v JOIN lexemes l ON l.actor=? AND l.term=v.term
-WHERE length(v.term)<=128]],
-            lexeme_exact = "SELECT id,term FROM lexemes WHERE actor=? AND term=?",
-            lexeme_near = VISIBLE .. [[SELECT l.id,l.term FROM lexeme_grams
-JOIN lexemes l ON l.id=lexeme_grams.rowid WHERE lexeme_grams MATCH ? AND l.actor=?
-AND EXISTS(SELECT 1 FROM event_lexemes link JOIN events e ON e.id=link.event
-JOIN branches b ON b.id=e.branch JOIN runs r ON r.id=b.run
-WHERE link.lexeme=l.id AND ]] .. SCOPE .. [[)
-ORDER BY bm25(lexeme_grams),l.id LIMIT ?]],
-            start_run = "INSERT INTO runs(actor,budget) VALUES(?,?) RETURNING id",
-            branch = "INSERT INTO branches(run,base,memory,preset,temporary) VALUES(?,?,?,?,?) RETURNING id,run,base,memory,preset,temporary",
-            branch_info = [[SELECT b.memory,r.actor,
-COALESCE((SELECT max(e.id) FROM events e WHERE e.branch=b.id),b.base) parent
-FROM branches b JOIN runs r ON r.id=b.run WHERE b.id=?]],
-            finish = [[UPDATE branches SET result=? WHERE id=? AND temporary=0 AND result IS NULL
-AND EXISTS(SELECT 1 FROM events WHERE id=? AND branch=? AND kind='response') RETURNING id]],
-            caller = [[SELECT r.id run,r.actor,r.budget,b.id branch,b.preset
-FROM events e JOIN branches b ON b.id=e.branch JOIN runs r ON r.id=b.run
-WHERE e.id=? AND e.kind='call' AND r.actor=?]],
-            insert = "INSERT INTO events(branch,kind,text) VALUES(?,?,?) RETURNING id",
-            charge = "UPDATE runs SET used=used+? WHERE id=? RETURNING id",
-            head = [[SELECT e.id FROM events e
-JOIN branches b ON b.id=e.branch JOIN runs r ON r.id=b.run
-WHERE r.actor=? AND b.temporary=0
-ORDER BY e.id DESC LIMIT 1]],
-            quota = "SELECT budget-used remaining,used FROM runs WHERE id=?",
-            destroy = [[WITH RECURSIVE ancestors(id) AS (
- SELECT ? UNION
- SELECT parent.branch FROM ancestors a JOIN branches child ON child.id=a.id
- JOIN events parent ON parent.id=child.base
-)
-DELETE FROM branches WHERE id=? AND temporary=1 AND id NOT IN ancestors
-AND run IN (SELECT id FROM runs WHERE actor=?) RETURNING id]],
-            before = BEFORE,
-            search = SEARCH,
-            frequency = FREQUENCY,
-        }
-        for name, query in pairs(queries) do
-            statements[name] = query
-        end
     end)
     if not opened then
         store:close(problem)
         error(problem, 0)
     end
 
-    local function append(branch, events)
-        local info = assert(rows(db, statements, "branch_info", branch)[1], "branch is unavailable")
-        local parent = info.parent
+    function store:run(reference, snapshot)
+        local field = type(reference) == "string" and "request" or "id"
+        local selected = snapshot and ",r.config" or ""
+        local row = rows([[
+SELECT r.id,json_extract(r.config,'$.run.tool_quota')-coalesce(sum(e.estimated_tokens),0) remaining,
+coalesce(sum(e.estimated_tokens),0) used,
+max(CASE WHEN e.kind='abort' OR e.kind='completed' AND b.id IS NOT NULL AND b.caller IS NULL THEN e.kind END) state
+]] .. selected .. [[ FROM runs r LEFT JOIN events e ON e.run=r.id LEFT JOIN branches b ON b.id=e.branch
+WHERE r.actor=? AND r.]] .. field .. "=? GROUP BY r.id", config.actor, reference)[1]
+        if row then
+            row.state = row.state or "unfinished"
+            if snapshot then
+                row.config = decode_json(row.config, 1, null)
+            end
+        end
+        return row
+    end
+
+    function store:tokens(text, limit)
+        assert(db:exec("DELETE FROM temp.event_tokenizer") == sqlite.OK, db:errmsg())
+        rows("INSERT INTO temp.event_tokenizer(rowid,text) VALUES(1,?) RETURNING rowid", text)
+        return rows("SELECT term FROM temp.event_positions WHERE doc=1 ORDER BY offset LIMIT ?", limit)
+    end
+
+    local function append(call, events)
         local output = {}
         for index, event in ipairs(events) do
-            assert(type(event.text) == "string" and event.text ~= "" and utf8.len(event.text), "invalid event text")
-            local id = rows(db, statements, "insert", branch, event.kind, event.text)[1].id
-            if event.kind == "user" or event.kind == "response" or event.kind == "result" then
-                assert(db:exec("DELETE FROM temp.event_tokenizer") == sqlite.OK, db:errmsg())
-                assert(rows(db, statements, "tokenize", id, event.text)[1], "failed to tokenize event")
-                rows(db, statements, "lexeme_insert", info.actor)
-                rows(db, statements, "lexeme_link", id, info.actor)
+            local text, amount = event.text or "", event.estimated_tokens or 0
+            assert(type(text) == "string" and utf8.len(text), "invalid event text")
+            if event.kind == "call" and call.persist then
+                event.data.message = output[1].id
             end
-            output[index] = {
-                id = id,
-                branch = branch,
-                parent = parent,
-                memory = info.memory or 0,
-                kind = event.kind,
-                text = event.text,
-            }
-            parent = id
+            local row = event
+            if call.persist or amount > 0 then
+                row = rows(
+                    [[
+INSERT INTO events(run,branch,call,kind,text,data,estimated_tokens) VALUES(?,?,?,?,?,?,?) RETURNING *
+]],
+                    call.run,
+                    call.persist and call.branch or nil,
+                    event.call,
+                    call.persist and event.kind or "quota_charge",
+                    call.persist and text or "",
+                    encode_json(call.persist and event.data or {}, null),
+                    amount
+                )[1]
+                if not call.persist then
+                    if event.kind == "call" then
+                        event.id = row.id
+                    end
+                    row = event
+                elseif
+                    (
+                        event.kind == "user"
+                        or event.kind == "response"
+                        or event.kind == "completed"
+                        or event.kind == "result"
+                    ) and text ~= ""
+                then
+                    store:tokens(text, 0)
+                    rows(
+                        [[
+INSERT INTO lexemes(actor,term) SELECT ?,term FROM temp.event_vocabulary WHERE length(term)<=128
+ON CONFLICT(actor,term) DO NOTHING
+]],
+                        config.actor
+                    )
+                    rows(
+                        [[
+INSERT INTO event_lexemes(event,lexeme) SELECT ?,l.id FROM temp.event_vocabulary v
+JOIN lexemes l ON l.actor=? AND l.term=v.term WHERE length(v.term)<=128
+]],
+                        row.id,
+                        config.actor
+                    )
+                end
+            end
+            output[index] = row
         end
         return output
     end
 
-    function store:start(actor, budget, base, memory, preset, question, automatic)
+    function store:append(call, events)
+        local inserted = transaction(function()
+            local current = assert(self:run(call.run), "run is unavailable")
+            local charge = 0
+            for _, event in ipairs(events) do
+                if event.kind == "response" or event.kind == "call" then
+                    assert(current.state == "unfinished", "run is terminal")
+                end
+                if event.kind == "call" then
+                    charge = charge + event.estimated_tokens
+                end
+            end
+            assert(charge == 0 or charge <= current.remaining, "tool quota exhausted; no tools dispatched")
+            if events[1].kind == "response" and not events[1].data.message.tool_calls then
+                events[1].kind = "completed"
+            end
+            local last, produced = events[#events], 0
+            for _, event in ipairs(events) do
+                produced = produced + (event.estimated_tokens or 0)
+            end
+            if last.kind == "result" then
+                last.data.message.content = last.text
+                    .. "\n[tool_quota_remaining="
+                    .. (current.remaining - produced)
+                    .. "]"
+            end
+            return append(call, events)
+        end)
+        for _, event in ipairs(inserted) do
+            call.events[#call.events + 1] = event
+        end
+        return inserted
+    end
+
+    function store:node(id)
+        return assert(
+            rows(
+                [[
+SELECT e.id,e.run,e.branch,e.call,e.kind,e.text,e.created_at,CASE WHEN e.kind='summary' THEN e.data ELSE '{}' END data
+FROM events e JOIN runs r ON r.id=e.run WHERE r.actor=? AND e.id=?
+]],
+                config.actor,
+                id
+            )[1],
+            "memory is unavailable"
+        )
+    end
+
+    function store:start(value, caller, snapshot)
         return transaction(function()
-            if automatic then
-                local head = rows(db, statements, "head", actor)[1]
+            if value.persist and value.request then
+                local existing = self:run(value.request)
+                if existing then
+                    return { existing = existing.id }
+                end
+            end
+            local run = caller and caller.run
+            if run then
+                assert(self:run(run).state == "unfinished", "run is terminal")
+            else
+                local saved = value.persist and snapshot or { run = { tool_quota = snapshot.run.tool_quota } }
+                run = rows(
+                    "INSERT INTO runs(request,actor,config) VALUES(?,?,?) RETURNING id",
+                    value.persist and value.request or nil,
+                    config.actor,
+                    encode_json(saved, null)
+                )[1].id
+            end
+            local base = value.parent
+            if value.automatic then
+                local head =
+                    rows(RECORD .. "WHERE r.actor=? AND e.kind='completed' ORDER BY e.id DESC LIMIT 1", config.actor)[1]
                 base = head and head.id or nil
             end
-            if memory == nil then
-                memory = base or 0
+            if base then
+                self:node(base)
             end
-            local run = rows(db, statements, "start_run", actor, budget)[1].id
-            local branch = rows(db, statements, "branch", run, base, memory ~= 0 and memory or nil, preset, 0)[1]
-            return run, branch.id, append(branch.id, { { kind = "user", text = question } })[1]
-        end)
-    end
-
-    function store:child(run, base, memory, preset, question)
-        return transaction(function()
-            local branch = rows(db, statements, "branch", run, base, memory ~= 0 and memory or nil, preset, 1)[1]
-            return branch.id, append(branch.id, { { kind = "user", text = question } })[1]
-        end)
-    end
-
-    function store:finish(branch, result)
-        assert(rows(db, statements, "finish", result, branch, result, branch)[1], "invalid terminal response")
-    end
-
-    function store:append(branch, events)
-        return transaction(function()
-            return append(branch, events)
-        end)
-    end
-
-    function store:charge(run, tokens)
-        assert(math.type(tokens) == "integer" and tokens >= 0, "invalid model usage")
-        assert(rows(db, statements, "charge", tokens, run)[1], "run is unavailable")
-    end
-
-    function store:caller(actor, event)
-        return assert(rows(db, statements, "caller", event, actor)[1], "caller is unavailable")
-    end
-
-    function store:quota(run)
-        local row = assert(rows(db, statements, "quota", run)[1], "run is unavailable")
-        return row.remaining, row.used
-    end
-
-    function store:destroy(actor, caller_branch, branch)
-        assert(rows(db, statements, "destroy", caller_branch, branch, actor)[1], "branch is unavailable")
-    end
-
-    function store:before(actor, memory, branch, limit)
-        if memory == 0 then
-            return {}
-        end
-        return rows(db, statements, "before", branch, memory, actor, memory, limit)
-    end
-
-    function store:lexemes(actor, memory, branch, term, grams, limit)
-        local found = rows(db, statements, "lexeme_exact", actor, term)
-        local hits = found[1] and self:frequency(actor, memory, branch, found[1].id) or 0
-        if hits > 0 or grams == "" or memory == 0 then
-            return found, hits
-        end
-        for _, row in ipairs(rows(db, statements, "lexeme_near", branch, memory, grams, actor, actor, memory, limit)) do
-            if row.term ~= term then
-                found[#found + 1] = row
+            local range = value.memory_range
+            if range.start == nil and range["end"] == nil then
+                local first = rows(
+                    RECORD .. "WHERE r.actor=? AND e.id<=? AND " .. MEMORY .. "ORDER BY e.id LIMIT 1",
+                    config.actor,
+                    base or 0
+                )[1]
+                range = { start = first and first.id or 0, ["end"] = base or 0 }
             end
+            assert(
+                range.start ~= nil
+                    and range["end"] ~= nil
+                    and range.start <= range["end"]
+                    and (range.start == 0) == (range["end"] == 0),
+                "invalid memory_range"
+            )
+            for _, id in ipairs({ range.start, range["end"] }) do
+                if id ~= 0 then
+                    self:node(id)
+                end
+            end
+            local call = {
+                run = run,
+                persist = value.persist,
+                preset_name = value.preset or config.preset,
+                parent = base,
+                memory_range = range,
+                text = value.text,
+                events = {},
+                root = not caller,
+            }
+            if call.persist then
+                call.branch = rows(
+                    [[
+INSERT INTO branches(run,caller,base,memory_start,memory_end,preset) VALUES(?,?,?,?,?,?) RETURNING id
+]],
+                    run,
+                    caller and caller.call,
+                    base,
+                    range.start ~= 0 and range.start or nil,
+                    range["end"] ~= 0 and range["end"] or nil,
+                    call.preset_name
+                )[1].id
+            else
+                call.branch = -(caller and caller.call * 2 + 1 or run * 2)
+            end
+            local content = value.text
+            if value.images then
+                content = { { type = "text", text = value.text } }
+                for _, image in ipairs(value.images) do
+                    content[#content + 1] =
+                        { type = "image_url", image_url = { url = "data:" .. image.type .. ";base64," .. image.data } }
+                end
+            end
+            local user = append(
+                call,
+                { { kind = "user", text = value.text, data = { message = { role = "user", content = content } } } }
+            )[1]
+            call.id, call.events[1] = user.id, user
+            return call
+        end)
+    end
+
+    function store:caller(caller)
+        assert(
+            rows(
+                RECORD .. "WHERE r.actor=? AND e.id=? AND e.run=? AND e.kind IN ('call','quota_charge')",
+                config.actor,
+                caller.call,
+                caller.run
+            )[1],
+            "caller is unavailable"
+        )
+        assert(self:run(caller.run).state == "unfinished", "run is terminal")
+    end
+
+    function store:context(range)
+        return rows(
+            [[
+SELECT json_extract(e.data,'$.chronological') data,b.memory_end last FROM events e
+JOIN branches b ON b.id=e.branch JOIN runs r ON r.id=e.run
+WHERE r.actor=? AND e.kind='context' AND b.caller IS NULL
+AND coalesce(b.memory_start,0)=? AND coalesce(b.memory_end,0)<=? ORDER BY e.id DESC LIMIT 1
+]],
+            config.actor,
+            range.start,
+            range["end"]
+        )[1]
+    end
+
+    function store:pending()
+        return rows(
+            [[
+SELECT r.id FROM runs r WHERE r.actor=? AND EXISTS(SELECT 1 FROM branches b WHERE b.run=r.id)
+AND NOT EXISTS(SELECT 1 FROM events e LEFT JOIN branches b ON b.id=e.branch
+ WHERE e.run=r.id AND (e.kind='abort' OR e.kind='completed' AND b.id IS NOT NULL AND b.caller IS NULL)) ORDER BY r.id
+]],
+            config.actor
+        )
+    end
+
+    function store:resume(run)
+        local saved = assert(self:run(run, true), "run is unavailable")
+        local calls = rows(
+            [[
+SELECT b.run,b.id branch,b.caller,b.base parent,b.memory_start,b.memory_end,b.preset preset_name,u.id,u.text
+FROM branches b JOIN events u ON u.branch=b.id AND u.kind='user' WHERE b.run=?
+AND NOT EXISTS(SELECT 1 FROM events e WHERE e.branch=b.id
+ AND (e.kind='completed' OR e.kind='error' AND b.caller IS NOT NULL)) ORDER BY b.id DESC
+]],
+            run
+        )
+        for _, call in ipairs(calls) do
+            call.persist, call.root = true, call.caller == nil
+            call.memory_range = { start = call.memory_start or 0, ["end"] = call.memory_end or 0 }
+            call.events = rows("SELECT * FROM events WHERE branch=? ORDER BY id", call.branch)
         end
-        return found, hits
+        return saved.config, calls
     end
 
-    function store:tokens(event, limit)
-        return rows(db, statements, "tokens", event, limit)
-    end
-
-    function store:frequency(actor, memory, branch, lexeme)
-        if memory == 0 then
-            return 0
+    function store:recover(call)
+        local notices = {}
+        for _, event in
+            ipairs(rows(
+                [[
+SELECT c.id,json_extract(m.data,'$.message.tool_calls['||(json_extract(c.data,'$.index')-1)||'].id') tool
+FROM events c JOIN events m ON m.id=json_extract(c.data,'$.message') WHERE c.branch=? AND c.kind='call'
+AND NOT EXISTS(SELECT 1 FROM events e WHERE e.call=c.id AND e.kind IN ('result','ambiguity')) ORDER BY c.id
+]],
+                call.branch
+            ))
+        do
+            local text = "AMBIGUOUS / UNTRUSTED: call #"
+                .. event.id
+                .. " has no committed result. Effects may have happened. Do not replay its code; inspect or reconcile first."
+            for _, child in
+                ipairs(rows(
+                    [[
+SELECT b.id,substr(e.text,1,?) text FROM branches b JOIN events e ON e.branch=b.id
+WHERE b.caller=? AND e.kind IN ('completed','error') ORDER BY b.id
+]],
+                    config.run.tool_result_tokens,
+                    event.id
+                ))
+            do
+                text = text
+                    .. "\nCommitted subcall #"
+                    .. child.id
+                    .. " (does not resolve the enclosing call):\n"
+                    .. child.text
+            end
+            notices[#notices + 1] = {
+                kind = "ambiguity",
+                call = event.id,
+                text = text,
+                data = { message = { role = "tool", tool_call_id = event.tool, content = text }, trusted = false },
+            }
         end
-        return rows(db, statements, "frequency", branch, memory, lexeme, actor, memory, 32)[1].hits
+        if #notices > 0 then
+            self:append(call, notices)
+        end
     end
 
-    function store:search(actor, memory, branch, terms, limit)
-        if #terms == 0 or memory == 0 then
+    function store:events(run, after)
+        return rows(RECORD .. "WHERE r.actor=? AND e.run=? AND e.id>? ORDER BY e.id", config.actor, run, after or 0)
+    end
+
+    function store:abort(reference, reason)
+        return transaction(function()
+            local run = self:run(reference)
+            if not run and type(reference) == "string" then
+                local id = rows(
+                    "INSERT INTO runs(request,actor,config) VALUES(?,?,?) RETURNING id",
+                    reference,
+                    config.actor,
+                    encode_json({ run = { tool_quota = config.run.tool_quota } }, null)
+                )[1].id
+                run = self:run(id)
+            end
+            assert(run, "run is unavailable")
+            if run.state == "completed" then
+                return { run = run.id, state = "completed" }
+            end
+            if run.state == "unfinished" then
+                append({ run = run.id, persist = true }, {
+                    {
+                        kind = "abort",
+                        text = "Run aborted: " .. reason .. ". Unresolved effects are unknown.",
+                        data = { reason = reason },
+                    },
+                })
+            end
+            return { run = run.id, state = "aborted" }
+        end)
+    end
+
+    function store:result(run)
+        local current = assert(self:run(run), "run is unavailable")
+        assert(current.state == "completed", "run is not completed")
+        local result = rows(
+            [[
+SELECT final.id event,final.text,final.created_at,b.id branch,b.base parent,b.memory_start,b.memory_end,u.id start
+FROM events final JOIN branches b ON b.id=final.branch JOIN events u ON u.branch=b.id AND u.kind='user'
+WHERE final.run=? AND final.kind='completed' AND b.caller IS NULL
+]],
+            run
+        )[1]
+        result.run, result.parent, result.tool_usage = run, result.parent or 0, current.used
+        result.memory_range = { start = result.memory_start or 0, ["end"] = result.memory_end or 0 }
+        result.memory_start, result.memory_end = nil, nil
+        return result
+    end
+
+    function store:search(range, terms, limit, covered)
+        if #terms == 0 or range["end"] == 0 then
             return {}
         end
         local literals = {}
         for index, term in ipairs(terms) do
             literals[index] = '"' .. term:gsub('"', '""') .. '"'
         end
-        return rows(db, statements, "search", branch, memory, table.concat(literals, " OR "), actor, memory, limit)
+        return rows([[
+SELECT e.id,e.call,e.kind,e.created_at,snippet(event_fts,0,'','',' … ',64) text
+FROM event_fts JOIN events e ON e.id=event_fts.rowid JOIN runs r ON r.id=e.run
+WHERE event_fts MATCH ? AND ]] .. SCOPE .. [[AND NOT EXISTS(
+ SELECT 1 FROM json_each(?) bounds WHERE e.id BETWEEN json_extract(bounds.value,'$.start') AND json_extract(bounds.value,'$.end')
+) ORDER BY bm25(event_fts),e.id LIMIT ?
+]], table.concat(literals, " OR "), config.actor, range.start, range["end"], encode_json(covered, null), limit)
+    end
+
+    function store:lexemes(range, grams, limit)
+        local exact = {}
+        for _, row in
+            ipairs(rows(
+                [[
+SELECT DISTINCT l.term FROM temp.event_positions input JOIN lexemes l ON l.term=input.term
+WHERE input.offset<? AND l.actor=? AND EXISTS(
+ SELECT 1 FROM event_lexemes link WHERE link.lexeme=l.id AND link.event BETWEEN ? AND ?
+)
+]],
+                limit,
+                config.actor,
+                range.start,
+                range["end"]
+            ))
+        do
+            exact[row.term] = true
+        end
+        local near = {}
+        if grams ~= "" then
+            near = rows(
+                [[
+SELECT l.term FROM lexeme_grams JOIN lexemes l ON l.id=lexeme_grams.rowid
+WHERE lexeme_grams MATCH ? AND l.actor=? AND EXISTS(
+ SELECT 1 FROM event_lexemes link WHERE link.lexeme=l.id AND link.event BETWEEN ? AND ?
+) ORDER BY bm25(lexeme_grams),l.id LIMIT ?
+]],
+                grams,
+                config.actor,
+                range.start,
+                range["end"],
+                limit
+            )
+        end
+        return exact, near
+    end
+
+    function store:nodes(range)
+        return rows([[
+WITH memory_range AS (SELECT ? actor,? first,? last), roots AS (
+ SELECT e.*,json_extract(e.data,'$.memory_range.start') first,json_extract(e.data,'$.memory_range.end') last
+ FROM events e JOIN runs r ON r.id=e.run CROSS JOIN memory_range m
+ WHERE r.actor=m.actor AND e.kind='summary'
+ AND json_extract(e.data,'$.memory_range.start')>=m.first AND json_extract(e.data,'$.memory_range.end')<=m.last
+ AND NOT EXISTS(
+  SELECT 1 FROM summary_children link JOIN events parent ON parent.id=link.parent
+  WHERE link.child=e.id AND json_extract(parent.data,'$.memory_range.start')>=m.first
+  AND json_extract(parent.data,'$.memory_range.end')<=m.last
+ )
+)
+SELECT id,run,branch,call,kind,text,data,created_at,first,last,1 boundary FROM roots UNION ALL
+SELECT e.id,e.run,e.branch,e.call,e.kind,e.text,'{}',e.created_at,e.id,e.id,
+ e.kind IN ('completed','abort','error','ambiguity','result') boundary
+FROM events e JOIN runs r ON r.id=e.run CROSS JOIN memory_range m
+WHERE r.actor=m.actor AND e.id BETWEEN m.first AND m.last AND ]] .. MEMORY .. [[
+AND NOT EXISTS(SELECT 1 FROM roots s WHERE e.id BETWEEN s.first AND s.last) ORDER BY first
+]], config.actor, range.start, range["end"])
+    end
+
+    function store:summary(run, range, children, text)
+        return transaction(function()
+            local existing = rows(RECORD .. [[WHERE r.actor=? AND e.kind='summary'
+AND json_extract(e.data,'$.memory_range.start')=? AND json_extract(e.data,'$.memory_range.end')=? LIMIT 1
+]], config.actor, range.start, range["end"])[1]
+            if existing then
+                return existing
+            end
+            local height = 0
+            for _, id in ipairs(children) do
+                local child = self:node(id)
+                height = math.max(height, child.kind == "summary" and child.data.height or 0)
+            end
+            assert(self:run(run), "run is unavailable")
+            local summary = append({ run = run, persist = true }, {
+                {
+                    kind = "summary",
+                    text = text,
+                    data = { memory_range = range, children = children, height = height + 1 },
+                },
+            })[1]
+            for _, id in ipairs(children) do
+                rows("INSERT INTO summary_children(child,parent) VALUES(?,?)", id, summary.id)
+            end
+            return summary
+        end)
     end
 
     return setmetatable(store, { __close = store.close })

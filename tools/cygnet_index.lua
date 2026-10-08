@@ -1,7 +1,12 @@
 local sqlite = require("lsqlite3complete")
 
-local source, output, source_identity = ...
-assert(type(source) == "string" and source ~= "", "usage: lua tools/cygnet_index.lua SOURCE OUTPUT SOURCE_IDENTITY")
+local source, stopwords, output, source_identity = ...
+assert(
+    type(source) == "string" and source ~= "",
+    "usage: lua tools/cygnet_index.lua SOURCE STOPWORDS OUTPUT SOURCE_IDENTITY"
+)
+local stop_file <close> = assert(io.open(stopwords, "rb"), "stop-word source does not exist")
+local words = require("lunajson.decoder")()(stop_file:read("a"))
 assert(type(output) == "string" and output ~= "", "output path is required")
 assert(type(source_identity) == "string" and source_identity ~= "", "source identity is required")
 local source_file = assert(io.open(source, "rb"), "Cygnet source does not exist")
@@ -63,6 +68,7 @@ exec("PRAGMA journal_mode=OFF; PRAGMA synchronous=OFF; PRAGMA temp_store=MEMORY;
 exec("ATTACH DATABASE " .. quote(source) .. " AS cygnet")
 exec([[
 CREATE TABLE metadata(key TEXT PRIMARY KEY,value TEXT NOT NULL) STRICT;
+CREATE TABLE stop_words(language TEXT NOT NULL,term TEXT NOT NULL,PRIMARY KEY(language,term)) WITHOUT ROWID;
 CREATE TABLE concept_edges(source INTEGER NOT NULL,target INTEGER NOT NULL,PRIMARY KEY(source,target)) WITHOUT ROWID;
 ]])
 local relation_literals = {}
@@ -103,8 +109,19 @@ JOIN cygnet.synsets concept ON concept.rowid=s.synset_rowid
 WHERE e.pos IN (%s) AND concept.pos IN (%s) AND f.normalized_form<>'';
 CREATE INDEX form_concepts_by_concept ON form_concepts(concept,language,form);
 ]]):format(CONTENT_POS, CONTENT_POS))
+local insert_stop = assert(db:prepare("INSERT OR IGNORE INTO stop_words(language,term) VALUES(?,?)"))
+for language, terms in pairs(words) do
+    for _, term in ipairs(terms) do
+        assert(insert_stop:bind_values(language, term) == sqlite.OK, db:errmsg())
+        assert(insert_stop:step() == sqlite.DONE, db:errmsg())
+        assert(insert_stop:reset() == sqlite.OK, db:errmsg())
+    end
+end
+assert(insert_stop:finalize() == sqlite.OK, db:errmsg())
 local metadata = {
-    format_version = "4",
+    format_version = "5",
+    stopwords_revision = "6e8e9a2d1c019ad2a885bcbe157628dea624dfb6",
+    stopwords_sha256 = "337af4d57d5fa1fecc2ffcae532e9b9f05db51c74ff18d3dde9572185a3cdae4",
     source_identity = source_identity,
     concepts = tostring(count),
     maximum_form_tokens = tostring(maximum_form_tokens),
@@ -116,7 +133,7 @@ for key, value in pairs(metadata) do
     assert(statement:reset() == sqlite.OK, db:errmsg())
 end
 assert(statement:finalize() == sqlite.OK, db:errmsg())
-exec("PRAGMA application_id=1514751817; PRAGMA user_version=4; VACUUM")
+exec("PRAGMA application_id=1514751817; PRAGMA user_version=5; VACUUM")
 assert(db:close() == sqlite.OK, "closing Cygnet index failed")
 assert(os.rename(temporary, output))
 print(string.format("indexed %d concepts", count))
