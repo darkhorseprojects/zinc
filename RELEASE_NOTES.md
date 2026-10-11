@@ -1,51 +1,23 @@
-# Unreleased — current Janet stack
+# Zinc 0.4.0
 
-- PA protocol 6; immutable composition and one durable jobs path for recursion, capabilities and Imports.
-- SQLite format 9, persistent working/accepted worlds, fenced intent/outcomes, cancellation tombstones and bounded slot release.
-- Original-source summary checkpoints, scoped FTS/trigram/Cygnet retrieval, UTF-8 handles and validated Git activation/rollback.
-- Native JSON/SSE parity, conservative unreported usage, hidden reasoning policy and final-round explanation without tools.
-- Connector configuration 3 example, isolated regression/crash/security fixtures and reproducible fixture benchmarks.
-- Structural size gate: agent 576/724 lines, store 468/586. Preserve old databases and select a fresh format-9 path.
+## Worlds and interaction
 
-The notes below describe the preceding development snapshot, not the current protocol.
+Worlds are ordinary source/data directories evaluated in one resident Janet environment. Users and generated code share definitions and normal redefinitions. `zinc repl CLIENT.json` accepts Janet and `/ask`; `zinc ask CLIENT.json QUESTION` submits inference. `zinc serve SERVER.json` starts the invoker-supervised evaluator.
 
-# Zinc v0.3.0
+REPL-only mutations are ephemeral. Durable changes are file edits, versioned with normal Git. Restart loads the selected source file; there is no image reconstruction, accepted head, publication, watcher or activation operation.
 
-Zinc now runs on Janet and Portable Agents protocol 4. This is a fresh application, not a compatibility release.
+## Authority
 
-## Requirements and installation
+The invoker supplies mounts, native sandbox restrictions, services and resource limits. A fresh trusted relay mediates every evaluation. Private task tokens, provider configuration and PA grant descriptors stay outside mutable world code. Redefining a binding does not grant authority.
 
-Use Janet 1.42.1, Git, SQLite with FTS5/trigram support, libcurl and the revision-pinned dependencies in `project.janet`. Supply the dependency tree as PA's named `library` dependency. Invoke `install` to validate and publish source before making conversational calls.
+The optional Git service has separately grantable `status`, `diff`, `add` and `commit` members. Requests select repository-relative paths; commit uses `--only`. Its launcher must expose only the selected repository and immutable runtime libraries. Push, hooks and arbitrary command arguments are not exposed.
 
-Use a fresh application database and a coordinated Git world namespace. Old Lua SQLite stores and nested configuration are unsupported; there are no migrations or compatibility adapters. Preserve old state offline if needed. Do not delete a live database while retaining its published refs and expect a fresh installation.
+## Configuration and storage
 
-## Interface
+`zinc.md` contains the concise prompt, public schema, defaults, validation and composition. Private invoker configuration requires actor, absolute SQLite store path and world identity. Provider/model grants and PA Imports replace world presets and activation permissions.
 
-- `call` remains conversational inference; it is not an eval or maintenance endpoint.
-- `install`, `invoke`, `resume`, `worker`, `events`, `acknowledge`, `abort`, `pending`, `models` and `describe` are separate entries.
-- Configuration is flat private JSON with required actor/store/repo/state identity and absolute application paths.
-- Tool programs are Janet. Learned capability descriptors live in revision-pinned `src/functions.janet`.
-- Lua sources, Lux configuration, old installers, Lua tooling and old CI were removed.
-- Model presets and asset pins remain. The old `ac.yaml` was not changed and is not configured for this interface; Connector integration is outside this update.
+SQLite format **10** stores immutable history, task admissions/outcomes, leases, summaries and accounting. Preserve older databases and select a fresh path; no migration is supplied. World source/data and private history have separate backup lifecycles.
 
-## Durability
+Safe work retains checkpoint recovery and fencing. Janet evaluation and arbitrary Imports are irreversible; interrupted effects require inspection, not automatic replay. No heap continuation or exactly-once remote-effect guarantee is provided.
 
-One application SQLite database stores immutable originals, images, model stream bytes, task attempts/outcomes, summary provenance, budgets and publication receipts. Model, tool, recursive and background work use one persisted task mechanism with leases and completion fencing.
-
-Safe/keyed work can resume from committed checkpoints. Irreversible effects are not automatically replayed. Source-defined reconciliation and validated publication receipts can establish outcomes. Cancellation does not roll back effects or promise immediate termination.
-
-Git worlds use source-defined validation and compare-and-swap refs. Prepared publications are recoverable; unvalidated candidates cannot be promoted. Existing runs execute their admitted revision while new calls use accepted source. The default validator checks loadability and required exports, not behavioral correctness.
-
-## Memory and models
-
-Chronological memory uses a summary DAG with strict-shrinking compaction and lossless access to retained originals. Semantic retrieval preserves the original query, uses Cygnet graph expansion and FTS/spelling candidates, and reranks scoped excerpts. A compatible format-4 index must be provisioned separately; raw upstream Cygnet data is incompatible.
-
-Context sizing uses UTF-8 quarter-byte reference units. Model budgets reserve estimated units across shared work and retain provider-reported usage separately. They are not exact tokenizer or billing guarantees. Unknown usage remains conservatively accounted.
-
-## Validation and limits
-
-Real PA workflows exercised installation, independent workers, revision-pinned calls, learned functions, map/reduce, audit replay, cursors, source reconciliation after a durable effect, invalid-source rejection and restore. SQLite integrity/foreign-key checks passed. No tests were added.
-
-No model endpoint was available. Live inference, provider/SSE behavior, image handling, recursive inference and inference-quality/performance benchmarks remain unvalidated.
-
-Arbitrary Janet is not sandboxed, including under the `empty` preset. The invoker remains responsible for OS confinement, identity, credentials, hard resource limits and process lifetime. Backups must retain the SQLite database/WAL and Git refs/objects together.
+Connector version-3 configuration includes an external resident socket and optional, filesystem-confined Git policy. Provision worlds and supervise evaluators before enabling routes. Deployment must keep credential-bearing runtime code immutable and outside the writable world.

@@ -4,21 +4,15 @@
 (import spork/utf8 :as utf8)
 
 (def schema `
-CREATE TABLE actors(id TEXT PRIMARY KEY) STRICT;
-CREATE TABLE worlds(
- actor TEXT NOT NULL REFERENCES actors(id),name TEXT NOT NULL,definition TEXT NOT NULL,
- parent TEXT,base INTEGER REFERENCES events(id),head INTEGER NOT NULL REFERENCES events(id),
- PRIMARY KEY(actor,name)
-) STRICT;
 CREATE TABLE runs(
- id INTEGER PRIMARY KEY AUTOINCREMENT CHECK(id<=9007199254740991),actor TEXT NOT NULL REFERENCES actors(id),
- request TEXT,input TEXT NOT NULL CHECK(json_valid(input)),world TEXT NOT NULL,revision TEXT NOT NULL,
+ id INTEGER PRIMARY KEY AUTOINCREMENT CHECK(id<=9007199254740991),actor TEXT NOT NULL,
+ request TEXT,input TEXT NOT NULL CHECK(json_valid(input)),world TEXT NOT NULL,
  budget INTEGER NOT NULL CHECK(budget>=0),config TEXT NOT NULL CHECK(json_valid(config)),UNIQUE(actor,request)
 ) STRICT;
 CREATE INDEX runs_actor ON runs(actor,id);
 CREATE TABLE branches(
  id INTEGER PRIMARY KEY AUTOINCREMENT,run INTEGER NOT NULL REFERENCES runs(id),parent INTEGER REFERENCES branches(id),
- caller INTEGER REFERENCES events(id),entry INTEGER REFERENCES events(id),image INTEGER REFERENCES events(id),
+ caller INTEGER REFERENCES events(id),entry INTEGER REFERENCES events(id),
  first INTEGER NOT NULL,last INTEGER NOT NULL,history_last INTEGER NOT NULL,
  world TEXT NOT NULL,temporary INTEGER NOT NULL CHECK(temporary IN (0,1)),retired INTEGER NOT NULL DEFAULT 0,
  CHECK(first>=0 AND last>=first AND ((first=0 AND last=0) OR first>0))
@@ -27,21 +21,21 @@ CREATE UNIQUE INDEX root_run ON branches(run) WHERE parent IS NULL;
 CREATE UNIQUE INDEX child_admission ON branches(caller) WHERE caller IS NOT NULL;
 CREATE INDEX branch_parent ON branches(parent,id);
 CREATE TABLE tasks(
- id INTEGER PRIMARY KEY AUTOINCREMENT,actor TEXT NOT NULL REFERENCES actors(id),run INTEGER REFERENCES runs(id),
- branch INTEGER REFERENCES branches(id),parent INTEGER REFERENCES tasks(id),world TEXT NOT NULL,revision TEXT NOT NULL,
+ id INTEGER PRIMARY KEY AUTOINCREMENT,actor TEXT NOT NULL,run INTEGER REFERENCES runs(id),
+ branch INTEGER REFERENCES branches(id),parent INTEGER REFERENCES tasks(id),world TEXT NOT NULL,
  kind TEXT NOT NULL,input TEXT NOT NULL CHECK(json_valid(input)),scope TEXT NOT NULL CHECK(json_valid(scope)),
- policy TEXT NOT NULL CHECK(policy IN ('safe','keyed','reconcile','irreversible')),effect_key TEXT,retries INTEGER NOT NULL,
+ policy TEXT NOT NULL CHECK(policy IN ('safe','irreversible')),retries INTEGER NOT NULL,
  state TEXT NOT NULL DEFAULT 'queued' CHECK(state IN ('queued','running','waiting','done','failed','cancelled','uncertain')),
  checkpoint TEXT NOT NULL DEFAULT '{}' CHECK(json_valid(checkpoint)),result TEXT CHECK(json_valid(result)),
  attempt INTEGER NOT NULL DEFAULT 0,admission INTEGER REFERENCES events(id),outcome INTEGER REFERENCES events(id),
- key TEXT,UNIQUE(actor,key),CHECK(policy!='keyed' OR effect_key IS NOT NULL)
+ key TEXT,UNIQUE(actor,key)
 ) STRICT;
 CREATE INDEX task_pending ON tasks(state,actor,id);
 CREATE UNIQUE INDEX active_driver ON tasks(branch) WHERE parent IS NULL AND state IN ('queued','running','waiting');
 CREATE INDEX task_parent ON tasks(parent,id);
 CREATE TABLE leases(task INTEGER PRIMARY KEY REFERENCES tasks(id),owner TEXT NOT NULL,generation INTEGER NOT NULL,expires REAL NOT NULL) STRICT;
 CREATE TABLE events(
- id INTEGER PRIMARY KEY AUTOINCREMENT CHECK(id<=9007199254740991),actor TEXT NOT NULL REFERENCES actors(id),
+ id INTEGER PRIMARY KEY AUTOINCREMENT CHECK(id<=9007199254740991),actor TEXT NOT NULL,
  run INTEGER REFERENCES runs(id),branch INTEGER REFERENCES branches(id),parent INTEGER REFERENCES events(id),
  task INTEGER REFERENCES tasks(id),kind TEXT NOT NULL,text TEXT NOT NULL DEFAULT '',data TEXT NOT NULL CHECK(json_valid(data)),
  units INTEGER NOT NULL CHECK(units>=0),created REAL NOT NULL DEFAULT(unixepoch('subsec'))
@@ -83,18 +77,17 @@ CREATE UNIQUE INDEX call_position ON events(task,json_extract(data,'$.position')
 CREATE TRIGGER summary_edge_immutable_update BEFORE UPDATE ON summary_children BEGIN SELECT raise(ABORT,'immutable summary edge'); END;
 CREATE TRIGGER summary_edge_immutable_delete BEFORE DELETE ON summary_children BEGIN SELECT raise(ABORT,'immutable summary edge'); END;
 CREATE TABLE contexts(branch INTEGER NOT NULL REFERENCES branches(id),through INTEGER NOT NULL,projection TEXT NOT NULL CHECK(json_valid(projection)),PRIMARY KEY(branch,through)) WITHOUT ROWID;
-CREATE TABLE cursors(actor TEXT NOT NULL REFERENCES actors(id),consumer TEXT NOT NULL,sequence INTEGER NOT NULL REFERENCES events(id),PRIMARY KEY(actor,consumer)) WITHOUT ROWID;
 CREATE VIRTUAL TABLE event_fts USING fts5(text,content='events',content_rowid='id',tokenize='unicode61 remove_diacritics 0');
 CREATE TRIGGER event_index AFTER INSERT ON events WHEN new.kind IN ('user','response','tools','completed','tool-result','artifact') BEGIN
  INSERT INTO event_fts(rowid,text) VALUES(new.id,new.text);
 END;
 CREATE VIRTUAL TABLE event_words USING fts5vocab(event_fts,'instance');
-CREATE TABLE lexemes(id INTEGER PRIMARY KEY,actor TEXT NOT NULL REFERENCES actors(id),term TEXT NOT NULL,UNIQUE(actor,term)) STRICT;
+CREATE TABLE lexemes(id INTEGER PRIMARY KEY,actor TEXT NOT NULL,term TEXT NOT NULL,UNIQUE(actor,term)) STRICT;
 CREATE TABLE event_lexemes(event INTEGER NOT NULL REFERENCES events(id),lexeme INTEGER NOT NULL REFERENCES lexemes(id),PRIMARY KEY(event,lexeme)) WITHOUT ROWID;
 CREATE INDEX lexeme_events ON event_lexemes(lexeme,event);
 CREATE VIRTUAL TABLE lexeme_grams USING fts5(term,content='lexemes',content_rowid='id',tokenize='trigram',detail='none');
 CREATE TRIGGER lexeme_index AFTER INSERT ON lexemes BEGIN INSERT INTO lexeme_grams(rowid,term) VALUES(new.id,new.term); END;
-PRAGMA user_version=9;
+PRAGMA user_version=10;
 `)
 
 (defn units [bytes] (math/ceil (/ (length bytes) 4)))
@@ -119,9 +112,8 @@ PRAGMA user_version=9;
       (def s {:db db :actor (config :actor) :config config})
       (transact s
                 (def version (((query s "PRAGMA user_version") 0) "user_version"))
-                (assert (index-of version [0 9]) "unsupported Zinc database; preserve it and select a fresh database")
-                (when (= version 0) (query s schema))
-                (query s "INSERT INTO actors(id) VALUES(?) ON CONFLICT DO NOTHING" [(s :actor)]))
+                (assert (index-of version [0 10]) "unsupported Zinc database; preserve it and select a fresh database")
+                (when (= version 0) (query s schema)))
       s)
     ([err] (sql/close db) (error err))))
 
@@ -137,13 +129,13 @@ PRAGMA user_version=9;
   row)
 
 (defn branch [s id]
-  (def rows (query s "SELECT b.*,r.actor,r.revision,r.budget,r.config FROM branches b JOIN runs r ON r.id=b.run WHERE b.id=? AND r.actor=? AND b.retired=0" [id (s :actor)]))
+  (def rows (query s "SELECT b.*,r.actor,r.budget,r.config FROM branches b JOIN runs r ON r.id=b.run WHERE b.id=? AND r.actor=? AND b.retired=0" [id (s :actor)]))
   (assert (> (length rows) 0) "branch unavailable") (rows 0))
 
 (defn visible [s view &opt order ceiling]
   (query s (string `WITH RECURSIVE ancestry(id,through) AS (
     SELECT ?,9007199254740991 UNION ALL SELECT b.parent,min(a.through,b.last) FROM branches b JOIN ancestry a ON b.id=a.id WHERE b.parent IS NOT NULL
-  ) SELECT ` (get view :columns "e.*") `,b.world,r.revision FROM `
+  ) SELECT ` (get view :columns "e.*") `,b.world FROM `
                    (cond (view :lexical) "lexeme_grams JOIN lexemes l ON l.id=lexeme_grams.rowid JOIN event_lexemes w ON w.lexeme=l.id JOIN events e ON e.id=w.event"
                      (view :match) "event_fts JOIN events e ON e.id=event_fts.rowid" "events e")
                    ` LEFT JOIN branches b ON b.id=e.branch LEFT JOIN runs r ON r.id=e.run
@@ -166,7 +158,7 @@ PRAGMA user_version=9;
   (assert (and (<= (view :first) id (view :last)) (> (length rows) 0)) "event outside granted history")
   (rows 0))
 
-(defn start [s input config &opt caller image]
+(defn start [s input config &opt caller]
   (def input (json/decode (json/encode input) true true))
   (transact s
             (def admitted (table ;(kvs input)))
@@ -200,9 +192,8 @@ PRAGMA user_version=9;
                     (assert (not (get input :persist false)) "temporary calls cannot create durable descendants"))
                   (def attachment (first (query s "SELECT branch FROM events WHERE id=? AND actor=?" [(caller :event) (s :actor)])))
                   (assert (= (caller :branch) (attachment "branch")) "caller admission is outside its branch"))
-                (def world (or (input :world) (when caller (caller :world)) (config :world)))
-                (def revision (or (when caller (caller :revision)) (config :revision)))
-                (assert (index-of world (config :worlds)) "world is not granted")
+                (def world (config :world))
+                (when caller (assert (= world (caller :world)) "child changes world"))
                 (def automatic (first (query s `SELECT e.id FROM events e JOIN branches b ON b.id=e.branch JOIN runs r ON r.id=e.run
           WHERE e.actor=? AND b.world=? AND b.temporary=0 AND b.retired=0 AND e.kind='completed' ORDER BY e.id DESC LIMIT 1` [(s :actor) world])))
                 (def entry (get input :parent (if caller (caller :last) (if automatic (automatic "id") 0))))
@@ -218,18 +209,16 @@ PRAGMA user_version=9;
                 (when (> last 0) (event s allowed last) (event s allowed first-id))
                 (when caller (assert (or (= last 0) (and (<= (caller :first) first-id) (<= last (caller :last)))) "child history exceeds caller view"))
                 (def run (if caller (caller :run)
-                           (((query s "INSERT INTO runs(actor,request,input,world,revision,budget,config) VALUES(?,?,?,?,?,?,?) RETURNING id"
-                                    [(s :actor) (input :request) (string (json/encode admitted)) world revision (config :budget)
+                           (((query s "INSERT INTO runs(actor,request,input,world,budget,config) VALUES(?,?,?,?,?,?) RETURNING id"
+                                    [(s :actor) (input :request) (string (json/encode admitted)) world (config :budget)
                                      (string (json/encode (merge config {:providers (tabseq [[name provider] :in (pairs (config :providers))]
                                                                                       name {:url (provider :url) :identity (provider :identity)})})))]) 0) "id")))
                 (def id (((query s "INSERT INTO branches(run,parent,caller,entry,first,last,history_last,world,temporary) VALUES(?,?,?,?,?,?,?,?,?) RETURNING id"
                                  [run (when caller (caller :branch)) (when caller (caller :event)) (when (> entry 0) entry)
                                   first-id last (if caller (min last (caller :history-last)) last) world
                                   (if (get input :persist true) 0 1)]) 0) "id"))
-                (def scope {:run run :branch id :world world :revision revision :first first-id :last last :visibility (config :visibility)})
+                (def scope {:run run :branch id :world world :first first-id :last last :visibility (config :visibility)})
                 (def user (append s scope "user" (get input :text "") {:input admitted} (when (> entry 0) entry)))
-                (def snapshot (append s scope "world-image" "Working environment instantiated." image))
-                (query s "UPDATE branches SET image=? WHERE id=?" [(snapshot "id") id])
 
                 (eachp [position image] (get input :images [])
                   (def bytes (if (image :bytes) (image :bytes) (base64/decode (image :data))))
@@ -238,7 +227,7 @@ PRAGMA user_version=9;
 
 (defn view [s id]
   (def b (branch s id))
-  {:run (b "run") :branch id :world (b "world") :revision (b "revision") :image (b "image")
+  {:run (b "run") :branch id :world (b "world")
    :first (b "first") :last (b "last")
    :history-last (b "history_last") :visibility ((s :config) :visibility)})
 
@@ -281,7 +270,7 @@ PRAGMA user_version=9;
 
   (when parent
     (assert (and (= (view :run) (granted :run))
-                 (= (view :revision) (granted :revision))
+                 (= (view :world) (granted :world))
                  (>= (view :first) (granted :first))
                  (<= (view :history-last) (granted :history-last)))
             "child broadens execution scope")
@@ -291,10 +280,6 @@ PRAGMA user_version=9;
         (assert (index-of name (get granted key [])) "child broadens grants"))))
 
   (def policy (get options :policy "irreversible"))
-
-  (when (= policy "keyed")
-    (assert (and (string? (options :effect-key)) (> (length (options :effect-key)) 0))
-            "keyed work requires an actual idempotency key"))
 
   (transact s
             (when current (checkpoint s (current :checkpoint)))
@@ -322,12 +307,12 @@ PRAGMA user_version=9;
                           "shared tool quota exhausted"))
 
                 (def id (((query s
-                                 `INSERT INTO tasks(actor,run,branch,parent,world,revision,kind,input,scope,
-                             policy,effect_key,retries,key,checkpoint)
-           VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?) RETURNING id`
-                                 [(s :actor) (view :run) (view :branch) parent (view :world) (view :revision)
+                                 `INSERT INTO tasks(actor,run,branch,parent,world,kind,input,scope,
+                             policy,retries,key,checkpoint)
+           VALUES(?,?,?,?,?,?,?,?,?,?,?,?) RETURNING id`
+                                 [(s :actor) (view :run) (view :branch) parent (view :world)
                                   kind (string (json/encode saved)) (string (json/encode view)) policy
-                                  (options :effect-key) (get options :retries 1) (options :key)
+                                  (get options :retries 1) (options :key)
                                   (string (json/encode (get options :checkpoint {})))]) 0) "id"))
 
                 (def event (append s view "task-admission"
@@ -446,7 +431,7 @@ PRAGMA user_version=9;
        ORDER BY t.id`
                              [(s :actor) (os/clock)])
 
-              (def retry (and (index-of (row "policy") ["safe" "keyed"])
+              (def retry (and (= (row "policy") "safe")
                               (<= (row "attempt") (row "retries"))))
               (def state (if retry "queued" "uncertain"))
               (def outcome {:ok false :state state :attempt (row "attempt")

@@ -76,20 +76,6 @@
   (assert (or (nil? body) (<= (length body) (config :request-bytes)))
           "HTTP request byte ceiling")
 
-  (each [key value] (pairs headers)
-    (assert (peg/match ~(* (some (choice (range "az" "AZ" "09")
-                                         (set "!#$%&'*+-.^_`|~"))) -1)
-                       (string key))
-            "invalid HTTP header name")
-    (unless (nil? value)
-      (assert (and (string? value)
-                   (not (string/find "\r" value))
-                   (not (string/find "\n" value)))
-              "invalid HTTP header value"))
-    (assert (not (index-of (string/ascii-lower (string key))
-                           ["host" "content-length" "transfer-encoding"]))
-            "reserved HTTP header"))
-
   (def channel (ev/thread-chan (min 16777215 (+ 2 (config :response-bytes)))))
   (def cancel (ev/thread-chan 1))
   (ev/thread transfer [config url method body headers channel cancel] :n channel)
@@ -136,7 +122,7 @@
       {:status (response :status) :body (string bytes)}
       {:status (response :status) :data (base64/encode (string bytes))})))
 
-(def tool {:type "function" :function {:name "run_janet" :description "Run Janet in an independent, granted worker." :parameters
+(def tool {:type "function" :function {:name "run_janet" :description "Evaluate Janet in the current world." :parameters
                                        {:type "object" :additionalProperties false :required ["code"] :properties {:code {:type "string"}}}}})
 
 (defn units [messages]
@@ -173,8 +159,7 @@
       (assert (and (dictionary? record) (string? (record :id)) (> (length (record :id)) 0)
                    (not (identities (record :id)))) "invalid or duplicate model ID")
       (put identities (record :id) true)
-      (when (or (= 0 (length (config :allowed-models)))
-                (= reference (config (keyword role)))
+      (when (or (= reference (config (keyword role)))
                 (index-of reference (config :allowed-models)))
         (array/push models {:ref reference :name (get record :name (record :id))}))))
   (sorted models |(< ($0 :ref) ($1 :ref))))

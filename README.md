@@ -1,100 +1,165 @@
 # Zinc
 
-Zinc is a Janet inference engine with scoped recursive execution, persistent SQLite worlds, and chronological memory. Portable Agents (PA) runs programs and carries explicit Imports. Agent Connector owns Discord routing, credentials and delivery.
+Zinc is a Janet agent with a file-backed, resident REPL and chronological memory. You and the agent evaluate code in the same live environment. Files hold durable code and data; ordinary Git versions those files. SQLite holds history, work admissions, outcomes and model accounting—not world images.
 
-## Package
+Portable Agents (PA) transports bytes and explicitly delegated services. Agent Connector supplies Discord routing, credentials and delivery. The invoker owns filesystem access, native facilities, service grants and process lifetime.
 
-```text
-zinc.md
-src/
-  agent.janet
-  model.janet
-  store.janet
-  memory.janet
-  world.janet
-  worker.janet
-worlds/
-  empty.md
-  configured.md
-  unrestricted.md
-```
+## Install
 
-`zinc.md` composes the schema, document, worlds and public operations. Agent owns admissions and bounded dispatch; model owns providers and billing; store owns SQLite facts; memory owns retrieval and summaries; world owns definition/state composition and code activation. Worker is the isolation boundary for generated Janet.
-
-No Lua runtime, vector database, world Git repository, effect ledger, or continuation recovery is involved.
-
-## Installation
-
-Use Janet 1.42+, Jpm, Git, Python 3.11+, SQLite with FTS5/trigram, and the pinned dependencies in `project.janet`. On Linux the example worker launcher also needs bubblewrap. Clone `portable-agents`, `zinc`, and `agent-connector` as sibling directories under `/srv/agents`.
+Use Janet 1.42+, Jpm, Git, libcurl and SQLite with FTS5/trigram support. Resident worlds require Unix domain sockets. The confinement examples use Linux and bubblewrap.
 
 ```sh
-cd /srv/agents/portable-agents
-jpm install
 cd /srv/agents/zinc
 jpm deps
+jpm install
 ```
 
-Expose the generated `jpm_tree/lib` directory through PA's explicit `library` dependency. Commit the intended agent files before execution: workers run validated, pinned Git worktrees. Keep the checkout and dependency libraries read-only to generated code.
+The package installs `zinc` and the following runtime:
 
-Database **format 9** rejects older databases. Preserve those files and select a fresh database; there is no migration or compatibility mode. SQLite must use a local filesystem with reliable locking. WAL transactions are short and do not surround HTTP calls or worker validation.
-
-### Retrieval data
-
-`models.lock` pins the upstream Cygnet archive and source database hashes. That source database is not the runtime graph index. Decompress the pinned source, then generate a new index:
-
-```sh
-python3 tools/cygnet_index.py /path/to/upstream-cygnet.db data/cygnet.db
+```text
+zinc.md                 prompt, configuration schema/defaults/validation, composition
+src/agent.janet         inference and durable dispatch
+src/repl.janet          resident evaluator, request-scoped relay and CLI
+src/model.janet         providers and accounting
+src/memory.janet        retrieval and summaries
+src/store.janet         SQLite history and work
+src/git.janet           optional repository-scoped Git service
 ```
 
-The builder verifies the source hash and refuses an existing output. Format 4 contains 181,343 concepts, 454,427 edges and 2,513,705 forms. Provision the stopword artifact pinned in `models.lock` separately. Configure `cygnet` and `stopwords` with absolute paths.
+Keep this privileged runtime and its dependencies outside the writable world. A world may contain an editable copy of its entire agent, but that copy must never supply the controller or credential-bearing services.
 
-## Invocation
+Database **format 10** rejects older databases. Preserve them and choose a fresh absolute database path; there is no migration. Create the database's parent directory yourself. Use a local filesystem with reliable SQLite locking.
 
-PA passes opaque bytes; Zinc's public entries decode JSON. Call `describe` to obtain the actual schema and configurable parameters. User entries are `call`, `invoke`, `resume`, `pending`, `abort`, `events`, `acknowledge`, `models`, `merge-world`, `restore-world`, `reload`, and `supervise`. Durable work inspection/await is scoped through qualified capabilities.
+## Create a world
 
-A minimal `call` input is:
+Choose an ordinary directory and entry file:
+
+```text
+my-agent/
+├── .git/
+├── world.janet
+├── world.md
+└── notes.md
+```
+
+For example, `world.janet` can contain:
+
+```janet
+(def instructions (slurp "world.md"))
+(defn double [n] (* n 2))
+```
+
+Initialize and commit with normal Git. Git is not needed to start or evaluate the world. Nothing is published, accepted or activated through Zinc.
+
+Run one resident evaluator per logical world. Its JSON configuration contains PA framing limits and these service settings:
 
 ```json
-{"text":"Investigate this","parent":0,"request":"stable-request-key","memory_range":{"start":0,"end":0}}
+{
+  "limits": {"frameBytes":16777216,"depth":64,"inFlight":32,"handles":4096,"admissionSeconds":10},
+  "config": {
+    "file": "/world/world.janet",
+    "socket": "/srv/agents/run/zinc/local/world.sock",
+    "forbid": ["net","subprocess","ffi","modules","threads","env","asm","unmarshal","exit","locale","signal","chroot","sandbox"]
+  }
+}
 ```
 
-`parent` is an event attachment, not a code revision or world name. Zero starts a fresh conversation branch. Memory endpoints are inclusive; both zero disable inherited history. Nonzero endpoints must be ordered. Images use indexed `{mime,data}` records, with canonical Base64 data.
+`zinc serve SERVER.json` loads the entry once, then serves the live environment. Start it inside the invoker's chosen filesystem/process scope, with the world as its working directory. The `forbid` list invokes Janet's irreversible native `sandbox` before loading mutable source. It is not a filesystem jail. Do not forbid compilation or world file access if you want a usable persistent REPL.
 
-Configuration names the actor, repository/state/database paths, active and granted worlds, capabilities, providers, exact model IDs, quotas and bounds. Provider references have the form `llama:MODEL-ID` or `openrouter:MODEL-ID`. Zinc checks the provider's actual catalogue; aliases are not inferred. Thinking `none` suppresses reasoning observation while retaining provider replay data.
+The invoker must provide the socket directory, supervise the process, remove stale sockets after termination, and enforce CPU, memory, process and deadline limits. Socket permissions are `0600`; they do not isolate hostile programs sharing a host user.
 
-`ac.yaml` is a version-3 Connector example for `/srv/agents`. It grants a confined `worker` and trusted `ledger` with explicit member/delegation lists. Adapt paths, exact model IDs, world/capability grants, actor boundaries and resource limits before deployment. The example includes private tmpfs `/tmp` for native-library loading. Its broad read-only bubblewrap view is not a host confidentiality policy; narrow mounts, scrub credentials and impose CPU/memory/process limits yourself.
+## Participate directly
 
-## Execution and recovery
-
-Every recursive call, capability, Import and generated program uses the same durable job admission/outcome path. `self` spawns the same scoped instance. `self/world/put`, other qualified capabilities and named Imports admit children and return durable handles. Explicit `await` reads committed results. Children can only inherit or narrow authority; reconstruction cannot grant it.
-
-Slots are released while waiting and reacquired before work resumes, including recursion at `parallel=1`. Completion wakes accepted queued work in the same run. Generated workers own lease renewal and fenced completion receipts, so losing an observer or launcher need not lose accepted work.
-
-Stable keys deduplicate identical admissions and reject conflicting reuse. Immutable events and outcomes retain attempts and provenance. Safe jobs can be retried after lease expiry. Irreversible jobs become uncertain; a recorded original owner may commit a late known outcome unless superseded. Lost launch acknowledgments are ambiguity, not proof of non-execution. No arbitrary Janet VM continuation or exactly-once remote-effect guarantee is claimed.
-
-`abort` accepts exactly one run or request key. It writes an admission tombstone even before work arrives. Cancellation is cooperative and does not undo effects already performed. An invoker must enforce hard CPU/deadline containment.
-
-Reported provider usage is charged; missing usage keeps a conservative reservation rather than failing a successful response. Terminal agent results are immutable completion snapshots. Later maintenance charges remain in the run's usage ledger. The final permitted inference round has no tools and must explain the result.
-
-## Worlds, history and code
-
-Worlds contain ordered declarative definitions and state snapshots. Working images and accepted heads are SQLite facts. Empty/configured acceptance is user-triggered; agent acceptance elsewhere still requires invoker authority. Forks have independent identities and heads. Initializers cannot replay effects or start delayed work during reconstruction.
-
-Original text/data remains available through bounded handles. Search scopes FTS5, trigram spelling and Cygnet expansion to granted history before original-query reranking. Summaries consume bounded original-source slices in chronological order, checkpoint their progress and retain immutable ancestry; they do not summarize only previews. UTF-8 reads advance whole characters and reject offsets within characters.
-
-Git versions code and explicitly exported definitions, not evolving world state. `reload` requires `code-actions: [activate]`, materializes and validates a revision in a fresh worker, checks activation races, then appends a `code-accepted` receipt. Accepting an older valid revision is rollback. Conversations, world forks and code revisions are separate identities.
-
-## Validation and benchmarks
+The trusted client accepts a private PA invocation descriptor, not a world pathname:
 
 ```sh
-export JANET_PATH="$PWD/jpm_tree/lib"
-janet test/ledger.janet
-python3 test/integration.py
-python3 tools/benchmark.py 5
+zinc repl /srv/agents/private/local/client.json
+zinc ask /srv/agents/private/local/client.json 'Add clamp to world.janet'
 ```
 
-The integration harness needs the sibling PA checkout and bubblewrap. It creates fresh, Git-pinned packages/databases under `dist/regression-*`, runs a local JSON/SSE provider fixture, and tests isolated tools, recursion, accounting, deduplication, final-round exit, cancellation, world acceptance/fork/restore, original-source compaction and observer SIGKILL survival. Ledger probes cover scoped lexical retrieval, UTF-8 originals, summary provenance, slot release, fencing, ambiguity and late completion.
+A client descriptor has `program`, `limits`, `spawn`, `config` and `imports`. Programs use PA's normal `sourceDir`, `entryModule`, `dependencies` and optional `command`. Here `config` and each Import's `config` are JSON objects; the CLI encodes them as opaque PA configuration bytes.
 
-These are local fixture benchmarks, not real-model throughput measurements or cross-platform certification. Existing databases and source history are never reset by the harness.
+Grant `repl` the evaluator relay's `eval` and `document` members, delegating only `ledger` and forwarding Spawn permission for authenticated child-job receipts. Grant `ledger` Zinc's `receipt` member, the same private actor/store/world configuration as the root, and the root's explicit service catalog and Spawn permission. The relay configuration is only `{"socket":"/srv/agents/run/zinc/local/world.sock"}`. Supply a `library` dependency pointing to Zinc's `jpm_tree/lib` for both programs. See [Configuration](https://github.com/darkhorseprojects/zinc/wiki/Configuration) for a complete descriptor.
+
+```text
+zinc> (defn double [n] (* n 2))
+zinc> (double 21)
+42
+zinc> (defn double [n] (+ n n))
+zinc> /ask Add clamp to world.janet and explain its boundary cases.
+zinc> (clamp 12 0 10)
+10
+```
+
+Multiline Janet is accepted. `/ask` submits conversational inference; ordinary input evaluates Janet directly. Both use the same resident environment.
+
+A definition or mutable value changed only in the REPL is ephemeral. Edit the source/data file to make it durable. To evaluate edited source explicitly:
+
+```janet
+(eval-string (slurp (dyn :current-file)) world)
+```
+
+`world` is the live environment; `:current-file` identifies the entry. There is no watcher, automatic reload, evaluation-log replay or heap serialization. Restart loads the source file again. Whole-file evaluation executes effects normally and can partially change the environment before an error; it is not a transaction.
+
+During an evaluation:
+
+```janet
+(input)
+(self/document)
+(await (self {:text "Investigate this subproblem" :persist false}))
+(await (self/member "memory/document" "A useful observation"))
+(def tool (pa/import "tool-name"))
+(tool "input bytes" :member "call")
+```
+
+`self` and `self/member` return durable child handles. `await` reads their committed results. Named Imports use the ordinary synchronous PA proxy convention. `pa/imports` lists the current public names. You may redefine these bindings, but definitions cannot change actual mounts, provider permissions or delegated members.
+
+## Persistence and Git permission
+
+File persistence does not require commit permission. You can inspect and commit normally outside the evaluator:
+
+```sh
+git -C my-agent diff
+git -C my-agent add -- world.janet notes.md
+git -C my-agent commit -m 'Add clamp and document its boundary behavior'
+```
+
+Optionally grant `git` selected members of `src/git.janet`: `status`, `diff`, `add`, `commit`. Every request selects explicit relative `paths`; `commit` also requires `message`:
+
+```janet
+(def git (pa/import "git"))
+(git `{"paths":["world.janet","notes.md"]}` :member "status")
+(git `{"paths":["world.janet","notes.md"]}` :member "add")
+(git `{"paths":["world.janet","notes.md"]}` :member "diff")
+(git `{"paths":["world.janet","notes.md"],"message":"Add clamp and explain boundary behavior"}` :member "commit")
+```
+
+Stage new files before inspecting the `HEAD` diff. Commit uses `--only`, excluding unrelated staged paths. Inspect the actual diff and use a message describing it. Concurrent edits still require ordinary Git coordination; Zinc does not freeze a reviewed diff. No arbitrary Git arguments, hooks, push or remote operation is exposed.
+
+Run the Git service in a filesystem view limited to this repository and immutable runtime libraries. Relative-path validation alone is not confinement against mutable-path races. Protect `.git` from world writes when commit permission is withheld; keep credentials out of readable Git metadata. The invoker owns repository initialization and local author configuration; use plain metadata without external filters or signers.
+
+## Authority and deployment
+
+“Empty”, “configured” and “unrestricted” describe invoker policies, not privileged Janet definitions. An empty native view can still allow world file persistence. Configured views add selected facilities and Imports. Unrestricted views may expose the entire editable agent directory. None implicitly exposes private configuration or credentials.
+
+Each evaluation gets a fresh relay. Its task token, lease coordinates, provider configuration and actual PA grants remain in trusted processes outside the resident world. Retained definitions and proxies use the current evaluation's authority; disconnected or expired relays cannot authorize later effects. Bootstrap has native filesystem authority but no evaluation-scoped services.
+
+`ac.yaml` supplies Connector version-3 policies for the engine, relay and optional Git service. Before enabling a route, provision its world and resident socket. The example isolates actors by application/member/channel; intentional sharing requires a corresponding shared-world policy. Adapt exact model IDs, library paths, mounts and resource limits. The optional Git policy is not imported by default. To grant it, add a `git` Import with the desired member list and include `git` in `ledger`'s delegated catalog.
+
+Use narrow mounts and scrub ambient credentials. The resident evaluator may use a separate network namespace because it communicates over a filesystem Unix socket. PA-controlled service workers must share their controller's loopback namespace; the Git example therefore isolates its filesystem and PID view without unsharing networking.
+
+## History, models and recovery
+
+Private configuration requires `actor`, absolute `store`, and `world`. Providers and exact model references grant model access. `describe` returns the schema/defaults from `zinc.md`. For a minimal installation without semantic retrieval, set `search-units` to zero.
+
+`call` performs inference; `invoke` accepts either Janet `code` or a qualified `capability` and `arguments`. Other public entries are `describe`, `document`, `models`, `events`, `pending`, `resume`, `abort`, and `supervise`. `run-task` and `receipt` are trusted execution plumbing, not world-facing grants.
+
+A minimal conversational input is `{"text":"Investigate this","parent":0}`. `parent` is an event attachment. `memory_range` contains inclusive `start`/`end`; both zero disable inherited history. Images are canonical Base64 records with `type` and `data`.
+
+History retains immutable originals, summary ancestry, scoped FTS/trigram retrieval, bounded UTF-8 handles and chronological compaction from original sources. Semantic retrieval needs absolute `cygnet`/`stopwords` paths. `models.lock` pins the Cygnet source and stopword artifacts; build a new format-4 graph index with `python3 tools/cygnet_index.py SOURCE.db data/cygnet.db`.
+
+Stable request keys deduplicate identical admissions and reject conflicting reuse. Safe work can recover from checkpoints; Janet evaluations and arbitrary Imports are irreversible and become uncertain after interruption. Inspect receipts before repeating effects. No heap continuation, rollback or exactly-once external-effect guarantee is provided. Waiting releases execution slots, including recursive work at `parallel=1`.
+
+Independent accepted work can outlive its observer, provided the invoker keeps the evaluator, services and grants alive. Cancellation is cooperative and does not undo effects. Provider usage is recorded separately from conservative budget reservations; unknown usage retains its reservation. The final inference round has no tools.
 
 Further contracts: [wiki](https://github.com/darkhorseprojects/zinc/wiki).

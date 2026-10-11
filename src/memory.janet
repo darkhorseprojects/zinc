@@ -5,7 +5,8 @@
 (import ./model)
 
 (defn events [s run after]
-  (assert (first (store/query s "SELECT id FROM runs WHERE id=? AND actor=?" [run (s :actor)])) "run unavailable")
+  (assert (first (store/query s "SELECT id FROM runs WHERE id=? AND actor=? AND (world=? OR world IN (SELECT value FROM json_each(?)))"
+                              [run (s :actor) ((s :config) :world) (string (json/encode ((s :config) :visibility)))])) "run unavailable")
   (store/query s "SELECT *,strftime('%Y-%m-%dT%H:%M:%fZ',created,'unixepoch') created_at FROM events WHERE actor=? AND run=? AND id>? ORDER BY id LIMIT 256"
                [(s :actor) run after]))
 
@@ -309,10 +310,10 @@
     (assert (> size 128) "memory provenance cannot shrink under the configured ceiling")
     (def children (map |(if ($ :node) {:node ($ :node)} {:event ($ :event)}) group))
     (def key (string "summary:" (view :world) ":" (view :branch) ":" (json/encode children)))
-    (def source-view (struct ;(catseq [key :in [:run :branch :world :revision :history-last :visibility]] [key (view key)])
+    (def source-view (struct ;(catseq [key :in [:run :branch :world :history-last :visibility]] [key (view key)])
                              :first ((first group) :first) :last ((last group) :last)))
     (def id (store/submit s source-view "summarize" {:view source-view :children children :model (config :chat)}
-                          {:policy "keyed" :effect-key key :key key}))
+                          {:policy "safe" :key key}))
     (if (or blocking (>= total (config :hard-units)))
       (do
         (array/push receipts ((dyn :zinc/wait) s id))
@@ -333,21 +334,21 @@
 
 (def operations
   {"memory/retire"
-   {:policy "safe" :transactional true :description "(self/memory/retire branch) retires an owned temporary branch and its descendants."
+   {:policy "safe" :transactional true :description "memory/retire branch -> retires an owned temporary branch and its descendants."
     :function retire}
    "memory/open"
-   {:policy "safe" :description "(self/memory/open reference) returns a bounded original/summary handle."
+   {:policy "safe" :description "memory/open reference -> original/summary handle."
     :function open}
    "memory/read"
-   {:policy "safe" :description "(self/memory/read handle offset bytes) reads a bounded UTF-8 slice."
+   {:policy "safe" :description "memory/read handle offset bytes -> UTF-8 slice."
     :function read}
    "memory/expand"
-   {:policy "safe" :description "(self/memory/expand reference) returns bounded child references and provenance."
+   {:policy "safe" :description "memory/expand reference -> child references and provenance."
     :function expand}
    "memory/search"
-   {:policy "safe" :description "(self/memory/search query) retrieves scoped evidence, reranked against the original query."
+   {:policy "safe" :description "memory/search query -> scoped evidence reranked against the query."
     :function (fn [s view query] (search s view query ((s :config) :search-units)))}
    "memory/document"
    {:policy "safe" :transactional true
-    :description "(self/memory/document text) stores a scoped document and returns its handle."
+    :description "memory/document text -> stored document handle."
     :function document}})

@@ -19,44 +19,62 @@ policies:
     images: true
     options: [config.chat, config.rerank, config.thinking, config.rounds, config.budget, input.parent, input.persist]
     imports:
-      worker:
-        policy: worker
-        members: [execute, validate-image, validate-package]
+      repl:
+        policy: repl
+        members: [eval, document]
         imports: [ledger]
         spawn: true
       ledger:
         policy: zinc
         members: [receipt]
-        imports: [worker, ledger, discord]
+        imports: [repl, ledger, discord]
         spawn: true
     input:
       text: "${prompt}"
       images: "${images}"
     config:
       actor: "discord:${application}:${policy}:member:${member}:channel:${channel}"
-      repo: "${directory}/zinc"
-      state: "${directory}/zinc/state"
-      store: "${directory}/zinc/state/application-v9.db"
-      world: configured
-      worlds: [configured, empty, unrestricted]
-      world-actions: [merge, fork, restore]
-      code-actions: []
+      store: "${directory}/private/zinc/application-v10.db"
+      world: "discord:${application}:${member}:${channel}"
       cygnet: "${directory}/zinc/data/cygnet.db"
       stopwords: "${directory}/zinc/data/stopwords-iso.json"
+      allowed-models: [llama:chat, llama:rerank]
       providers:
         llama: {url: "http://127.0.0.1:8000"}
       chat: llama:chat
       rerank: llama:rerank
       thinking: none
-  worker:
+  repl:
     directory: /srv/agents
     source: zinc
-    entry: src/worker.janet
+    entry: src/repl.janet
     dependencies:
       library: zinc/jpm_tree/lib
-    command: [bwrap, --die-with-parent, --ro-bind, /, /, --proc, /proc, --dev, /dev, --tmpfs, /tmp, --, janet]
     limits: {frameBytes: 16777216, depth: 64, inFlight: 32, handles: 4096, admissionSeconds: 10}
-    config: {jailed: true, source-bytes: 65536, response-bytes: 8388608}
+    config:
+      socket: "${directory}/run/zinc/${application}-${member}-${channel}/world.sock"
+  git:
+    directory: /srv/agents
+    source: zinc
+    entry: src/git.janet
+    dependencies:
+      library: zinc/jpm_tree/lib
+    command:
+      [bwrap, --die-with-parent, --new-session,
+       --unshare-user, --unshare-pid, --unshare-ipc, --unshare-uts, --unshare-cgroup,
+       --clearenv, --setenv, PATH, /usr/bin:/bin,
+       --ro-bind, /usr, /usr, --ro-bind, /lib, /lib, --ro-bind, /lib64, /lib64,
+       --proc, /proc, --dev, /dev, --tmpfs, /tmp,
+       --ro-bind, "${directory}/zinc/src", "${directory}/zinc/src",
+       --ro-bind, "${directory}/zinc/jpm_tree/lib", "${directory}/zinc/jpm_tree/lib",
+       --bind, "${directory}/worlds/${application}/${member}/${channel}", /world,
+       --, janet]
+    limits: {frameBytes: 16777216, depth: 64, inFlight: 32, handles: 4096, admissionSeconds: 10}
+    config:
+      repo: /world
+      executable: /usr/bin/git
+      seconds: 30
+      response-bytes: 8388608
 members: {}
 channels: {}
 guilds: {}
