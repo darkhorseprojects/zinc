@@ -1,72 +1,51 @@
-# Zinc v0.2.0
+# Unreleased — current Janet stack
 
-## Requirements
+- PA protocol 6; immutable composition and one durable jobs path for recursion, capabilities and Imports.
+- SQLite format 9, persistent working/accepted worlds, fenced intent/outcomes, cancellation tombstones and bounded slot release.
+- Original-source summary checkpoints, scoped FTS/trigram/Cygnet retrieval, UTF-8 handles and validated Git activation/rollback.
+- Native JSON/SSE parity, conservative unreported usage, hidden reasoning policy and final-round explanation without tools.
+- Connector configuration 3 example, isolated regression/crash/security fixtures and reproducible fixture benchmarks.
+- Structural size gate: agent 576/724 lines, store 468/586. Preserve old databases and select a fresh format-9 path.
 
-- Portable Agents protocol 2 and Lua 5.5
-- Agent Connector YAML 2
-- SQLite Store format 3
+The notes below describe the preceding development snapshot, not the current protocol.
 
-## Migrate configuration
+# Zinc v0.3.0
 
-Stop Connector and other users of the Store before upgrading. Back up configuration and state.
-The installer preserves `ac.yaml`, `models.ini`, and `state/`; it does not migrate them.
+Zinc now runs on Janet and Portable Agents protocol 4. This is a fresh application, not a compatibility release.
 
-For older Connector YAML:
+## Requirements and installation
 
-- Set `version: 2` and preserve member/channel/guild routes.
-- Move PA ceilings under policy `limits`.
-- Rename `model_access` to `models`.
-- Replace free-form `overrides` with authorized `options` paths and a JSON `input` template.
+Use Janet 1.42.1, Git, SQLite with FTS5/trigram support, libcurl and the revision-pinned dependencies in `project.janet`. Supply the dependency tree as PA's named `library` dependency. Invoke `install` to validate and publish source before making conversational calls.
 
-For older Zinc configuration:
+Use a fresh application database and a coordinated Git world namespace. Old Lua SQLite stores and nested configuration are unsupported; there are no migrations or compatibility adapters. Preserve old state offline if needed. Do not delete a live database while retaining its published refs and expect a fresh installation.
 
-- Change boolean `thinking: true` to an explicit effort such as `medium`, or `false` to `none`.
-  There is no `auto`; unsupported efforts fail. Mandatory-reasoning models cannot use `none`.
-- Set `run.tokens: 0` and `limits.chat.tokens: 0` for model-derived allowances. Existing positive values remain caps,
-  so upgrading alone does not remove an old 8,192-token output setting.
-- Image-input models no longer need tool support. Context, images, tools, and effort controls are checked when selected.
+## Interface
 
-| Old setting | Current setting |
-| --- | --- |
-| `model` | `chat` |
-| `models.chat` | `chat` using a `provider:id` reference |
-| config `parent` / `memory` | request `parent` / `through` |
-| preset `safe` | `configured` |
-| preset `unsafe` | `unrestricted` |
-| preset `no-host` or `none` | `empty` |
+- `call` remains conversational inference; it is not an eval or maintenance endpoint.
+- `install`, `invoke`, `resume`, `worker`, `events`, `acknowledge`, `abort`, `pending`, `models` and `describe` are separate entries.
+- Configuration is flat private JSON with required actor/store/repo/state identity and absolute application paths.
+- Tool programs are Janet. Learned capability descriptors live in revision-pinned `src/functions.janet`.
+- Lua sources, Lux configuration, old installers, Lua tooling and old CI were removed.
+- Model presets and asset pins remain. The old `ac.yaml` was not changed and is not configured for this interface; Connector integration is outside this update.
 
-Replace caller option aliases with these paths:
+## Durability
 
-| Old option | Current path |
-| --- | --- |
-| `model` / `rerank` | `config.chat` / `config.rerank` |
-| `thinking` | `config.thinking` |
-| `tokens` / `rounds` / `tool_bytes` | `config.run.tokens` / `config.run.rounds` / `config.run.tool_bytes` |
-| `history_records` / `history_bytes` | `config.history.records` / `config.history.bytes` |
-| `depth` / `terms` / `candidates` / `search_bytes` / `score` | `config.search.depth` / `config.search.terms` / `config.search.candidates` / `config.search.bytes` / `config.search.score` |
-| `parent` / `through` | `input.parent` / `input.through` |
+One application SQLite database stores immutable originals, images, model stream bytes, task attempts/outcomes, summary provenance, budgets and publication receipts. Model, tool, recursive and background work use one persisted task mechanism with leases and completion fencing.
 
-Remove config `version` and translate older retrieval settings into `history` and `search`;
-see [Configuration](https://github.com/darkhorseprojects/zinc/wiki/Configuration).
-Set actor, Store/Cygnet paths, providers, and tool grants explicitly.
+Safe/keyed work can resume from committed checkpoints. Irreversible effects are not automatically replayed. Source-defined reconciliation and validated publication receipts can establish outcomes. Cancellation does not roll back effects or promise immediate termination.
 
-`chat` and `rerank` select independent references. Put every hosted reference in policy `models`.
-For example, an enabled caller control uses `options: [config.chat, config.run.tokens, input.parent]`.
-Use the shipped `ac.yaml` as the full YAML-2 example; old names are not accepted.
+Git worlds use source-defined validation and compare-and-swap refs. Prepared publications are recoverable; unvalidated candidates cannot be promoted. Existing runs execute their admitted revision while new calls use accepted source. The default validator checks loadability and required exports, not behavioral correctness.
 
-## Store compatibility
+## Memory and models
 
-Keep an existing format-3 Store. Model, effort, budget, and option changes do not change its format.
+Chronological memory uses a summary DAG with strict-shrinking compaction and lossless access to retained originals. Semantic retrieval preserves the original query, uses Cygnet graph expansion and FTS/spelling candidates, and reranks scoped excerpts. A compatible format-4 index must be provisioned separately; raw upstream Cygnet data is incompatible.
 
-Older Store formats cannot be opened by Zinc 0.2. Retain an offline copy if you need their history,
-then replace the old database and its WAL/SHM companions together. A missing database initializes
-as format 3 on the next request.
+Context sizing uses UTF-8 quarter-byte reference units. Model budgets reserve estimated units across shared work and retain provider-reported usage separately. They are not exact tokenizer or billing guarantees. Unknown usage remains conservatively accounted.
 
-After migrating, run:
+## Validation and limits
 
-```sh
-agc check /path/to/zinc
-```
+Real PA workflows exercised installation, independent workers, revision-pinned calls, learned functions, map/reduce, audit replay, cursors, source reconciliation after a durable effect, invalid-source rejection and restore. SQLite integrity/foreign-key checks passed. No tests were added.
 
-This validates package loading and controls, not model availability. Verify configured providers
-before starting Connector.
+No model endpoint was available. Live inference, provider/SSE behavior, image handling, recursive inference and inference-quality/performance benchmarks remain unvalidated.
+
+Arbitrary Janet is not sandboxed, including under the `empty` preset. The invoker remains responsible for OS confinement, identity, credentials, hard resource limits and process lifetime. Backups must retain the SQLite database/WAL and Git refs/objects together.

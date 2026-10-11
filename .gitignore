@@ -1,8 +1,8 @@
-.lux/
-package/native/
+/jpm_tree/
+/build/
 /dist/
-/store/
 /state/
 /data/*.db
 /models/
 user.md
+/.lux/

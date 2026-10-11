@@ -1,74 +1,62 @@
-version: 2
-
+version: 3
+concurrency: 4
+limits:
+  pending_requests: 32
+  lifetime_ms: 600000
+  grant_lifetime_ms: 86400000
+  rpc_bytes: 8388608
+  output_messages: 32
 policies:
   zinc:
-    source: package
+    directory: /srv/agents
+    source: zinc
     entry: zinc
-    limits:
-      memory_bytes: 100663296
-      instructions: 200000000
+    dependencies:
+      library: zinc/jpm_tree/lib
+    limits: {frameBytes: 16777216, depth: 64, inFlight: 32, handles: 4096, admissionSeconds: 10}
+    spawn: [janet]
     discord: true
     images: true
-    options:
-      - config.chat
-      - config.rerank
-      - config.thinking
-      - config.run.tokens
-      - config.run.rounds
-      - config.run.tool_bytes
-      - config.history.records
-      - config.history.bytes
-      - config.search.language
-      - config.search.candidates
-      - config.search.bytes
-      - config.search.depth
-      - config.search.terms
-      - config.search.score
-      - config.limits.chat.tokens
-      - input.parent
-      - input.through
+    options: [config.chat, config.rerank, config.thinking, config.rounds, config.budget, input.parent, input.persist]
+    imports:
+      worker:
+        policy: worker
+        members: [execute, validate-image, validate-package]
+        imports: [ledger]
+        spawn: true
+      ledger:
+        policy: zinc
+        members: [receipt]
+        imports: [worker, ledger, discord]
+        spawn: true
     input:
       text: "${prompt}"
       images: "${images}"
     config:
       actor: "discord:${application}:${policy}:member:${member}:channel:${channel}"
-      preset: configured
-      store: "${directory}/state/zinc.db"
-      cygnet: "${directory}/data/cygnet.db"
+      repo: "${directory}/zinc"
+      state: "${directory}/zinc/state"
+      store: "${directory}/zinc/state/application-v9.db"
+      world: configured
+      worlds: [configured, empty, unrestricted]
+      world-actions: [merge, fork, restore]
+      code-actions: []
+      cygnet: "${directory}/zinc/data/cygnet.db"
+      stopwords: "${directory}/zinc/data/stopwords-iso.json"
       providers:
-        llama:
-          url: http://127.0.0.1:8000
+        llama: {url: "http://127.0.0.1:8000"}
       chat: llama:chat
       rerank: llama:rerank
-      thinking: medium
-      run:
-        tokens: 0
-        rounds: 32
-        tool_bytes: 8192
-      history:
-        records: 256
-        bytes: 32768
-      search:
-        language: en
-        depth: 1
-        terms: 64
-        candidates: 16
-        bytes: 32768
-        score: 0
-      limits:
-        chat:
-          tokens: 0
-          calls: 16
-          source_bytes: 65536
-          argument_bytes: 524288
-          response_bytes: 8388608
-        rerank:
-          pair_bytes: 3968
-          query_bytes: 2048
-      tools:
-        roots: {}
-        actions: {}
-
+      thinking: none
+  worker:
+    directory: /srv/agents
+    source: zinc
+    entry: src/worker.janet
+    dependencies:
+      library: zinc/jpm_tree/lib
+    command: [bwrap, --die-with-parent, --ro-bind, /, /, --proc, /proc, --dev, /dev, --tmpfs, /tmp, --, janet]
+    limits: {frameBytes: 16777216, depth: 64, inFlight: 32, handles: 4096, admissionSeconds: 10}
+    config: {jailed: true, source-bytes: 65536, response-bytes: 8388608}
 members: {}
 channels: {}
 guilds: {}

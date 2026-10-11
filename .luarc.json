@@ -1,8 +1,0 @@
-{
-  "workspace": {
-    "library": [
-      ".lux/5.5/5e08204f89fd1f2d9a2ba23fd2bcc12b026dd37e089d4bcf6a65fc0bc2335505-lsqlite3complete@0.9.7-1/src",
-      ".lux/5.5/a943eee5bce2b518092862291a9add115e24533a560cde5bc801d73068ac6eae-lunajson@1.2.3-1/src"
-    ]
-  }
-}

@@ -6,7 +6,7 @@ version = "2026.05.12"
 source = "https://github.com/omwn/cygnet/releases/download/2026.05.12/cygnet.db.gz"
 sha256 = "65e93f3620d7cc5444350d9e204259e961096138767d9ea73403ade38964cc48"
 database_sha256 = "aae2cdb1418c1435558584a91181e1cb94459f2506c16f2be4b00e81428deaff"
-expected = "build data/cygnet.db with tools/cygnet_index.lua; package only the generated database"
+expected = "provision a generated Cygnet format-4 graph index separately; this upstream artifact is not the runtime index"
 license = "LicenseRef-Cygnet-Aggregate"
 
 [[dependency]]
