@@ -2,7 +2,7 @@
 
 (import spork/json :as json)
 (import spork/path :as path)
-(import ./config :as settings)
+(import ./schema :as settings)
 
 (defn- execute [member bytes opaque]
   (def config (settings/validate settings/git opaque))
@@ -38,7 +38,6 @@
                                 (do
                                   (var chunk nil)
                                   (while (set chunk (ev/read (child key) 4096 nil (config :seconds)))
-                                    (assert (<= (+ (length output) (length chunk)) (config :response-bytes)) "Git output byte ceiling")
                                     (buffer/push-string output chunk))
                                   {:key key :text (string output)})
                                 ([err] {:error (string err)})))

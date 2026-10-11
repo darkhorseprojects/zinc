@@ -4,6 +4,7 @@
 (import ./store)
 (import ./model)
 (import ./memory)
+(import ./schema)
 
 (defn- document [node]
   (cond
@@ -19,10 +20,6 @@
 
 (defn make [spec]
   (var operations nil)
-
-  (def configuration (spec :configuration))
-  (def authorize (spec :authorize))
-  (def request (spec :request))
 
   (defn scope [s branch]
     (def view (store/view s branch))
@@ -102,7 +99,7 @@
      :children (store/query s "SELECT id,kind,policy,admission,outcome,state FROM tasks WHERE parent=? AND actor=? ORDER BY id LIMIT 256" [id (s :actor)])})
 
   (defn start-child [s view value]
-    (def value (request (json/encode value) (s :config) [:text :parent :memory_range :persist]))
+    (def value (schema/request (json/encode value) [:text :parent :memory_range :persist]))
     (assert (value :text) "nested question required")
     (def parent (store/branch s (view :branch)))
     (def branch (store/start s (merge value {:operation "call" :persist (get value :persist (= 0 (parent "temporary")))})
@@ -154,7 +151,7 @@
                       "\nInspect uncertain effects before repeating them."))))
 
   (defn model-request [s view value]
-    (def value (request (json/encode value) (s :config) [:role :model :messages :tools :output :query :documents]))
+    (def value (schema/request (json/encode value) [:role :model :messages :tools :output :query :documents]))
     (model/call s value (get-in (dyn :zinc/task) [:checkpoint :request])))
 
   (defn result [s id]
@@ -167,8 +164,8 @@
                                                                   {:text (final "text") :run (branch "run") :branch id :start (user "id") :event (final "id")
                                                                    :parent (or (branch "entry") 0) :memory_range {:start (branch "first") :end (branch "last")}
                                                                    :created_at (final "created_at") :tool_usage (store/tool-used s (branch "run"))
-                                                                   :usage {:reported_total (model/used s (branch "run")) :budget_accounted (model/spent s (branch "run"))
-                                                                           :unreported (((store/query s "SELECT count(*) n FROM reservations r JOIN events e ON e.id=r.request LEFT JOIN usage u ON u.request=r.request WHERE e.run=? AND u.total IS NULL" [(branch "run")]) 0) "n")}
+                                                                   :usage {:reported_total (model/used s (branch "run"))
+                                                                           :unreported (((store/query s "SELECT count(*) n FROM events e LEFT JOIN usage u ON u.request=e.id WHERE e.actor=? AND e.run=? AND e.kind='model-admission' AND u.total IS NULL" [(s :actor) (branch "run")]) 0) "n")}
                                                                    :context_unit "utf8-quarter-byte"})))
 
   (defn infer [s task input]
@@ -265,8 +262,7 @@
                                                                            :memory_range {:start (view :first) :end (view :last)}})
                                                             :document (instructions (s :config) view)
                                                             :task id :owner (row "owner") :generation (row "attempt")
-                                                            :imports (view :imports) :source-bytes ((s :config) :source-bytes)
-                                                            :response-bytes ((s :config) :response-bytes)
+                                                            :imports (view :imports)
                                                             :lease-seconds ((s :config) :lease-seconds)}))) ""
                       :member "eval" :imports ["ledger"] :spawn true))
           ([err] (store/transact s
@@ -295,8 +291,10 @@
                                  "operation" (apply (member :function) s view (input :arguments))
                                  "import" {:data (base64/encode (string ((pa/import (input :name)) (base64/decode (input :data)) :member (input :member))))}
                                  (error "unknown job kind"))))
-                  (assert (<= (length (json/encode value)) ((s :config) :response-bytes)) "result byte ceiling"))
+                  (unless (index-of ((store/task s id) "state") ["done" "failed"])
+                    (store/finish s row value nil)))
                 ([err]
+                  (set value nil)
                   (set failure (string err))
                   (each provider (values ((s :config) :providers))
                     (when (provider :token) (set failure (string/replace-all (provider :token) "[redacted]" failure))))))
@@ -306,14 +304,14 @@
                 (spawn-job s (pending "id")))))))))
 
   (defn receipt [bytes opaque]
-    (def config (configuration opaque))
-    (def value (request bytes config [:task :token :owner :generation :position :operation :arguments :value :error]))
+    (def config (schema/configuration (spec :schema) opaque (pa/imports)))
+    (def value (schema/request bytes [:task :token :owner :generation :position :operation :arguments :value :error]))
     (def s (store/open config))
     (defer (store/close s)
       (def row (store/task s (value :task)))
       (def input (json/decode (row "input") true true))
       (def saved ((first (store/query s "SELECT config FROM runs WHERE id=? AND actor=?" [(row "run") (s :actor)])) "config"))
-      (put s :config (authorize config (json/decode saved true true)))
+      (put s :config (schema/authorize (spec :schema) config (json/decode saved true true)))
       (assert (and (= "eval" (row "kind")) (= (input :token) (value :token))
                    (= (row "attempt") (value :generation))) "invalid evaluation receipt")
       (if (and (= "complete" (value :operation)) (row "result") (index-of (row "state") ["done" "failed" "cancelled"]))
@@ -401,8 +399,8 @@
     sequence)
 
   (defn dispatch [member bytes opaque]
-    (def config (configuration opaque))
-    (def value (request bytes config (case member
+    (def config (schema/configuration (spec :schema) opaque (pa/imports)))
+    (def value (schema/request bytes (case member
                                        "call" (keys (spec :input))
                                        "invoke" [:code :capability :arguments :request :parent :memory_range :persist :after]
                                        "run-task" [:task]
@@ -420,7 +418,7 @@
       (when existing
         (assert (= (existing "world") (config :world)) "saved world differs")
         (assert (not (first (store/query s "SELECT id FROM events WHERE run=? AND kind='cancelled'" [(existing "id")]))) "run cancelled")
-        (put s :config (authorize config (json/decode (existing "config") true true))))
+        (put s :config (schema/authorize (spec :schema) config (json/decode (existing "config") true true))))
       (with-dyns [:zinc/wait wait :zinc/spawn spawn-job]
         (store/recover s)
         (if (= member "run-task")
@@ -480,15 +478,14 @@
 
   (defn describe [bytes opaque]
     (assert (= "" bytes) "describe takes empty input")
-    (def config (configuration opaque true))
+    (def config (schema/configuration (spec :schema) opaque [] true))
     (def parameters @[])
     (each [target fields] [[:config (spec :schema)] [:input (spec :input)]]
       (each [key field] (sorted (pairs fields))
         (when (field :option)
           (def parameter (merge field {:name (field :option) :path (string target "." key) :type (string (field :type))}))
           (when (and (= target :config) (= :integer (field :type)) (> (config key) 0))
-            (put parameter :maximum (config key))
-            (when (= key :budget) (put parameter :minimum 1)))
+            (put parameter :maximum (config key)))
           (each key [:default :optional :option] (put parameter key nil))
           (array/push parameters parameter))))
     (string (json/encode {:input "json" :output "json" :durable true
@@ -496,19 +493,19 @@
 
   (defn document-entry [bytes opaque]
     (assert (= "" bytes) "document takes empty input")
-    (def config (configuration opaque))
+    (def config (schema/configuration (spec :schema) opaque (pa/imports)))
     (instructions config {:capabilities (config :capabilities)
                           :imports (filter |(and (not (index-of $ ["repl" "ledger"]))
                                                  (get-in config [:imports (keyword $)])) (pa/imports))}))
 
   (defn models [bytes opaque]
-    (def config (configuration opaque))
-    (def value (request bytes config [:role]))
+    (def config (schema/configuration (spec :schema) opaque (pa/imports)))
+    (def value (schema/request bytes [:role]))
     (string (json/encode (model/catalogue config (get value :role "chat")))))
 
   (defn events [bytes opaque]
-    (def config (configuration opaque))
-    (def value (request bytes config [:run :after]))
+    (def config (schema/configuration (spec :schema) opaque (pa/imports)))
+    (def value (schema/request bytes [:run :after]))
     (def s (store/open config))
     (defer (store/close s)
       (def records (memory/events s (value :run) (get value :after 0)))
@@ -518,7 +515,7 @@
 
   (defn pending [bytes opaque]
     (assert (= "" bytes) "pending takes empty input")
-    (def config (configuration opaque))
+    (def config (schema/configuration (spec :schema) opaque (pa/imports)))
     (def s (store/open config))
     (defer (store/close s)
       (string (json/encode (store/query s
@@ -532,17 +529,17 @@
                                         [(s :actor) (config :world)])))))
 
   (defn abort [bytes opaque]
-    (def config (configuration opaque))
-    (def value (request bytes config [:run :request :reason]))
+    (def config (schema/configuration (spec :schema) opaque (pa/imports)))
+    (def value (schema/request bytes [:run :request :reason]))
     (assert (and (not= (nil? (value :run)) (nil? (value :request)))
                  (string? (value :reason)) (<= (length (value :reason)) 2048)) "abort requires run or request and reason")
     (def s (store/open config))
     (defer (store/close s)
       (string (json/encode (store/transact s
                                            (when (value :request)
-                                             (store/query s `INSERT INTO runs(actor,request,input,world,budget,config)
-            VALUES(?,?,'{}',?,?,?) ON CONFLICT(actor,request) DO NOTHING`
-                                                          [(s :actor) (value :request) (config :world) (config :budget)
+                                             (store/query s `INSERT INTO runs(actor,request,input,world,config)
+            VALUES(?,?,'{}',?,?) ON CONFLICT(actor,request) DO NOTHING`
+                                                          [(s :actor) (value :request) (config :world)
                                                            (string (json/encode (merge config {:providers {}})))]))
                                            (def run (first (store/query s "SELECT id,world FROM runs WHERE actor=? AND (id=? OR request=?)"
                                                                         [(s :actor) (value :run) (value :request)])))
@@ -557,8 +554,8 @@
                                            {:run (run "id") :state (if complete "completed" "cancelled")})))))
 
   (defn supervise [bytes opaque]
-    (def config (configuration opaque))
-    (def value (request bytes config [:once]))
+    (def config (schema/configuration (spec :schema) opaque (pa/imports)))
+    (def value (schema/request bytes [:once]))
     (def s (store/open config))
     (defer (store/close s)
       (while true

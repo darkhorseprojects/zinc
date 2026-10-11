@@ -8,26 +8,15 @@
 (defn used [s run]
   (((store/query s "SELECT coalesce(sum(u.total),0) used FROM usage u JOIN events e ON e.id=u.request WHERE e.actor=? AND e.run=?" [(s :actor) run]) 0) "used"))
 
-(defn spent [s run]
-  (((store/query s `SELECT coalesce(sum(CASE WHEN o.id IS NULL OR u.total IS NULL THEN max(r.units,coalesce(u.total,0)) ELSE u.total END),0) spent
-    FROM reservations r JOIN events e ON e.id=r.request LEFT JOIN usage u ON u.request=r.request
-    LEFT JOIN events o ON o.parent=e.id AND o.kind='model-outcome' WHERE e.actor=? AND e.run=?` [(s :actor) run]) 0) "spent"))
-
-(defn allowance [s reference input size requested]
+(defn admit [s reference input size output]
   (store/transact s
                   (def current (dyn :zinc/task))
                   (def scope (current :scope))
                   (store/checkpoint s (current :checkpoint))
-                  (def budget (((store/query s "SELECT budget FROM runs WHERE id=? AND actor=?" [(scope :run) (s :actor)]) 0) "budget"))
-                  (def configured ((s :config) :budget))
-                  (def ceiling (if (= 0 (min budget configured)) (max budget configured) (min budget configured)))
-                  (def available (if (= 0 ceiling) requested (min requested (- ceiling (spent s (scope :run)) size))))
-                  (assert (and (>= available 0) (or (= requested 0) (> available 0))) "shared model budget exhausted")
                   (def event (store/append s scope "model-admission" (reference :reference)
-                                           {:input input :estimate size :output available} nil (current :id)))
-                  (store/query s "INSERT INTO reservations(request,units) VALUES(?,?)" [(event "id") (+ size available)])
+                                           {:input input :estimate size :output output} nil (current :id)))
                   (store/checkpoint s (merge (current :checkpoint) {:request (event "id")}))
-                  {:id (event "id") :output available}))
+                  {:id (event "id") :output output}))
 
 (defn charge [s request reference raw]
   (def previous (first (store/query s "SELECT total FROM usage WHERE request=?" [request])))
@@ -45,7 +34,6 @@
   (defer (curl/reset client)
     (try
       (do
-        (var received 0)
         (def response
           (http/request
             {:client client
@@ -64,19 +52,13 @@
               :xferinfofunction (fn [& counts] (= 0 (ev/count cancel)))}
              :stream
              (fn [chunk]
-               (+= received (length chunk))
-               (assert (<= received (config :response-bytes)) "HTTP response byte ceiling")
-               (assert (not (ev/full channel)) "HTTP packet ceiling")
                (ev/give-supervisor :packet {:chunk (string chunk)}))}))
 
         (ev/give channel [:packet {:status (response :status) :error (response :error)}]))
       ([err] (when (= 0 (ev/count cancel)) (ev/give channel [:packet {:failure (string err)}]))))))
 
 (defn http-request [config url method body headers]
-  (assert (or (nil? body) (<= (length body) (config :request-bytes)))
-          "HTTP request byte ceiling")
-
-  (def channel (ev/thread-chan (min 16777215 (+ 2 (config :response-bytes)))))
+  (def channel (ev/thread-chan))
   (def cancel (ev/thread-chan 1))
   (ev/thread transfer [config url method body headers channel cancel] :n channel)
   (def current (dyn :zinc/task))
@@ -237,8 +219,8 @@
   (def maximum (min (or (selected :output) (selected :context))
                     (if (= 0 cap) (or (selected :output) (math/floor (/ (selected :context) 2))) cap)
                     (- (selected :context) size)))
-  (assert (> maximum 0) "approximate context budget exhausted")
-  (def admission (allowance s selected input size maximum))
+  (assert (> maximum 0) "approximate context capacity exhausted")
+  (def admission (admit s selected input size maximum))
   (def body @{:model (selected :id) :messages messages :max_tokens (admission :output) :stream true :stream_options {:include_usage true}})
   (when (input :tools)
     (assert (selected :tools) "model does not support tools")
@@ -377,10 +359,7 @@
                           (when fragment
                             (assert (string? fragment) "invalid function fragment")
                             (unless (and (= key :name) (= fragment (string (assembled key))))
-                              (buffer/push-string (assembled key) fragment))))
-
-                        (assert (<= (length (assembled :arguments)) (config :request-bytes))
-                                "tool arguments exceed byte ceiling"))
+                              (buffer/push-string (assembled key) fragment)))))
 
                       (when (choice :finish_reason)
                         (assert (index-of (choice :finish_reason) ["stop" "tool_calls"])
@@ -409,7 +388,7 @@
       (assert (and (dictionary? arguments)
                    (= [:code] (tuple/slice (sort (keys arguments))))
                    (string? (arguments :code))
-                   (<= 1 (length (arguments :code)) (config :source-bytes)))
+                   (> (length (arguments :code)) 0))
               "invalid Janet tool source")
       (array/push tools {:id (string (call :id)) :code (arguments :code)}))
 
@@ -434,7 +413,7 @@
   (assert (> (length query) 0) "rerank query must remain nonempty")
   (each passage documents
     (assert (< (store/units (string query passage)) (selected :context)) "original rerank query/passage exceeds capacity"))
-  (def admission (allowance s selected input (sum (map |(store/units (string query $)) documents)) 0))
+  (def admission (admit s selected input (sum (map |(store/units (string query $)) documents)) 0))
   (def result (collect (request config selected "POST" "/v1/rerank"
                                 {:model (selected :id) :query query :documents documents :top_n (length documents)})))
   (account s admission selected (get result :usage {}))

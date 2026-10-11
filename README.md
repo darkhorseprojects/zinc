@@ -17,10 +17,10 @@ jpm install
 The package installs `zinc` and the following runtime:
 
 ```text
-zinc.md                 prompt, configuration schema/defaults/validation, composition
-src/agent.janet         inference and durable dispatch
+zinc.md                 prompt, declarative configuration/input schemas, composition
+src/engine.janet        inference and durable dispatch
 src/repl.janet          resident evaluator and request-scoped relay
-src/config.janet        shared validation and resident/relay/Git schemas
+src/schema.janet        validation, reauthorization and resident/relay/Git schemas
 cli.janet               serve/repl/ask command dispatch and interactive client
 src/model.janet         providers and accounting
 src/memory.janet        retrieval and summaries
@@ -30,7 +30,7 @@ src/git.janet           optional repository-scoped Git service
 
 Keep this privileged runtime and its dependencies outside the writable world. A world may contain an editable copy of its entire agent, but that copy must never supply the controller or credential-bearing services.
 
-Database **format 10** rejects older databases. Preserve them and choose a fresh absolute database path; there is no migration. Create the database's parent directory yourself. Use a local filesystem with reliable SQLite locking.
+Database **format 11** rejects older databases. Preserve them and choose a fresh absolute database path; there is no migration. Create the database's parent directory yourself. Use a local filesystem with reliable SQLite locking.
 
 ## Create a world
 
@@ -164,6 +164,12 @@ History retains immutable originals, summary ancestry, scoped FTS/trigram retrie
 
 Stable request keys deduplicate identical admissions and reject conflicting reuse. Safe work can recover from checkpoints; Janet evaluations and arbitrary Imports are irreversible and become uncertain after interruption. Inspect receipts before repeating effects. No heap continuation, rollback or exactly-once external-effect guarantee is provided. Waiting releases execution slots, including recursive work at `parallel=1`.
 
-Independent accepted work can outlive its observer, provided the invoker keeps the evaluator, services and grants alive. Cancellation is cooperative and does not undo effects. Provider usage is recorded separately from conservative budget reservations; unknown usage retains its reservation. The final inference round has no tools.
+Independent accepted work can outlive its observer, provided the invoker keeps the evaluator, services and grants alive. Cancellation is cooperative and does not undo effects. The final inference round has no tools.
+
+Byte limits govern stored payloads, not HTTP or REPL transport. `source-bytes` limits stored Janet source; `request-bytes` limits serialized inputs/admission payloads; `response-bytes` limits serialized outcomes/event payloads; `image-bytes` limits decoded image bytes per request. Event accounting measures the actual stored text and JSON data, with no fixed overhead estimate.
+
+`tool-quota` retains the shared per-run estimate: sum `ceil(source bytes / 4)` and `ceil(serialized outcome bytes / 4)` for all admitted evaluations, including nested branches. Results are stored and exposed without a separate tool-result truncation. Admission checks existing usage plus the new source; completed responses can exceed the quota and block subsequent admissions. Resume retains usage; a new root run starts a new quota. Internal Imports/members are not separately charged.
+
+Provider-reported usage is recorded in tokens; missing reports remain unknown. `output` is a provider output-token ceiling. There is no model `budget` or mixed byte/token reservation ledger.
 
 Further contracts: [wiki](https://github.com/darkhorseprojects/zinc/wiki).

@@ -18,7 +18,7 @@ agents:
     spawn: [janet]
     discord: true
     images: true
-    options: [config.chat, config.rerank, config.thinking, config.rounds, config.budget, input.parent, input.persist]
+    options: [config.chat, config.rerank, config.thinking, config.rounds, input.parent, input.persist]
     imports:
       repl:
         program:
@@ -40,7 +40,7 @@ agents:
       images: "${images}"
     config:
       actor: "discord:${application}:${policy}:member:${member}:channel:${channel}"
-      store: "${directory}/private/zinc/application-v10.db"
+      store: "${directory}/private/zinc/application-v11.db"
       world: "discord:${application}:${member}:${channel}"
       repl: true
       cygnet: "${directory}/zinc/data/cygnet.db"

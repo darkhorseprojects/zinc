@@ -7,7 +7,7 @@
 CREATE TABLE runs(
  id INTEGER PRIMARY KEY AUTOINCREMENT CHECK(id<=9007199254740991),actor TEXT NOT NULL,
  request TEXT,input TEXT NOT NULL CHECK(json_valid(input)),world TEXT NOT NULL,
- budget INTEGER NOT NULL CHECK(budget>=0),config TEXT NOT NULL CHECK(json_valid(config)),UNIQUE(actor,request)
+ config TEXT NOT NULL CHECK(json_valid(config)),UNIQUE(actor,request)
 ) STRICT;
 CREATE INDEX runs_actor ON runs(actor,id);
 CREATE TABLE branches(
@@ -55,7 +55,6 @@ CREATE TABLE usage(
  request INTEGER PRIMARY KEY REFERENCES events(id),provider TEXT NOT NULL,model TEXT NOT NULL,
  input INTEGER,output INTEGER,total INTEGER,reasoning INTEGER,cached INTEGER,raw TEXT NOT NULL CHECK(json_valid(raw))
 ) STRICT;
-CREATE TABLE reservations(request INTEGER PRIMARY KEY REFERENCES events(id),units INTEGER NOT NULL CHECK(units>=0)) STRICT;
 CREATE UNIQUE INDEX model_terminal ON events(parent) WHERE kind='model-outcome';
 CREATE VIEW summaries AS
  SELECT id,actor,json_extract(data,'$.world') world,branch,
@@ -87,7 +86,7 @@ CREATE TABLE event_lexemes(event INTEGER NOT NULL REFERENCES events(id),lexeme I
 CREATE INDEX lexeme_events ON event_lexemes(lexeme,event);
 CREATE VIRTUAL TABLE lexeme_grams USING fts5(term,content='lexemes',content_rowid='id',tokenize='trigram',detail='none');
 CREATE TRIGGER lexeme_index AFTER INSERT ON lexemes BEGIN INSERT INTO lexeme_grams(rowid,term) VALUES(new.id,new.term); END;
-PRAGMA user_version=10;
+PRAGMA user_version=11;
 `)
 
 (defn units [bytes] (math/ceil (/ (length bytes) 4)))
@@ -112,24 +111,27 @@ PRAGMA user_version=10;
       (def s @{:db db :actor (config :actor) :config config})
       (transact s
                 (def version (((query s "PRAGMA user_version") 0) "user_version"))
-                (assert (index-of version [0 10]) "unsupported Zinc database; preserve it and select a fresh database")
+                (assert (index-of version [0 11]) "unsupported Zinc database; preserve it and select a fresh database")
                 (when (= version 0) (query s schema)))
       s)
     ([err] (sql/close db) (error err))))
 
 (defn close [s] (sql/close (s :db)))
 (defn append [s scope kind text &opt data parent task]
-  (assert (and (string? text) (utf8/is-valid? text) (<= (length text) ((s :config) :response-bytes)))
-          "invalid event text")
+  (assert (and (string? text) (utf8/is-valid? text)) "invalid event text")
+  (def data (string (json/encode (or data {}))))
+  (assert (<= (+ (length text) (length data))
+              ((s :config) (if (index-of kind ["user" "call-admission" "task-admission" "model-admission"]) :request-bytes :response-bytes)))
+          "stored event byte ceiling")
   (def row ((query s "INSERT INTO events(actor,run,branch,parent,task,kind,text,data,units) VALUES(?,?,?,?,?,?,?,?,?) RETURNING *"
-                   [(s :actor) (scope :run) (scope :branch) parent task kind text (string (json/encode (or data {}))) (+ 48 (units text))]) 0))
+                   [(s :actor) (scope :run) (scope :branch) parent task kind text data (units (string text data))]) 0))
   (when (index-of kind ["user" "response" "tools" "completed" "tool-result" "artifact"])
     (query s "INSERT INTO lexemes(actor,term) SELECT DISTINCT ?,term FROM (SELECT term FROM event_words WHERE doc=? ORDER BY offset LIMIT 2048) WHERE length(CAST(term AS BLOB))<=128 ON CONFLICT DO NOTHING" [(s :actor) (row "id")])
     (query s "INSERT INTO event_lexemes(event,lexeme) SELECT DISTINCT ?,l.id FROM (SELECT term FROM event_words WHERE doc=? ORDER BY offset LIMIT 2048) w JOIN lexemes l ON l.term=w.term AND l.actor=? ON CONFLICT DO NOTHING" [(row "id") (row "id") (s :actor)]))
   row)
 
 (defn branch [s id]
-  (def rows (query s "SELECT b.*,r.actor,r.budget,r.config FROM branches b JOIN runs r ON r.id=b.run WHERE b.id=? AND r.actor=? AND b.retired=0" [id (s :actor)]))
+  (def rows (query s "SELECT b.*,r.actor,r.config FROM branches b JOIN runs r ON r.id=b.run WHERE b.id=? AND r.actor=? AND b.retired=0" [id (s :actor)]))
   (assert (> (length rows) 0) "branch unavailable") (rows 0))
 
 (defn visible [s view &opt order ceiling]
@@ -159,6 +161,8 @@ PRAGMA user_version=10;
   (rows 0))
 
 (defn start [s input config &opt caller]
+  (when (input :code)
+    (assert (<= (length (input :code)) (config :source-bytes)) "stored Janet source byte ceiling"))
   (def input (json/decode (json/encode input) true true))
   (transact s
             (def admitted (table ;(kvs input)))
@@ -208,9 +212,11 @@ PRAGMA user_version=10;
                 (when (> entry 0) (event s allowed entry))
                 (when (> last 0) (event s allowed last) (event s allowed first-id))
                 (when caller (assert (or (= last 0) (and (<= (caller :first) first-id) (<= last (caller :last)))) "child history exceeds caller view"))
+                (def encoded (string (json/encode admitted)))
+                (assert (<= (length encoded) (config :request-bytes)) "stored request byte ceiling")
                 (def run (if caller (caller :run)
-                           (((query s "INSERT INTO runs(actor,request,input,world,budget,config) VALUES(?,?,?,?,?,?) RETURNING id"
-                                    [(s :actor) (input :request) (string (json/encode admitted)) world (config :budget)
+                           (((query s "INSERT INTO runs(actor,request,input,world,config) VALUES(?,?,?,?,?) RETURNING id"
+                                    [(s :actor) (input :request) encoded world
                                      (string (json/encode (merge config {:providers (tabseq [[name provider] :in (pairs (config :providers))]
                                                                                       name {:url (provider :url) :identity (provider :identity)})})))]) 0) "id")))
                 (def id (((query s "INSERT INTO branches(run,parent,caller,entry,first,last,history_last,world,temporary) VALUES(?,?,?,?,?,?,?,?,?) RETURNING id"
@@ -220,8 +226,11 @@ PRAGMA user_version=10;
                 (def scope {:run run :branch id :world world :first first-id :last last :visibility (config :visibility)})
                 (def user (append s scope "user" (get input :text "") {:input admitted} (when (> entry 0) entry)))
 
+                (var image-bytes 0)
                 (eachp [position image] (get input :images [])
                   (def bytes (if (image :bytes) (image :bytes) (base64/decode (image :data))))
+                  (+= image-bytes (length bytes))
+                  (assert (<= image-bytes (config :image-bytes)) "stored image byte ceiling")
                   (query s "INSERT INTO images(event,position,mime,bytes) VALUES(?,?,?,?)" [(user "id") position (image :type) (buffer bytes)]))
                 (branch s id)))))
 
@@ -236,6 +245,8 @@ PRAGMA user_version=10;
     FROM tasks t JOIN events e ON e.id=t.admission WHERE t.actor=? AND t.run=? AND t.kind='eval'` [(s :actor) run]) 0) "units"))
 
 (defn checkpoint [s value]
+  (def encoded (string (json/encode value)))
+  (assert (<= (length encoded) ((s :config) :request-bytes)) "stored checkpoint byte ceiling")
   (def current (dyn :zinc/task))
   (assert current "checkpoint requires an executing job")
   (assert (first (query s
@@ -243,7 +254,7 @@ PRAGMA user_version=10;
      WHERE id=? AND actor=? AND state IN ('running','waiting') AND EXISTS(
        SELECT 1 FROM leases WHERE task=? AND owner=? AND generation=? AND expires>?)
      RETURNING id`
-                        [(string (json/encode value)) (current :id) (s :actor)
+                        [encoded (current :id) (s :actor)
                          (current :id) (current :owner) (current :generation) (os/clock)])) "job lease lost")
   (put current :checkpoint value)
   value)
@@ -259,6 +270,8 @@ PRAGMA user_version=10;
   (when (= kind "eval")
     (assert (and (string? (input :code)) (<= 1 (length (input :code)) ((s :config) :source-bytes))) "invalid tool source")
     (put saved :code nil))
+  (def encoded (string (json/encode saved)))
+  (assert (<= (length encoded) ((s :config) :request-bytes)) "stored task input byte ceiling")
   (default options {})
   (def current (dyn :zinc/task))
   (def parent (when current (current :id)))
@@ -311,7 +324,7 @@ PRAGMA user_version=10;
                              policy,retries,key,checkpoint)
            VALUES(?,?,?,?,?,?,?,?,?,?,?,?) RETURNING id`
                                  [(s :actor) (view :run) (view :branch) parent (view :world)
-                                  kind (string (json/encode saved)) (string (json/encode view)) policy
+                                  kind encoded (string (json/encode view)) policy
                                   (get options :retries 1) (options :key)
                                   (string (json/encode (get options :checkpoint {})))]) 0) "id"))
 
@@ -381,13 +394,8 @@ PRAGMA user_version=10;
 
 (defn finish [s row value failure]
   (def view (json/decode (row "scope") true true))
-  (var text (if failure failure
+  (def text (if failure failure
               (if (string? value) value (string (json/encode value)))))
-
-  (when (= "eval" (row "kind"))
-    (set text (string/slice text 0 (min (length text) (* 4 ((s :config) :tool-result-units)))))
-    (while (not (utf8/is-valid? text))
-      (set text (string/slice text 0 -2))))
 
   (transact s
             (assert (first (query s
@@ -401,11 +409,13 @@ PRAGMA user_version=10;
                          (if failure "failed" "done")))
             (def outcome {:ok (= state "done") :value value :error failure
                           :state state :attempt (row "attempt")})
+            (def encoded (string (json/encode outcome)))
+            (assert (<= (length encoded) ((s :config) :response-bytes)) "stored task outcome byte ceiling")
             (def event (append s view "task-outcome" (or failure "outcome committed")
                                outcome nil (row "id")))
 
             (query s "UPDATE tasks SET state=?,result=?,outcome=? WHERE id=?"
-                   [state (string (json/encode outcome)) (event "id") (row "id")])
+                   [state encoded (event "id") (row "id")])
             (query s "DELETE FROM leases WHERE task=?" [(row "id")])
 
             (when (and (nil? (row "parent")) (not= "agent" (row "kind")))
@@ -418,7 +428,7 @@ PRAGMA user_version=10;
                       {:ok (outcome :ok)
                        :tool-id (input :tool-id)
                        :original {:event (event "id")}
-                       :bytes (length (json/encode outcome))}
+                       :bytes (length encoded)}
                       (input :response) (row "id")))
 
             outcome))

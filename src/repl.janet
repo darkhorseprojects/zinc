@@ -3,7 +3,7 @@
 (import spork/json :as json)
 (import spork/base64 :as base64)
 (import portable-agents/src/protocol :as wire)
-(import ./config :as settings)
+(import ./schema :as settings)
 
 (defn- exchange [operation & arguments]
   (def current (dyn :zinc/evaluation))
@@ -47,7 +47,7 @@
                      (fn [peer]
                        (with-dyns [:pa/limits limits]
                          (defer (ev/close peer)
-                           (def packet (wire/record (wire/receive peer) ["type"] ["code" "input" "document" "imports" "source-bytes" "response-bytes"]))
+                           (def packet (wire/record (wire/receive peer) ["type"] ["code" "input" "document" "imports"]))
                            (case (packet "type")
                              "document"
                              (do
@@ -57,21 +57,16 @@
                                                                                      "instructions" (or instructions "")})}))
                              "eval"
                              (do
-                               (assert (and (string? (packet "code")) (int? (packet "source-bytes"))
-                                            (<= 1 (length (packet "code")) (packet "source-bytes"))
-                                            (int? (packet "response-bytes")) (> (packet "response-bytes") 0)) "invalid evaluation")
+                               (assert (and (string? (packet "code")) (> (length (packet "code")) 0)) "invalid evaluation")
                                (def output @"")
                                (def outcome
                                  (with-env env
                                    (with-dyns [:zinc/evaluation {:stream peer :lock (ev/lock) :input (json/decode (packet "input") true true)
                                                                  :document (packet "document") :imports (packet "imports")}
-                                               :out (fn [text]
-                                                      (assert (<= (+ (length output) (length text)) (packet "response-bytes")) "REPL output byte ceiling")
-                                                      (buffer/push-string output text))]
+                                               :out (fn [text] (buffer/push-string output text))]
                                      (try
                                        (let [result (eval-string (packet "code") env)
                                              text (string output (if (string? result) result (string/format "%p" result)))]
-                                         (assert (<= (length text) (packet "response-bytes")) "REPL result byte ceiling")
                                          {"value" text})
                                        ([err] {"error" (string err)})))))
                                (wire/send peer {"type" "result" "output" (wire/json outcome)}))
@@ -102,8 +97,7 @@
   (var position 0)
   (defer (do (ev/cancel heartbeat "evaluation finished") (ev/close peer))
     (wire/send peer {"type" "eval" "code" (value "code") "input" (wire/json (value "input"))
-                     "document" (value "document") "imports" (value "imports")
-                     "source-bytes" (value "source-bytes") "response-bytes" (value "response-bytes")})
+                     "document" (value "document") "imports" (value "imports")})
     (while true
       (def packet (wire/receive peer))
       (assert packet "REPL connection lost; effects may have happened")
