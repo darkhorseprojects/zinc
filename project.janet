@@ -1,6 +1,6 @@
 (declare-project
   :name "zinc"
-  :version "0.4.0"
+  :version "0.2.0"
   :description "A Janet agent with file-backed resident worlds and durable memory"
   :license "AGPL-3.0-only"
   :dependencies
@@ -11,4 +11,10 @@
 
 (declare-source :source ["src" "zinc.md"] :prefix "zinc")
 
-(declare-binscript :name "zinc" :source "cli.janet")
+(def script (string (find-build-dir) "zinc"))
+(rule script ["cli.janet"]
+      (create-dirs script)
+      (copyfile "cli.janet" script)
+      (os/chmod script 8r755))
+(task "install" [script])
+(declare-binscript :main script :hardcode-syspath true)

@@ -2,13 +2,12 @@
 
 (import spork/json :as json)
 (import spork/path :as path)
+(import ./config :as settings)
 
 (defn- execute [member bytes opaque]
-  (def config (json/decode opaque true true))
+  (def config (settings/validate settings/git opaque))
   (def value (json/decode bytes true true))
-  (assert (and (dictionary? value) (path/abspath? (config :repo)) (path/abspath? (config :executable))
-               (number? (config :seconds)) (< 0 (config :seconds) math/inf)
-               (int? (config :response-bytes)) (> (config :response-bytes) 0)) "invalid Git request/configuration")
+  (assert (dictionary? value) "invalid Git request")
   (each key (keys value) (assert (index-of key [:paths :message]) "unknown Git request field"))
   (def paths (value :paths))
   (assert (and (indexed? paths) (> (length paths) 0)) "select explicit repository paths")
@@ -52,6 +51,11 @@
       (assert (not (or (a :error) (b :error))) (or (a :error) (b :error)))
       (assert (= 0 status) (if (= :err (a :key)) (a :text) (b :text)))
       (if (= :out (a :key)) (a :text) (b :text)))))
+
+(defn describe [bytes opaque]
+  (assert (= "" bytes) "describe takes empty input")
+  (settings/validate settings/git opaque true)
+  (json/encode {:schema {:config settings/git}}))
 
 (def status (partial execute "status"))
 (def diff (partial execute "diff"))

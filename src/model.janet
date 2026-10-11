@@ -149,7 +149,7 @@
 (defn catalogue [config role]
   (assert (index-of role ["chat" "rerank"]) "unsupported model role")
   (def models @[])
-  (each [name provider] (pairs (config :providers))
+  (each name (keys (config :providers))
     (def ref {:provider (string name)})
     (def response (collect (request config ref "GET" (if (= :openrouter name) (string "/v1/models?output_modalities=" (if (= role "chat") "text" "rerank")) "/v1/models"))))
     (assert (and (dictionary? response) (indexed? (response :data))) "invalid model catalogue")
@@ -159,9 +159,7 @@
       (assert (and (dictionary? record) (string? (record :id)) (> (length (record :id)) 0)
                    (not (identities (record :id)))) "invalid or duplicate model ID")
       (put identities (record :id) true)
-      (when (or (= reference (config (keyword role)))
-                (index-of reference (config :allowed-models)))
-        (array/push models {:ref reference :name (get record :name (record :id))}))))
+      (array/push models {:ref reference :name (get record :name (record :id))})))
   (sorted models |(< ($0 :ref) ($1 :ref))))
 
 (defn profile [config reference role]
@@ -170,7 +168,6 @@
   (def provider (string/slice reference 0 split))
   (def id (string/slice reference (+ split 1)))
   (assert (and (not= "" id) (index-of provider ["llama" "openrouter"])) "unsupported model reference")
-  (assert (or (index-of reference [(config :chat) (config :rerank)]) (index-of reference (config :allowed-models))) "model reference is not granted")
   (def ref {:provider provider :id id :reference reference})
   (def record
     (if (= provider "llama")
@@ -225,7 +222,6 @@
 
 (defn stream [s input &opt selected]
   (def config (s :config))
-  (assert (or (index-of (input :model) [(config :chat) (config :rerank)]) (index-of (input :model) (config :allowed-models))) "model is not granted")
   (default selected (profile config (input :model) :chat))
   (assert (= (selected :reference) (input :model)) "profile does not match admitted model")
   (def scope ((dyn :zinc/task) :scope))

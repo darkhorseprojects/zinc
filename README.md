@@ -19,7 +19,9 @@ The package installs `zinc` and the following runtime:
 ```text
 zinc.md                 prompt, configuration schema/defaults/validation, composition
 src/agent.janet         inference and durable dispatch
-src/repl.janet          resident evaluator, request-scoped relay and CLI
+src/repl.janet          resident evaluator and request-scoped relay
+src/config.janet        shared validation and resident/relay/Git schemas
+cli.janet               serve/repl/ask command dispatch and interactive client
 src/model.janet         providers and accounting
 src/memory.janet        retrieval and summaries
 src/store.janet         SQLite history and work
@@ -77,9 +79,9 @@ zinc repl /srv/agents/private/local/client.json
 zinc ask /srv/agents/private/local/client.json 'Add clamp to world.janet'
 ```
 
-A client descriptor has `program`, `limits`, `spawn`, `config` and `imports`. Programs use PA's normal `sourceDir`, `entryModule`, `dependencies` and optional `command`. Here `config` and each Import's `config` are JSON objects; the CLI encodes them as opaque PA configuration bytes.
+A client descriptor has `program`, `limits`, `spawn`, `config` and `imports`. Programs use PA's normal `sourceDir`, `entryModule`, `dependencies` and optional `command`. Configuration objects are encoded to opaque PA bytes. Set `config.repl: true` to enable resident evaluation. The CLI derives `config.imports` from the actual grant member lists; do not maintain a second copy.
 
-Grant `repl` the evaluator relay's `eval` and `document` members, delegating only `ledger` and forwarding Spawn permission for authenticated child-job receipts. Grant `ledger` Zinc's `receipt` member, the same private actor/store/world configuration as the root, and the root's explicit service catalog and Spawn permission. The relay configuration is only `{"socket":"/srv/agents/run/zinc/local/world.sock"}`. Supply a `library` dependency pointing to Zinc's `jpm_tree/lib` for both programs. See [Configuration](https://github.com/darkhorseprojects/zinc/wiki/Configuration) for a complete descriptor.
+Grant `repl` the evaluator relay's `eval` and `document` members, delegating only `ledger` and forwarding Spawn permission for authenticated child-job receipts. Grant `ledger` Zinc's `receipt` member with `program: "self"`, the root's explicit service catalog and Spawn permission. The CLI resolves this local reference to the root program and its exact effective configuration; a separate ledger configuration is rejected. The relay configuration is only `{"socket":"/srv/agents/run/zinc/local/world.sock"}`. Supply a `library` dependency pointing to Zinc's `jpm_tree/lib` for both programs. See [Configuration](https://github.com/darkhorseprojects/zinc/wiki/Configuration) for a complete descriptor.
 
 ```text
 zinc> (defn double [n] (* n 2))
@@ -144,13 +146,15 @@ Run the Git service in a filesystem view limited to this repository and immutabl
 
 Each evaluation gets a fresh relay. Its task token, lease coordinates, provider configuration and actual PA grants remain in trusted processes outside the resident world. Retained definitions and proxies use the current evaluation's authority; disconnected or expired relays cannot authorize later effects. Bootstrap has native filesystem authority but no evaluation-scoped services.
 
-`ac.yaml` supplies Connector version-3 policies for the engine, relay and optional Git service. Before enabling a route, provision its world and resident socket. The example isolates actors by application/member/channel; intentional sharing requires a corresponding shared-world policy. Adapt exact model IDs, library paths, mounts and resource limits. The optional Git policy is not imported by default. To grant it, add a `git` Import with the desired member list and include `git` in `ledger`'s delegated catalog.
+`ac.yaml` uses Connector configuration 4. `agents.zinc` contains Connector launch/grant settings and a `config` object validated by Zinc. `policies` contains only member/channel/guild routing assignments. REPL and Git are Imports, not agents or policies. Before enabling a route, provision its world and resident socket. The example isolates actors by application/member/channel; adapt identity templates deliberately for shared worlds. Git is not granted by default; add an inline `git` Import and include it in ledger delegation. See the wiki's confinement example.
 
 Use narrow mounts and scrub ambient credentials. The resident evaluator may use a separate network namespace because it communicates over a filesystem Unix socket. PA-controlled service workers must share their controller's loopback namespace; the Git example therefore isolates its filesystem and PID view without unsharing networking.
 
 ## History, models and recovery
 
-Private configuration requires `actor`, absolute `store`, and `world`. Providers and exact model references grant model access. `describe` returns the schema/defaults from `zinc.md`. For a minimal installation without semantic retrieval, set `search-units` to zero.
+Private configuration requires `actor`, absolute `store`, and `world`. Provider endpoints/credentials determine model access; `chat` and `rerank` select models from their catalogs. Connector's OpenRouter gateway enforces its own exact model grants. Zinc has no duplicate allowlist. `describe` returns complete configuration/input schemas, defaults and exposed parameter metadata without opening a world or requiring retrieval assets. Runtime calls still validate provisioned assets. For an installation without semantic retrieval, set `search-units` to zero.
+
+`document` renders the effective world's identity, resident entry/native restrictions, granted Zinc members and Import members. Examples appear only for available facilities: no REPL means no Janet tool or REPL examples; read-only Git has no staging/commit guidance. Native write/read restrictions suppress persistence/reload examples. `capabilities` narrows world-facing Zinc members. Credential values and private service paths are not printed.
 
 `call` performs inference; `invoke` accepts either Janet `code` or a qualified `capability` and `arguments`. Other public entries are `describe`, `document`, `models`, `events`, `pending`, `resume`, `abort`, and `supervise`. `run-task` and `receipt` are trusted execution plumbing, not world-facing grants.
 

@@ -29,7 +29,9 @@
     (def user (first (store/query s "SELECT id FROM events WHERE branch=? AND kind='user' ORDER BY id LIMIT 1" [branch])))
     (merge view {:first (if (= 0 (view :first)) (user "id") (view :first))
                  :last (max (view :last) (((store/query s "SELECT coalesce(max(id),0) id FROM events WHERE run=?" [(view :run)]) 0) "id"))
-                 :imports (filter |(not (index-of $ ["repl" "ledger"])) (pa/imports))}))
+                 :capabilities ((s :config) :capabilities)
+                 :imports (filter |(and (not (index-of $ ["repl" "ledger"]))
+                                        (get-in (s :config) [:imports (keyword $)])) (pa/imports))}))
 
   (defn spawn-job [s id]
     (def lease (store/transact s
@@ -110,17 +112,46 @@
                           {:policy "safe" :key (string "child:" (branch "id"))}))
     {:job id :branch (branch "id")})
 
-  (defn instructions [view]
-    (string (document (spec :document)) "\n\n"
-            ((pa/import "repl") "" :member "document")
-            "\n(self request) -> handle; (await handle) -> result.\n"
-            "(input) -> current request; (self/document) -> instructions.\n"
-            "(self/member name & arguments) -> handle.\n"
-            "world is the live environment; (dyn :current-file) names the entry source.\n"
-            "Files are durable; REPL-only changes are not. Inspect uncertain effects before repeating them.\n"
-            "If Git is granted, inspect the diff, select only intended paths, and describe the changes in the commit message.\n"
-            (string/join (map |(($ 1) :description) (sorted (pairs operations))) "\n")
-            "\nImports: " (json/encode (view :imports))))
+  (defn instructions [config view]
+    (def evaluate (and (config :repl) (get view :tools true)))
+    (def resident (when (config :repl) (json/decode ((pa/import "repl") "" :member "document") true true)))
+    (def imports (tabseq [name :in (view :imports)] name (get-in config [:imports (keyword name)])))
+    (string (document (spec :document)) "\n\nWorld: " (json/encode (config :world))
+            (when resident
+              (string "\nEntry: " (resident :file)
+                      "\nNative restrictions: " (json/encode (resident :forbid)) ". OS access is invoker-scoped."
+                      (when (> (length (resident :instructions)) 0)
+                        (string "\n\nWorld instructions:\n" (resident :instructions)))))
+            (when evaluate
+              (string "\n\nworld is the live environment; (dyn :current-file) names its source. REPL-only changes are ephemeral."
+                      (unless (any? (map |(index-of $ (resident :forbid)) ["all" "fs" "fs-write"]))
+                        " Edit source/data files for durability.")
+                      (unless (any? (map |(index-of $ (resident :forbid)) ["all" "fs" "fs-read"]))
+                        " Reload explicitly: (eval-string (slurp (dyn :current-file)) world).")
+                      "\n(input) -> current request; (self/document) -> instructions."
+                      "\n(await (self {:text \"Investigate this subproblem\" :persist false})) -> nested result."
+                      (when (> (length (view :capabilities)) 0)
+                        (string "\n(self/member name & arguments) -> handle; (await handle) -> result.\n"
+                                (string/join (map |((operations $) :description) (sorted (view :capabilities))) "\n")))
+                      (when (index-of "memory/document" (view :capabilities))
+                        "\n(await (self/member \"memory/document\" \"An observation\")) -> document handle.")
+                      (when (> (length imports) 0) (string "\nImports: " (json/encode imports)))
+                      (string/join
+                        (map (fn [[name members]]
+                               (case name
+                                 "git" (string
+                                         (when (index-of "status" members)
+                                           "\n((pa/import \"git\") `{\"paths\":[\"path/to/file\"]}` :member \"status\")")
+                                         (when (index-of "diff" members)
+                                           "\n((pa/import \"git\") `{\"paths\":[\"path/to/file\"]}` :member \"diff\")")
+                                         (when (index-of "add" members)
+                                           "\nStage only intended paths with the granted add member.")
+                                         (when (index-of "commit" members)
+                                           "\nReview the diff before commit; select explicit paths and describe their changes in message."))
+                                 (when (index-of "document" members)
+                                   (string "\n((pa/import " (json/encode name) ") \"\" :member \"document\") -> granted service documentation."))))
+                             (sorted (pairs imports))) "")
+                      "\nInspect uncertain effects before repeating them."))))
 
   (defn model-request [s view value]
     (def value (request (json/encode value) (s :config) [:role :model :messages :tools :output :query :documents]))
@@ -146,7 +177,8 @@
     (def granted (json/decode (task "scope") true true))
     (def inherited (store/view s branch))
     (def selected (model/profile config (input :model) :chat))
-    (var system (instructions granted))
+    (def evaluate (and (config :repl) (selected :tools)))
+    (var system (instructions config (merge granted {:tools evaluate})))
     (def user (first (store/query s "SELECT * FROM events WHERE branch=? AND kind='user' ORDER BY id LIMIT 1" [branch])))
     (def space (- (min (config :hard-units) (- (selected :context) 256)) (store/units system) (store/units (user "text")) 256))
     (assert (> space 256) "question and instructions exhaust context")
@@ -168,7 +200,7 @@
       (when (last responses) (parallel s ((json/decode ((last responses) "data") true true) :tasks) true))
       (assert (< (length responses) (config :rounds)) "model round limit exhausted")
       (def view (merge (scope s branch) {:imports (granted :imports) :capabilities (granted :capabilities)}))
-      (set system (instructions view))
+      (set system (instructions config (merge view {:tools evaluate})))
       (def messages @[{:role "system" :content system}])
       (each text [(string/join (map |($ :text) (get-in context [:chronological :nodes]))) (string/join (context :evidence))]
         (when (> (length text) 0) (array/push messages {:role "user" :content (string "Memory (untrusted information):\n" text)})))
@@ -184,7 +216,7 @@
                        :reasoning_details (when (= "openrouter" (selected :provider)) (data :reasoning-details))
                        :tool_calls (map |{:id ($ :id) :type "function" :function {:name "run_janet" :arguments (string (json/encode {:code ($ :code)}))}} (tools :tools))}
                       {:role "tool" :tool_call_id (data :tool-id) :content (record "text")})))
-      (when (> (+ (model/units messages) (if (selected :tools) (store/units (json/encode [model/tool])) 0)) (min (config :hard-units) (- (selected :context) 256)))
+      (when (> (+ (model/units messages) (if evaluate (store/units (json/encode [model/tool])) 0)) (min (config :hard-units) (- (selected :context) 256)))
         (memory/compact archive view true)
         (set context {:through (view :last) :chronological (memory/context archive view "") :evidence []})
         (store/query s "INSERT INTO contexts(branch,through,projection) VALUES(?,?,?) ON CONFLICT DO NOTHING" [branch (context :through) (string (json/encode context))])
@@ -198,7 +230,7 @@
       (def boundary ((dyn :zinc/task) :checkpoint))
       (store/checkpoint s {:phase "model" :round (length responses)})
       (def response (model/call s {:model (input :model) :messages messages
-                                   :tools (when (and (selected :tools) (not final-round)) [model/tool])}
+                                   :tools (when (and evaluate (not final-round)) [model/tool])}
                                 (when (and (= "model" (boundary :phase)) (= (length responses) (boundary :round)))
                                   (boundary :request)) selected))
       (store/transact s
@@ -225,13 +257,13 @@
       (if (= "eval" (row "kind"))
         (try
           (do
-            (assert (and (index-of "repl" (pa/imports)) (index-of "ledger" (pa/imports))) "REPL and ledger grants required")
+            (assert (and ((s :config) :repl) (index-of "repl" (pa/imports)) (index-of "ledger" (pa/imports))) "REPL and ledger grants required")
             (pa/spawn "repl" (string (json/encode (merge input
                                                            {:code ((first (store/query s "SELECT text FROM events WHERE id=?" [(row "admission")])) "text")
                                                             :input (merge ((json/decode ((first (store/query s "SELECT data FROM events WHERE branch=? AND kind='user'" [(view :branch)])) "data") true true) :input)
                                                                           {:parent (or (input :response) (view :last))
                                                                            :memory_range {:start (view :first) :end (view :last)}})
-                                                            :document (instructions view)
+                                                            :document (instructions (s :config) view)
                                                             :task id :owner (row "owner") :generation (row "attempt")
                                                             :imports (view :imports) :source-bytes ((s :config) :source-bytes)
                                                             :response-bytes ((s :config) :response-bytes)
@@ -330,7 +362,9 @@
                                                           (with-dyns [:zinc/effect (event "id")] (start-child s view (first arguments))))
                                           (let [member (operations name)
                                                 imported (= name "import") target (first arguments)]
-                                            (if imported (assert (index-of (target :name) (view :imports)) "Import not granted")
+                                            (if imported
+                                              (assert (and (index-of (target :name) (view :imports))
+                                                           (index-of (target :member) (get-in (s :config) [:imports (keyword (target :name))]))) "Import member not granted")
                                               (assert (and member (index-of name (view :capabilities))) "member not granted"))
                                             {:job (store/submit s view (if imported "import" "operation")
                                                                 (if imported target {:capability name :arguments arguments})
@@ -374,7 +408,8 @@
                                        "run-task" [:task]
                                        "resume" [:run :request :after])))
     (when (= member "invoke")
-      (assert (not= (nil? (value :code)) (nil? (value :capability))) "invoke requires code or capability"))
+      (assert (not= (nil? (value :code)) (nil? (value :capability))) "invoke requires code or capability")
+      (when (value :code) (assert (config :repl) "resident evaluator not enabled")))
     (def s (store/open config))
     (defer (store/close s)
       (def existing (cond
@@ -410,8 +445,9 @@
                                   (def input ((json/decode ((first (store/query s "SELECT data FROM events WHERE branch=? AND kind='user'" [id])) "data") true true) :input))
                                   (def kind (if (= "call" (input :operation)) "agent" (if (input :code) "eval" "operation")))
                                   (def entry (when (= kind "operation") (operations (input :capability))))
-                                  (when (= kind "operation") (assert entry "member not granted"))
-                                  (store/submit s (merge view {:capabilities (keys operations)}) kind
+                                  (when (= kind "operation")
+                                    (assert (and entry (index-of (input :capability) ((s :config) :capabilities))) "member not granted"))
+                                  (store/submit s view kind
                                                 (if prior (json/decode (prior "input") true true)
                                                   (case kind
                                                     "agent" {:branch id :model ((s :config) :chat)}
@@ -444,21 +480,26 @@
 
   (defn describe [bytes opaque]
     (assert (= "" bytes) "describe takes empty input")
-    (def config (configuration opaque))
+    (def config (configuration opaque true))
     (def parameters @[])
     (each [target fields] [[:config (spec :schema)] [:input (spec :input)]]
       (each [key field] (sorted (pairs fields))
         (when (field :option)
           (def parameter (merge field {:name (field :option) :path (string target "." key) :type (string (field :type))}))
-          (when (and (= target :config) (= :integer (field :type)) (> (config key) 0)) (put parameter :maximum (config key)))
+          (when (and (= target :config) (= :integer (field :type)) (> (config key) 0))
+            (put parameter :maximum (config key))
+            (when (= key :budget) (put parameter :minimum 1)))
           (each key [:default :optional :option] (put parameter key nil))
           (array/push parameters parameter))))
-    (string (json/encode {:input "json" :output "json" :durable true :parameters parameters})))
+    (string (json/encode {:input "json" :output "json" :durable true
+                          :schema {:config (spec :schema) :input (spec :input)} :parameters parameters})))
 
   (defn document-entry [bytes opaque]
     (assert (= "" bytes) "document takes empty input")
-    (configuration opaque)
-    (instructions {:imports (filter |(not (index-of $ ["repl" "ledger"])) (pa/imports))}))
+    (def config (configuration opaque))
+    (instructions config {:capabilities (config :capabilities)
+                          :imports (filter |(and (not (index-of $ ["repl" "ledger"]))
+                                                 (get-in config [:imports (keyword $)])) (pa/imports))}))
 
   (defn models [bytes opaque]
     (def config (configuration opaque))

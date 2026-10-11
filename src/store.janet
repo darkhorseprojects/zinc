@@ -109,7 +109,7 @@ PRAGMA user_version=10;
   (try
     (do
       (sql/eval db "PRAGMA foreign_keys=ON; PRAGMA trusted_schema=OFF; PRAGMA busy_timeout=200; PRAGMA synchronous=FULL; PRAGMA journal_mode=WAL;")
-      (def s {:db db :actor (config :actor) :config config})
+      (def s @{:db db :actor (config :actor) :config config})
       (transact s
                 (def version (((query s "PRAGMA user_version") 0) "user_version"))
                 (assert (index-of version [0 10]) "unsupported Zinc database; preserve it and select a fresh database")
