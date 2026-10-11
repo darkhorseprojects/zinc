@@ -47,9 +47,9 @@ try:
     count = db.execute("SELECT count(*) FROM cygnet.synsets WHERE pos IN ('NOUN','VERB','ADJ','ADV')").fetchone()[0]
     width = db.execute("SELECT coalesce(max(length(form)-length(replace(form,' ',''))+1),1) FROM form_concepts").fetchone()[0]
     assert count > 0 and 1 <= width <= 64
-    db.executemany("INSERT INTO metadata VALUES(?,?)", [("format_version", "4"), ("source_identity", identity), ("concepts", str(count)), ("maximum_form_tokens", str(width))])
+    db.executemany("INSERT INTO metadata VALUES(?,?)", [("format_version", "1"), ("source_identity", identity), ("concepts", str(count)), ("maximum_form_tokens", str(width))])
     db.execute("PRAGMA application_id=1514751817")
-    db.execute("PRAGMA user_version=4")
+    db.execute("PRAGMA user_version=1")
     db.commit()
     db.execute("VACUUM")
 finally:

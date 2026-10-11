@@ -96,7 +96,7 @@
                                        [id ((dyn :zinc/task) :id)]))))
     (unless owned (store/event s view (row "admission")))
     {:owned (not (nil? owned)) :job id :state (row "state") :kind (row "kind") :admission (row "admission") :outcome (row "outcome")
-     :children (store/query s "SELECT id,kind,policy,admission,outcome,state FROM tasks WHERE parent=? AND actor=? ORDER BY id LIMIT 256" [id (s :actor)])})
+     :children (store/query s "SELECT id,kind,retry_policy,admission,outcome,state FROM tasks WHERE parent=? AND actor=? ORDER BY id LIMIT 256" [id (s :actor)])})
 
   (defn start-child [s view value]
     (def value (schema/request (json/encode value) [:text :parent :memory_range :persist]))
@@ -106,7 +106,7 @@
                              (s :config) (merge view {:event (dyn :zinc/effect)})))
     (def id (store/submit s (merge (scope s (branch "id")) {:imports (view :imports) :capabilities (view :capabilities)})
                           "agent" {:branch (branch "id") :model ((s :config) :chat)}
-                          {:policy "safe" :key (string "child:" (branch "id"))}))
+                          {:retry-policy "retry" :key (string "child:" (branch "id"))}))
     {:job id :branch (branch "id")})
 
   (defn instructions [config view]
@@ -166,7 +166,7 @@
                                                                    :created_at (final "created_at") :tool_usage (store/tool-used s (branch "run"))
                                                                    :usage {:reported_total (model/used s (branch "run"))
                                                                            :unreported (((store/query s "SELECT count(*) n FROM events e LEFT JOIN usage u ON u.request=e.id WHERE e.actor=? AND e.run=? AND e.kind='model-admission' AND u.total IS NULL" [(s :actor) (branch "run")]) 0) "n")}
-                                                                   :context_unit "utf8-quarter-byte"})))
+                                                                   :context_unit "token-estimate"})))
 
   (defn infer [s task input]
     (def branch (input :branch))
@@ -177,11 +177,10 @@
     (def evaluate (and (config :repl) (selected :tools)))
     (var system (instructions config (merge granted {:tools evaluate})))
     (def user (first (store/query s "SELECT * FROM events WHERE branch=? AND kind='user' ORDER BY id LIMIT 1" [branch])))
-    (def space (- (min (config :hard-units) (- (selected :context) 256)) (store/units system) (store/units (user "text")) 256))
+    (def space (- (min (config :context-quota) (- (selected :context) 256)) (store/estimate system) (store/estimate (user "text")) 256))
     (assert (> space 256) "question and instructions exhaust context")
-    (def semantic (min (config :search-units) (math/floor (/ space 2))))
-    (def room (min (config :context-units) (- space semantic)))
-    (def archive (merge s {:config (merge config {:context-units room :soft-units (min (config :soft-units) room) :hard-units space})}))
+    (def semantic (if (config :search) (math/floor (/ space 2)) 0))
+    (def archive (merge s {:config (merge config {:context-quota (- space semantic)})}))
     (def cached (first (store/query s "SELECT projection FROM contexts WHERE branch=? ORDER BY through DESC LIMIT 1" [branch])))
     (var context (when cached (json/decode (cached "projection") true true)))
 
@@ -213,7 +212,7 @@
                        :reasoning_details (when (= "openrouter" (selected :provider)) (data :reasoning-details))
                        :tool_calls (map |{:id ($ :id) :type "function" :function {:name "run_janet" :arguments (string (json/encode {:code ($ :code)}))}} (tools :tools))}
                       {:role "tool" :tool_call_id (data :tool-id) :content (record "text")})))
-      (when (> (+ (model/units messages) (if evaluate (store/units (json/encode [model/tool])) 0)) (min (config :hard-units) (- (selected :context) 256)))
+      (when (> (+ (model/estimate messages) (if evaluate (store/estimate (json/encode [model/tool])) 0)) (min (config :context-quota) (- (selected :context) 256)))
         (memory/compact archive view true)
         (set context {:through (view :last) :chronological (memory/context archive view "") :evidence []})
         (store/query s "INSERT INTO contexts(branch,through,projection) VALUES(?,?,?) ON CONFLICT DO NOTHING" [branch (context :through) (string (json/encode context))])
@@ -240,7 +239,7 @@
                                         (store/submit s view "eval"
                                                       {:code (tool :code) :user (user "id") :response (event "id")
                                                        :tool-id (tool :id) :token (base64/encode (string (os/cryptorand 32)))}
-                                                      {:policy "irreversible"})) (response :tools)))
+                                                      {:retry-policy "manual"})) (response :tools)))
                         (store/append s view "tools" "Janet admissions, not proof of execution." {:tools (response :tools) :tasks ids} (event "id"))
                         (store/checkpoint s {:phase "tools"}))))
     (memory/compact archive (scope s branch))
@@ -366,7 +365,7 @@
                                               (assert (and member (index-of name (view :capabilities))) "member not granted"))
                                             {:job (store/submit s view (if imported "import" "operation")
                                                                 (if imported target {:capability name :arguments arguments})
-                                                                {:policy (if imported "irreversible" (member :policy))
+                                                                {:retry-policy (if imported "manual" (member :retry-policy))
                                                                  :key (string "call:" (row "id") ":" (value :position))})
                                              :bytes imported})))
                             (spawn-job s (handle :job))
@@ -439,7 +438,7 @@
                               (if (and prior (or (index-of (prior "state") ["queued" "running" "waiting" "done"]) (not= member "resume")))
                                 (prior "id")
                                 (do
-                                  (when prior (assert (= "safe" (prior "policy")) "effectful root requires reconciliation, not replay"))
+                                  (when prior (assert (= "retry" (prior "retry_policy")) "effectful root requires reconciliation, not replay"))
                                   (def input ((json/decode ((first (store/query s "SELECT data FROM events WHERE branch=? AND kind='user'" [id])) "data") true true) :input))
                                   (def kind (if (= "call" (input :operation)) "agent" (if (input :code) "eval" "operation")))
                                   (def entry (when (= kind "operation") (operations (input :capability))))
@@ -451,7 +450,7 @@
                                                     "agent" {:branch id :model ((s :config) :chat)}
                                                     "eval" {:code (input :code) :token (base64/encode (string (os/cryptorand 32)))}
                                                     "operation" {:capability (input :capability) :arguments (get input :arguments [])}))
-                                                {:policy (if (= kind "eval") "irreversible" (if entry (entry :policy) "safe"))
+                                                {:retry-policy (if (= kind "eval") "manual" (if entry (entry :retry-policy) "retry"))
                                                  :key (string "root:" id ":" (if prior (prior "id") 0))
                                                  :checkpoint (if prior (json/decode (prior "checkpoint") true true) {})})))))
                 (var sequence (get value :after 0))
@@ -570,12 +569,12 @@
   (set operations
        (merge memory/operations
               {"work/inspect"
-               {:policy "safe"
+               {:retry-policy "retry"
                 :description "work/inspect job -> owned work and effect receipts."
                 :function inspect-job}
 
                "model/request"
-               {:policy "safe"
+               {:retry-policy "retry"
                 :description "model/request request -> granted, accounted model response."
                 :function model-request}}))
 

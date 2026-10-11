@@ -8,11 +8,13 @@ The concise prompt outlines the selected world, its public entry/native restrict
 
 Model access follows configured provider catalogs/credentials and Connector's gateway grants. `chat`/`rerank` are selections, not grants; the duplicate `allowed-models` setting is removed. Saved runs containing removed fields are rejected rather than adapted.
 
-Connector configuration 4 separates named agents and PA Imports from member/channel/guild routing policies. REPL and Git are not routing targets. Invokers derive the Import member manifest from actual grants. A ledger `program: self` reference inherits the root program and effective configuration, including request overrides.
+Connector configuration 1 separates named agents and PA Imports from member/channel/guild routing policies. REPL and Git are not routing targets. Invokers derive the Import member manifest from actual grants. A ledger `program: self` reference inherits the root program and effective configuration, including request overrides.
 
 ## Stored limits and accounting
 
-Byte limits apply to stored source, serialized input/outcome and event payloads, and decoded image bytes—not HTTP or REPL wire data. Event reference units measure actual stored text plus JSON data. Tool outcomes are no longer separately truncated; the existing run-shared tool quota counts full stored source/outcome bytes across nested work and resume. Admission checks source plus existing usage; responses can exhaust the quota after completion.
+Byte limits apply to stored source, serialized input/outcome and event payloads, and decoded image bytes—not HTTP or REPL wire data. Event `estimate` measures actual stored text plus JSON data using `ceil(bytes / 4)`. Summary provenance uses `source_estimate`; estimate metadata is `token-estimate`. Tool outcomes are no longer separately truncated; the existing run-shared tool quota counts full stored source/outcome bytes across nested work and resume. Admission checks source plus existing usage; responses can exhaust the quota after completion.
+
+`context-quota` (default 32768) replaces the separate memory, soft/hard, compaction-source and retrieval limits. Inference allocates remaining context space to chronology and enabled retrieval; compaction uses its allocated context quota and blocks only when explicitly requested. `summary-quota` (default 512) bounds synopses. `search` is a boolean, default true; disable it instead of setting a retrieval size to zero. Original previews use derived byte allowances and preserve UTF-8 boundaries. Old setting names are rejected without aliases.
 
 The mixed byte/token `budget` and reservation ledger are removed. Provider usage remains reported tokens, with missing reports explicitly unknown. `output` remains a provider output-token ceiling. Connector's result schema matches this accounting and no longer requires an obsolete revision field.
 
@@ -24,4 +26,6 @@ The mixed byte/token `budget` and reservation ledger are removed. Provider usage
 
 The invoker supplies confinement, native restrictions, service grants, supervision and resource limits. Fresh evaluation relays keep task tokens and credentials outside the mutable world. Retained definitions cannot retain expired authority.
 
-SQLite format 11 removes the model-budget column and reservation table. Retrieval format 4 is unchanged. Preserve incompatible databases and select a fresh path; no migration or old-configuration fallback is supplied. Safe work retains checkpoint recovery and fencing. Interrupted Janet evaluations and arbitrary Imports require reconciliation, not blind replay.
+SQLite history and Cygnet retrieval formats use version 1 as the development baseline, matching PA protocol 1 and Connector configuration 1. History names the stored event estimate and task `retry_policy` explicitly; the model-budget column and reservation table remain removed. Preserve stale development databases and rebuild retrieval indexes when schemas change; no migration or old-configuration fallback is supplied.
+
+Task and operation `:policy` becomes `:retry-policy`, with `retry` and `manual` replacing `safe` and `irreversible`. Retry limits, checkpoints, leases and fencing remain. `retry` permits recovery after interruption, not harmless or effect-free execution; provider requests may repeat and incur costs. `manual` and exhausted retries become uncertain. Interrupted Janet evaluations and arbitrary Imports require reconciliation, not blind replay. Connector routing policies are unchanged.

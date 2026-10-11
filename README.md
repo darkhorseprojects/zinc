@@ -30,7 +30,7 @@ src/git.janet           optional repository-scoped Git service
 
 Keep this privileged runtime and its dependencies outside the writable world. A world may contain an editable copy of its entire agent, but that copy must never supply the controller or credential-bearing services.
 
-Database **format 11** rejects older databases. Preserve them and choose a fresh absolute database path; there is no migration. Create the database's parent directory yourself. Use a local filesystem with reliable SQLite locking.
+Database **format 1** is the development baseline. When the schema changes, preserve stale development databases and choose a fresh absolute database path; there is no migration. Create the database's parent directory yourself. Use a local filesystem with reliable SQLite locking.
 
 ## Create a world
 
@@ -146,13 +146,13 @@ Run the Git service in a filesystem view limited to this repository and immutabl
 
 Each evaluation gets a fresh relay. Its task token, lease coordinates, provider configuration and actual PA grants remain in trusted processes outside the resident world. Retained definitions and proxies use the current evaluation's authority; disconnected or expired relays cannot authorize later effects. Bootstrap has native filesystem authority but no evaluation-scoped services.
 
-`ac.yaml` uses Connector configuration 4. `agents.zinc` contains Connector launch/grant settings and a `config` object validated by Zinc. `policies` contains only member/channel/guild routing assignments. REPL and Git are Imports, not agents or policies. Before enabling a route, provision its world and resident socket. The example isolates actors by application/member/channel; adapt identity templates deliberately for shared worlds. Git is not granted by default; add an inline `git` Import and include it in ledger delegation. See the wiki's confinement example.
+`ac.yaml` uses Connector configuration 1. `agents.zinc` contains Connector launch/grant settings and a `config` object validated by Zinc. `policies` contains only member/channel/guild routing assignments. REPL and Git are Imports, not agents or policies. Before enabling a route, provision its world and resident socket. The example isolates actors by application/member/channel; adapt identity templates deliberately for shared worlds. Git is not granted by default; add an inline `git` Import and include it in ledger delegation. See the wiki's confinement example.
 
 Use narrow mounts and scrub ambient credentials. The resident evaluator may use a separate network namespace because it communicates over a filesystem Unix socket. PA-controlled service workers must share their controller's loopback namespace; the Git example therefore isolates its filesystem and PID view without unsharing networking.
 
 ## History, models and recovery
 
-Private configuration requires `actor`, absolute `store`, and `world`. Provider endpoints/credentials determine model access; `chat` and `rerank` select models from their catalogs. Connector's OpenRouter gateway enforces its own exact model grants. Zinc has no duplicate allowlist. `describe` returns complete configuration/input schemas, defaults and exposed parameter metadata without opening a world or requiring retrieval assets. Runtime calls still validate provisioned assets. For an installation without semantic retrieval, set `search-units` to zero.
+Private configuration requires `actor`, absolute `store`, and `world`. Provider endpoints/credentials determine model access; `chat` and `rerank` select models from their catalogs. Connector's OpenRouter gateway enforces its own exact model grants. Zinc has no duplicate allowlist. `describe` returns complete configuration/input schemas, defaults and exposed parameter metadata without opening a world or requiring retrieval assets. Runtime calls still validate provisioned assets. For an installation without semantic retrieval, set `search: false`.
 
 `document` renders the effective world's identity, resident entry/native restrictions, granted Zinc members and Import members. Examples appear only for available facilities: no REPL means no Janet tool or REPL examples; read-only Git has no staging/commit guidance. Native write/read restrictions suppress persistence/reload examples. `capabilities` narrows world-facing Zinc members. Credential values and private service paths are not printed.
 
@@ -160,15 +160,19 @@ Private configuration requires `actor`, absolute `store`, and `world`. Provider 
 
 A minimal conversational input is `{"text":"Investigate this","parent":0}`. `parent` is an event attachment. `memory_range` contains inclusive `start`/`end`; both zero disable inherited history. Images are canonical Base64 records with `type` and `data`.
 
-History retains immutable originals, summary ancestry, scoped FTS/trigram retrieval, bounded UTF-8 handles and chronological compaction from original sources. Semantic retrieval needs absolute `cygnet`/`stopwords` paths. `models.lock` pins the Cygnet source and stopword artifacts; build a new format-4 graph index with `python3 tools/cygnet_index.py SOURCE.db data/cygnet.db`.
+History retains immutable originals, summary ancestry, scoped FTS/trigram retrieval, bounded UTF-8 handles and chronological compaction from original sources. Semantic retrieval needs absolute `cygnet`/`stopwords` paths. `models.lock` pins the Cygnet source and stopword artifacts; build a new format-1 graph index with `python3 tools/cygnet_index.py SOURCE.db data/cygnet.db`.
 
-Stable request keys deduplicate identical admissions and reject conflicting reuse. Safe work can recover from checkpoints; Janet evaluations and arbitrary Imports are irreversible and become uncertain after interruption. Inspect receipts before repeating effects. No heap continuation, rollback or exactly-once external-effect guarantee is provided. Waiting releases execution slots, including recursive work at `parallel=1`.
+Stable request keys deduplicate identical admissions and reject conflicting reuse. Tasks retain an explicit `retry-policy`: `retry` permits checkpoint recovery within the retry count; `manual` prevents automatic replay after interruption. Janet evaluations and arbitrary Imports use `manual` and become uncertain; exhausted retries also become uncertain. Retry permission does not mean harmless or effect-free: provider requests may repeat and incur costs. Inspect receipts before repeating effects. No heap continuation, rollback or exactly-once external-effect guarantee is provided. Waiting releases execution slots, including recursive work at `parallel=1`.
 
 Independent accepted work can outlive its observer, provided the invoker keeps the evaluator, services and grants alive. Cancellation is cooperative and does not undo effects. The final inference round has no tools.
 
 Byte limits govern stored payloads, not HTTP or REPL transport. `source-bytes` limits stored Janet source; `request-bytes` limits serialized inputs/admission payloads; `response-bytes` limits serialized outcomes/event payloads; `image-bytes` limits decoded image bytes per request. Event accounting measures the actual stored text and JSON data, with no fixed overhead estimate.
 
 `tool-quota` retains the shared per-run estimate: sum `ceil(source bytes / 4)` and `ceil(serialized outcome bytes / 4)` for all admitted evaluations, including nested branches. Results are stored and exposed without a separate tool-result truncation. Admission checks existing usage plus the new source; completed responses can exceed the quota and block subsequent admissions. Resume retains usage; a new root run starts a new quota. Internal Imports/members are not separately charged.
+
+`context-quota` defaults to 32768 estimated tokens and replaces the separate memory, soft/hard, source and retrieval limits. Inference deducts instructions/question overhead and provider capacity, then splits remaining space between chronological memory and enabled semantic retrieval. Compaction uses the allocated context quota; explicit blocking compaction waits for summaries. Preview limits are derived byte allowances with UTF-8 boundaries preserved. `summary-quota` defaults to 512 estimated tokens and bounds each synopsis; `search` defaults to true and controls retrieval.
+
+Stored/projection estimates are named `estimate`; summary provenance records `source_estimate`. All estimates use `ceil(bytes / 4)`, not provider tokenization. Terminal `context_unit` and memory `unit` identify this measure as `token-estimate`.
 
 Provider-reported usage is recorded in tokens; missing reports remain unknown. `output` is a provider output-token ceiling. There is no model `budget` or mixed byte/token reservation ledger.
 

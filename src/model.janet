@@ -107,8 +107,8 @@
 (def tool {:type "function" :function {:name "run_janet" :description "Evaluate Janet in the current world." :parameters
                                        {:type "object" :additionalProperties false :required ["code"] :properties {:code {:type "string"}}}}})
 
-(defn units [messages]
-  (store/units (json/encode (map (fn [message]
+(defn estimate [messages]
+  (store/estimate (json/encode (map (fn [message]
                                    (if (indexed? (message :content))
                                      (merge message {:content (map |(if (= "image_url" ($ :type)) {:type "image_url" :image_url "[image bytes accounted separately]"} $) (message :content))}) message)) messages))))
 
@@ -211,8 +211,8 @@
   (each message messages
     (when (indexed? (message :content))
       (each part (message :content) (when (= "image_url" (part :type)) (assert (selected :images) "model does not support image input")))))
-  (def size (+ (units messages) (if (input :tools) (store/units (json/encode (input :tools))) 0)))
-  (assert (<= size (config :hard-units)) "model input exceeds reference-unit ceiling")
+  (def size (+ (estimate messages) (if (input :tools) (store/estimate (json/encode (input :tools))) 0)))
+  (assert (<= size (config :context-quota)) "model input exceeds context quota")
   (def requested (get input :output (config :output)))
   (assert (and (int? requested) (>= requested 0)) "invalid requested output limit")
   (def cap (if (= 0 (min requested (config :output))) (max requested (config :output)) (min requested (config :output))))
@@ -412,8 +412,8 @@
   (def documents (input :documents))
   (assert (> (length query) 0) "rerank query must remain nonempty")
   (each passage documents
-    (assert (< (store/units (string query passage)) (selected :context)) "original rerank query/passage exceeds capacity"))
-  (def admission (admit s selected input (sum (map |(store/units (string query $)) documents)) 0))
+    (assert (< (store/estimate (string query passage)) (selected :context)) "original rerank query/passage exceeds capacity"))
+  (def admission (admit s selected input (sum (map |(store/estimate (string query $)) documents)) 0))
   (def result (collect (request config selected "POST" "/v1/rerank"
                                 {:model (selected :id) :query query :documents documents :top_n (length documents)})))
   (account s admission selected (get result :usage {}))

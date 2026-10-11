@@ -31,8 +31,8 @@
   (def sources (map |(describe s view $) children))
   (def first-id (get (first sources) "first" ((first sources) "id")))
   (def last-id (get (last sources) "last" ((last sources) "id")))
-  (def source-units (sum (map |($ "units") sources)))
-  (assert (and (> (length children) 0) (< (store/units text) source-units) (> (length text) 0)) "summary must reduce accounted size")
+  (def source-estimate (sum (map |($ "estimate") sources)))
+  (assert (and (> (length children) 0) (< (store/estimate text) source-estimate) (> (length text) 0)) "summary must reduce accounted size")
   (var through (- first-id 1))
   (each source sources
     (def begin (get source "first" (source "id")))
@@ -40,10 +40,10 @@
     (set through (get source "last" (source "id"))))
   (store/transact s
                   (def event (store/append s view "summary" text
-                                           {:world (view :world) :first first-id :last last-id :source_units source-units
+                                           {:world (view :world) :first first-id :last last-id :source_estimate source-estimate
                                             :height (+ 1 (reduce max 0 (map |(get $ "height" 0) sources)))}
                                            nil task))
-                  (assert (< (event "units") source-units) "stored summary must reduce accounted size")
+                  (assert (< (event "estimate") source-estimate) "stored summary must reduce accounted size")
                   (def id (event "id"))
                   (eachp [position child] children
                     (store/query s "INSERT INTO summary_children(parent,position,node,event) VALUES(?,?,?,?)"
@@ -58,9 +58,9 @@
       (sql/eval db "ATTACH DATABASE ? AS graph" [(config :cygnet)])
       (sql/eval db "PRAGMA trusted_schema=OFF; PRAGMA query_only=ON;")
       (def metadata (table ;(catseq [row :in (sql/eval db "SELECT key,value FROM graph.metadata")] [(row :key) (row :value)])))
-      (assert (and (= 4 (((sql/eval db "PRAGMA graph.user_version") 0) :user_version))
+      (assert (and (= 1 (((sql/eval db "PRAGMA graph.user_version") 0) :user_version))
                    (= 1514751817 (((sql/eval db "PRAGMA graph.application_id") 0) :application_id))
-                   (= "4" (metadata "format_version")) (= (config :cygnet-source) (metadata "source_identity"))) "incompatible Cygnet index")
+                   (= "1" (metadata "format_version")) (= (config :cygnet-source) (metadata "source_identity"))) "incompatible Cygnet index")
       (each [name columns] [["form_concepts" ["language" "form" "concept"]] ["concept_edges" ["source" "target"]] ["metadata" ["key" "value"]]]
         (assert (= columns (tuple/slice (map |($ :name) (sql/eval db (string "PRAGMA graph.table_info(" name ")"))))) "Cygnet schema mismatch"))
       (assert (first (sql/eval db "SELECT name FROM graph.sqlite_schema WHERE name='form_concepts_by_concept'")) "Cygnet graph index missing")
@@ -96,7 +96,7 @@
   (map |($ "term") (store/query s "SELECT term FROM temp.words ORDER BY offset LIMIT ?" [ceiling])))
 
 (defn search [s view anchor limit]
-  (if (or (= limit 0) (= (view :last) 0)) []
+  (if (or (not ((s :config) :search)) (= limit 0) (= (view :last) 0)) []
     (let [config (s :config) graph (cygnet config)]
       (defer (sql/close (graph :db))
         (assert (utf8/is-valid? anchor) "invalid query UTF-8")
@@ -147,7 +147,7 @@
           (if (= "" expression) []
             (store/visible s
                            (merge view {:match expression
-                                        :columns "e.id,e.actor,e.branch,e.parent,e.task,e.created,e.kind,e.units,length(CAST(e.text AS BLOB)) bytes,substr(CAST(snippet(event_fts,0,'','', ' … ',64) AS BLOB),1,3072) text"})
+                                        :columns "e.id,e.actor,e.branch,e.parent,e.task,e.created,e.kind,e.estimate,length(CAST(e.text AS BLOB)) bytes,substr(CAST(snippet(event_fts,0,'','', ' … ',64) AS BLOB),1,3072) text"})
                            :oldest (config :candidates))))
         (def selected (map (fn [row]
                              (var excerpt (string/slice (row "text") 0 (min (length (row "text")) (* 4 (min limit 768)))))
@@ -160,7 +160,7 @@
             (var size 0) (def evidence @[])
             (each rank (ranked :results)
               (def row (selected (rank :index)))
-              (def cost (store/units (render row)))
+              (def cost (store/estimate (render row)))
               (when (and (>= (rank :relevance_score) (config :score)) (<= (+ size cost) limit))
                 (array/push evidence row) (+= size cost)))
             evidence))))))
@@ -176,40 +176,42 @@
                                   [(view :branch) (s :actor) (view :world) (view :first) (view :last) through (string (json/encode rejected))])))
     (unless node (break))
     (if (try (describe s view {:node (node "id")}) ([err] nil))
-      (do (array/push projection {:node (node "id") :first (node "first") :last (node "last") :text (render node) :units (max (node "units") (store/units (render node)))})
+      (do (array/push projection {:node (node "id") :first (node "first") :last (node "last") :text (render node) :estimate (max (node "estimate") (store/estimate (render node)))})
         (set through (node "last")))
       (do (array/push rejected (node "id")) (assert (< (length rejected) (config :history-records)) "summary eligibility work ceiling exceeded"))))
   (def records (store/visible s (merge view {:covered (map |{:first ($ :first) :last ($ :last)} projection)
                                              :kinds ["user" "response" "tools" "completed" "tool-result" "artifact" "error" "cancelled" "interruption"]
-                                             :columns (string "e.id,e.actor,e.branch,e.parent,e.task,e.created,e.kind,e.units,length(CAST(e.text AS BLOB)) bytes,substr(e.text,1,"
-                                                              (config :compact-source-units) ") text")})
+                                             :columns (string "e.id,e.actor,e.branch,e.parent,e.task,e.created,e.kind,e.estimate,length(CAST(e.text AS BLOB)) bytes,substr(CAST(e.text AS BLOB),1,"
+                                                              (* 4 (math/floor (/ (config :context-quota) 2))) ") text")})
                               (if recent :recent :oldest) (config :history-records)))
   (each row records
-    (def text (string (render row)
-                      (when (< (length (row "text")) (row "bytes")) "[preview; read the event handle for the complete original]\n")))
-    (array/push projection {:event (row "id") :first (row "id") :last (row "id") :text text :units (store/units text)}))
+    (var excerpt (row "text"))
+    (while (not (utf8/is-valid? excerpt)) (set excerpt (string/slice excerpt 0 -2)))
+    (def text (string (render (merge row {"text" excerpt}))
+                      (when (< (length excerpt) (row "bytes")) "[preview; read the event handle for the complete original]\n")))
+    (array/push projection {:event (row "id") :first (row "id") :last (row "id") :text text :estimate (store/estimate text)}))
   (sort projection |(< ($0 :first) ($1 :first)))
   projection)
 
 (defn context [s view capabilities]
   (def config (s :config))
   (def projection (forest s view true))
-  (def chosen @[]) (var used (store/units capabilities))
+  (def chosen @[]) (var used (store/estimate capabilities))
   (each node (reverse projection)
-    (when (<= (+ used (node :units)) (config :context-units))
-      (array/push chosen node) (+= used (node :units))))
+    (when (<= (+ used (node :estimate)) (config :context-quota))
+      (array/push chosen node) (+= used (node :estimate))))
   (def selected (reverse chosen))
-  {:nodes selected :covered (map |{:first ($ :first) :last ($ :last)} selected) :units used :unit "utf8-quarter-byte"})
+  {:nodes selected :covered (map |{:first ($ :first) :last ($ :last)} selected) :estimate used :unit "token-estimate"})
 
 (defn open [s view ref]
   (assert (and (dictionary? ref) (not= (nil? (ref :event)) (nil? (ref :node)))) "one memory reference required")
-  (def row (describe s (merge view {:columns "e.id,e.kind,e.units"}) ref))
+  (def row (describe s (merge view {:columns "e.id,e.kind,e.estimate"}) ref))
   (def id (row "id"))
   (def field (get ref :field "text"))
   (assert (index-of field ["text" "data"]) "invalid memory field")
   (def size (first (store/query s (string "SELECT length(CAST(" field " AS BLOB)) bytes FROM events WHERE id=? AND actor=?") [id (s :actor)])))
   {:handle (merge (if (ref :node) {:node id} {:event id}) {:field field})
-   :kind (get row "kind" "summary") :bytes (size "bytes") :units (row "units")})
+   :kind (get row "kind" "summary") :bytes (size "bytes") :estimate (row "estimate")})
 
 (defn read [s view handle offset bytes]
   (open s view handle)
@@ -247,17 +249,17 @@
 
 (defn summarize [s task input]
   (def view (input :view))
-  (def cached (first (store/query s "SELECT id,units FROM summaries WHERE task=? AND actor=?" [(task "id") (s :actor)])))
+  (def cached (first (store/query s "SELECT id,estimate FROM summaries WHERE task=? AND actor=?" [(task "id") (s :actor)])))
   (if cached
-    (do (describe s view {:node (cached "id")}) {:node (cached "id") :units (cached "units")})
+    (do (describe s view {:node (cached "id")}) {:node (cached "id") :estimate (cached "estimate")})
     (do
       (def config (s :config))
       (def children (input :children))
       (def sources (map |(describe s view $) children))
-      (def maximum (min (config :summary-units) (math/floor (/ (sum (map |($ "units") sources)) 2))))
+      (def maximum (min (config :summary-quota) (math/floor (/ (sum (map |($ "estimate") sources)) 2))))
       (assert (> maximum 64) "summary provenance cannot fit")
       (def selected (model/profile config (input :model) :chat))
-      (def room (- (min (config :compact-source-units) (config :hard-units) (selected :context)) (* 2 maximum) 512))
+      (def room (- (min (config :context-quota) (selected :context)) (* 2 maximum) 512))
       (assert (> room 128) "summary source and synopsis cannot fit")
       (def saved ((dyn :zinc/task) :checkpoint))
       (def progress (if (= "summary" (saved :phase)) (table ;(kvs saved))
@@ -279,7 +281,7 @@
                                       {:role "user" :content (string "Synopsis so far:\n" (progress :text) "\nSource " (json/encode ref)
                                                                      " bytes " (slice :offset) ".." (slice :next) ":\n" (slice :text))}]}
                                     (progress :request) selected))
-            (if (and (> (length (result :text)) 0) (<= (store/units (result :text)) maximum))
+            (if (and (> (length (result :text)) 0) (<= (store/estimate (result :text)) maximum))
               (set text (result :text))
               (put progress :request nil))))
         (assert text "provider did not produce a bounded summary")
@@ -295,32 +297,32 @@
       (store/transact s
                       (store/checkpoint s progress)
                       (def id (summary s view children (progress :text) (task "id")))
-                      {:node id :units ((describe s view {:node id}) "units")}))))
+                      {:node id :estimate ((describe s view {:node id}) "estimate")}))))
 
 (defn compact [s view &opt blocking]
   (def config (s :config))
   (var receipts @[])
   (while true
     (def projection (forest s view))
-    (def total (sum (map |($ :units) projection)))
-    (when (< total (config :soft-units)) (break))
+    (def total (sum (map |($ :estimate) projection)))
+    (when (< total (config :context-quota)) (break))
     (def group @[]) (var size 0)
     (each node projection
-      (when (and (< (length group) 32) (< size (config :compact-source-units)))
-        (array/push group node) (+= size (node :units))))
+      (when (and (< (length group) 32) (< size (config :context-quota)))
+        (array/push group node) (+= size (node :estimate))))
     (assert (> size 128) "memory provenance cannot shrink under the configured ceiling")
     (def children (map |(if ($ :node) {:node ($ :node)} {:event ($ :event)}) group))
     (def key (string "summary:" (view :world) ":" (view :branch) ":" (json/encode children)))
     (def source-view (struct ;(catseq [key :in [:run :branch :world :history-last :visibility]] [key (view key)])
                              :first ((first group) :first) :last ((last group) :last)))
     (def id (store/submit s source-view "summarize" {:view source-view :children children :model (config :chat)}
-                          {:policy "safe" :key key}))
-    (if (or blocking (>= total (config :hard-units)))
+                          {:retry-policy "retry" :key key}))
+    (if blocking
       (do
         (array/push receipts ((dyn :zinc/wait) s id))
         (def node (describe s view {:node ((last receipts) :node)}))
-        (assert (< (node "units") size) "compaction failed its strict shrinking invariant")
-        (assert (< (sum (map |($ :units) (forest s view))) total) "rendered compaction did not shrink"))
+        (assert (< (node "estimate") size) "compaction failed its strict shrinking invariant")
+        (assert (< (sum (map |($ :estimate) (forest s view))) total) "rendered compaction did not shrink"))
       (do ((dyn :zinc/spawn) s id) (array/push receipts {:task id :background true}) (break))))
   receipts)
 
@@ -335,21 +337,21 @@
 
 (def operations
   {"memory/retire"
-   {:policy "safe" :transactional true :description "memory/retire branch -> retires an owned temporary branch and its descendants."
+   {:retry-policy "retry" :transactional true :description "memory/retire branch -> retires an owned temporary branch and its descendants."
     :function retire}
    "memory/open"
-   {:policy "safe" :description "memory/open reference -> original/summary handle."
+   {:retry-policy "retry" :description "memory/open reference -> original/summary handle."
     :function open}
    "memory/read"
-   {:policy "safe" :description "memory/read handle offset bytes -> UTF-8 slice."
+   {:retry-policy "retry" :description "memory/read handle offset bytes -> UTF-8 slice."
     :function read}
    "memory/expand"
-   {:policy "safe" :description "memory/expand reference -> child references and provenance."
+   {:retry-policy "retry" :description "memory/expand reference -> child references and provenance."
     :function expand}
    "memory/search"
-   {:policy "safe" :description "memory/search query -> scoped evidence reranked against the query."
-    :function (fn [s view query] (search s view query ((s :config) :search-units)))}
+   {:retry-policy "retry" :description "memory/search query -> scoped evidence reranked against the query."
+    :function (fn [s view query] (search s view query ((s :config) :context-quota)))}
    "memory/document"
-   {:policy "safe" :transactional true
+   {:retry-policy "retry" :transactional true
     :description "memory/document text -> stored document handle."
     :function document}})

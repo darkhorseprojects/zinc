@@ -1,4 +1,4 @@
-version: 4
+version: 1
 concurrency: 4
 limits:
   pending_requests: 32
@@ -40,7 +40,7 @@ agents:
       images: "${images}"
     config:
       actor: "discord:${application}:${policy}:member:${member}:channel:${channel}"
-      store: "${directory}/private/zinc/application-v11.db"
+      store: "${directory}/private/zinc/application.db"
       world: "discord:${application}:${member}:${channel}"
       repl: true
       cygnet: "${directory}/zinc/data/cygnet.db"

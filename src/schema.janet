@@ -63,7 +63,7 @@
                  (indexed? members) (> (length members) 0)) "invalid Import grant")
     (each member members
       (assert (and (string? member) (> (length member) 0) (not (string/find "\0" member))) "invalid Import member")))
-  (assert (<= (config :summary-units) (config :soft-units) (config :context-units) (config :hard-units)) "inconsistent memory ceilings")
+  (assert (<= (config :summary-quota) (config :context-quota)) "summary quota exceeds context quota")
   (unless discovery
     (each name (keys (config :imports))
       (assert (index-of (string name) imports) "Import grant unavailable"))
@@ -74,7 +74,7 @@
     (each [name provider] (pairs (config :providers))
       (assert (index-of name [:llama :openrouter]) "unsupported provider")
       (assert (peg/match ~(* (choice "https://" "http://") (some (if-not (set "?#@ \t\r\n") 1)) -1) (provider :url)) "invalid provider base"))
-    (when (> (config :search-units) 0)
+    (when (config :search)
       (each key [:cygnet :stopwords]
         (assert (and (config key) (= :file (os/stat (config key) :mode))) "semantic retrieval requires provisioned Cygnet and stopword files"))))
   config)
@@ -91,7 +91,8 @@
   (each [name provider] (pairs (saved :providers))
     (def granted (get-in current [:providers name]))
     (assert (and granted (if (provider :identity) (= (provider :identity) (granted :identity)) (= (provider :url) (granted :url)))) "saved provider revoked"))
-  (def config (merge @{} saved {:providers (tabseq [name :in (keys (saved :providers))]
+  (def config (merge @{} saved {:search (and (saved :search) (current :search))
+                               :providers (tabseq [name :in (keys (saved :providers))]
                                                 name (get-in current [:providers name]))}))
   (each [key field] (pairs schema)
     (when (= :integer (field :type))

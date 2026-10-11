@@ -24,7 +24,7 @@ CREATE TABLE tasks(
  id INTEGER PRIMARY KEY AUTOINCREMENT,actor TEXT NOT NULL,run INTEGER REFERENCES runs(id),
  branch INTEGER REFERENCES branches(id),parent INTEGER REFERENCES tasks(id),world TEXT NOT NULL,
  kind TEXT NOT NULL,input TEXT NOT NULL CHECK(json_valid(input)),scope TEXT NOT NULL CHECK(json_valid(scope)),
- policy TEXT NOT NULL CHECK(policy IN ('safe','irreversible')),retries INTEGER NOT NULL,
+ retry_policy TEXT NOT NULL CHECK(retry_policy IN ('retry','manual')),retries INTEGER NOT NULL,
  state TEXT NOT NULL DEFAULT 'queued' CHECK(state IN ('queued','running','waiting','done','failed','cancelled','uncertain')),
  checkpoint TEXT NOT NULL DEFAULT '{}' CHECK(json_valid(checkpoint)),result TEXT CHECK(json_valid(result)),
  attempt INTEGER NOT NULL DEFAULT 0,admission INTEGER REFERENCES events(id),outcome INTEGER REFERENCES events(id),
@@ -38,7 +38,7 @@ CREATE TABLE events(
  id INTEGER PRIMARY KEY AUTOINCREMENT CHECK(id<=9007199254740991),actor TEXT NOT NULL,
  run INTEGER REFERENCES runs(id),branch INTEGER REFERENCES branches(id),parent INTEGER REFERENCES events(id),
  task INTEGER REFERENCES tasks(id),kind TEXT NOT NULL,text TEXT NOT NULL DEFAULT '',data TEXT NOT NULL CHECK(json_valid(data)),
- units INTEGER NOT NULL CHECK(units>=0),created REAL NOT NULL DEFAULT(unixepoch('subsec'))
+ estimate INTEGER NOT NULL CHECK(estimate>=0),created REAL NOT NULL DEFAULT(unixepoch('subsec'))
 ) STRICT;
 CREATE INDEX event_actor ON events(actor,id);
 CREATE INDEX event_branch ON events(branch,id);
@@ -59,7 +59,7 @@ CREATE UNIQUE INDEX model_terminal ON events(parent) WHERE kind='model-outcome';
 CREATE VIEW summaries AS
  SELECT id,actor,json_extract(data,'$.world') world,branch,
         json_extract(data,'$.first') first,json_extract(data,'$.last') last,
-        text,units,json_extract(data,'$.source_units') source_units,
+        text,estimate,json_extract(data,'$.source_estimate') source_estimate,
         json_extract(data,'$.height') height,task
  FROM events WHERE kind='summary';
 
@@ -86,10 +86,10 @@ CREATE TABLE event_lexemes(event INTEGER NOT NULL REFERENCES events(id),lexeme I
 CREATE INDEX lexeme_events ON event_lexemes(lexeme,event);
 CREATE VIRTUAL TABLE lexeme_grams USING fts5(term,content='lexemes',content_rowid='id',tokenize='trigram',detail='none');
 CREATE TRIGGER lexeme_index AFTER INSERT ON lexemes BEGIN INSERT INTO lexeme_grams(rowid,term) VALUES(new.id,new.term); END;
-PRAGMA user_version=11;
+PRAGMA user_version=1;
 `)
 
-(defn units [bytes] (math/ceil (/ (length bytes) 4)))
+(defn estimate [bytes] (math/ceil (/ (length bytes) 4)))
 (defn query [s statement &opt parameters]
   (map (fn [row] (struct ;(catseq [[key value] :in (pairs row)] [(string key) value])))
        (sql/eval (s :db) statement (or parameters []))))
@@ -111,7 +111,7 @@ PRAGMA user_version=11;
       (def s @{:db db :actor (config :actor) :config config})
       (transact s
                 (def version (((query s "PRAGMA user_version") 0) "user_version"))
-                (assert (index-of version [0 11]) "unsupported Zinc database; preserve it and select a fresh database")
+                (assert (index-of version [0 1]) "unsupported Zinc database; preserve it and select a fresh database")
                 (when (= version 0) (query s schema)))
       s)
     ([err] (sql/close db) (error err))))
@@ -123,8 +123,8 @@ PRAGMA user_version=11;
   (assert (<= (+ (length text) (length data))
               ((s :config) (if (index-of kind ["user" "call-admission" "task-admission" "model-admission"]) :request-bytes :response-bytes)))
           "stored event byte ceiling")
-  (def row ((query s "INSERT INTO events(actor,run,branch,parent,task,kind,text,data,units) VALUES(?,?,?,?,?,?,?,?,?) RETURNING *"
-                   [(s :actor) (scope :run) (scope :branch) parent task kind text data (units (string text data))]) 0))
+  (def row ((query s "INSERT INTO events(actor,run,branch,parent,task,kind,text,data,estimate) VALUES(?,?,?,?,?,?,?,?,?) RETURNING *"
+                   [(s :actor) (scope :run) (scope :branch) parent task kind text data (estimate (string text data))]) 0))
   (when (index-of kind ["user" "response" "tools" "completed" "tool-result" "artifact"])
     (query s "INSERT INTO lexemes(actor,term) SELECT DISTINCT ?,term FROM (SELECT term FROM event_words WHERE doc=? ORDER BY offset LIMIT 2048) WHERE length(CAST(term AS BLOB))<=128 ON CONFLICT DO NOTHING" [(s :actor) (row "id")])
     (query s "INSERT INTO event_lexemes(event,lexeme) SELECT DISTINCT ?,l.id FROM (SELECT term FROM event_words WHERE doc=? ORDER BY offset LIMIT 2048) w JOIN lexemes l ON l.term=w.term AND l.actor=? ON CONFLICT DO NOTHING" [(row "id") (row "id") (s :actor)]))
@@ -241,8 +241,8 @@ PRAGMA user_version=11;
    :history-last (b "history_last") :visibility ((s :config) :visibility)})
 
 (defn tool-used [s run]
-  (((query s `SELECT coalesce(sum((length(CAST(e.text AS BLOB))+3)/4 + (coalesce(length(CAST(t.result AS BLOB)),0)+3)/4),0) units
-    FROM tasks t JOIN events e ON e.id=t.admission WHERE t.actor=? AND t.run=? AND t.kind='eval'` [(s :actor) run]) 0) "units"))
+  (((query s `SELECT coalesce(sum((length(CAST(e.text AS BLOB))+3)/4 + (coalesce(length(CAST(t.result AS BLOB)),0)+3)/4),0) estimate
+    FROM tasks t JOIN events e ON e.id=t.admission WHERE t.actor=? AND t.run=? AND t.kind='eval'` [(s :actor) run]) 0) "estimate"))
 
 (defn checkpoint [s value]
   (def encoded (string (json/encode value)))
@@ -292,7 +292,7 @@ PRAGMA user_version=11;
       (each name (get view key [])
         (assert (index-of name (get granted key [])) "child broadens grants"))))
 
-  (def policy (get options :policy "irreversible"))
+  (def retry-policy (get options :retry-policy "manual"))
 
   (transact s
             (when current (checkpoint s (current :checkpoint)))
@@ -303,7 +303,7 @@ PRAGMA user_version=11;
             (if existing
               (do
                 (assert (and (= kind (existing "kind"))
-                             (= policy (existing "policy"))
+                             (= retry-policy (existing "retry_policy"))
                              (deep= saved (json/decode (existing "input") true true))
                              (or (not= kind "eval") (= (input :code) ((first (query s "SELECT text FROM events WHERE id=?" [(existing "admission")])) "text"))))
                         "job key reused with different work")
@@ -315,22 +315,22 @@ PRAGMA user_version=11;
                         "shared job quota exhausted")
 
                 (when (= kind "eval")
-                  (assert (<= (+ (tool-used s (view :run)) (units (input :code)))
+                  (assert (<= (+ (tool-used s (view :run)) (estimate (input :code)))
                               ((s :config) :tool-quota))
                           "shared tool quota exhausted"))
 
                 (def id (((query s
                                  `INSERT INTO tasks(actor,run,branch,parent,world,kind,input,scope,
-                             policy,retries,key,checkpoint)
+                             retry_policy,retries,key,checkpoint)
            VALUES(?,?,?,?,?,?,?,?,?,?,?,?) RETURNING id`
                                  [(s :actor) (view :run) (view :branch) parent (view :world)
-                                  kind encoded (string (json/encode view)) policy
+                                  kind encoded (string (json/encode view)) retry-policy
                                   (get options :retries 1) (options :key)
                                   (string (json/encode (get options :checkpoint {})))]) 0) "id"))
 
                 (def event (append s view "task-admission"
                                    (if (= kind "eval") (input :code) kind)
-                                   {:kind kind :policy policy :parent parent} nil id))
+                                   {:kind kind :retry-policy retry-policy :parent parent} nil id))
 
                 (query s "UPDATE tasks SET admission=? WHERE id=?" [(event "id") id])
                 id))))
@@ -441,7 +441,7 @@ PRAGMA user_version=11;
        ORDER BY t.id`
                              [(s :actor) (os/clock)])
 
-              (def retry (and (= (row "policy") "safe")
+              (def retry (and (= (row "retry_policy") "retry")
                               (<= (row "attempt") (row "retries"))))
               (def state (if retry "queued" "uncertain"))
               (def outcome {:ok false :state state :attempt (row "attempt")
