@@ -11,7 +11,7 @@ jobs:
     container: archlinux:base-devel
     timeout-minutes: 15
     env:
-      CONNECTOR_REVISION: 123ca2a5efad6b4b224374fd58c1f64b12a6cb1a
+      CONNECTOR_REVISION: 83f46db540caa03ab81548298e2c969a34c8a676
     steps:
       - name: Install native tools
         run: pacman -Syu --noconfirm janet jpm deno git python sqlite curl
