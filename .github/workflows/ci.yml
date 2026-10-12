@@ -10,11 +10,9 @@ jobs:
     runs-on: ubuntu-24.04
     container: archlinux:base-devel
     timeout-minutes: 15
-    env:
-      CONNECTOR_REVISION: 83f46db540caa03ab81548298e2c969a34c8a676
     steps:
       - name: Install native tools
-        run: pacman -Syu --noconfirm janet jpm deno git python sqlite curl
+        run: pacman -Syu --noconfirm janet jpm git python sqlite curl
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
         with:
           path: zinc
@@ -35,29 +33,16 @@ jobs:
           ref: ${{ steps.revision.outputs.pa }}
           path: portable-agents
           persist-credentials: false
-      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
-        with:
-          repository: darkhorseprojects/agent-connector
-          ref: ${{ env.CONNECTOR_REVISION }}
-          path: agent-connector
-          persist-credentials: false
       - name: Install checked-out runtime
         run: |
           cd portable-agents
           jpm --local install
           echo "$PWD/jpm_tree/bin" >> "$GITHUB_PATH"
+          echo "JANET_PATH=$PWD/jpm_tree/lib" >> "$GITHUB_ENV"
           cd ../zinc
-          jpm deps
+          jpm --local deps
           jpm --local install
-          echo "$PWD/jpm_tree/bin" >> "$GITHUB_PATH"
-      - name: Check sources and build Connector
-        run: |
-          cd portable-agents
-          deno task check
-          cd ../agent-connector
-          deno task check
-          deno task compile
-          test "$(dist/agc --version)" = "$(deno eval 'console.log(JSON.parse(Deno.readTextFileSync("deno.json")).version)')"
+          test ! -e jpm_tree/bin/zinc
       - name: Probe completion, deadlines and cleanup
         run: |
           python3 - <<'PY'
@@ -65,12 +50,11 @@ jobs:
           assert ctypes.CDLL(None).prctl(36, 1, 0, 0, 0) == 0
           workspace = pathlib.Path.cwd()
           zinc = workspace / 'zinc'
-          pa = workspace / 'portable-agents/src/main.janet'
           library = zinc / 'jpm_tree/lib'
           scratch = workspace / '.lifetime-probe'
           scratch.mkdir()
           limits = {'frameBytes': 1048576, 'depth': 32, 'inFlight': 8, 'handles': 32, 'admissionSeconds': 1}
-          command = ['janet', str(pa), 'call', *map(str, limits.values())]
+          command = ['agent', 'call', *map(str, limits.values())]
           program = {'sourceDir': str(zinc), 'entryModule': 'zinc.md', 'dependencies': {'library': str(library)}}
           config = {'actor': 'probe', 'world': 'probe', 'store': str(scratch / 'history.db'), 'search': False,
                     'repl': True, 'imports': {'repl': ['eval', 'document'], 'ledger': ['receipt']},
@@ -87,59 +71,23 @@ jobs:
                     'spawn': ['setsid', '--', 'timeout', '--kill-after=0.2s', '10s', 'janet']}
           server = None
           try:
-              (scratch / 'agent').write_text('#!/bin/sh\nexec janet ' + str(pa) + ' "$@"\n')
-              (scratch / 'agent').chmod(0o755)
-              (scratch / 'deployment').mkdir()
-              deployment = {'version': 1, 'limits': {'stop_ms': 200, 'grant_lifetime_ms': 10000},
-                            'agents': {'zinc': {'program': program, 'limits': limits, 'config': {}, 'input': {'text': '${prompt}'}}},
-                            'policies': {}}
-              (scratch / 'deployment/ac.yaml').write_text(json.dumps(deployment))
-              env = {**os.environ, 'PATH': str(scratch) + ':' + os.environ['PATH']}
-              subprocess.run([str(workspace / 'agent-connector/dist/agc'), 'check', str(scratch / 'deployment')],
-                             env=env, check=True, timeout=5)
-              (scratch / 'probe.janet').write_text('''(defn child [input config]
-                (if (= input "loop") (while true) (ev/sleep 0.3))
-                (spit config "committed") (pa/emit "unobserved") "done")
-              (defn call [input config]
-                (def h (pa/spawn "self" (if (= input "loop") "loop" "slow") config :member "child"))
-                (pa/emit "admitted")
-                (case input "await" (string (pa/await h) ":" (pa/await h)) "death" (do (ev/sleep 5) "observer") "returned"))
-              ''')
-              for mode in ['ignore', 'await', 'death', 'loop', 'admission']:
-                  target = {'sourceDir': str(scratch), 'entryModule': 'probe.janet'}
-                  if mode == 'admission': target['command'] = ['sh', '-c', 'sleep 3', '--']
-                  request = {'version': 1, 'program': target, 'input': base64.b64encode(mode.encode()).decode(),
-                             'config': base64.b64encode(str(scratch / mode).encode()).decode(),
-                             'spawn': ['setsid', '--', 'timeout', '--kill-after=0.2s', '2s', 'janet']}
-                  started = time.monotonic()
-                  child = subprocess.Popen(command, stdin=subprocess.PIPE, stdout=subprocess.PIPE, start_new_session=True)
-                  child.stdin.write((json.dumps(request) + '\n').encode()); child.stdin.close()
-                  while True:
-                      frame = json.loads(child.stdout.readline())
-                      if mode == 'death' and frame['type'] == 'emit':
-                          os.killpg(child.pid, signal.SIGKILL)
-                          break
-                      if frame['type'] in ['result', 'error']: break
-                  child.wait(timeout=1)
-                  child.stdout.close()
-                  if mode == 'death': assert child.returncode == -signal.SIGKILL
-                  else:
-                      assert child.returncode == 0
-                      assert frame['type'] == ('error' if mode == 'admission' else 'result'), frame
-                      if mode == 'await': assert base64.b64decode(frame['output']) == b'done:done'
-                      else: assert time.monotonic() - started < 2
-                  if mode in ['ignore', 'await', 'death']:
-                      until = time.monotonic() + 2
-                      while not (scratch / mode).exists() and time.monotonic() < until: time.sleep(0.02)
-                      assert (scratch / mode).read_text() == 'committed'
-                  print('PA:', mode, 'passed', flush=True)
+              discovery = {'version': 1, 'program': program, 'member': 'describe', 'input': '',
+                           'config': base64.b64encode(b'{}').decode()}
+              result = subprocess.run(command, input=(json.dumps(discovery) + '\n').encode(), capture_output=True, timeout=5)
+              assert result.returncode == 0
+              terminal = json.loads(result.stdout.splitlines()[-1])
+              assert terminal['type'] == 'result', terminal
+              description = json.loads(base64.b64decode(terminal['output']))
+              assert description['input'] == 'json' and description['output'] == 'json'
+              assert 'config' in description['schema'] and 'input' in description['schema']
+              print('Zinc: agent discovery passed', flush=True)
               (scratch / 'world.janet').write_text('(def instructions "probe")\n')
               server_config = {'file': str(scratch / 'world.janet'), 'socket': str(scratch / 'world.sock'),
                                'seconds': 2, 'forbid': ['exit', 'threads', 'signal', 'subprocess']}
-              code = '(module/add-syspath ' + json.dumps(str(library)) + ') (def repl (require ' + json.dumps(str(zinc / 'src/repl.janet')) + ')) '
-              code += '(with-dyns [:pa/limits {' + ' '.join(json.dumps(k) + ' ' + str(v) for k, v in limits.items()) + '}] '
-              code += '((module/value repl \'serve) "" ' + json.dumps(json.dumps(server_config)) + '))'
-              server = subprocess.Popen(['janet', '-e', code], start_new_session=True)
+              resident = {'version': 1, 'program': {**program, 'entryModule': 'src/repl.janet'},
+                          'member': 'serve', 'input': '', 'config': base64.b64encode(json.dumps(server_config).encode()).decode()}
+              server = subprocess.Popen(command, stdin=subprocess.PIPE, stdout=subprocess.PIPE, start_new_session=True)
+              server.stdin.write((json.dumps(resident) + '\n').encode()); server.stdin.close()
               until = time.monotonic() + 3
               while not (scratch / 'world.sock').exists() and time.monotonic() < until: time.sleep(0.02)
               assert server.poll() is None and (scratch / 'world.sock').exists()
@@ -196,12 +144,17 @@ jobs:
                           assert db.execute('SELECT count(*) FROM tasks t JOIN runs r ON r.id=t.run WHERE r.request=?', (name,)).fetchone()[0] == 1
                   print('Zinc:', name, 'passed', flush=True)
               server.wait(timeout=3)
-              assert server.returncode == 124
+              assert server.returncode == 0
+              terminal = json.loads(server.stdout.read().splitlines()[-1]); server.stdout.close()
+              assert terminal['type'] == 'error' and terminal['code'] == 'ProcessFailure', terminal
               (scratch / 'world.sock').unlink()
               (scratch / 'world.janet').write_text('(while true)\n')
-              server = subprocess.Popen(['janet', '-e', code], start_new_session=True)
+              server = subprocess.Popen(command, stdin=subprocess.PIPE, stdout=subprocess.PIPE, start_new_session=True)
+              server.stdin.write((json.dumps(resident) + '\n').encode()); server.stdin.close()
               server.wait(timeout=4)
-              assert server.returncode == 124
+              assert server.returncode == 0
+              terminal = json.loads(server.stdout.read().splitlines()[-1]); server.stdout.close()
+              assert terminal['type'] == 'error' and terminal['code'] == 'ProcessFailure', terminal
               with sqlite3.connect(scratch / 'history.db') as db:
                   db.execute("INSERT INTO tasks(actor,run,branch,world,kind,input,scope,retry_policy,retries) SELECT actor,run,branch,world,kind,input,scope,retry_policy,retries FROM tasks WHERE id=?", (task,))
                   queued = db.execute('SELECT max(id) FROM tasks').fetchone()[0]
@@ -231,17 +184,4 @@ jobs:
                   if not children: break
               shutil.rmtree(scratch)
               assert not children, children
-          PY
-      - name: Clean owned fixture processes and files
-        if: always()
-        run: |
-          python3 - <<'PY'
-          import os, pathlib, shutil, signal
-          for proc in pathlib.Path('/proc').glob('[0-9]*'):
-              try:
-                  if (proc / 'comm').read_text().strip() == 'janet':
-                      os.kill(int(proc.name), signal.SIGKILL)
-              except (OSError, ValueError): pass
-          for path in ['.lifetime-probe', 'agent-connector/dist']:
-              if pathlib.Path(path).exists(): shutil.rmtree(path)
           PY

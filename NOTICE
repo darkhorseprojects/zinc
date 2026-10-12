@@ -1,7 +1,7 @@
 Zinc third-party notices
 ========================
 
-Janet, Portable Agents, Agent Connector, SQLite, libcurl, model servers,
+Janet, Portable Agents, SQLite, libcurl, model servers,
 model weights and Cygnet data are external dependencies or separately
 provisioned assets. Janet modules are pinned in project.janet. Preserve their
 upstream notices and license texts when redistributing installed dependencies.

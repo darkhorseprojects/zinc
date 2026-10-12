@@ -2,7 +2,7 @@
 
 Zinc is a Janet agent with a file-backed, resident REPL and chronological memory. You and the agent evaluate code in the same live environment. Files hold durable code and data; ordinary Git versions those files. SQLite holds history, work admissions, outcomes and model accounting—not world images.
 
-Portable Agents (PA) transports bytes and explicitly delegated services. Agent Connector supplies Discord routing, credentials and delivery. The invoker owns filesystem access, native facilities, service grants and process lifetime.
+Zinc is a package for Portable Agents (PA), not an executable or CLI. PA transports bytes and explicitly delegated services. The invoker owns credentials, delivery, filesystem access, native facilities, service grants and process lifetime.
 
 ## Install
 
@@ -10,18 +10,17 @@ Use Janet 1.42+, Jpm, Git, libcurl and SQLite with FTS5/trigram support. Residen
 
 ```sh
 cd /srv/agents/zinc
-jpm deps
-jpm install
+jpm --local deps
+jpm --local install
 ```
 
-The package installs `zinc` and the following runtime:
+Jpm installs only the package sources under `zinc/`; it installs no executable. Invoke those sources through PA's `agent` CLI or SDK. The runtime contains:
 
 ```text
 zinc.md                 prompt, declarative configuration/input schemas, composition
 src/engine.janet        inference and durable dispatch
 src/repl.janet          resident evaluator and request-scoped relay
 src/schema.janet        validation, reauthorization and resident/relay/Git schemas
-cli.janet               serve/repl/ask command dispatch and interactive client
 src/model.janet         providers and accounting
 src/memory.janet        retrieval and summaries
 src/store.janet         SQLite history and work
@@ -30,7 +29,7 @@ src/git.janet           optional repository-scoped Git service
 
 Keep this privileged runtime and its dependencies outside the writable world. A world may contain an editable copy of its entire agent, but that copy must never supply the controller or credential-bearing services.
 
-Database **format 1** is the development baseline. When the schema changes, preserve stale development databases and choose a fresh absolute database path; there is no migration. Create the database's parent directory yourself. Use a local filesystem with reliable SQLite locking. One history database can serve multiple actors/worlds. SQLite's `-wal` and `-shm` files are sidecars, not extra databases; do not delete active sidecars. Connector's request ledger and the immutable retrieval index have separate owners.
+Database **format 1** is the development baseline. When the schema changes, preserve stale development databases and choose a fresh absolute database path; there is no migration. Create the database's parent directory yourself. Use a local filesystem with reliable SQLite locking. One history database can serve multiple actors/worlds. SQLite's `-wal` and `-shm` files are sidecars, not extra databases; do not delete active sidecars. The invoker's delivery ledger and the immutable retrieval index have separate owners.
 
 ## Create a world
 
@@ -47,54 +46,34 @@ my-agent/
 For example, `world.janet` can contain:
 
 ```janet
-(def instructions (slurp "world.md"))
+(def instructions (string (slurp "world.md")))
 (defn double [n] (* n 2))
 ```
 
 Initialize and commit with normal Git. Git is not needed to start or evaluate the world. Nothing is published, accepted or activated through Zinc.
 
-Run one resident evaluator per logical world. Its JSON configuration contains PA framing limits and these service settings:
+Run one resident evaluator per logical world through the `serve` member of `src/repl.janet`. Its opaque JSON configuration contains only these service settings:
 
 ```json
 {
-  "limits": {"frameBytes":16777216,"depth":64,"inFlight":32,"handles":4096,"admissionSeconds":10},
-  "config": {
-    "file": "/world/world.janet",
-    "socket": "/srv/agents/run/zinc/local/world.sock",
-    "seconds": 120,
-    "forbid": ["net","subprocess","ffi","modules","threads","env","asm","unmarshal","exit","locale","signal","chroot","sandbox"]
-  }
+  "file": "/world/world.janet",
+  "socket": "/srv/agents/run/zinc/local/world.sock",
+  "seconds": 120,
+  "forbid": ["net","subprocess","ffi","modules","threads","env","asm","unmarshal","exit","locale","signal","chroot","sandbox"]
 }
 ```
 
-`zinc serve SERVER.json` loads the entry once, then serves the live environment. Start it inside the invoker's chosen filesystem/process scope, with the world as its working directory. The `forbid` list invokes Janet's irreversible native `sandbox` before loading mutable source. It is not a filesystem jail. Do not forbid compilation or world file access if you want a usable persistent REPL.
+Select `src/repl.janet` and member `serve` in an ordinary PA request with empty input, then invoke `agent call FRAME-BYTES DEPTH IN-FLIGHT HANDLES ADMISSION-SECONDS`. PA wire requests encode input/configuration bytes as canonical Base64. See [Configuration](https://github.com/darkhorseprojects/zinc/wiki/Configuration) for a runnable request and confinement example. The service loads the entry once, then serves the live environment. Start the controller and its worker inside the invoker's chosen filesystem/process scope, with the world as their working directory. The `forbid` list invokes Janet's irreversible native `sandbox` before loading mutable source. It is not a filesystem jail. Do not forbid compilation or world file access if you want a usable persistent REPL.
 
-Required resident `seconds` bounds bootstrap and each evaluation, including waits. A private native watchdog starts before sandboxing and exits the entire resident with status 124 on expiry, even for non-yielding code. The invoker must restart it from files, provide the socket directory, remove stale sockets only after known termination, and enforce aggregate CPU, memory and process limits. Heap-only changes are lost; interrupted effects remain uncertain. Socket permissions are `0600`; they do not isolate hostile programs sharing a host user.
+Required resident `seconds` bounds bootstrap and each evaluation, including waits. A private native watchdog starts before sandboxing and exits the resident worker with status 124 on expiry, even for non-yielding code. PA reports a failed worker through a terminal error frame; its controller can exit zero after reporting that error. The invoker must supervise the whole controller/worker scope and restart this long-lived service after termination, provide the socket directory, remove stale sockets only after known termination, and enforce aggregate CPU, memory and process limits. Heap-only changes are lost; interrupted effects remain uncertain. Socket permissions are `0600`; they do not isolate hostile programs sharing a host user.
 
 ## Participate directly
 
-The trusted client accepts a private PA invocation descriptor, not a world pathname:
+Invoke `zinc.md` through PA's `agent call` or SDK. Member `call` accepts conversational input such as `{"text":"Add clamp to world.janet"}`. Member `invoke` accepts direct Janet input such as `{"code":"(double 21)"}`. Both use the same resident environment when private configuration enables `repl`.
 
-```sh
-zinc repl /srv/agents/private/local/client.json
-zinc ask /srv/agents/private/local/client.json 'Add clamp to world.janet'
-```
+The invoker selects the Program, limits, independent Spawn launcher, opaque configuration and Import grants. It derives `config.imports` from the actual grant member lists. PA does not interpret Zinc's configuration or supply an interactive Zinc client.
 
-A client descriptor has `program`, `limits`, `spawn`, `config` and `imports`. Programs use PA's normal `sourceDir`, `entryModule`, `dependencies` and optional `command`. Configuration objects are encoded to opaque PA bytes. Set `config.repl: true` to enable resident evaluation. The CLI derives `config.imports` from the actual grant member lists; do not maintain a second copy.
-
-Grant `repl` the evaluator relay's `eval` and `document` members, delegating only `ledger` and forwarding Spawn permission for authenticated child-job receipts. Grant `ledger` Zinc's `receipt` member with `program: "self"`, the root's explicit service catalog and Spawn permission. The CLI resolves this local reference to the root program and its exact effective configuration; a separate ledger configuration is rejected. The relay configuration is only `{"socket":"/srv/agents/run/zinc/local/world.sock"}`. Supply a `library` dependency pointing to Zinc's `jpm_tree/lib` for both programs. See [Configuration](https://github.com/darkhorseprojects/zinc/wiki/Configuration) for a complete descriptor.
-
-```text
-zinc> (defn double [n] (* n 2))
-zinc> (double 21)
-42
-zinc> (defn double [n] (+ n n))
-zinc> /ask Add clamp to world.janet and explain its boundary cases.
-zinc> (clamp 12 0 10)
-10
-```
-
-Multiline Janet is accepted. `/ask` submits conversational inference; ordinary input evaluates Janet directly. Both use the same resident environment.
+Grant `repl` the evaluator relay's `eval` and `document` members, delegating only `ledger` and forwarding Spawn permission for authenticated child-job receipts. Grant `ledger` Zinc's `receipt` member with the same root Program and effective configuration, its explicit service catalog and Spawn permission. These are ordinary PA descriptors; there is no Zinc-specific `program: "self"` reference. The relay configuration is only `{"socket":"/srv/agents/run/zinc/local/world.sock"}`. Supply a `library` dependency pointing to Zinc's `jpm_tree/lib` for both programs. See [Configuration](https://github.com/darkhorseprojects/zinc/wiki/Configuration) for a complete invocation.
 
 A definition or mutable value changed only in the REPL is ephemeral. Edit the source/data file to make it durable. To evaluate edited source explicitly:
 
@@ -147,13 +126,13 @@ Run the Git service in a filesystem view limited to this repository and immutabl
 
 Each evaluation gets a fresh relay. Its task token, lease coordinates, provider configuration and actual PA grants remain in trusted processes outside the resident world. Retained definitions and proxies use the current evaluation's authority; disconnected or expired relays cannot authorize later effects. Bootstrap has native filesystem authority but no evaluation-scoped services.
 
-`ac.yaml` uses Connector configuration 1. `agents.zinc` contains Connector launch/grant settings and a `config` object validated by Zinc. `policies` contains only member/channel/guild routing assignments. REPL and Git are Imports, not agents or policies. Before enabling a route, provision its world and resident socket. The example isolates actors by application/member/channel; adapt identity templates deliberately for shared worlds. Git is not granted by default; add an inline `git` Import and include it in ledger delegation. See the wiki's confinement example.
+Deployment configuration belongs to the invoker, not this package. Provision the world and resident socket before invoking it. Choose actor/world identities deliberately for isolation or sharing. Git is not granted by default; include it in actual Import grants and ledger delegation only when intended.
 
-Use narrow mounts and scrub ambient credentials. The resident evaluator may use a separate network namespace because it communicates over a filesystem Unix socket. PA-controlled service workers must share their controller's loopback namespace; the Git example therefore isolates its filesystem and PID view without unsharing networking.
+Use narrow mounts and scrub ambient credentials. The resident evaluator may use a separate network namespace because it communicates over a filesystem Unix socket. PA-controlled service workers must share their controller's loopback namespace; confine a Git worker's filesystem and PID view without independently unsharing its networking.
 
 ## History, models and recovery
 
-Private configuration requires `actor`, absolute `store`, and `world`. Provider endpoints/credentials determine model access; `chat` and `rerank` select models from their catalogs. Connector's OpenRouter gateway enforces its own exact model grants. Zinc has no duplicate allowlist. `describe` returns complete configuration/input schemas, defaults and exposed parameter metadata without opening a world or requiring retrieval assets. Runtime calls still validate provisioned assets. For an installation without semantic retrieval, set `search: false`.
+Private configuration requires `actor`, absolute `store`, and `world`. Provider endpoints/credentials determine model access; `chat` and `rerank` select models from their catalogs. An invoker-supplied model gateway may narrow exact model grants. Zinc has no duplicate allowlist. `describe` returns complete configuration/input schemas, defaults and exposed parameter metadata without opening a world or requiring retrieval assets. Runtime calls still validate provisioned assets. For an installation without semantic retrieval, set `search: false`.
 
 `document` renders the effective world's identity, resident entry/native restrictions, granted Zinc members and Import members. Examples appear only for available facilities: no REPL means no Janet tool or REPL examples; read-only Git has no staging/commit guidance. Native write/read restrictions suppress persistence/reload examples. `capabilities` narrows world-facing Zinc members. Credential values and private service paths are not printed.
 
@@ -167,7 +146,7 @@ Stable request keys deduplicate identical admissions and reject conflicting reus
 
 Independent accepted work can outlive its observer, provided the invoker keeps the evaluator, services and grants alive. Zinc tracks durable task IDs, not PA's ephemeral handles. `run-seconds` defaults to 900 and fixes the run deadline at admission; descendants, retries, resume and observation do not extend it. Reauthorization may shorten it. Expiry prevents claims, checkpoints and renewal, cancels never-started work and makes interrupted work uncertain without replay. An original fenced owner may still commit a late known result. `pending` recovers stale work and reports request/run/task IDs, state, attempt, retry policy and run/lease expiry.
 
-The Linux `ac.yaml` uses separate sessions and bounded `timeout` launchers. Supply equivalent supervised launchers elsewhere; PA framing/admission limits do not terminate runaway processes. Connector reattaches the frozen request after observer detachment, rather than implicitly invoking `resume`. Failed, uncertain, cancelled or expired work requires inspection. Cancellation is cooperative and does not undo effects. The final inference round has no tools.
+The invoker supplies separate sessions and bounded worker/independent-controller launchers; PA framing/admission limits do not terminate runaway processes. Observers may reattach the original request rather than implicitly invoking `resume`. Failed, uncertain, cancelled or expired work requires inspection. Cancellation is cooperative and does not undo effects. The final inference round has no tools.
 
 Byte limits govern stored payloads, not HTTP or REPL transport. `source-bytes` limits stored Janet source; `request-bytes` limits serialized inputs/admission payloads; `response-bytes` limits serialized outcomes/event payloads; `image-bytes` limits decoded image bytes per request. Event accounting measures the actual stored text and JSON data, with no fixed overhead estimate.
 

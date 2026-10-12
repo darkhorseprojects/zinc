@@ -10,11 +10,3 @@
    {:repo "https://github.com/janet-lang/spork.git" :tag "8a87c5ae1cbbf3a0037eeac7f172bd45da4d9910"}])
 
 (declare-source :source ["src" "zinc.md"] :prefix "zinc")
-
-(def script (string (find-build-dir) "zinc"))
-(rule script ["cli.janet"]
-      (create-dirs script)
-      (copyfile "cli.janet" script)
-      (os/chmod script 8r755))
-(task "install" [script])
-(declare-binscript :main script :hardcode-syspath true)
