@@ -21,28 +21,41 @@
   (def config (settings/validate settings/resident opaque))
   (def listener (net/listen :unix (config :socket)))
   (os/chmod (config :socket) 8r600)
-  (def env (make-env))
-  (def limits (struct ;(kvs (dyn :pa/limits))))
-  (put env :pa/limits limits)
-  (put env :current-file (config :file))
-  (put env :redef true)
-  (put env 'world @{:value env})
-  (put env 'self @{:value (partial exchange "spawn")})
-  (put env 'self/member @{:value exchange})
-  (put env 'self/document @{:value (fn [] ((dyn :zinc/evaluation) :document))})
-  (put env 'input @{:value (fn [] ((dyn :zinc/evaluation) :input))})
-  (put env 'await @{:value (fn [handle]
-                             (def result (exchange "await" handle))
-                             (if (handle :bytes) (base64/decode (result :data)) result))})
-  (put env 'pa/imports @{:value (fn [] ((dyn :zinc/evaluation) :imports))})
-  (put env 'pa/import @{:value (fn [name]
-                                 (assert (index-of name ((dyn :zinc/evaluation) :imports)) "Import not granted")
-                                 (fn [input &named member]
-                                   (def handle (exchange "import" {:name name :member (or member "call") :data (base64/encode (string input))}))
-                                   (base64/decode ((exchange "await" handle) :data))))})
-  (sandbox ;(map keyword (config :forbid)))
-  (with-env env (eval-string (slurp (config :file)) env))
-  (defer (ev/close listener)
+  (def watchdog (ev/thread-chan 1))
+  (ev/thread
+    (fn [watchdog]
+      (while true
+        (def ticket (ev/take watchdog))
+        (unless ticket (break))
+        (ev/spawn
+          (try (ev/with-deadline (ticket 0) (ev/take (ticket 1)))
+            ([err] (os/exit 124))))))
+    watchdog :n)
+  (defer (do (ev/chan-close watchdog) (ev/close listener))
+    (def env (make-env))
+    (def limits (struct ;(kvs (dyn :pa/limits))))
+    (put env :pa/limits limits)
+    (put env :current-file (config :file))
+    (put env :redef true)
+    (put env 'world @{:value env})
+    (put env 'self @{:value (partial exchange "spawn")})
+    (put env 'self/member @{:value exchange})
+    (put env 'self/document @{:value (fn [] ((dyn :zinc/evaluation) :document))})
+    (put env 'input @{:value (fn [] ((dyn :zinc/evaluation) :input))})
+    (put env 'await @{:value (fn [handle]
+                               (def result (exchange "await" handle))
+                               (if (handle :bytes) (base64/decode (result :data)) result))})
+    (put env 'pa/imports @{:value (fn [] ((dyn :zinc/evaluation) :imports))})
+    (put env 'pa/import @{:value (fn [name]
+                                   (assert (index-of name ((dyn :zinc/evaluation) :imports)) "Import not granted")
+                                   (fn [input &named member]
+                                     (def handle (exchange "import" {:name name :member (or member "call") :data (base64/encode (string input))}))
+                                     (base64/decode ((exchange "await" handle) :data))))})
+    (def bootstrapped (ev/thread-chan 1))
+    (ev/give watchdog [(config :seconds) bootstrapped])
+    (defer (ev/give bootstrapped true)
+      (sandbox ;(map keyword (config :forbid)))
+      (with-env env (eval-string (slurp (config :file)) env)))
     (net/accept-loop listener
                      (fn [peer]
                        (with-dyns [:pa/limits limits]
@@ -54,22 +67,25 @@
                                (def instructions (module/value env 'instructions))
                                (assert (or (nil? instructions) (string? instructions)) "instructions must be a string")
                                (wire/send peer {"type" "result" "output" (wire/json {"file" (config :file) "forbid" (config :forbid)
-                                                                                     "instructions" (or instructions "")})}))
+                                                                                     "seconds" (config :seconds) "instructions" (or instructions "")})}))
                              "eval"
                              (do
                                (assert (and (string? (packet "code")) (> (length (packet "code")) 0)) "invalid evaluation")
-                               (def output @"")
-                               (def outcome
-                                 (with-env env
-                                   (with-dyns [:zinc/evaluation {:stream peer :lock (ev/lock) :input (json/decode (packet "input") true true)
-                                                                 :document (packet "document") :imports (packet "imports")}
-                                               :out (fn [text] (buffer/push-string output text))]
-                                     (try
-                                       (let [result (eval-string (packet "code") env)
-                                             text (string output (if (string? result) result (string/format "%p" result)))]
-                                         {"value" text})
-                                       ([err] {"error" (string err)})))))
-                               (wire/send peer {"type" "result" "output" (wire/json outcome)}))
+                               (def completed (ev/thread-chan 1))
+                               (ev/give watchdog [(config :seconds) completed])
+                               (defer (ev/give completed true)
+                                 (def output @"")
+                                 (def outcome
+                                   (with-env env
+                                     (with-dyns [:zinc/evaluation {:stream peer :lock (ev/lock) :input (json/decode (packet "input") true true)
+                                                                   :document (packet "document") :imports (packet "imports")}
+                                                 :out (fn [text] (buffer/push-string output text))]
+                                       (try
+                                         (let [result (eval-string (packet "code") env)
+                                               text (string output (if (string? result) result (string/format "%p" result)))]
+                                           {"value" text})
+                                         ([err] {"error" (string err)})))))
+                                 (wire/send peer {"type" "result" "output" (wire/json outcome)})))
                              (error "unknown REPL operation")))))))
   "")
 

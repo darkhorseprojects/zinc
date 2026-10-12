@@ -30,7 +30,7 @@ src/git.janet           optional repository-scoped Git service
 
 Keep this privileged runtime and its dependencies outside the writable world. A world may contain an editable copy of its entire agent, but that copy must never supply the controller or credential-bearing services.
 
-Database **format 1** is the development baseline. When the schema changes, preserve stale development databases and choose a fresh absolute database path; there is no migration. Create the database's parent directory yourself. Use a local filesystem with reliable SQLite locking.
+Database **format 1** is the development baseline. When the schema changes, preserve stale development databases and choose a fresh absolute database path; there is no migration. Create the database's parent directory yourself. Use a local filesystem with reliable SQLite locking. One history database can serve multiple actors/worlds. SQLite's `-wal` and `-shm` files are sidecars, not extra databases; do not delete active sidecars. Connector's request ledger and the immutable retrieval index have separate owners.
 
 ## Create a world
 
@@ -61,6 +61,7 @@ Run one resident evaluator per logical world. Its JSON configuration contains PA
   "config": {
     "file": "/world/world.janet",
     "socket": "/srv/agents/run/zinc/local/world.sock",
+    "seconds": 120,
     "forbid": ["net","subprocess","ffi","modules","threads","env","asm","unmarshal","exit","locale","signal","chroot","sandbox"]
   }
 }
@@ -68,7 +69,7 @@ Run one resident evaluator per logical world. Its JSON configuration contains PA
 
 `zinc serve SERVER.json` loads the entry once, then serves the live environment. Start it inside the invoker's chosen filesystem/process scope, with the world as its working directory. The `forbid` list invokes Janet's irreversible native `sandbox` before loading mutable source. It is not a filesystem jail. Do not forbid compilation or world file access if you want a usable persistent REPL.
 
-The invoker must provide the socket directory, supervise the process, remove stale sockets after termination, and enforce CPU, memory, process and deadline limits. Socket permissions are `0600`; they do not isolate hostile programs sharing a host user.
+Required resident `seconds` bounds bootstrap and each evaluation, including waits. A private native watchdog starts before sandboxing and exits the entire resident with status 124 on expiry, even for non-yielding code. The invoker must restart it from files, provide the socket directory, remove stale sockets only after known termination, and enforce aggregate CPU, memory and process limits. Heap-only changes are lost; interrupted effects remain uncertain. Socket permissions are `0600`; they do not isolate hostile programs sharing a host user.
 
 ## Participate directly
 
@@ -164,7 +165,9 @@ History retains immutable originals, summary ancestry, scoped FTS/trigram retrie
 
 Stable request keys deduplicate identical admissions and reject conflicting reuse. Tasks retain an explicit `retry-policy`: `retry` permits checkpoint recovery within the retry count; `manual` prevents automatic replay after interruption. Janet evaluations and arbitrary Imports use `manual` and become uncertain; exhausted retries also become uncertain. Retry permission does not mean harmless or effect-free: provider requests may repeat and incur costs. Inspect receipts before repeating effects. No heap continuation, rollback or exactly-once external-effect guarantee is provided. Waiting releases execution slots, including recursive work at `parallel=1`.
 
-Independent accepted work can outlive its observer, provided the invoker keeps the evaluator, services and grants alive. Cancellation is cooperative and does not undo effects. The final inference round has no tools.
+Independent accepted work can outlive its observer, provided the invoker keeps the evaluator, services and grants alive. Zinc tracks durable task IDs, not PA's ephemeral handles. `run-seconds` defaults to 900 and fixes the run deadline at admission; descendants, retries, resume and observation do not extend it. Reauthorization may shorten it. Expiry prevents claims, checkpoints and renewal, cancels never-started work and makes interrupted work uncertain without replay. An original fenced owner may still commit a late known result. `pending` recovers stale work and reports request/run/task IDs, state, attempt, retry policy and run/lease expiry.
+
+The Linux `ac.yaml` uses separate sessions and bounded `timeout` launchers. Supply equivalent supervised launchers elsewhere; PA framing/admission limits do not terminate runaway processes. Connector reattaches the frozen request after observer detachment, rather than implicitly invoking `resume`. Failed, uncertain, cancelled or expired work requires inspection. Cancellation is cooperative and does not undo effects. The final inference round has no tools.
 
 Byte limits govern stored payloads, not HTTP or REPL transport. `source-bytes` limits stored Janet source; `request-bytes` limits serialized inputs/admission payloads; `response-bytes` limits serialized outcomes/event payloads; `image-bytes` limits decoded image bytes per request. Event accounting measures the actual stored text and JSON data, with no fixed overhead estimate.
 

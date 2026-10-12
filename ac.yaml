@@ -3,6 +3,7 @@ concurrency: 4
 limits:
   pending_requests: 32
   lifetime_ms: 600000
+  stop_ms: 5000
   grant_lifetime_ms: 86400000
   rpc_bytes: 8388608
   output_messages: 32
@@ -12,10 +13,11 @@ agents:
     program:
       sourceDir: zinc
       entryModule: zinc.md
+      command: [timeout, --kill-after=5s, 900s, janet]
       dependencies: &libraries
         library: zinc/jpm_tree/lib
     limits: {frameBytes: 16777216, depth: 64, inFlight: 32, handles: 4096, admissionSeconds: 10}
-    spawn: [janet]
+    spawn: [setsid, --, timeout, --kill-after=5s, 900s, janet]
     discord: true
     images: true
     options: [config.chat, config.rerank, config.thinking, config.rounds, input.parent, input.persist]
@@ -24,6 +26,7 @@ agents:
         program:
           sourceDir: zinc
           entryModule: src/repl.janet
+          command: [timeout, --kill-after=5s, 900s, janet]
           dependencies: *libraries
         config:
           socket: "${directory}/run/zinc/${application}-${member}-${channel}/world.sock"
@@ -43,6 +46,7 @@ agents:
       store: "${directory}/private/zinc/application.db"
       world: "discord:${application}:${member}:${channel}"
       repl: true
+      run-seconds: 900
       cygnet: "${directory}/zinc/data/cygnet.db"
       stopwords: "${directory}/zinc/data/stopwords-iso.json"
       providers:

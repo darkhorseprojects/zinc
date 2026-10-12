@@ -7,7 +7,7 @@
 CREATE TABLE runs(
  id INTEGER PRIMARY KEY AUTOINCREMENT CHECK(id<=9007199254740991),actor TEXT NOT NULL,
  request TEXT,input TEXT NOT NULL CHECK(json_valid(input)),world TEXT NOT NULL,
- config TEXT NOT NULL CHECK(json_valid(config)),UNIQUE(actor,request)
+ config TEXT NOT NULL CHECK(json_valid(config)),expires REAL NOT NULL,UNIQUE(actor,request)
 ) STRICT;
 CREATE INDEX runs_actor ON runs(actor,id);
 CREATE TABLE branches(
@@ -112,7 +112,9 @@ PRAGMA user_version=1;
       (transact s
                 (def version (((query s "PRAGMA user_version") 0) "user_version"))
                 (assert (index-of version [0 1]) "unsupported Zinc database; preserve it and select a fresh database")
-                (when (= version 0) (query s schema)))
+                (when (= version 0) (query s schema))
+                (assert (first (query s "SELECT name FROM pragma_table_info('runs') WHERE name='expires'"))
+                        "stale Zinc database; preserve it and select a fresh database"))
       s)
     ([err] (sql/close db) (error err))))
 
@@ -215,10 +217,11 @@ PRAGMA user_version=1;
                 (def encoded (string (json/encode admitted)))
                 (assert (<= (length encoded) (config :request-bytes)) "stored request byte ceiling")
                 (def run (if caller (caller :run)
-                           (((query s "INSERT INTO runs(actor,request,input,world,config) VALUES(?,?,?,?,?) RETURNING id"
+                           (((query s "INSERT INTO runs(actor,request,input,world,config,expires) VALUES(?,?,?,?,?,?) RETURNING id"
                                     [(s :actor) (input :request) encoded world
                                      (string (json/encode (merge config {:providers (tabseq [[name provider] :in (pairs (config :providers))]
-                                                                                      name {:url (provider :url) :identity (provider :identity)})})))]) 0) "id")))
+                                                                                      name {:url (provider :url) :identity (provider :identity)})})))
+                                     (+ (os/clock) (config :run-seconds))]) 0) "id")))
                 (def id (((query s "INSERT INTO branches(run,parent,caller,entry,first,last,history_last,world,temporary) VALUES(?,?,?,?,?,?,?,?,?) RETURNING id"
                                  [run (when caller (caller :branch)) (when caller (caller :event)) (when (> entry 0) entry)
                                   first-id last (if caller (min last (caller :history-last)) last) world
@@ -253,9 +256,10 @@ PRAGMA user_version=1;
                         `UPDATE tasks SET checkpoint=?
      WHERE id=? AND actor=? AND state IN ('running','waiting') AND EXISTS(
        SELECT 1 FROM leases WHERE task=? AND owner=? AND generation=? AND expires>?)
+       AND EXISTS(SELECT 1 FROM runs WHERE id=tasks.run AND expires>?)
      RETURNING id`
                         [encoded (current :id) (s :actor)
-                         (current :id) (current :owner) (current :generation) (os/clock)])) "job lease lost")
+                         (current :id) (current :owner) (current :generation) (os/clock) (os/clock)])) "job lease lost")
   (put current :checkpoint value)
   value)
 
@@ -309,6 +313,8 @@ PRAGMA user_version=1;
                         "job key reused with different work")
                 (existing "id"))
               (do
+                (assert (first (query s "SELECT id FROM runs WHERE id=? AND actor=? AND expires>?"
+                                      [(view :run) (s :actor) (os/clock)])) "run deadline expired")
                 (assert (< (((query s "SELECT count(*) n FROM tasks WHERE actor=? AND run=?"
                                     [(s :actor) (view :run)]) 0) "n")
                            ((s :config) :task-quota))
@@ -355,8 +361,9 @@ PRAGMA user_version=1;
             (def row (first (query s
                                    `UPDATE tasks SET state='running',attempt=attempt+1
        WHERE id=? AND actor=? AND state='queued'
+         AND EXISTS(SELECT 1 FROM runs WHERE id=tasks.run AND expires>?)
          AND (SELECT count(*) FROM tasks WHERE actor=? AND state='running')<? RETURNING *`
-                                   [id (s :actor) (s :actor) ((s :config) :parallel)])))
+                                   [id (s :actor) (os/clock) (s :actor) ((s :config) :parallel)])))
 
             (when row
               (query s
@@ -377,8 +384,9 @@ PRAGMA user_version=1;
         (while true
           (unless (first (query s
                                 `UPDATE leases SET expires=? WHERE task=? AND owner=? AND generation=?
-             AND EXISTS(SELECT 1 FROM tasks WHERE id=? AND state IN ('running','waiting')) RETURNING task`
-                                [(+ (os/clock) (config :lease-seconds)) id owner generation id]))
+             AND EXISTS(SELECT 1 FROM tasks t JOIN runs r ON r.id=t.run
+               WHERE t.id=? AND t.state IN ('running','waiting') AND r.expires>?) RETURNING task`
+                                [(+ (os/clock) (config :lease-seconds)) id owner generation id (os/clock)]))
             (break))
 
           (def tick (ev/chan 1))
@@ -436,23 +444,28 @@ PRAGMA user_version=1;
 (defn recover [s]
   (transact s
             (each row (query s
-                             `SELECT t.* FROM tasks t LEFT JOIN leases l ON l.task=t.id
-       WHERE t.actor=? AND t.state IN ('running','waiting') AND (l.task IS NULL OR l.expires<=?)
+                             `SELECT t.*,r.expires run_expires FROM tasks t JOIN runs r ON r.id=t.run LEFT JOIN leases l ON l.task=t.id
+       WHERE t.actor=? AND ((t.state IN ('queued','running','waiting') AND r.expires<=?)
+         OR (t.state IN ('running','waiting') AND (l.task IS NULL OR l.expires<=?)))
        ORDER BY t.id`
-                             [(s :actor) (os/clock)])
+                             [(s :actor) (os/clock) (os/clock)])
 
-              (def retry (and (= (row "retry_policy") "retry")
+              (def expired (<= (row "run_expires") (os/clock)))
+              (def unstarted (and expired (= "queued" (row "state")) (= 0 (row "attempt"))))
+              (def retry (and (not expired) (= (row "retry_policy") "retry")
                               (<= (row "attempt") (row "retries"))))
-              (def state (if retry "queued" "uncertain"))
+              (def state (cond unstarted "cancelled" retry "queued" "uncertain"))
               (def outcome {:ok false :state state :attempt (row "attempt")
-                            :error "Interrupted execution; effects may have happened."})
+                            :error (cond unstarted "Run deadline expired before execution."
+                                         expired "Run deadline expired; effects may have happened."
+                                         "Interrupted execution; effects may have happened.")})
               (def event (append s (json/decode (row "scope") true true) "interruption"
                                  (outcome :error) outcome nil (row "id")))
 
               (query s "UPDATE tasks SET state=?,result=?,outcome=? WHERE id=?"
                      [state (unless retry (string (json/encode outcome)))
                       (unless retry (event "id")) (row "id")])
-              (when retry (query s "DELETE FROM leases WHERE task=?" [(row "id")]))
+              (when (or retry unstarted) (query s "DELETE FROM leases WHERE task=?" [(row "id")]))
 
               (def input (json/decode (row "input") true true))
               (when (and (= "eval" (row "kind")) (input :tool-id) (not retry))

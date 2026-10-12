@@ -35,10 +35,11 @@
                                (first (store/query s
                                                    `INSERT INTO leases(task,owner,generation,expires)
        SELECT id,'launch',-1,? FROM tasks WHERE id=? AND actor=? AND state='queued'
+         AND EXISTS(SELECT 1 FROM runs WHERE id=tasks.run AND expires>?)
          AND (SELECT count(*) FROM tasks WHERE actor=? AND state='running')<?
        ON CONFLICT(task) DO UPDATE SET expires=excluded.expires
        WHERE leases.owner='launch' AND leases.expires<=? RETURNING task`
-                                                   [(+ (os/clock) ((s :config) :lease-seconds)) id (s :actor)
+                                                   [(+ (os/clock) ((s :config) :lease-seconds)) id (s :actor) (os/clock)
                                                     (s :actor) ((s :config) :parallel) (os/clock)]))))
     (when lease
       (try
@@ -117,6 +118,7 @@
             (when resident
               (string "\nEntry: " (resident :file)
                       "\nNative restrictions: " (json/encode (resident :forbid)) ". OS access is invoker-scoped."
+                      "\nHard evaluation deadline: " (resident :seconds) " seconds; expiry terminates the resident, and the supervisor reloads files."
                       (when (> (length (resident :instructions)) 0)
                         (string "\n\nWorld instructions:\n" (resident :instructions)))))
             (when evaluate
@@ -299,7 +301,7 @@
                     (when (provider :token) (set failure (string/replace-all (provider :token) "[redacted]" failure))))))
               (unless (index-of ((store/task s id) "state") ["done" "failed"])
                 (store/finish s row value failure))
-              (each pending (store/query s "SELECT id FROM tasks WHERE actor=? AND run=? AND state='queued' ORDER BY id LIMIT ?" [(s :actor) (row "run") ((s :config) :parallel)])
+              (each pending (store/query s "SELECT id FROM tasks WHERE actor=? AND run=? AND state='queued' AND EXISTS(SELECT 1 FROM runs WHERE id=tasks.run AND expires>?) ORDER BY id LIMIT ?" [(s :actor) (row "run") (os/clock) ((s :config) :parallel)])
                 (spawn-job s (pending "id")))))))))
 
   (defn receipt [bytes opaque]
@@ -311,6 +313,8 @@
       (def input (json/decode (row "input") true true))
       (def saved ((first (store/query s "SELECT config FROM runs WHERE id=? AND actor=?" [(row "run") (s :actor)])) "config"))
       (put s :config (schema/authorize (spec :schema) config (json/decode saved true true)))
+      (store/query s "UPDATE runs SET expires=min(expires,(SELECT min(created) FROM events WHERE run=runs.id AND kind='user')+?) WHERE id=?"
+                   [((s :config) :run-seconds) (row "run")])
       (assert (and (= "eval" (row "kind")) (= (input :token) (value :token))
                    (= (row "attempt") (value :generation))) "invalid evaluation receipt")
       (if (and (= "complete" (value :operation)) (row "result") (index-of (row "state") ["done" "failed" "cancelled"]))
@@ -329,15 +333,18 @@
             (def result (case (value :operation)
                           "complete" (do
                                        (store/finish s (merge row {"owner" (lease "owner")}) (value :value) (value :error))
-                                       (each pending (store/query s "SELECT id FROM tasks WHERE actor=? AND run=? AND state='queued' ORDER BY id LIMIT ?" [(s :actor) (row "run") ((s :config) :parallel)])
+                                       (each pending (store/query s "SELECT id FROM tasks WHERE actor=? AND run=? AND state='queued' AND EXISTS(SELECT 1 FROM runs WHERE id=tasks.run AND expires>?) ORDER BY id LIMIT ?" [(s :actor) (row "run") (os/clock) ((s :config) :parallel)])
                                          (spawn-job s (pending "id")))
                                        nil)
                           "renew" (store/transact s
-                                                  (assert (index-of (row "state") ["running" "waiting" "uncertain"]) "job cancelled")
-                                                  (store/query s "UPDATE leases SET expires=? WHERE task=? AND owner=?"
-                                                               [(+ (os/clock) (config :lease-seconds)) (row "id") (lease "owner")])
-                                                  (when (= "uncertain" (row "state"))
-                                                    (store/query s "UPDATE tasks SET state='waiting',result=NULL,outcome=NULL WHERE id=?" [(row "id")]))
+                                                  (assert (first (store/query s
+                                                    `UPDATE leases SET expires=? WHERE task=? AND owner=? AND generation=?
+                                                     AND EXISTS(SELECT 1 FROM tasks t JOIN runs r ON r.id=t.run
+                                                       WHERE t.id=leases.task AND t.attempt=leases.generation
+                                                         AND t.state IN ('running','waiting','uncertain') AND r.expires>?) RETURNING task`
+                                                    [(+ (os/clock) ((s :config) :lease-seconds)) (row "id") (lease "owner")
+                                                     (value :generation) (os/clock)])) "evaluation renewal fenced or expired")
+                                                  (store/query s "UPDATE tasks SET state='waiting',result=NULL,outcome=NULL WHERE id=? AND state='uncertain'" [(row "id")])
                                                   nil)
                           "await" (do
                                     (def handle (first (value :arguments)))
@@ -417,7 +424,9 @@
       (when existing
         (assert (= (existing "world") (config :world)) "saved world differs")
         (assert (not (first (store/query s "SELECT id FROM events WHERE run=? AND kind='cancelled'" [(existing "id")]))) "run cancelled")
-        (put s :config (schema/authorize (spec :schema) config (json/decode (existing "config") true true))))
+        (put s :config (schema/authorize (spec :schema) config (json/decode (existing "config") true true)))
+        (store/query s "UPDATE runs SET expires=min(expires,(SELECT min(created) FROM events WHERE run=runs.id AND kind='user')+?) WHERE id=?"
+                     [((s :config) :run-seconds) (existing "id")]))
       (with-dyns [:zinc/wait wait :zinc/spawn spawn-job]
         (store/recover s)
         (if (= member "run-task")
@@ -517,12 +526,14 @@
     (def config (schema/configuration (spec :schema) opaque (pa/imports)))
     (def s (store/open config))
     (defer (store/close s)
+      (store/recover s)
       (string (json/encode (store/query s
-                                        `SELECT r.id run,b.id branch,t.id job,t.state,t.kind,t.admission,t.outcome
+                                        `SELECT r.id run,r.request,b.id branch,t.id job,t.state,t.kind,t.attempt,t.retry_policy,
+                                                t.admission,t.outcome,r.expires run_expires,l.expires lease_expires
        FROM runs r JOIN branches b ON b.run=r.id AND b.parent IS NULL
-       JOIN tasks t ON t.branch=b.id AND t.parent IS NULL
+       JOIN tasks t ON t.branch=b.id AND t.parent IS NULL LEFT JOIN leases l ON l.task=t.id
        WHERE r.actor=? AND r.world=?
-         AND t.state IN ('queued','running','waiting','failed','uncertain')
+         AND t.state IN ('queued','running','waiting','failed','uncertain','cancelled')
          AND NOT EXISTS(SELECT 1 FROM events e WHERE e.branch=b.id AND e.kind='completed')
        ORDER BY r.id,t.id`
                                         [(s :actor) (config :world)])))))
@@ -536,10 +547,10 @@
     (defer (store/close s)
       (string (json/encode (store/transact s
                                            (when (value :request)
-                                             (store/query s `INSERT INTO runs(actor,request,input,world,config)
-            VALUES(?,?,'{}',?,?) ON CONFLICT(actor,request) DO NOTHING`
+                                             (store/query s `INSERT INTO runs(actor,request,input,world,config,expires)
+            VALUES(?,?,'{}',?,?,?) ON CONFLICT(actor,request) DO NOTHING`
                                                           [(s :actor) (value :request) (config :world)
-                                                           (string (json/encode (merge config {:providers {}})))]))
+                                                           (string (json/encode (merge config {:providers {}}))) (os/clock)]))
                                            (def run (first (store/query s "SELECT id,world FROM runs WHERE actor=? AND (id=? OR request=?)"
                                                                         [(s :actor) (value :run) (value :request)])))
                                            (assert (and run (= (run "world") (config :world))) "run unavailable")
@@ -559,8 +570,8 @@
     (defer (store/close s)
       (while true
         (store/recover s)
-        (each job (store/query s "SELECT id FROM tasks WHERE actor=? AND state='queued' AND world=? ORDER BY id LIMIT ?"
-                               [(s :actor) (config :world) (config :parallel)])
+        (each job (store/query s "SELECT id FROM tasks WHERE actor=? AND state='queued' AND world=? AND EXISTS(SELECT 1 FROM runs WHERE id=tasks.run AND expires>?) ORDER BY id LIMIT ?"
+                               [(s :actor) (config :world) (os/clock) (config :parallel)])
           (spawn-job s (job "id")))
         (when (value :once) (break))
         (ev/sleep 1))
