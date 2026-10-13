@@ -38,19 +38,32 @@
     (put env :current-file (config :file))
     (put env :redef true)
     (put env 'world @{:value env})
-    (put env 'self @{:value (partial exchange "spawn")})
+    (put env 'self @{:value (fn [value]
+                              (if (index-of "agent" ((dyn :zinc/evaluation) :imports))
+                                (merge (exchange "import" {:name "agent" :member "call"
+                                                          :data (base64/encode (string (json/encode value)))}) {:json true})
+                                (exchange "spawn" value)))})
     (put env 'self/member @{:value exchange})
     (put env 'self/document @{:value (fn [] ((dyn :zinc/evaluation) :document))})
     (put env 'input @{:value (fn [] ((dyn :zinc/evaluation) :input))})
     (put env 'await @{:value (fn [handle]
                                (def result (exchange "await" handle))
-                               (if (handle :bytes) (base64/decode (result :data)) result))})
+                               (cond (handle :json) (json/decode (base64/decode (result :data)) true true)
+                                     (handle :bytes) (base64/decode (result :data))
+                                     result))})
     (put env 'pa/imports @{:value (fn [] ((dyn :zinc/evaluation) :imports))})
     (put env 'pa/import @{:value (fn [name]
                                    (assert (index-of name ((dyn :zinc/evaluation) :imports)) "Import not granted")
                                    (fn [input &named member]
                                      (def handle (exchange "import" {:name name :member (or member "call") :data (base64/encode (string input))}))
                                      (base64/decode ((exchange "await" handle) :data))))})
+    (each member (get-in config [:imports :git] [])
+      (assert (index-of member ["status" "diff" "add" "commit"]) "unknown resident Git member")
+      (put env (if (= member "commit") 'commit (symbol "git/" member))
+           @{:value (fn [paths &opt message]
+                      (((module/value env 'pa/import) "git")
+                       (string (json/encode (merge {:paths paths} (if message {:message message} {}))))
+                       :member member))}))
     (def bootstrapped (ev/thread-chan 1))
     (ev/give watchdog [(config :seconds) bootstrapped])
     (defer (ev/give bootstrapped true)
@@ -67,7 +80,8 @@
                                (def instructions (module/value env 'instructions))
                                (assert (or (nil? instructions) (string? instructions)) "instructions must be a string")
                                (wire/send peer {"type" "result" "output" (wire/json {"file" (config :file) "forbid" (config :forbid)
-                                                                                     "seconds" (config :seconds) "instructions" (or instructions "")})}))
+                                                                                     "seconds" (config :seconds) "imports" (tabseq [[name members] :in (pairs (config :imports))] (string name) members)
+                                                                                     "instructions" (or instructions "")})}))
                              "eval"
                              (do
                                (assert (and (string? (packet "code")) (> (length (packet "code")) 0)) "invalid evaluation")

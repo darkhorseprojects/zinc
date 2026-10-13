@@ -7,6 +7,8 @@
   {:file {:type :string :absolute true :description "World entry source"}
    :socket {:type :string :absolute true :description "Resident Unix socket"}
    :seconds {:type :number :minimum 0.001 :description "Hard bootstrap/evaluation wall-clock deadline"}
+   :imports {:type :dictionary :values {:type :array :items :string} :default {}
+             :description "Public Import members exposed by this resident view"}
    :forbid {:type :array :items :string :description "Forbidden Janet native capabilities"
             :choices ["all" "asm" "chroot" "compile" "env" "exit" "ffi" "ffi-define" "ffi-jit" "ffi-use"
                       "fs" "fs-read" "fs-temp" "fs-write" "hrtime" "locale" "modules" "net" "net-connect"
@@ -84,7 +86,8 @@
   (each key (keys saved) (assert (has-key? schema key) "unsupported saved configuration"))
   (each key [:actor :store :world]
     (assert (= (current key) (saved key)) "saved identity/location differs"))
-  (assert (or (not (saved :repl)) (current :repl)) "saved evaluator revoked")
+  (each key [:repl :inference]
+    (assert (or (not (saved key)) (current key)) (string "saved permission revoked: " key)))
   (each key [:visibility :capabilities]
     (each value (saved key) (assert (index-of value (current key)) "saved grant revoked")))
   (each [name members] (pairs (saved :imports))

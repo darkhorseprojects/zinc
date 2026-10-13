@@ -1,6 +1,6 @@
 # Zinc
 
-Zinc is a Janet agent with a file-backed, resident REPL and chronological memory. You and the agent evaluate code in the same live environment. Files hold durable code and data; ordinary Git versions those files. SQLite holds history, work admissions, outcomes and model accounting—not world images.
+Zinc is a Janet agent with a file-backed, resident REPL and chronological memory. User and agent views can share source files while retaining separate live environments and service permissions. Files hold durable code and data; ordinary Git versions those files. SQLite holds history, work admissions, outcomes and model accounting—not world images.
 
 Zinc is a package for Portable Agents (PA), not an executable or CLI. PA transports bytes and explicitly delegated services. The invoker owns credentials, delivery, filesystem access, native facilities, service grants and process lifetime.
 
@@ -69,7 +69,7 @@ Required resident `seconds` bounds bootstrap and each evaluation, including wait
 
 ## Participate directly
 
-Invoke `zinc.md` through PA's `agent call` or SDK. Member `call` accepts conversational input such as `{"text":"Add clamp to world.janet"}`. Member `invoke` accepts direct Janet input such as `{"code":"(double 21)"}`. Both use the same resident environment when private configuration enables `repl`.
+Invoke `zinc.md` through PA's `agent call` or SDK. Member `call` accepts conversational input such as `{"text":"Add clamp to world.janet"}`. Member `invoke` accepts direct Janet input such as `{"code":"(double 21)"}`. Each uses the resident selected by its private configuration when `repl` is enabled.
 
 The invoker selects the Program, limits, independent Spawn launcher, opaque configuration and Import grants. It derives `config.imports` from the actual grant member lists. PA does not interpret Zinc's configuration or supply an interactive Zinc client.
 
@@ -95,6 +95,27 @@ During an evaluation:
 ```
 
 `self` and `self/member` return durable child handles. `await` reads their committed results. Named Imports use the ordinary synchronous PA proxy convention. `pa/imports` lists the current public names. You may redefine these bindings, but definitions cannot change actual mounts, provider permissions or delegated members.
+
+## Inspecting and selecting a view
+
+`(all-bindings world true)` lists local symbols; omit `true` to include inherited Janet bindings. Read the current source
+with `(slurp (dyn :current-file))` when allowed. `(input)`, `(self/document)` and `(pa/imports)` expose the current request,
+formatted instructions and public Import names. No credential-bearing configuration or heap/source inventory is inserted
+into the model prompt.
+
+The system document has World, World instructions, Evaluation, Members and Imports sections. History and retrieved
+text are separate data messages, not instructions. The evaluation tool schema is supplied separately and is omitted when unavailable.
+
+For user/agent separation, supervise two residents with separate sockets and the same source files. Heap changes do not
+cross views; file edits do, after explicit reload. Resident `imports` is a public member manifest: a Git `commit` member
+binds `(commit paths message)`; granted `status`/`diff`/`add` bind `git/status`, `git/diff`, `git/add`. Only configured bindings
+appear. Actual calls still require the current relay's matching grants.
+
+A user execution view sets `inference: false`. Its `self` binding uses a granted `agent` Import when present, returning the
+normal agent's JSON result through `await`. The invoker materializes that service with the normal configuration/catalog,
+not the user's. Without it, disabled inference cannot be restored by invoking another engine member.
+
+`thinking: default` leaves reasoning to the provider. Explicit efforts are validated without silent downgrades.
 
 ## Persistence and Git permission
 

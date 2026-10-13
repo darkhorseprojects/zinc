@@ -119,14 +119,14 @@
                 (merge {:content-type "application/json" :accept "application/json, text/event-stream"
                         :authorization (when (provider :token) (string "Bearer " (provider :token)))} (or headers {}))))
 
-(defn collect [transfer]
+(defn collect [transfer &opt preserve-nulls]
   (def response (collect-http transfer))
 
   (assert (<= 200 (response :status) 299)
           (string "model HTTP status " (response :status)))
   (assert (response :body) "model response is not UTF-8")
 
-  (json/decode (response :body) true true))
+  (json/decode (response :body) true (not preserve-nulls)))
 
 (defn catalogue [config role]
   (assert (index-of role ["chat" "rerank"]) "unsupported model role")
@@ -157,7 +157,7 @@
         (assert (find |(= ($ :ref) reference) (catalogue config (string role))) "exact model is unavailable")
         (collect (request config ref "GET" (string "/props?model=" (curl/escape id)))))
       (do
-        (def catalog (collect (request config ref "GET" (string "/v1/models?output_modalities=" (if (= role :rerank) "rerank" "text")))))
+        (def catalog (collect (request config ref "GET" (string "/v1/models?output_modalities=" (if (= role :rerank) "rerank" "text"))) true))
         (def record (find |(= ($ :id) id) (catalog :data)))
         (assert record "exact model is unavailable") record)))
   (def context
@@ -175,17 +175,20 @@
   (def parameters (get record :supported_parameters []))
   (def reasoning (record :reasoning))
   (def thinking (config :thinking))
-  (when (and (= role :chat) (= provider "openrouter"))
-    (if (= thinking "none") (assert (not (get reasoning :mandatory)) "model requires reasoning")
-      (assert (or (index-of thinking (get reasoning :supported_efforts []))
-                  (and (nil? (get reasoning :supported_efforts))
-                       (get reasoning :supports_max_tokens)))
-              "model does not advertise requested thinking effort")))
+  (when (and (= role :chat) (= provider "openrouter") (not= thinking "default"))
+    (if (= thinking "none") (assert (not= true (get reasoning :mandatory)) "model requires reasoning")
+      (assert (or (= :null (get reasoning :supported_efforts))
+                  (and (indexed? (get reasoning :supported_efforts))
+                       (index-of thinking (reasoning :supported_efforts)))
+                  (= true (get reasoning :supports_max_tokens)))
+              (string (ref :reference) " does not advertise thinking=" thinking "; use default or an advertised effort"))))
   (def control (if (= provider "llama")
                  (when (get-in record [:chat_template_caps :supports_reasoning_effort]) "reasoning_effort")
                  (cond (index-of "reasoning" parameters) "reasoning" (index-of "reasoning_effort" parameters) "reasoning_effort")))
-  (when (and (= role :chat) (not= thinking "none")) (assert control "thinking effort is unsupported"))
-  (def output (when (= provider "openrouter") (get-in record [:top_provider :max_completion_tokens])))
+  (when (and (= role :chat) (not (index-of thinking ["default" "none"])))
+    (assert control "thinking effort is unsupported"))
+  (def advertised (when (= provider "openrouter") (get-in record [:top_provider :max_completion_tokens])))
+  (def output (unless (= :null advertised) advertised))
   (when output (assert (and (int? output) (<= 1 output context)) "invalid provider output capacity"))
 
   (merge ref {:context context :output output
@@ -226,9 +229,10 @@
     (assert (selected :tools) "model does not support tools")
     (put body :tools (input :tools))
     (when (selected :parallel) (put body :parallel_tool_calls true)))
-  (case (selected :control)
-    "reasoning" (put body :reasoning (if (= "none" (config :thinking)) {:enabled false} {:effort (config :thinking)}))
-    "reasoning_effort" (put body :reasoning_effort (config :thinking)))
+  (unless (= "default" (config :thinking))
+    (case (selected :control)
+      "reasoning" (put body :reasoning (if (= "none" (config :thinking)) {:enabled false} {:effort (config :thinking)}))
+      "reasoning_effort" (put body :reasoning_effort (config :thinking))))
   (when (= "openrouter" (selected :provider)) (put body :provider {:require_parameters true :allow_fallbacks false}))
   (def transfer (request config selected "POST" "/v1/chat/completions" body))
 

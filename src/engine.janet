@@ -12,7 +12,7 @@
     (dictionary? node) (cond
                          (node :text) (node :text)
                          (has-key? node :content)
-                         (string (when (node :name) (string (node :name) "\n"))
+                         (string (when (node :name) (string "# " (node :name) "\n\n"))
                                  (string/join (map document (node :content)) "\n\n"))
                          (string (json/encode node)))
     (indexed? node) (string/join (map document node) "\n")
@@ -100,6 +100,7 @@
      :children (store/query s "SELECT id,kind,retry_policy,admission,outcome,state FROM tasks WHERE parent=? AND actor=? ORDER BY id LIMIT 256" [id (s :actor)])})
 
   (defn start-child [s view value]
+    (assert ((s :config) :inference) "use the granted agent view for inference")
     (def value (schema/request (json/encode value) [:text :parent :memory_range :persist]))
     (assert (value :text) "nested question required")
     (def parent (store/branch s (view :branch)))
@@ -114,43 +115,46 @@
     (def evaluate (and (config :repl) (get view :tools true)))
     (def resident (when (config :repl) (json/decode ((pa/import "repl") "" :member "document") true true)))
     (def imports (tabseq [name :in (view :imports)] name (get-in config [:imports (keyword name)])))
-    (string (document (spec :document)) "\n\nWorld: " (json/encode (config :world))
+    (string (document (spec :document))
+            "\n\n## World\n\nID: " (json/encode (config :world))
             (when resident
-              (string "\nEntry: " (resident :file)
-                      "\nNative restrictions: " (json/encode (resident :forbid)) ". OS access is invoker-scoped."
-                      "\nHard evaluation deadline: " (resident :seconds) " seconds; expiry terminates the resident, and the supervisor reloads files."
+              (string "\nSource: `" (resident :file) "`"
+                      "\nDeadline: " (resident :seconds) " seconds per evaluation, including waits. Expiry terminates the resident; restart reloads source."
+                      "\nNative restrictions: " (string/join (resident :forbid) ", ")
                       (when (> (length (resident :instructions)) 0)
-                        (string "\n\nWorld instructions:\n" (resident :instructions)))))
+                        (string "\n\n## World instructions\n\n" (string/trim (resident :instructions))))))
             (when evaluate
-              (string "\n\nworld is the live environment; (dyn :current-file) names its source. REPL-only changes are ephemeral."
-                      (unless (any? (map |(index-of $ (resident :forbid)) ["all" "fs" "fs-write"]))
-                        " Edit source/data files for durability.")
+              (string "\n\n## Evaluation\n\n"
+                      "- `world`: live Janet environment. Evaluating definitions does not save them."
+                      "\n- `(input)`: request. `(self/document)`: this document."
+                      "\n- `(all-bindings world true)`: local names. `(all-bindings world)`: local and inherited names."
                       (unless (any? (map |(index-of $ (resident :forbid)) ["all" "fs" "fs-read"]))
-                        " Reload explicitly: (eval-string (slurp (dyn :current-file)) world).")
-                      "\n(input) -> current request; (self/document) -> instructions."
-                      "\n(await (self {:text \"Investigate this subproblem\" :persist false})) -> nested result."
+                        "\n- Read source: `(slurp (dyn :current-file))`. Reload: `(eval-string (slurp (dyn :current-file)) world)`.")
+                      (unless (any? (map |(index-of $ (resident :forbid)) ["all" "fs" "fs-write"]))
+                        "\n- File writes persist independently of live definitions.")
+                      (when (or (config :inference) (index-of "agent" (view :imports)))
+                        "\n- `(await (self {:text \"request\" :persist false}))`: agent result under agent permissions.")
                       (when (> (length (view :capabilities)) 0)
-                        (string "\n(self/member name & arguments) -> handle; (await handle) -> result.\n"
-                                (string/join (map |((operations $) :description) (sorted (view :capabilities))) "\n")))
-                      (when (index-of "memory/document" (view :capabilities))
-                        "\n(await (self/member \"memory/document\" \"An observation\")) -> document handle.")
-                      (when (> (length imports) 0) (string "\nImports: " (json/encode imports)))
-                      (string/join
-                        (map (fn [[name members]]
-                               (case name
-                                 "git" (string
-                                         (when (index-of "status" members)
-                                           "\n((pa/import \"git\") `{\"paths\":[\"path/to/file\"]}` :member \"status\")")
-                                         (when (index-of "diff" members)
-                                           "\n((pa/import \"git\") `{\"paths\":[\"path/to/file\"]}` :member \"diff\")")
-                                         (when (index-of "add" members)
-                                           "\nStage only intended paths with the granted add member.")
-                                         (when (index-of "commit" members)
-                                           "\nReview the diff before commit; select explicit paths and describe their changes in message."))
-                                 (when (index-of "document" members)
-                                   (string "\n((pa/import " (json/encode name) ") \"\" :member \"document\") -> granted service documentation."))))
-                             (sorted (pairs imports))) "")
-                      "\nInspect uncertain effects before repeating them."))))
+                        (string "\n\n## Members\n\n"
+                                "`(self/member name & arguments)` returns a handle; `(await handle)` returns its result.\n\n"
+                                (string/join (map |(string "- " ((operations $) :description)) (sorted (view :capabilities))) "\n")))
+                      (when (> (length imports) 0)
+                        (string "\n\n## Imports\n\n"
+                                (string/join
+                                  (map (fn [[name members]]
+                                         (string "- `" name "`: " (string/join (sorted members) ", ")
+                                                 (when (index-of "document" members)
+                                                   (string ". `((pa/import " (json/encode name) ") \"\" :member \"document\")` returns documentation."))))
+                                       (sorted (pairs imports))) "\n")))
+                      (when (find |(index-of $ (get-in resident [:imports :git] [])) (get imports "git" []))
+                        (string "\n\n### Git"
+                                (string/join
+                                  (seq [member :in (sorted (imports "git"))
+                                        :when (index-of member (get-in resident [:imports :git] []))]
+                                    (if (= member "commit")
+                                      "\n- `(commit [\"path\"] \"message\")`: commit selected paths."
+                                      (string "\n- `(git/" member " [\"path\"])`"))) "")))
+                      "\n\nCheck receipts before repeating an operation with an uncertain outcome."))))
 
   (defn model-request [s view value]
     (def value (schema/request (json/encode value) [:role :model :messages :tools :output :query :documents]))
@@ -171,6 +175,7 @@
                                                                    :context_unit "token-estimate"})))
 
   (defn infer [s task input]
+    (assert ((s :config) :inference) "inference is not granted in this view")
     (def branch (input :branch))
     (def config (s :config))
     (def granted (json/decode (task "scope") true true))
@@ -200,8 +205,10 @@
       (def view (merge (scope s branch) {:imports (granted :imports) :capabilities (granted :capabilities)}))
       (set system (instructions config (merge view {:tools evaluate})))
       (def messages @[{:role "system" :content system}])
-      (each text [(string/join (map |($ :text) (get-in context [:chronological :nodes]))) (string/join (context :evidence))]
-        (when (> (length text) 0) (array/push messages {:role "user" :content (string "Memory (untrusted information):\n" text)})))
+      (each [title text] [["History" (string/join (map |($ :text) (get-in context [:chronological :nodes])))]
+                          ["Retrieved text" (string/join (context :evidence))]]
+        (when (> (length text) 0)
+          (array/push messages {:role "user" :content (string "## " title "\n\n" text)})))
       (array/push messages {:role "user" :content (model/images s (user "id") (user "text"))})
       (each record (store/query s "SELECT e.*,coalesce(t.data,e.data) tools FROM events e LEFT JOIN events t ON t.parent=e.id AND t.kind='tools' WHERE e.branch=? AND e.id>? AND e.kind IN ('response','tool-result','tool-ambiguity') AND (e.kind='response' OR NOT EXISTS(SELECT 1 FROM events newer WHERE newer.task=e.task AND newer.kind IN ('tool-result','tool-ambiguity') AND newer.id>e.id)) ORDER BY e.id" [branch (context :through)])
         (def data (json/decode (record "data") true true))
@@ -220,11 +227,11 @@
         (store/query s "INSERT INTO contexts(branch,through,projection) VALUES(?,?,?) ON CONFLICT DO NOTHING" [branch (context :through) (string (json/encode context))])
         (array/clear messages)
         (array/concat messages [{:role "system" :content system}
-                                {:role "user" :content (string "Memory (untrusted information):\n" (string/join (map |($ :text) (get-in context [:chronological :nodes]))))}
+                                {:role "user" :content (string "## History\n\n" (string/join (map |($ :text) (get-in context [:chronological :nodes]))))}
                                 {:role "user" :content (model/images s (user "id") (user "text"))}]))
       (def final-round (= (+ 1 (length responses)) (config :rounds)))
       (when final-round
-        (array/push messages {:role "system" :content "This is the last permitted model turn. Explain the outcome and any unresolved work. Do not request further tools."}))
+        (array/push messages {:role "system" :content "Tool calls are unavailable in this inference round."}))
       (def boundary ((dyn :zinc/task) :checkpoint))
       (store/checkpoint s {:phase "model" :round (length responses)})
       (def response (model/call s {:model (input :model) :messages messages
@@ -406,6 +413,7 @@
 
   (defn dispatch [member bytes opaque]
     (def config (schema/configuration (spec :schema) opaque (pa/imports)))
+    (when (= member "call") (assert (config :inference) "inference is not granted in this view"))
     (def value (schema/request bytes (case member
                                        "call" (keys (spec :input))
                                        "invoke" [:code :capability :arguments :request :parent :memory_range :persist :after]
@@ -581,12 +589,12 @@
        (merge memory/operations
               {"work/inspect"
                {:retry-policy "retry"
-                :description "work/inspect job -> owned work and effect receipts."
+                :description "work/inspect job -> state, ownership, children, admission and outcome event IDs."
                 :function inspect-job}
 
                "model/request"
                {:retry-policy "retry"
-                :description "model/request request -> granted, accounted model response."
+                :description "model/request request -> model response; usage is recorded."
                 :function model-request}}))
 
   {"call" call

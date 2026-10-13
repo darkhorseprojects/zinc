@@ -1,5 +1,15 @@
 # Zinc 0.2.0
 
+## User and agent views
+
+`inference` is an explicit execution permission. User views disable it and may delegate `self` through an invoker-owned
+normal-authority agent Import. Separate residents share files, not heaps. A public resident Import manifest binds only
+its granted Git operations, including `commit`; actual calls still require current evaluation authority.
+
+The generated prompt now has compact Markdown sections and an environment-inspection hint. History and retrieved text are
+separate data messages, not instructions. `thinking: default` leaves provider reasoning controls unspecified; explicit efforts are
+validated without downgrade, including OpenRouter's distinction between missing and null effort lists.
+
 ## Configuration and prompts
 
 Zinc owns engine, resident, relay and Git configuration schemas. Unknown fields are rejected. `describe` exposes complete configuration/input schemas and defaults without requiring a live world or provisioned retrieval files; execution still validates its resources.
