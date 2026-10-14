@@ -14,7 +14,7 @@ CREATE TABLE branches(
  id INTEGER PRIMARY KEY AUTOINCREMENT,run INTEGER NOT NULL REFERENCES runs(id),parent INTEGER REFERENCES branches(id),
  caller INTEGER REFERENCES events(id),entry INTEGER REFERENCES events(id),
  first INTEGER NOT NULL,last INTEGER NOT NULL,history_last INTEGER NOT NULL,
- world TEXT NOT NULL,temporary INTEGER NOT NULL CHECK(temporary IN (0,1)),retired INTEGER NOT NULL DEFAULT 0,
+ world TEXT NOT NULL,source TEXT NOT NULL,temporary INTEGER NOT NULL CHECK(temporary IN (0,1)),retired INTEGER NOT NULL DEFAULT 0,
  CHECK(first>=0 AND last>=first AND ((first=0 AND last=0) OR first>0))
 ) STRICT;
 CREATE UNIQUE INDEX root_run ON branches(run) WHERE parent IS NULL;
@@ -113,7 +113,7 @@ PRAGMA user_version=1;
                 (def version (((query s "PRAGMA user_version") 0) "user_version"))
                 (assert (index-of version [0 1]) "unsupported Zinc database; preserve it and select a fresh database")
                 (when (= version 0) (query s schema))
-                (assert (first (query s "SELECT name FROM pragma_table_info('runs') WHERE name='expires'"))
+                (assert (first (query s "SELECT name FROM pragma_table_info('branches') WHERE name='source'"))
                         "stale Zinc database; preserve it and select a fresh database"))
       s)
     ([err] (sql/close db) (error err))))
@@ -222,9 +222,12 @@ PRAGMA user_version=1;
                                      (string (json/encode (merge config {:providers (tabseq [[name provider] :in (pairs (config :providers))]
                                                                                       name {:url (provider :url) :identity (provider :identity)})})))
                                      (+ (os/clock) (config :run-seconds))]) 0) "id")))
-                (def id (((query s "INSERT INTO branches(run,parent,caller,entry,first,last,history_last,world,temporary) VALUES(?,?,?,?,?,?,?,?,?) RETURNING id"
+                (def source (if caller ((branch s (caller :branch)) "source")
+                               (if (config :repl) (string (slurp (config :file))) "")))
+                (assert (<= (length source) (config :source-bytes)) "world source byte ceiling")
+                (def id (((query s "INSERT INTO branches(run,parent,caller,entry,first,last,history_last,world,source,temporary) VALUES(?,?,?,?,?,?,?,?,?,?) RETURNING id"
                                  [run (when caller (caller :branch)) (when caller (caller :event)) (when (> entry 0) entry)
-                                  first-id last (if caller (min last (caller :history-last)) last) world
+                                  first-id last (if caller (min last (caller :history-last)) last) world source
                                   (if (get input :persist true) 0 1)]) 0) "id"))
                 (def scope {:run run :branch id :world world :first first-id :last last :visibility (config :visibility)})
                 (def user (append s scope "user" (get input :text "") {:input admitted} (when (> entry 0) entry)))
@@ -245,7 +248,7 @@ PRAGMA user_version=1;
 
 (defn tool-used [s run]
   (((query s `SELECT coalesce(sum((length(CAST(e.text AS BLOB))+3)/4 + (coalesce(length(CAST(t.result AS BLOB)),0)+3)/4),0) estimate
-    FROM tasks t JOIN events e ON e.id=t.admission WHERE t.actor=? AND t.run=? AND t.kind='eval'` [(s :actor) run]) 0) "estimate"))
+    FROM tasks t JOIN events e ON e.id=t.admission WHERE t.actor=? AND t.run=? AND t.kind='code'` [(s :actor) run]) 0) "estimate"))
 
 (defn checkpoint [s value]
   (def encoded (string (json/encode value)))
@@ -271,7 +274,7 @@ PRAGMA user_version=1;
 (defn submit [s view kind input &opt options]
   (def input (json/decode (json/encode input) true true))
   (def saved (table ;(kvs input)))
-  (when (= kind "eval")
+  (when (= kind "code")
     (assert (and (string? (input :code)) (<= 1 (length (input :code)) ((s :config) :source-bytes))) "invalid tool source")
     (put saved :code nil))
   (def encoded (string (json/encode saved)))
@@ -292,7 +295,7 @@ PRAGMA user_version=1;
                  (<= (view :history-last) (granted :history-last)))
             "child broadens execution scope")
 
-    (each key [:imports :capabilities :visibility]
+    (each key [:visibility]
       (each name (get view key [])
         (assert (index-of name (get granted key [])) "child broadens grants"))))
 
@@ -309,7 +312,7 @@ PRAGMA user_version=1;
                 (assert (and (= kind (existing "kind"))
                              (= retry-policy (existing "retry_policy"))
                              (deep= saved (json/decode (existing "input") true true))
-                             (or (not= kind "eval") (= (input :code) ((first (query s "SELECT text FROM events WHERE id=?" [(existing "admission")])) "text"))))
+                             (or (not= kind "code") (= (input :code) ((first (query s "SELECT text FROM events WHERE id=?" [(existing "admission")])) "text"))))
                         "job key reused with different work")
                 (existing "id"))
               (do
@@ -320,7 +323,7 @@ PRAGMA user_version=1;
                            ((s :config) :task-quota))
                         "shared job quota exhausted")
 
-                (when (= kind "eval")
+                (when (= kind "code")
                   (assert (<= (+ (tool-used s (view :run)) (estimate (input :code)))
                               ((s :config) :tool-quota))
                           "shared tool quota exhausted"))
@@ -335,7 +338,7 @@ PRAGMA user_version=1;
                                   (string (json/encode (get options :checkpoint {})))]) 0) "id"))
 
                 (def event (append s view "task-admission"
-                                   (if (= kind "eval") (input :code) kind)
+                                   (if (= kind "code") (input :code) kind)
                                    {:kind kind :retry-policy retry-policy :parent parent} nil id))
 
                 (query s "UPDATE tasks SET admission=? WHERE id=?" [(event "id") id])
@@ -431,7 +434,7 @@ PRAGMA user_version=1;
                       {:original {:event (event "id")} :state state} nil (row "id")))
 
             (def input (json/decode (row "input") true true))
-            (when (and (= "eval" (row "kind")) (input :tool-id))
+            (when (and (= "code" (row "kind")) (input :tool-id))
               (append s view "tool-result" text
                       {:ok (outcome :ok)
                        :tool-id (input :tool-id)
@@ -468,7 +471,7 @@ PRAGMA user_version=1;
               (when (or retry unstarted) (query s "DELETE FROM leases WHERE task=?" [(row "id")]))
 
               (def input (json/decode (row "input") true true))
-              (when (and (= "eval" (row "kind")) (input :tool-id) (not retry))
+              (when (and (= "code" (row "kind")) (input :tool-id) (not retry))
                 (append s (json/decode (row "scope") true true) "tool-ambiguity"
                         (outcome :error)
                         {:ok false :uncertain true :tool-id (input :tool-id)

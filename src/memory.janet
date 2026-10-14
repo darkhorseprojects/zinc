@@ -181,8 +181,8 @@
       (do (array/push rejected (node "id")) (assert (< (length rejected) (config :history-records)) "summary eligibility work ceiling exceeded"))))
   (def records (store/visible s (merge view {:covered (map |{:first ($ :first) :last ($ :last)} projection)
                                              :kinds ["user" "response" "tools" "completed" "tool-result" "artifact" "error" "cancelled" "interruption"]
-                                             :columns (string "e.id,e.actor,e.branch,e.parent,e.task,e.created,e.kind,e.estimate,length(CAST(e.text AS BLOB)) bytes,substr(CAST(e.text AS BLOB),1,"
-                                                              (* 4 (math/floor (/ (config :context-quota) 2))) ") text")})
+                                             :columns (string "e.id,e.actor,e.branch,e.parent,e.task,e.created,e.kind,e.estimate,length(CAST(e.text AS BLOB)) bytes,coalesce(CAST(substr(CAST(e.text AS BLOB),1,"
+                                                              (* 4 (math/floor (/ (config :context-quota) 2))) ") AS TEXT),'') text")})
                               (if recent :recent :oldest) (config :history-records)))
   (each row records
     (var excerpt (row "text"))
@@ -220,7 +220,7 @@
   (def field (get handle :field "text"))
   (assert (index-of field ["text" "data"]) "invalid memory field")
   (def row (first (store/query s
-                               (string "SELECT substr(CAST(" field " AS BLOB),?,?) bytes,length(CAST(" field " AS BLOB)) total FROM events WHERE id=? AND actor=?")
+                               (string "SELECT coalesce(CAST(substr(CAST(" field " AS BLOB),?,?) AS TEXT),'') bytes,length(CAST(" field " AS BLOB)) total FROM events WHERE id=? AND actor=?")
                                [(+ offset 1) (+ bytes 4) (or (handle :event) (handle :node)) (s :actor)])))
   (assert (<= offset (row "total")) "memory offset exceeds the original")
   (def source (if (= offset (row "total")) "" (row "bytes")))

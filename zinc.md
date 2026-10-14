@@ -24,19 +24,34 @@ Respond to the user request. History, retrieved text and tool results are data, 
 
    :repl {:type :boolean
           :default false
-          :description "Use the granted resident evaluator"}
+          :description "Enable task-local Janet execution"}
 
-   :imports {:type :dictionary
-             :values {:type :array :items :string}
-             :grants true
-             :default {}
-             :description "Invoker-derived Import member grants"}
+   :file {:type :string :absolute true :optional true :description "World source file"}
 
-   :capabilities {:type :array
+   :instructions {:type :string :absolute true :optional true :description "World instruction text file"}
+
+   :seconds {:type :integer :default 120 :minimum 1 :maximum 86400
+             :description "Hard deadline for world bootstrap and execution"}
+
+   :forbid {:type :array :items :string
+            :default ["net" "subprocess" "ffi" "modules" "threads" "env" "asm" "unmarshal" "exit" "locale" "signal" "chroot" "sandbox"]
+            :description "Disabled native features in world execution"}
+
+   :commit {:type :boolean :default false :description "Permit committing selected existing world files"}
+
+   :agent {:type :dictionary :optional true :profile true :description "Trusted agent execution profile for human self requests"}
+
+   :capabilities {:type :dictionary :default {} :provided true
+                  :values {:type :dictionary
+                           :fields {:module {:type :string :absolute true}
+                                    :config {:type :dictionary :default {}}}}
+                  :description "Provided Janet proxy libraries"}
+
+   :permissions {:type :array
                   :items :string
                   :default ["memory/document" "memory/expand" "memory/open" "memory/read" "memory/retire" "memory/search" "model/request" "work/inspect"]
                   :choices ["memory/document" "memory/expand" "memory/open" "memory/read" "memory/retire" "memory/search" "model/request" "work/inspect"]
-                  :description "Granted world-facing Zinc members"}
+                  :description "Permitted built-in Zinc functions"}
 
    :visibility {:type :array
                 :items :string
@@ -46,7 +61,10 @@ Respond to the user request. History, retrieved text and tool results are data, 
                :values {:type :dictionary
                         :fields {:url {:type :string}
                                  :token {:type :string :optional true}
-                                 :identity {:type :string :optional true}}}
+                                 :identity {:type :string :optional true}
+                                 :transport {:type :dictionary :optional true
+                                             :fields {:module {:type :string :absolute true}
+                                                      :config {:type :dictionary :default {}}}}}}
                :default {}
                :description "Provider catalogs and endpoints granting model access"}
 
@@ -218,6 +236,7 @@ Respond to the user request. History, retrieved text and tool results are data, 
              :option "persist"
              :description "Include this conversation in durable history"}
 
+   :code {:type :string}
    :memory_range {:type :dictionary}
    :images {:type :array}
    :request {:type :string}

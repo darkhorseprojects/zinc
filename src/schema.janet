@@ -3,25 +3,6 @@
 (import spork/base64 :as base64)
 (import spork/utf8 :as utf8)
 
-(def resident
-  {:file {:type :string :absolute true :description "World entry source"}
-   :socket {:type :string :absolute true :description "Resident Unix socket"}
-   :seconds {:type :number :minimum 0.001 :description "Hard bootstrap/evaluation wall-clock deadline"}
-   :imports {:type :dictionary :values {:type :array :items :string} :default {}
-             :description "Public Import members exposed by this resident view"}
-   :forbid {:type :array :items :string :description "Forbidden Janet native capabilities"
-            :choices ["all" "asm" "chroot" "compile" "env" "exit" "ffi" "ffi-define" "ffi-jit" "ffi-use"
-                      "fs" "fs-read" "fs-temp" "fs-write" "hrtime" "locale" "modules" "net" "net-connect"
-                      "net-listen" "sandbox" "signal" "subprocess" "threads" "unmarshal"]}})
-
-(def relay
-  {:socket {:type :string :absolute true :description "Resident Unix socket"}})
-
-(def git
-  {:repo {:type :string :absolute true :description "Granted repository"}
-   :executable {:type :string :absolute true :description "Git executable"}
-   :seconds {:type :number :minimum 0.001 :description "Execution deadline"}})
-
 (defn validate [schema bytes &opt discovery]
   (def supplied (json/decode bytes true true))
   (assert (dictionary? supplied) "configuration must be an object")
@@ -58,22 +39,21 @@
         (when (field :choices) (assert (index-of value (field :choices)) "invalid setting choice")))))
   config)
 
-(defn configuration [schema bytes imports &opt discovery]
+(defn configuration [schema bytes &opt discovery]
   (def config (validate schema bytes discovery))
-  (each [name members] (pairs (config :imports))
-    (assert (and (> (length (string name)) 0) (not (string/find "\0" (string name)))
-                 (not (index-of (string name) ["self" "pa"]))
-                 (indexed? members) (> (length members) 0)) "invalid Import grant")
-    (each member members
-      (assert (and (string? member) (> (length member) 0) (not (string/find "\0" member))) "invalid Import member")))
   (assert (<= (config :summary-quota) (config :context-quota)) "summary quota exceeds context quota")
+  (when (config :agent)
+    (assert (not (get-in config [:agent :agent])) "nested execution profiles are not supported")
+    (put config :agent (configuration schema (json/encode (config :agent)) discovery))
+    (each key [:actor :store :world :file]
+      (assert (= (config key) (get-in config [:agent key])) "agent view changes world identity/location")))
   (unless discovery
-    (each name (keys (config :imports))
-      (assert (index-of (string name) imports) "Import grant unavailable"))
     (when (config :repl)
-      (each [name members] [[:repl ["eval" "document"]] [:ledger ["receipt"]]]
-        (each member members
-          (assert (index-of member (get-in config [:imports name] [])) "resident evaluator grants required"))))
+      (assert (and (config :file) (= :file (os/stat (config :file) :mode))) "world source is required"))
+    (each [name capability] (pairs (config :capabilities))
+      (assert (and (peg/match ~(* (some (set "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789_-")) -1) (string name))
+                   (not (index-of name [:self :pa :memory :model :work]))) "invalid capability namespace")
+      (assert (= :file (os/stat (capability :module) :mode)) "capability library unavailable"))
     (each [name provider] (pairs (config :providers))
       (assert (index-of name [:llama :openrouter]) "unsupported provider")
       (assert (peg/match ~(* (choice "https://" "http://") (some (if-not (set "?#@ \t\r\n") 1)) -1) (provider :url)) "invalid provider base"))
@@ -84,18 +64,22 @@
 
 (defn authorize [schema current saved]
   (each key (keys saved) (assert (has-key? schema key) "unsupported saved configuration"))
-  (each key [:actor :store :world]
+  (each key [:actor :store :world :file :instructions]
     (assert (= (current key) (saved key)) "saved identity/location differs"))
-  (each key [:repl :inference]
+  (each key [:repl :inference :commit]
     (assert (or (not (saved key)) (current key)) (string "saved permission revoked: " key)))
-  (each key [:visibility :capabilities]
+  (each key [:visibility :permissions]
     (each value (saved key) (assert (index-of value (current key)) "saved grant revoked")))
-  (each [name members] (pairs (saved :imports))
-    (each member members (assert (index-of member (get-in current [:imports name] [])) "saved Import member revoked")))
+  (each [name capability] (pairs (saved :capabilities))
+    (assert (= (capability :module) (get-in current [:capabilities name :module])) "saved capability revoked"))
+  (when (saved :agent)
+    (assert (current :agent) "agent execution view revoked"))
   (each [name provider] (pairs (saved :providers))
     (def granted (get-in current [:providers name]))
     (assert (and granted (if (provider :identity) (= (provider :identity) (granted :identity)) (= (provider :url) (granted :url)))) "saved provider revoked"))
   (def config (merge @{} saved {:search (and (saved :search) (current :search))
+                               :agent (when (saved :agent) (authorize schema (current :agent) (saved :agent)))
+                               :capabilities (tabseq [name :in (keys (saved :capabilities))] name (get-in current [:capabilities name]))
                                :providers (tabseq [name :in (keys (saved :providers))]
                                                 name (get-in current [:providers name]))}))
   (each [key field] (pairs schema)
@@ -118,7 +102,7 @@
     (assert (and (string? (value :text)) (> (length (value :text)) 0)) "invalid question"))
   (when (has-key? value :code)
     (assert (and (string? (value :code)) (> (length (value :code)) 0)) "invalid Janet source"))
-  (each key [:request :capability :owner :token]
+  (each key [:request]
     (when (has-key? value key)
       (assert (and (string? (value key)) (<= 1 (length (value key)) 256)) "invalid request name")))
   (when (has-key? value :persist) (assert (boolean? (value :persist)) "invalid persistence flag"))

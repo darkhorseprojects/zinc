@@ -1,7 +1,6 @@
 name: CI
 on: [push, pull_request, workflow_dispatch]
-permissions:
-  contents: read
+permissions: { contents: read }
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
   cancel-in-progress: true
@@ -12,18 +11,15 @@ jobs:
     timeout-minutes: 15
     steps:
       - name: Install native tools
-        run: pacman -Syu --noconfirm janet jpm git python sqlite curl
+        run: pacman -Syu --noconfirm janet jpm git python sqlite curl deno
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
-        with:
-          path: zinc
-          persist-credentials: false
+        with: { path: zinc, persist-credentials: false }
       - name: Read PA revision
         id: revision
         run: |
-          python3 - <<'PY'
+          python - <<'PY'
           import os, pathlib, re
-          source = pathlib.Path('zinc/project.janet').read_text()
-          revision = re.search(r'portable-agents.git" :tag "([0-9a-f]{40})"', source)[1]
+          revision = re.search(r'portable-agents.git" :tag "([0-9a-f]{40})"', pathlib.Path('zinc/project.janet').read_text())[1]
           with open(os.environ['GITHUB_OUTPUT'], 'a') as output:
               output.write('pa=' + revision + '\n')
           PY
@@ -33,155 +29,16 @@ jobs:
           ref: ${{ steps.revision.outputs.pa }}
           path: portable-agents
           persist-credentials: false
-      - name: Install checked-out runtime
+      - name: Build native boundary and dependencies
         run: |
           cd portable-agents
-          jpm --local install
-          echo "$PWD/jpm_tree/bin" >> "$GITHUB_PATH"
-          echo "JANET_PATH=$PWD/jpm_tree/lib" >> "$GITHUB_ENV"
+          deno task check
+          deno task compile
+          python tests/runtime.py
           cd ../zinc
           jpm --local deps
           jpm --local install
-          test ! -e jpm_tree/bin/zinc
-      - name: Probe completion, deadlines and cleanup
-        run: |
-          python3 - <<'PY'
-          import base64, ctypes, json, os, pathlib, shutil, signal, sqlite3, subprocess, time
-          assert ctypes.CDLL(None).prctl(36, 1, 0, 0, 0) == 0
-          workspace = pathlib.Path.cwd()
-          zinc = workspace / 'zinc'
-          library = zinc / 'jpm_tree/lib'
-          scratch = workspace / '.lifetime-probe'
-          scratch.mkdir()
-          limits = {'frameBytes': 1048576, 'depth': 32, 'inFlight': 8, 'handles': 32, 'admissionSeconds': 1}
-          command = ['agent', 'call', *map(str, limits.values())]
-          program = {'sourceDir': str(zinc), 'entryModule': 'zinc.md', 'dependencies': {'library': str(library)}}
-          config = {'actor': 'probe', 'world': 'probe', 'store': str(scratch / 'history.db'), 'search': False,
-                    'repl': True, 'imports': {'repl': ['eval', 'document'], 'ledger': ['receipt']},
-                    'lease-seconds': 3, 'parallel': 1, 'run-seconds': 10}
-          private = base64.b64encode(json.dumps(config).encode()).decode()
-          grants = [
-              {'name': 'repl', 'program': {**program, 'entryModule': 'src/repl.janet'},
-               'config': base64.b64encode(json.dumps({'socket': str(scratch / 'world.sock')}).encode()).decode(),
-               'members': ['eval', 'document'], 'imports': ['ledger'], 'spawn': True},
-              {'name': 'ledger', 'program': program, 'config': private, 'members': ['receipt'],
-               'imports': ['repl', 'ledger'], 'spawn': True},
-          ]
-          packet = {'version': 1, 'program': program, 'config': private, 'imports': grants,
-                    'spawn': ['setsid', '--', 'timeout', '--kill-after=0.2s', '10s', 'janet']}
-          server = None
-          try:
-              discovery = {'version': 1, 'program': program, 'member': 'describe', 'input': '',
-                           'config': base64.b64encode(b'{}').decode()}
-              result = subprocess.run(command, input=(json.dumps(discovery) + '\n').encode(), capture_output=True, timeout=5)
-              assert result.returncode == 0
-              terminal = json.loads(result.stdout.splitlines()[-1])
-              assert terminal['type'] == 'result', terminal
-              description = json.loads(base64.b64decode(terminal['output']))
-              assert description['input'] == 'json' and description['output'] == 'json'
-              assert 'config' in description['schema'] and 'input' in description['schema']
-              print('Zinc: agent discovery passed', flush=True)
-              (scratch / 'world.janet').write_text('(def instructions "probe")\n')
-              server_config = {'file': str(scratch / 'world.janet'), 'socket': str(scratch / 'world.sock'),
-                               'seconds': 2, 'forbid': ['exit', 'threads', 'signal', 'subprocess']}
-              resident = {'version': 1, 'program': {**program, 'entryModule': 'src/repl.janet'},
-                          'member': 'serve', 'input': '', 'config': base64.b64encode(json.dumps(server_config).encode()).decode()}
-              server = subprocess.Popen(command, stdin=subprocess.PIPE, stdout=subprocess.PIPE, start_new_session=True)
-              server.stdin.write((json.dumps(resident) + '\n').encode()); server.stdin.close()
-              until = time.monotonic() + 3
-              while not (scratch / 'world.sock').exists() and time.monotonic() < until: time.sleep(0.02)
-              assert server.poll() is None and (scratch / 'world.sock').exists()
-              for name, source in [('nested', '(await (self/member "memory/document" "descendant"))'),
-                                   ('death', '(ev/sleep 0.3) (+ 20 22)'), ('expired', '(while true)')]:
-                  current = {**config, 'run-seconds': 1 if name == 'expired' else 10}
-                  opaque = base64.b64encode(json.dumps(current).encode()).decode()
-                  imports = [grants[0], {**grants[1], 'config': opaque}]
-                  value = {'request': name, 'code': source}
-                  request = {**packet, 'config': opaque, 'imports': imports, 'member': 'invoke',
-                             'input': base64.b64encode(json.dumps(value).encode()).decode()}
-                  child = subprocess.Popen(command, stdin=subprocess.PIPE, stdout=subprocess.PIPE, start_new_session=True)
-                  child.stdin.write((json.dumps(request) + '\n').encode()); child.stdin.close()
-                  if name == 'death':
-                      until = time.monotonic() + 3
-                      while time.monotonic() < until:
-                          with sqlite3.connect(scratch / 'history.db') as db:
-                              running = db.execute("SELECT count(*) FROM tasks t JOIN runs r ON r.id=t.run WHERE r.request=? AND t.state='running'", (name,)).fetchone()[0]
-                          if running: break
-                          time.sleep(0.02)
-                      assert running
-                      os.killpg(child.pid, signal.SIGKILL)
-                  child.wait(timeout=5)
-                  frames = [json.loads(line) for line in child.stdout]; child.stdout.close()
-                  with sqlite3.connect(scratch / 'history.db') as db:
-                      rows = db.execute('SELECT t.id,t.state,t.attempt,t.result FROM tasks t JOIN runs r ON r.id=t.run WHERE r.request=? ORDER BY t.id', (name,)).fetchall()
-                  if name == 'nested':
-                      assert len(rows) == 2 and all(row[1] == 'done' for row in rows), rows
-                      assert frames[-1]['type'] == 'result', frames
-                  elif name == 'death':
-                      until = time.monotonic() + 3
-                      while time.monotonic() < until:
-                          with sqlite3.connect(scratch / 'history.db') as db:
-                              row = db.execute('SELECT t.state,t.result FROM tasks t JOIN runs r ON r.id=t.run WHERE r.request=?', (name,)).fetchone()
-                          if row[0] == 'done': break
-                          time.sleep(0.02)
-                      assert row[0] == 'done' and json.loads(row[1])['value'] == '42', row
-                  else:
-                      assert len(rows) == 1 and rows[0][1:3] == ('uncertain', 1), rows
-                      assert frames[-1]['type'] == 'error', frames
-                      with sqlite3.connect(scratch / 'history.db') as db:
-                          task, owner, generation, data, expires = db.execute("SELECT t.id,l.owner,l.generation,t.input,r.expires FROM tasks t JOIN runs r ON r.id=t.run JOIN leases l ON l.task=t.id WHERE r.request=?", (name,)).fetchone()
-                      renewal = {'task': task, 'owner': owner, 'generation': generation, 'token': json.loads(data)['token'], 'operation': 'renew'}
-                      for member, payload in [('receipt', renewal), ('invoke', value), ('pending', '')]:
-                          follow = {**request, 'member': member, 'input': '' if payload == '' else base64.b64encode(json.dumps(payload).encode()).decode()}
-                          result = subprocess.run(command, input=(json.dumps(follow) + '\n').encode(), capture_output=True, timeout=3)
-                          terminal = json.loads(result.stdout.splitlines()[-1])
-                          assert terminal['type'] == ('result' if member == 'pending' else 'error'), terminal
-                          if member == 'pending':
-                              jobs = json.loads(base64.b64decode(terminal['output']))
-                              job = next(job for job in jobs if job['request'] == name)
-                              assert job['state'] == 'uncertain' and job['attempt'] == 1 and job['run_expires'] == expires, job
-                      with sqlite3.connect(scratch / 'history.db') as db:
-                          assert db.execute('SELECT count(*) FROM tasks t JOIN runs r ON r.id=t.run WHERE r.request=?', (name,)).fetchone()[0] == 1
-                  print('Zinc:', name, 'passed', flush=True)
-              server.wait(timeout=3)
-              assert server.returncode == 0
-              terminal = json.loads(server.stdout.read().splitlines()[-1]); server.stdout.close()
-              assert terminal['type'] == 'error' and terminal['code'] == 'ProcessFailure', terminal
-              (scratch / 'world.sock').unlink()
-              (scratch / 'world.janet').write_text('(while true)\n')
-              server = subprocess.Popen(command, stdin=subprocess.PIPE, stdout=subprocess.PIPE, start_new_session=True)
-              server.stdin.write((json.dumps(resident) + '\n').encode()); server.stdin.close()
-              server.wait(timeout=4)
-              assert server.returncode == 0
-              terminal = json.loads(server.stdout.read().splitlines()[-1]); server.stdout.close()
-              assert terminal['type'] == 'error' and terminal['code'] == 'ProcessFailure', terminal
-              with sqlite3.connect(scratch / 'history.db') as db:
-                  db.execute("INSERT INTO tasks(actor,run,branch,world,kind,input,scope,retry_policy,retries) SELECT actor,run,branch,world,kind,input,scope,retry_policy,retries FROM tasks WHERE id=?", (task,))
-                  queued = db.execute('SELECT max(id) FROM tasks').fetchone()[0]
-              recovery = {**packet, 'member': 'pending', 'input': ''}
-              result = subprocess.run(command, input=(json.dumps(recovery) + '\n').encode(), capture_output=True, timeout=3)
-              assert json.loads(result.stdout.splitlines()[-1])['type'] == 'result'
-              with sqlite3.connect(scratch / 'history.db') as db:
-                  assert db.execute('SELECT state FROM tasks WHERE id=?', (queued,)).fetchone()[0] == 'cancelled'
-                  assert db.execute('PRAGMA integrity_check').fetchone()[0] == 'ok'
-              print('Zinc: bootstrap watchdog, queued expiry and database integrity passed', flush=True)
-          finally:
-              for _ in range(30):
-                  children = []
-                  for proc in pathlib.Path('/proc').glob('[0-9]*'):
-                      try:
-                          stat = (proc / 'stat').read_text().rsplit(')', 1)[1].split()
-                          if int(stat[1]) == os.getpid(): children.append(int(proc.name))
-                      except (OSError, ValueError): pass
-                  for pid in children:
-                      try: os.kill(pid, signal.SIGKILL)
-                      except ProcessLookupError: pass
-                  time.sleep(0.02)
-                  while True:
-                      try:
-                          if os.waitpid(-1, os.WNOHANG)[0] == 0: break
-                      except ChildProcessError: break
-                  if not children: break
-              shutil.rmtree(scratch)
-              assert not children, children
-          PY
+          cd ../portable-agents
+          jpm --modpath="$GITHUB_WORKSPACE/zinc/jpm_tree/lib" install
+      - name: Probe independent execution and authority
+        run: python zinc/tests/runtime.py

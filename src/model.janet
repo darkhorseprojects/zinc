@@ -28,13 +28,17 @@
                [request (reference :provider) (reference :id) (raw :prompt_tokens) (raw :completion_tokens) (raw :total_tokens)
                 (get-in raw [:completion_tokens_details :reasoning_tokens]) (get-in raw [:prompt_tokens_details :cached_tokens]) (string (json/encode raw))]))
 
-(defn transfer [[config url method body headers channel cancel]]
+(defn transfer [[config url method body headers channel cancel transport]]
   (def client (curl/new))
 
   (defer (curl/reset client)
     (try
       (do
         (def response
+          (if transport
+            ((module/value (require (transport :module)) 'request)
+             url method body headers (fn [chunk] (ev/give-supervisor :packet {:chunk (string chunk)}))
+             (transport :config))
           (http/request
             {:client client
              :url url
@@ -52,7 +56,7 @@
               :xferinfofunction (fn [& counts] (= 0 (ev/count cancel)))}
              :stream
              (fn [chunk]
-               (ev/give-supervisor :packet {:chunk (string chunk)}))}))
+               (ev/give-supervisor :packet {:chunk (string chunk)}))})))
 
         (ev/give channel [:packet {:status (response :status) :error (response :error)}]))
       ([err] (when (= 0 (ev/count cancel)) (ev/give channel [:packet {:failure (string err)}]))))))
@@ -60,7 +64,8 @@
 (defn http-request [config url method body headers]
   (def channel (ev/thread-chan))
   (def cancel (ev/thread-chan 1))
-  (ev/thread transfer [config url method body headers channel cancel] :n channel)
+  (def provider (find |(string/has-prefix? (($ 1) :url) url) (pairs (config :providers))))
+  (ev/thread transfer [config url method body headers channel cancel (get-in provider [1 :transport])] :n channel)
   (def current (dyn :zinc/task))
   (def watcher (when current (ev/go (fn []
                                       (def s (store/open config))
