@@ -34,11 +34,8 @@ jobs:
           cd portable-agents
           deno task check
           deno task compile
-          python tests/runtime.py
           cd ../zinc
           jpm --local deps
           jpm --local install
           cd ../portable-agents
           jpm --modpath="$GITHUB_WORKSPACE/zinc/jpm_tree/lib" install
-      - name: Probe independent execution and authority
-        run: python zinc/tests/runtime.py

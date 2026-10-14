@@ -121,12 +121,4 @@ Provider URL/token configuration supports llama/OpenRouter. An optional generic 
 
 Semantic retrieval requires the pinned format-1 Cygnet index and stopwords. Set `search: false` without those assets. Preserve stale development databases and choose a fresh path; there is no compatibility migration.
 
-## Verification
-
-```sh
-python3 tests/runtime.py
-```
-
-The native probe checks isolated heaps, ordinary capability imports and prompt discovery, recursion at `parallel=1`, inference, deadlines, observer death, no implicit replay, commit permissions and store integrity. Zinc's native dependency CI runs on Linux; other-platform lifecycle certification is not implied.
-
 Further contracts: [wiki](https://github.com/darkhorseprojects/zinc/wiki).

@@ -28,7 +28,8 @@
                [request (reference :provider) (reference :id) (raw :prompt_tokens) (raw :completion_tokens) (raw :total_tokens)
                 (get-in raw [:completion_tokens_details :reasoning_tokens]) (get-in raw [:prompt_tokens_details :cached_tokens]) (string (json/encode raw))]))
 
-(defn transfer [[config url method body headers channel cancel transport]]
+(defn transfer [[config url method body headers channel cancel transport limits]]
+  (setdyn :pa/limits limits)
   (def client (curl/new))
 
   (defer (curl/reset client)
@@ -65,7 +66,7 @@
   (def channel (ev/thread-chan))
   (def cancel (ev/thread-chan 1))
   (def provider (find |(string/has-prefix? (($ 1) :url) url) (pairs (config :providers))))
-  (ev/thread transfer [config url method body headers channel cancel (get-in provider [1 :transport])] :n channel)
+  (ev/thread transfer [config url method body headers channel cancel (get-in provider [1 :transport]) (dyn :pa/limits)] :n channel)
   (def current (dyn :zinc/task))
   (def watcher (when current (ev/go (fn []
                                       (def s (store/open config))
