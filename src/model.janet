@@ -261,8 +261,10 @@
       (var packet (or terminal (get (ev/take (transfer :channel)) 1)))
       (assert packet "HTTP transfer closed")
       (when (and (= :json format) (not (packet :chunk)))
-        (assert (and (= :ok (packet :error)) (<= 200 (packet :status) 299)) "chat transport failed")
+        (when (packet :failure) (error (packet :failure)))
         (def value (json/decode pending true true))
+        (assert (and (= :ok (packet :error)) (<= 200 (packet :status) 299))
+                (string "chat HTTP " (packet :status) ": " (json/encode (value :error))))
         (assert (and (dictionary? value) (indexed? (value :choices))) "invalid chat response")
         (each choice (value :choices)
           (def message (choice :message))
@@ -302,8 +304,9 @@
                   (set done true)
                   (do
                     (def value (json/decode payload true true))
-                    (assert (and (dictionary? value) (not (value :error)))
-                            "provider reported a stream error")
+                    (assert (dictionary? value) "invalid provider stream packet")
+                    (when (value :error)
+                      (error (string "provider stream error: " (json/encode (value :error)))))
 
                     (when (value :usage)
                       (assert (dictionary? (value :usage)) "invalid usage report")
@@ -378,7 +381,8 @@
         (set status packet)))
 
     (when (status :failure) (error (status :failure)))
-    (assert (and (= :ok (status :error)) (<= 200 (status :status) 299)) "chat transport failed")
+    (assert (and (= :ok (status :error)) (<= 200 (status :status) 299))
+            (string "chat HTTP " (status :status) " (" (status :error) "): " pending))
     (assert (and done finish (= 0 (length data)) (= "" (string/trim pending)))
             "incomplete model stream")
     (assert (and (utf8/is-valid? content) (utf8/is-valid? thoughts)) "invalid assistant UTF-8")
