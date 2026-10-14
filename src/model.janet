@@ -31,6 +31,7 @@
 (defn transfer [[config url method body headers channel cancel transport limits]]
   (setdyn :pa/limits limits)
   (def client (curl/new))
+  (var received 0)
 
   (defer (curl/reset client)
     (try
@@ -57,13 +58,16 @@
               :xferinfofunction (fn [& counts] (= 0 (ev/count cancel)))}
              :stream
              (fn [chunk]
+               (+= received (length chunk))
+               (assert (<= received (config :response-bytes)) "HTTP response exceeds byte limit")
+               (assert (< (ev/count channel) (- (ev/capacity channel) 1)) "HTTP response queue limit")
                (ev/give-supervisor :packet {:chunk (string chunk)}))})))
 
         (ev/give channel [:packet {:status (response :status) :error (response :error)}]))
       ([err] (when (= 0 (ev/count cancel)) (ev/give channel [:packet {:failure (string err)}]))))))
 
 (defn http-request [config url method body headers]
-  (def channel (ev/thread-chan))
+  (def channel (ev/thread-chan (- (config :response-bytes) 1)))
   (def cancel (ev/thread-chan 1))
   (def provider (find |(string/has-prefix? (($ 1) :url) url) (pairs (config :providers))))
   (ev/thread transfer [config url method body headers channel cancel (get-in provider [1 :transport]) (dyn :pa/limits)] :n channel)
