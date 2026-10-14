@@ -95,7 +95,7 @@
   (store/query s "INSERT INTO temp.tokens(rowid,text) VALUES(1,?)" [text])
   (map |($ "term") (store/query s "SELECT term FROM temp.words ORDER BY offset LIMIT ?" [ceiling])))
 
-(defn search [s view anchor limit]
+(defn semantic-window [s view anchor limit]
   (if (or (not ((s :config) :search)) (= limit 0) (= (view :last) 0)) []
     (let [config (s :config) graph (cygnet config)]
       (defer (sql/close (graph :db))
@@ -188,7 +188,7 @@
     (var excerpt (row "text"))
     (while (not (utf8/is-valid? excerpt)) (set excerpt (string/slice excerpt 0 -2)))
     (def text (string (render (merge row {"text" excerpt}))
-                      (when (< (length excerpt) (row "bytes")) "[preview; read the event handle for the complete original]\n")))
+                      (when (< (length excerpt) (row "bytes")) "[preview; expand this event ID for the original]\n")))
     (array/push projection {:event (row "id") :first (row "id") :last (row "id") :text text :estimate (store/estimate text)}))
   (sort projection |(< ($0 :first) ($1 :first)))
   projection)
@@ -203,7 +203,7 @@
   (def selected (reverse chosen))
   {:nodes selected :covered (map |{:first ($ :first) :last ($ :last)} selected) :estimate used :unit "token-estimate"})
 
-(defn open [s view ref]
+(defn- open [s view ref]
   (assert (and (dictionary? ref) (not= (nil? (ref :event)) (nil? (ref :node)))) "one memory reference required")
   (def row (describe s (merge view {:columns "e.id,e.kind,e.estimate"}) ref))
   (def id (row "id"))
@@ -213,7 +213,7 @@
   {:handle (merge (if (ref :node) {:node id} {:event id}) {:field field})
    :kind (get row "kind" "summary") :bytes (size "bytes") :estimate (row "estimate")})
 
-(defn read [s view handle offset bytes]
+(defn- read [s view handle offset bytes]
   (open s view handle)
   (assert (and (int? offset) (>= offset 0) (int? bytes)
                (<= 1 bytes 65536)) "invalid memory slice")
@@ -229,7 +229,7 @@
   (while (and (< end (length source)) (<= 0x80 (source end) 0xbf)) (++ end))
   {:text (string/slice source 0 end) :offset offset :next (+ offset end) :total (row "total")})
 
-(defn expand [s view ref]
+(defn- references [s view ref]
   (open s view ref)
   (if (ref :event)
     (let [row (describe s view ref) data (json/decode (row "data") true true) original (get-in data [:original :event])]
@@ -239,13 +239,14 @@
     (map (fn [edge] (open s view (if (edge "node") {:node (edge "node")} {:event (edge "event")})))
          (store/query s "SELECT node,event FROM summary_children WHERE parent=? ORDER BY position LIMIT 32" [(ref :node)]))))
 
-(defn document [s view text]
-  (assert (and (string? text) (utf8/is-valid? text) (> (length text) 0)) "invalid document")
-  (store/transact s
-                  (store/checkpoint s ((dyn :zinc/task) :checkpoint))
-                  (def previous (first (store/query s "SELECT id FROM events WHERE parent=? AND kind='artifact'" [(dyn :zinc/effect)])))
-                  (def event (or previous (store/append s view "artifact" text {} (dyn :zinc/effect))))
-                  {:event (event "id")}))
+(defn expand [s view id]
+  (assert (and (int? id) (> id 0)) "expand requires an event ID")
+  (def row (first (store/query s "SELECT kind FROM events WHERE id=? AND actor=?" [id (s :actor)])))
+  (assert row "event unavailable")
+  (map (fn [source]
+         (def record (describe s view (source :handle)))
+         (if (record "data") (merge record {"data" (json/decode (record "data") true true)}) record))
+       (references s view (if (= "summary" (row "kind")) {:node id} {:event id}))))
 
 (defn summarize [s task input]
   (def view (input :view))
@@ -267,7 +268,7 @@
       (while (< (progress :index) (length children))
         (assert (< (progress :chunks) (config :history-records)) "summary source work ceiling")
         (def ref (children (progress :index)))
-        (def handle (if (ref :node) ref ((first (expand s view ref)) :handle)))
+        (def handle (if (ref :node) ref ((first (references s view ref)) :handle)))
         (def slice (read s view handle (progress :offset) (min 65536 (* 4 room))))
         (var text nil)
         (each mode (if (= "aggressive" (progress :mode)) ["aggressive"] ["normal" "aggressive"])
@@ -327,32 +328,7 @@
       (do ((dyn :zinc/spawn) s id) (array/push receipts {:task id :background true}) (break))))
   receipts)
 
-(defn retire [s view id]
-  (def b (store/branch s id))
-  (assert (and (= 1 (b "temporary")) (= (view :run) (b "run"))
-               (first (store/query s `WITH RECURSIVE descendants(id) AS (SELECT ? UNION ALL SELECT b.id FROM branches b JOIN descendants d ON b.parent=d.id) SELECT id FROM descendants WHERE id=?` [(view :branch) id]))) "retirement requires an owned temporary descendant")
-  (store/transact s
-                  (store/checkpoint s ((dyn :zinc/task) :checkpoint))
-                  (store/query s `WITH RECURSIVE descendants(id) AS (SELECT ? UNION ALL SELECT b.id FROM branches b JOIN descendants d ON b.parent=d.id) UPDATE branches SET retired=1 WHERE id IN descendants` [id])
-                  {:event ((store/append s {:branch id :run (b "run")} "retired" "temporary branch retired") "id")}))
-
 (def operations
-  {"memory/retire"
-   {:retry-policy "retry" :transactional true :description "memory/retire branch -> retire an owned temporary branch and its descendants; return the event ID."
-    :function retire}
-   "memory/open"
-   {:retry-policy "retry" :description "memory/open reference -> handle, kind, byte count and token estimate."
-    :function open}
-   "memory/read"
-   {:retry-policy "retry" :description "memory/read handle offset bytes -> text, offset, next offset and total bytes."
-    :function read}
-   "memory/expand"
-   {:retry-policy "retry" :description "memory/expand reference -> original or summary-child handles."
-    :function expand}
-   "memory/search"
-   {:retry-policy "retry" :description "memory/search query -> visible records ranked by relevance to the query."
-    :function (fn [s view query] (search s view query ((s :config) :context-quota)))}
-   "memory/document"
-   {:retry-policy "retry" :transactional true
-    :description "memory/document text -> store text and return its event reference."
-    :function document}})
+  {"memory/expand"
+   {:retry-policy "retry" :description "(memory/expand id) — Scoped original records or summary children at an event ID."
+    :function expand}})

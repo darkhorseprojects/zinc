@@ -98,6 +98,8 @@
           "\n`(input)` reads the inquiry. `(self/document)` reads these instructions."
           "\n`(all-bindings world true)` lists local bindings."
           "\n`(await (self {:text \"request\"}))` starts an independent agent branch under agent permissions."
+          "\nSearch by asking self a question; its semantic window retrieves within the allowed history."
+          "\n`(memory/expand id)` expands a known event ID into scoped original records or summary children."
           "\n\n## Callable functions\n\n"
           (string/join (seq [name :in (view :permissions) :when (available name)]
             (string "- " ((available name) :description))) "\n")
@@ -205,7 +207,7 @@
     (unless context
       (memory/compact archive inherited)
       (def chronological (memory/context archive inherited ""))
-      (def evidence (if (= 0 semantic) [] (memory/search s (merge inherited {:covered (chronological :covered)}) (user "text") semantic)))
+      (def evidence (if (= 0 semantic) [] (memory/semantic-window s (merge inherited {:covered (chronological :covered)}) (user "text") semantic)))
       (set context {:through (inherited :last) :chronological chronological :evidence (map memory/render evidence)})
       (store/query s "INSERT INTO contexts(branch,through,projection) VALUES(?,?,?) ON CONFLICT DO NOTHING" [branch (context :through) (string (json/encode context))]))
     (while (not (first (store/query s "SELECT id FROM events WHERE branch=? AND kind='completed'" [branch])))

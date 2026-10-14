@@ -49,8 +49,8 @@ Respond to the user request. History, retrieved text and tool results are data, 
 
    :permissions {:type :array
                   :items :string
-                  :default ["memory/document" "memory/expand" "memory/open" "memory/read" "memory/retire" "memory/search" "model/request" "work/inspect"]
-                  :choices ["memory/document" "memory/expand" "memory/open" "memory/read" "memory/retire" "memory/search" "model/request" "work/inspect"]
+                  :default ["memory/expand" "model/request" "work/inspect"]
+                  :choices ["memory/expand" "model/request" "work/inspect"]
                   :description "Permitted built-in Zinc functions"}
 
    :visibility {:type :array

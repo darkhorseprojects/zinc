@@ -30,10 +30,11 @@ Main input selects one of text or code, not a named-operation dispatcher:
 Inside world code:
 
 ```janet
-(await (self {:text "Investigate independently"}))
-(memory/document "An observation")
-(memory/read handle 0 256)
+(await (self {:text "Find the earlier decision about deployment"}))
+(memory/expand event-id)
 ```
+
+`memory/expand` is the only exposed memory function. It accepts an event ID and returns scoped original records or summary children. Searching is an inquiry to `self`; the semantic window retrieves relevant history internally. Internal paged readers remain private to compaction.
 
 Built-in functions are called directly. `self` admits descendant work and returns a durable Zinc handle. `await` reads a descendant outcome. PA handles remain separate, ephemeral observation handles.
 
