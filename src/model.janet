@@ -30,9 +30,9 @@
                    (set next-check (+ (os/clock) 0.1))
                    (set permitted (not (nil? (first (store/query s
                                                                  `SELECT t.id FROM tasks t JOIN leases l ON l.task=t.id JOIN runs r ON r.id=t.run
-           WHERE t.id=? AND t.actor=? AND t.attempt=? AND l.owner=? AND l.generation=t.attempt
+           WHERE t.id=? AND t.source=? AND t.attempt=? AND l.owner=? AND l.generation=t.attempt
              AND t.state IN ('running','waiting') AND l.expires>? AND r.expires>?`
-                                                                 [(current :id) (s :actor) (current :generation) (current :owner) (os/clock) (os/clock)]))))))
+                                                                 [(current :id) (s :source) (current :generation) (current :owner) (os/clock) (os/clock)]))))))
                  permitted))
     (assert (check) "HTTP job fenced")
     (def url (string (provider :url) path))
@@ -248,7 +248,7 @@
   (assert (index-of role ["chat" "rerank"]) "unknown model role")
   (def input (merge {:model ((s :config) (if (= "rerank" role) :rerank :chat))} input))
   (def cached (when request (first (store/query s
-                                                "SELECT data FROM events WHERE actor=? AND parent=? AND kind='model-outcome'" [(s :actor) request]))))
+                                                "SELECT data FROM events WHERE source=? AND parent=? AND kind='model-outcome'" [(s :source) request]))))
   (if cached (json/decode (cached "data") true true)
     (do
       (default selected (profile (s :config) (input :model) (keyword role)))

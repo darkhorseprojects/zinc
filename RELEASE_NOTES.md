@@ -1,3 +1,15 @@
+# Source identity and passive recording
+
+`source` replaces the history-owner name `actor`; authors are observation provenance, not ownership grants. Context-only records are bounded and idempotent, visible to the next new inquiry without creating runs, tasks or inference. Running snapshots stay frozen.
+
+Runtime world bindings/instructions now belong to `repl.janet`; database DDL belongs to `schema.janet`. Durable scheduling remains in `engine.janet`. The evaluator has no PA spawning or private configuration.
+
+# Reject fragment persistence
+
+The history database rejects new events outside the explicit semantic/receipt kind set. No delta or generic emission kind is accepted. Existing historical fragments remain immutable; they are not deleted, renumbered or relabeled as complete messages. The fresh store is schema version 1; old layouts are not migrated. Preserve old deployments separately.
+
+PA observation switches and append frames are removed; use matching PA callers, executable and Janet sources. Zinc emits only committed complete segments.
+
 # Whole messages and interrupted history
 
 Model calls use bounded complete JSON responses, not SSE fragment persistence. Existing event IDs and histories are retained. Usage reports survive response-validation failures.

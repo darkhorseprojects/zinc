@@ -38,11 +38,19 @@ Inside world code:
 
 Built-in functions are called directly. `self` admits descendant work and returns a durable Zinc handle. `await` reads a descendant outcome. PA handles remain separate, ephemeral observation handles.
 
-`describe`, `document`, `models`, `events`, `pending`, `resume` and `abort` are ordinary package exports used by invokers. `task` is the trusted executor export, not a world binding. Generated environments receive neither PA spawning nor private runtime configuration.
+`record`, `describe`, `document`, `models`, `events`, `pending`, `resume` and `abort` are ordinary package exports used by invokers. `task` is the trusted executor export, not a world binding. Generated environments receive neither PA spawning nor private runtime configuration.
+
+## Passive context
+
+The trusted `record` export accepts `{"records":[{"key":"external-id","author":"principal-id","at":"timestamp","text":"observed text"}]}` and returns committed `events` IDs. Repeated identical records return the same IDs; reusing a key with different content is an error.
+
+Recording creates no turn, run, task, inference, code evaluation or background summary. Even Janet fences are stored as data. Context belongs to the configured authenticated `source` and `world`; the next new inquiry includes it within its history bounds. Running turns retain their frozen cutoffs. `record` is not a generated-world binding.
+
+`source` is the history namespace, not the record author or a world filename. Source isolation and current execution grants remain separate. Only a new `self` inquiry asks for work or a response.
 
 ## Worlds and concurrency
 
-Required identity is `actor`, absolute `store`, and `world`. For Janet execution, set `repl: true`, an absolute `file`, `seconds`, and native restrictions in `forbid`.
+Required identity is `source`, absolute `store`, and `world`. For Janet execution, set `repl: true`, an absolute `file`, `seconds`, and native restrictions in `forbid`.
 
 Each branch captures the selected entry source at admission. Descendants inherit that source. Each execution gets a separate Janet VM in a task-owned process; siblings do not share bindings. A hard evaluation deadline affects that task, not another resident heap.
 
@@ -94,7 +102,7 @@ There are no process-program descriptors, function-name selectors or recursive i
 
 `inference` controls agent/model-request execution. `permissions` lists built-in memory/model/work functions. `capabilities` supplies external libraries. These are distinct.
 
-An authorized human execution may have `inference: false`, `commit: true`, and a trusted `agent` profile. Human `self` requests use that agent profile, not the user's stronger permissions. Profiles must share actor/store/world/source identity. Saved work is reauthorized against current profiles.
+An authorized human execution may have `inference: false`, `commit: true`, and a trusted `agent` profile. Human `self` requests use that agent profile, not the user's stronger permissions. Profiles must share source/store/world/file identity. Saved work is reauthorized against current profiles.
 
 `commit` is one optional built-in function:
 
@@ -112,11 +120,11 @@ SQLite format 1 stores admissions, immutable events/outcomes, attempts, leases, 
 
 `parallel` bounds running tasks; waits release and reacquire slots, including recursion at one slot. `task-depth`, `task-quota` and the admission-anchored `run-seconds` bound work. Reattachment never resets deadlines. Code and arbitrary capability effects are manual-recovery work, not automatic replay.
 
-Root inquiries attach to the latest committed event in their actor/world scope, including failed and interrupted work—not only successful answers. The history cutoff is frozen at admission. Explicit `parent` and `memory_range` still constrain it; a bounded prompt is not an unbounded transcript.
+Root inquiries attach to the latest committed event in their source/world scope, including failed and interrupted work—not only successful answers. The history cutoff is frozen at admission. Explicit `parent` and `memory_range` still constrain it; a bounded prompt is not an unbounded transcript.
 
 Known failures are outcomes. Interrupted execution can be uncertain. Original-owner fencing allows late known completion while its generation remains valid. Abort fences scheduling and records the affected tasks in branch history. It is cooperative and does not undo effects; an external action already in flight may still finish. Completed roots remain completed.
 
-Model requests use complete JSON responses. Complete assistant messages, tool calls/results and execution receipts are persisted; transport fragments are not events. Event IDs count ledger records, not conversation messages. Existing records and IDs are retained.
+Model requests use complete JSON responses. Complete assistant messages, tool calls/results and execution receipts are persisted; transport fragments are not events. A database insert constraint permits only explicit semantic and receipt kinds, never deltas or arbitrary emissions. Event IDs count ledger records, not conversation messages. Historical fragment rows and their IDs are retained, not relabeled as completed responses.
 
 `events` returns bounded committed pages. Reattachment emits saved events before returning an outcome, without rerunning failed effects. Observers own delivery receipts and cursors. Zinc has no Discord acknowledgment state or catch-up queue.
 

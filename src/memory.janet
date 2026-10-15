@@ -5,26 +5,26 @@
 (import ./model)
 
 (defn events [s run after]
-  (assert (first (store/query s "SELECT id FROM runs WHERE id=? AND actor=? AND (world=? OR world IN (SELECT value FROM json_each(?)))"
-                              [run (s :actor) ((s :config) :world) (string (json/encode ((s :config) :visibility)))])) "run unavailable")
-  (store/query s "SELECT *,strftime('%Y-%m-%dT%H:%M:%fZ',created,'unixepoch') created_at FROM events WHERE actor=? AND run=? AND id>? ORDER BY id LIMIT 256"
-               [(s :actor) run after]))
+  (assert (first (store/query s "SELECT id FROM runs WHERE id=? AND source=? AND (world=? OR world IN (SELECT value FROM json_each(?)))"
+                              [run (s :source) ((s :config) :world) (string (json/encode ((s :config) :visibility)))])) "run unavailable")
+  (store/query s "SELECT *,strftime('%Y-%m-%dT%H:%M:%fZ',created,'unixepoch') created_at FROM events WHERE source=? AND run=? AND id>? ORDER BY id LIMIT 256"
+               [(s :source) run after]))
 
 (defn describe [s view ref]
   (if (ref :event) (store/event s view (ref :event))
     (do
-      (def row (first (store/query s "SELECT * FROM summaries WHERE id=? AND actor=? AND world=? AND first>=? AND last<=?"
-                                   [(ref :node) (s :actor) (view :world) (view :first) (view :last)])))
+      (def row (first (store/query s "SELECT * FROM summaries WHERE id=? AND source=? AND world=? AND first>=? AND last<=?"
+                                   [(ref :node) (s :source) (view :world) (view :first) (view :last)])))
       (assert row "summary outside granted history")
       (store/event s view (row "first")) (store/event s view (row "last"))
       (def invalid (first (store/query s `WITH RECURSIVE ancestry(id,through) AS (
         SELECT ?,9007199254740991 UNION ALL SELECT b.parent,min(a.through,b.last) FROM branches b JOIN ancestry a ON b.id=a.id WHERE b.parent IS NOT NULL
       ), descendants(id) AS (SELECT ? UNION SELECT c.node FROM summary_children c JOIN descendants d ON c.parent=d.id WHERE c.node IS NOT NULL)
       SELECT e.id FROM descendants d JOIN summary_children c ON c.parent=d.id JOIN events e ON e.id=c.event
-      JOIN branches b ON b.id=e.branch JOIN runs r ON r.id=e.run
-      WHERE e.actor!=? OR e.id NOT BETWEEN ? AND ? OR b.retired=1 OR (b.temporary=1 AND b.id NOT IN (SELECT id FROM ancestry))
-        OR (b.world!=? AND b.world NOT IN (SELECT value FROM json_each(?))) OR (e.id>? AND NOT (e.run=? AND EXISTS(SELECT 1 FROM ancestry a WHERE a.id=e.branch AND e.id<=a.through))) LIMIT 1`
-                                       [(view :branch) (ref :node) (s :actor) (view :first) (view :last) (view :world) (string (json/encode (view :visibility))) (get view :history-last (view :last)) (view :run)])))
+      LEFT JOIN branches b ON b.id=e.branch
+      WHERE e.source!=? OR e.id NOT BETWEEN ? AND ? OR b.retired=1 OR (b.temporary=1 AND b.id NOT IN (SELECT id FROM ancestry))
+        OR (coalesce(b.world,json_extract(e.data,'$.world'))!=? AND coalesce(b.world,json_extract(e.data,'$.world')) NOT IN (SELECT value FROM json_each(?))) OR (e.id>? AND NOT (e.run=? AND EXISTS(SELECT 1 FROM ancestry a WHERE a.id=e.branch AND e.id<=a.through))) LIMIT 1`
+                                       [(view :branch) (ref :node) (s :source) (view :first) (view :last) (view :world) (string (json/encode (view :visibility))) (get view :history-last (view :last)) (view :run)])))
       (assert (not invalid) "summary includes unavailable sources") row)))
 
 (defn summary [s view children text task]
@@ -84,7 +84,7 @@
       (last previous))))
 
 (defn render [row]
-  (string "[#" (row "id") " actor=" (row "actor") " world=" (row "world") " branch=" (row "branch")
+  (string "[#" (row "id") " source=" (row "source") " world=" (row "world") " branch=" (row "branch")
           " parent=" (row "parent") " task=" (row "task") " at=" (row "created") " " (row "kind")
           (when (= "task-admission" (row "kind")) " admission, not proof of execution")
           (when (row "first") (string " sources=[" (row "first") "," (row "last") "]")) "]\n" (row "text") "\n"))
@@ -147,7 +147,7 @@
           (if (= "" expression) []
             (store/visible s
                            (merge view {:match expression
-                                        :columns "e.id,e.actor,e.branch,e.parent,e.task,e.created,e.kind,e.estimate,length(CAST(e.text AS BLOB)) bytes,substr(CAST(snippet(event_fts,0,'','', ' … ',64) AS BLOB),1,3072) text"})
+                                        :columns "e.id,e.source,e.branch,e.parent,e.task,e.created,e.kind,e.estimate,length(CAST(e.text AS BLOB)) bytes,substr(CAST(snippet(event_fts,0,'','', ' … ',64) AS BLOB),1,3072) text"})
                            :oldest (config :candidates))))
         (def selected (map (fn [row]
                              (var excerpt (string/slice (row "text") 0 (min (length (row "text")) (* 4 (min limit 768)))))
@@ -171,22 +171,22 @@
   (while (< (length projection) (config :history-records))
     (def node (first (store/query s `WITH RECURSIVE ancestry(id,through) AS (SELECT ?,9007199254740991 UNION ALL SELECT b.parent,min(a.through,b.last) FROM branches b JOIN ancestry a ON b.id=a.id WHERE b.parent IS NOT NULL)
       SELECT n.*, 'summary' kind FROM summaries n JOIN branches b ON b.id=n.branch
-      WHERE n.actor=? AND n.world=? AND n.first>=? AND n.last<=? AND n.first>? AND b.retired=0 AND (b.temporary=0 OR b.id IN (SELECT id FROM ancestry))
+      WHERE n.source=? AND n.world=? AND n.first>=? AND n.last<=? AND n.first>? AND b.retired=0 AND (b.temporary=0 OR b.id IN (SELECT id FROM ancestry))
       AND n.id NOT IN (SELECT value FROM json_each(?)) ORDER BY n.first,n.height DESC,n.id DESC LIMIT 1`
-                                  [(view :branch) (s :actor) (view :world) (view :first) (view :last) through (string (json/encode rejected))])))
+                                  [(view :branch) (s :source) (view :world) (view :first) (view :last) through (string (json/encode rejected))])))
     (unless node (break))
     (if (try (describe s view {:node (node "id")}) ([err] nil))
       (do (array/push projection {:node (node "id") :first (node "first") :last (node "last") :text (render node) :estimate (max (node "estimate") (store/estimate (render node)))})
         (set through (node "last")))
       (do (array/push rejected (node "id")) (assert (< (length rejected) (config :history-records)) "summary eligibility work ceiling exceeded"))))
-  (def source `CASE WHEN e.kind IN ('tools','model-outcome','task-outcome','cancelled','interruption')
+  (def source `CASE WHEN e.kind IN ('tools','model-outcome','task-outcome','cancelled','interruption','context')
                     THEN e.text || char(10) || e.data ELSE e.text END`)
   (def records (store/visible s
                               (merge view
                                      {:covered (map |{:first ($ :first) :last ($ :last)} projection)
                                       :kinds ["user" "response" "tools" "completed" "tool-result" "task-admission" "task-outcome"
-                                              "model-outcome" "artifact" "error" "cancelled" "interruption"]
-                                      :columns (string "e.id,e.actor,e.branch,e.parent,e.task,e.created,e.kind,e.estimate,length(CAST(" source
+                                              "model-outcome" "artifact" "context" "error" "cancelled" "interruption"]
+                                      :columns (string "e.id,e.source,e.branch,e.parent,e.task,e.created,e.kind,e.estimate,length(CAST(" source
                                                        " AS BLOB)) bytes,coalesce(CAST(substr(CAST(" source " AS BLOB),1,"
                                                        (* 4 (math/floor (/ (config :context-quota) 2))) ") AS TEXT),'') text")})
                               (if recent :recent :oldest) (config :history-records)))
@@ -216,8 +216,8 @@
   (def field (get handle :field "text"))
   (assert (index-of field ["text" "data"]) "invalid memory field")
   (def row (first (store/query s
-                               (string "SELECT coalesce(CAST(substr(CAST(" field " AS BLOB),?,?) AS TEXT),'') bytes,length(CAST(" field " AS BLOB)) total FROM events WHERE id=? AND actor=?")
-                               [(+ offset 1) (+ bytes 4) (or (handle :event) (handle :node)) (s :actor)])))
+                               (string "SELECT coalesce(CAST(substr(CAST(" field " AS BLOB),?,?) AS TEXT),'') bytes,length(CAST(" field " AS BLOB)) total FROM events WHERE id=? AND source=?")
+                               [(+ offset 1) (+ bytes 4) (or (handle :event) (handle :node)) (s :source)])))
   (assert (<= offset (row "total")) "memory offset exceeds the original")
   (def source (if (= offset (row "total")) "" (row "bytes")))
   (assert (or (= 0 (length source)) (not (<= 0x80 (source 0) 0xbf))) "memory offset splits a UTF-8 character")
@@ -238,7 +238,7 @@
 
 (defn expand [s view id]
   (assert (and (int? id) (> id 0)) "expand requires an event ID")
-  (def row (first (store/query s "SELECT kind FROM events WHERE id=? AND actor=?" [id (s :actor)])))
+  (def row (first (store/query s "SELECT kind FROM events WHERE id=? AND source=?" [id (s :source)])))
   (assert row "event unavailable")
   (map (fn [source]
          (def record (describe s view source))
@@ -247,7 +247,7 @@
 
 (defn summarize [s task input]
   (def view (input :view))
-  (def cached (first (store/query s "SELECT id,estimate FROM summaries WHERE task=? AND actor=?" [(task "id") (s :actor)])))
+  (def cached (first (store/query s "SELECT id,estimate FROM summaries WHERE task=? AND source=?" [(task "id") (s :source)])))
   (if cached
     (do (describe s view {:node (cached "id")}) {:node (cached "id") :estimate (cached "estimate")})
     (do
