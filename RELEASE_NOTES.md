@@ -1,3 +1,11 @@
+# Whole messages and interrupted history
+
+Model calls use bounded complete JSON responses, not SSE fragment persistence. Existing event IDs and histories are retained. Usage reports survive response-validation failures.
+
+Automatic history attachment includes the latest committed failed/interrupted work. Abort receipts belong to branch history; cancellation is cooperative, not rollback. Reattachment emits committed messages before returning saved outcomes.
+
+Redundant context caches, memory handle wrappers and fragment machinery are removed. Source formatting now distinguishes validation, admission, execution and outcome boundaries.
+
 # Development baseline
 
 Zinc owns self, independent task execution, source-based world branches, user/agent profiles and one optional commit capability.

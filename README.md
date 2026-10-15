@@ -112,13 +112,17 @@ SQLite format 1 stores admissions, immutable events/outcomes, attempts, leases, 
 
 `parallel` bounds running tasks; waits release and reacquire slots, including recursion at one slot. `task-depth`, `task-quota` and the admission-anchored `run-seconds` bound work. Reattachment never resets deadlines. Code and arbitrary capability effects are manual-recovery work, not automatic replay.
 
-Known failures are outcomes. Interrupted execution can be uncertain. Original-owner fencing allows late known completion while its generation remains valid. Abort is cooperative and does not undo effects; completed roots remain completed.
+Root inquiries attach to the latest committed event in their actor/world scope, including failed and interrupted work—not only successful answers. The history cutoff is frozen at admission. Explicit `parent` and `memory_range` still constrain it; a bounded prompt is not an unbounded transcript.
 
-`events` returns bounded committed pages. Observers own delivery receipts and cursors. Zinc has no Discord acknowledgment state or catch-up queue.
+Known failures are outcomes. Interrupted execution can be uncertain. Original-owner fencing allows late known completion while its generation remains valid. Abort fences scheduling and records the affected tasks in branch history. It is cooperative and does not undo effects; an external action already in flight may still finish. Completed roots remain completed.
+
+Model requests use complete JSON responses. Complete assistant messages, tool calls/results and execution receipts are persisted; transport fragments are not events. Event IDs count ledger records, not conversation messages. Existing records and IDs are retained.
+
+`events` returns bounded committed pages. Reattachment emits saved events before returning an outcome, without rerunning failed effects. Observers own delivery receipts and cursors. Zinc has no Discord acknowledgment state or catch-up queue.
 
 Token estimates use `ceil(bytes / 4)`; provider-reported usage remains separate. Tool quota accounts full stored code/outcomes. Context and summary quotas bound chronology, retrieval and compaction. History and retrieved text are data, not instructions.
 
-Provider URL/token configuration supports llama/OpenRouter. An optional generic `transport` library replaces HTTP transfer without exposing credentials to the world. Model selections are not additional grants. `thinking: default` leaves provider controls unspecified.
+Provider URL/token configuration supports llama/OpenRouter. An optional generic `transport` library replaces HTTP transfer without exposing credentials to the world. Its `request(url, method, body, headers, config)` function returns `{:status integer :body string :error :ok}` as one bounded response; there is no chunk callback. Model selections are not additional grants. `thinking: default` leaves provider controls unspecified. Reported usage is saved even when subsequent response validation fails; missing usage remains unknown.
 
 Semantic retrieval requires the pinned format-1 Cygnet index and stopwords. Set `search: false` without those assets. Preserve stale development databases and choose a fresh path; there is no compatibility migration.
 

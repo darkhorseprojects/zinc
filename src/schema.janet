@@ -78,10 +78,10 @@
     (def granted (get-in current [:providers name]))
     (assert (and granted (if (provider :identity) (= (provider :identity) (granted :identity)) (= (provider :url) (granted :url)))) "saved provider revoked"))
   (def config (merge @{} saved {:search (and (saved :search) (current :search))
-                               :agent (when (saved :agent) (authorize schema (current :agent) (saved :agent)))
-                               :capabilities (tabseq [name :in (keys (saved :capabilities))] name (get-in current [:capabilities name]))
-                               :providers (tabseq [name :in (keys (saved :providers))]
-                                                name (get-in current [:providers name]))}))
+                                :agent (when (saved :agent) (authorize schema (current :agent) (saved :agent)))
+                                :capabilities (tabseq [name :in (keys (saved :capabilities))] name (get-in current [:capabilities name]))
+                                :providers (tabseq [name :in (keys (saved :providers))]
+                                             name (get-in current [:providers name]))}))
   (each [key field] (pairs schema)
     (when (= :integer (field :type))
       (put config key
@@ -95,7 +95,7 @@
   (def value (json/decode bytes true true))
   (assert (dictionary? value) "request must be an object")
   (each key (keys value) (assert (index-of key fields) "unknown request field"))
-  (each key [:parent :after :run :task :generation]
+  (each key [:parent :after :run :task]
     (when (has-key? value key)
       (assert (and (int? (value key)) (<= 0 (value key) 9007199254740991)) "invalid coordinate")))
   (when (has-key? value :text)
@@ -106,7 +106,6 @@
     (when (has-key? value key)
       (assert (and (string? (value key)) (<= 1 (length (value key)) 256)) "invalid request name")))
   (when (has-key? value :persist) (assert (boolean? (value :persist)) "invalid persistence flag"))
-  (when (has-key? value :arguments) (assert (indexed? (value :arguments)) "arguments must be an array"))
   (when (has-key? value :memory_range)
     (def range (value :memory_range))
     (assert (dictionary? range) "invalid memory range")

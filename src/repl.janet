@@ -33,8 +33,8 @@
     (def output @"")
     (with-dyns [:zinc/requests requests
                 :out (fn [bytes]
-                  (assert (<= (+ (length output) (length bytes)) ceiling) "execution output byte ceiling")
-                  (buffer/push-string output bytes))]
+                       (assert (<= (+ (length output) (length bytes)) ceiling) "execution output byte ceiling")
+                       (buffer/push-string output bytes))]
       (eval-string source env)
       (let [result (eval-string code env)]
         (string output (if (string? result) result (string/format "%p" result)))))))

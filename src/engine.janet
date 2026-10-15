@@ -11,9 +11,9 @@
   (cond
     (string? node) node
     (dictionary? node) (if (has-key? node :content)
-      (string (when (node :name) (string "# " (node :name) "\n\n"))
-              (string/join (map document (node :content)) "\n\n"))
-      (or (node :text) (string (json/encode node))))
+                         (string (when (node :name) (string "# " (node :name) "\n\n"))
+                                 (string/join (map document (node :content)) "\n\n"))
+                         (or (node :text) (string (json/encode node))))
     (indexed? node) (string/join (map document node) "\n")
     ""))
 
@@ -26,7 +26,7 @@
   (defn inspect-job [s view id]
     (def row (store/task s id))
     (def owned (or (= id ((dyn :zinc/task) :id))
-      (first (store/query s `WITH RECURSIVE parents(id) AS (
+                   (first (store/query s `WITH RECURSIVE parents(id) AS (
         SELECT ? UNION ALL SELECT t.parent FROM tasks t JOIN parents p ON t.id=p.id WHERE t.parent IS NOT NULL)
         SELECT id FROM parents WHERE id=?` [id ((dyn :zinc/task) :id)]))))
     (unless owned (store/event s view (row "admission")))
@@ -43,8 +43,8 @@
       (each part (string/split "/" file)
         (assert (not (index-of part ["" "." ".." ".git"])) "invalid Git path component")))
     (def child (os/spawn ["git" "-C" (path/dirname (config :file)) "--literal-pathspecs"
-                         "commit" "--only" "--message" message "--" ;paths]
-                        :p {:in :pipe :out :pipe :err :out}))
+                          "commit" "--only" "--message" message "--" ;paths]
+                         :p {:in :pipe :out :pipe :err :out}))
     (ev/close (child :in))
     (var waited false)
     (ev/with-deadline (config :seconds)
@@ -61,11 +61,11 @@
 
   (defn definitions [config]
     (def builtins (merge memory/operations
-      {"work/inspect" {:retry-policy "retry" :description "(work/inspect job) — State, children and durable receipts." :function inspect-job}
-       "model/request" {:retry-policy "retry" :description "(model/request request) — Model response with recorded usage." :function model-request}}))
+                         {"work/inspect" {:retry-policy "retry" :description "(work/inspect job) — State, children and durable receipts." :function inspect-job}
+                          "model/request" {:retry-policy "retry" :description "(model/request request) — Model response with recorded usage." :function model-request}}))
     (def selected (tabseq [name :in (config :permissions)
-                          :when (or (config :inference) (not= name "model/request"))] name
-      (do (assert (builtins name) "unknown Zinc permission") (builtins name))))
+                           :when (or (config :inference) (not= name "model/request"))] name
+                    (do (assert (builtins name) "unknown Zinc permission") (builtins name))))
     (when (config :commit)
       (put selected "commit" {:retry-policy "manual" :description "(commit paths message) — Commit selected tracked world files." :function commit}))
     (each [namespace capability] (pairs (config :capabilities))
@@ -76,9 +76,9 @@
           (assert (string? (binding :doc)) "capability function requires documentation")
           (def target (binding :value))
           (put selected (string namespace "/" name)
-            {:retry-policy "manual" :description (binding :doc)
-             :module (capability :module)
-             :function (fn [s view & args] (apply target (array/concat @[] args [(get capability :config {})])))}))))
+               {:retry-policy "manual" :description (binding :doc)
+                :module (capability :module)
+                :function (fn [s view & args] (apply target (array/concat @[] args [(get capability :config {})])))}))))
     selected)
 
   (defn scope [s branch]
@@ -91,37 +91,37 @@
   (defn instructions [config view]
     (def available (definitions config))
     (string (document (spec :document)) "\n\n## World\n\n" (config :world)
-      (when (config :instructions) (string "\n\n" (slurp (config :instructions))))
-      (when (and (config :repl) (get view :tools true))
-        (string "\nSource: `" (config :file) "`\nExecution deadline: " (config :seconds) " seconds."
-          "\n\n## Janet\n\n`world` is this branch's environment. Files persist independently of definitions."
-          "\n`(input)` reads the inquiry. `(self/document)` reads these instructions."
-          "\n`(all-bindings world true)` lists local bindings."
-          "\n`(await (self {:text \"request\"}))` starts an independent agent branch under agent permissions."
-          "\nSearch by asking self a question; its semantic window retrieves within the allowed history."
-          "\n`(memory/expand id)` expands a known event ID into scoped original records or summary children."
-          "\n\n## Callable functions\n\n"
-          (string/join (seq [name :in (view :permissions) :when (available name)]
-            (string "- " ((available name) :description))) "\n")
-          "\n\nProvided library namespaces can also be imported with `(import @namespace)`."
-          "\nCheck receipts before repeating an operation with an uncertain outcome."))))
+            (when (config :instructions) (string "\n\n" (slurp (config :instructions))))
+            (when (and (config :repl) (get view :tools true))
+              (string "\nSource: `" (config :file) "`\nExecution deadline: " (config :seconds) " seconds."
+                      "\n\n## Janet\n\n`world` is this branch's environment. Files persist independently of definitions."
+                      "\n`(input)` reads the inquiry. `(self/document)` reads these instructions."
+                      "\n`(all-bindings world true)` lists local bindings."
+                      "\n`(await (self {:text \"request\"}))` starts an independent agent branch under agent permissions."
+                      "\nSearch by asking self a question; its semantic window retrieves within the allowed history."
+                      "\n`(memory/expand id)` expands a known event ID into scoped original records or summary children."
+                      "\n\n## Callable functions\n\n"
+                      (string/join (seq [name :in (view :permissions) :when (available name)]
+                                     (string "- " ((available name) :description))) "\n")
+                      "\n\nProvided library namespaces can also be imported with `(import @namespace)`."
+                      "\nCheck receipts before repeating an operation with an uncertain outcome."))))
 
   (defn spawn-job [s id]
     (def lease (store/transact s (first (store/query s
-      `INSERT INTO leases(task,owner,generation,expires)
+                                                     `INSERT INTO leases(task,owner,generation,expires)
        SELECT id,'launch',-1,? FROM tasks WHERE id=? AND actor=? AND state='queued'
          AND EXISTS(SELECT 1 FROM runs WHERE id=tasks.run AND expires>?)
          AND (SELECT count(*) FROM tasks WHERE actor=? AND state='running')<?
        ON CONFLICT(task) DO UPDATE SET expires=excluded.expires
        WHERE leases.owner='launch' AND leases.expires<=? RETURNING task`
-      [(+ (os/clock) ((s :config) :lease-seconds)) id (s :actor) (os/clock) (s :actor) ((s :config) :parallel) (os/clock)]))))
+                                                     [(+ (os/clock) ((s :config) :lease-seconds)) id (s :actor) (os/clock) (s :actor) ((s :config) :parallel) (os/clock)]))))
     (when lease
       (try
         (pa/spawn (merge (dyn :pa/program) {"entry" "task"}) (string (json/encode {:task id}))
                   (string (json/encode (dyn :zinc/config))) {:limits (dyn :pa/limits)})
         ([err] (store/transact s
-          (store/append s (json/decode ((store/task s id) "scope") true true)
-                        "launch-uncertain" "Task acceptance could not be confirmed." {} nil id)))))
+                 (store/append s (json/decode ((store/task s id) "scope") true true)
+                               "launch-uncertain" "Task acceptance could not be confirmed." {} nil id)))))
     id)
 
   (defn wait [s id]
@@ -130,8 +130,8 @@
     (var result nil)
     (when parked (store/park s true) (put current :waiting true))
     (defer (when parked
-      (when (= "waiting" ((store/task s (current :id)) "state")) (store/park s false))
-      (put current :waiting nil))
+             (when (= "waiting" ((store/task s (current :id)) "state")) (store/park s false))
+             (put current :waiting nil))
       (while true
         (store/recover s)
         (when current
@@ -148,17 +148,6 @@
         (ev/sleep 0.1))
       result))
 
-  (defn parallel [s ids &opt outcomes]
-    (def results @[])
-    (each id (take ((s :config) :parallel) ids) (spawn-job s id))
-    (eachp [position id] ids
-      (def outcome (with-dyns [:zinc/dependencies ids]
-        (try {:ok true :value (wait s id)} ([err] {:ok false :error (string err)}))))
-      (if outcomes (array/push results outcome)
-        (do (assert (outcome :ok) (outcome :error)) (array/push results (outcome :value))))
-      (when (< (+ position ((s :config) :parallel)) (length ids)) (spawn-job s (ids (+ position ((s :config) :parallel))))))
-    results)
-
   (defn start-child [s view value]
     (def config (or ((s :config) :agent) (s :config)))
     (assert (config :inference) "agent inference is not permitted")
@@ -167,10 +156,10 @@
     (assert (not= (nil? (value :text)) (nil? (value :code))) "self requires text or code")
     (def parent (store/branch s (view :branch)))
     (def branch (store/start child (merge value {:persist (get value :persist (= 0 (parent "temporary")))})
-                              config (merge view {:event (dyn :zinc/effect)})))
+                             config (merge view {:event (dyn :zinc/effect)})))
     (def id (store/submit child (scope child (branch "id")) (if (value :text) "agent" "code")
-      (if (value :text) {:branch (branch "id") :model (config :chat)} {:code (value :code)})
-      {:retry-policy (if (value :text) "retry" "manual") :key (string "child:" (branch "id"))}))
+                          (if (value :text) {:branch (branch "id") :model (config :chat)} {:code (value :code)})
+                          {:retry-policy (if (value :text) "retry" "manual") :key (string "child:" (branch "id"))}))
     {:job id :branch (branch "id")})
 
   (defn result [s id]
@@ -181,11 +170,13 @@
         (def final (first (store/query s "SELECT *,strftime('%Y-%m-%dT%H:%M:%fZ',created,'unixepoch') created_at FROM events WHERE branch=? AND kind='completed'" [id])))
         (assert final "branch has no completion")
         (def user (first (store/query s "SELECT id FROM events WHERE branch=? AND kind='user' ORDER BY id LIMIT 1" [id])))
+        (def usage (first (store/query s
+                                       "SELECT coalesce(sum(u.total),0) reported_total,count(*) FILTER(WHERE u.total IS NULL) unreported FROM events e LEFT JOIN usage u ON u.request=e.id WHERE e.actor=? AND e.run=? AND e.kind='model-admission'"
+                                       [(s :actor) (branch "run")])))
         {:text (final "text") :run (branch "run") :branch id :start (user "id") :event (final "id")
          :parent (or (branch "entry") 0) :memory_range {:start (branch "first") :end (branch "last")}
          :created_at (final "created_at") :tool_usage (store/tool-used s (branch "run"))
-         :usage {:reported_total (model/used s (branch "run"))
-                 :unreported (((store/query s "SELECT count(*) n FROM events e LEFT JOIN usage u ON u.request=e.id WHERE e.actor=? AND e.run=? AND e.kind='model-admission' AND u.total IS NULL" [(s :actor) (branch "run")]) 0) "n")}
+         :usage usage
          :context_unit "token-estimate"})))
 
   (defn infer [s task input]
@@ -202,17 +193,16 @@
     (assert (> space 256) "question and instructions exhaust context")
     (def semantic (if (config :search) (math/floor (/ space 2)) 0))
     (def archive (merge s {:config (merge config {:context-quota (- space semantic)})}))
-    (def cached (first (store/query s "SELECT projection FROM contexts WHERE branch=? ORDER BY through DESC LIMIT 1" [branch])))
-    (var context (when cached (json/decode (cached "projection") true true)))
-    (unless context
-      (memory/compact archive inherited)
-      (def chronological (memory/context archive inherited ""))
-      (def evidence (if (= 0 semantic) [] (memory/semantic-window s (merge inherited {:covered (chronological :covered)}) (user "text") semantic)))
-      (set context {:through (inherited :last) :chronological chronological :evidence (map memory/render evidence)})
-      (store/query s "INSERT INTO contexts(branch,through,projection) VALUES(?,?,?) ON CONFLICT DO NOTHING" [branch (context :through) (string (json/encode context))]))
+    (memory/compact archive inherited)
+    (def chronological (memory/context archive inherited))
+    (def evidence (if (= 0 semantic) [] (memory/semantic-window s (merge inherited {:covered (chronological :covered)}) (user "text") semantic)))
+    (var context {:through (inherited :last) :chronological chronological :evidence (map memory/render evidence)})
     (while (not (first (store/query s "SELECT id FROM events WHERE branch=? AND kind='completed'" [branch])))
       (def responses (store/query s "SELECT e.id,coalesce(t.data,e.data) data FROM events e LEFT JOIN events t ON t.parent=e.id AND t.kind='tools' WHERE e.branch=? AND e.kind='response' ORDER BY e.id" [branch]))
-      (when (last responses) (parallel s ((json/decode ((last responses) "data") true true) :tasks) true))
+      (when (last responses)
+        (def ids ((json/decode ((last responses) "data") true true) :tasks))
+        (with-dyns [:zinc/dependencies ids]
+          (each id ids (try (wait s id) ([err] nil)))))
       (assert (< (length responses) (config :rounds)) "model round limit exhausted")
       (def view (merge (scope s branch) {:permissions (granted :permissions)}))
       (set system (instructions config (merge view {:tools evaluate})))
@@ -224,31 +214,31 @@
         (def data (json/decode (record "data") true true))
         (def tools (json/decode (record "tools") true true))
         (array/push messages (if (= "response" (record "kind"))
-          {:role "assistant" :content (record "text")
-           :reasoning_content (when (= "llama" (selected :provider)) (data :reasoning))
-           :reasoning (when (and (= "openrouter" (selected :provider)) (= 0 (length (data :reasoning-details)))) (data :reasoning))
-           :reasoning_details (when (= "openrouter" (selected :provider)) (data :reasoning-details))
-           :tool_calls (map |{:id ($ :id) :type "function" :function {:name "run_janet" :arguments (string (json/encode {:code ($ :code)}))}} (tools :tools))}
-          {:role "tool" :tool_call_id (data :tool-id) :content (record "text")})))
+                               {:role "assistant" :content (record "text")
+                                :reasoning_content (when (= "llama" (selected :provider)) (data :reasoning))
+                                :reasoning (when (and (= "openrouter" (selected :provider)) (= 0 (length (data :reasoning-details)))) (data :reasoning))
+                                :reasoning_details (when (= "openrouter" (selected :provider)) (data :reasoning-details))
+                                :tool_calls (map |{:id ($ :id) :type "function" :function {:name "run_janet" :arguments (string (json/encode {:code ($ :code)}))}} (tools :tools))}
+                               {:role "tool" :tool_call_id (data :tool-id) :content (record "text")})))
       (when (> (+ (model/estimate messages) (if evaluate (store/estimate (json/encode [model/tool])) 0)) (min (config :context-quota) (- (selected :context) 256)))
         (memory/compact archive view true)
-        (set context {:through (view :last) :chronological (memory/context archive view "") :evidence []})
-        (store/query s "INSERT INTO contexts(branch,through,projection) VALUES(?,?,?) ON CONFLICT DO NOTHING" [branch (context :through) (string (json/encode context))])
+        (set context {:through (view :last) :chronological (memory/context archive view) :evidence []})
         (array/clear messages)
         (array/concat messages [{:role "system" :content system}
-          {:role "user" :content (string "## History\n\n" (string/join (map |($ :text) (get-in context [:chronological :nodes]))))}
-          {:role "user" :content (model/images s (user "id") (user "text"))}]))
+                                {:role "user" :content (string "## History\n\n" (string/join (map |($ :text) (get-in context [:chronological :nodes]))))}
+                                {:role "user" :content (model/images s (user "id") (user "text"))}]))
       (def final-round (= (+ 1 (length responses)) (config :rounds)))
       (when final-round (array/push messages {:role "system" :content "Tool calls are unavailable in this inference round."}))
       (def boundary ((dyn :zinc/task) :checkpoint))
       (store/checkpoint s {:phase "model" :round (length responses)})
       (def response (model/call s {:model (input :model) :messages messages :tools (when (and evaluate (not final-round)) [model/tool])}
-        (when (and (= "model" (boundary :phase)) (= (length responses) (boundary :round))) (boundary :request)) selected))
+                                (when (and (= "model" (boundary :phase)) (= (length responses) (boundary :round))) (boundary :request)) selected))
       (store/transact s
         (store/checkpoint s {:phase "commit"})
         (def event (store/append s view (if (= 0 (length (response :tools))) "completed" "response") (response :text)
-          {:model (response :model) :reasoning (response :reasoning) :reasoning-visible (response :reasoning-visible)
-           :reasoning-details (response :reasoning-details) :tools (response :tools)}))
+                                 {:model (response :model) :reasoning (response :reasoning) :reasoning-visible (response :reasoning-visible)
+                                  :reasoning-details (response :reasoning-details) :tools (response :tools)}
+                                 (response :request) ((dyn :zinc/task) :id)))
         (when (> (length (response :tools)) 0)
           (def ids (map (fn [tool] (store/submit s view "code" {:code (tool :code) :user (user "id") :response (event "id") :tool-id (tool :id)} {:retry-policy "manual"})) (response :tools)))
           (store/append s view "tools" "Janet admissions, not proof of execution." {:tools (response :tools) :tasks ids} (event "id"))
@@ -276,54 +266,50 @@
               (def available (definitions config))
               (each name (view :permissions) (assert (available name) "saved function revoked"))
               (set value (case (row "kind")
-                "agent" (infer s row input)
-                "summarize" (memory/summarize s row input)
-                "operation" (do
-                  (assert (index-of (input :function) (view :permissions)) "function is not permitted")
-                  (def entry (available (input :function)))
-                  (if (entry :transactional)
-                    (store/transact s
-                      (def result (apply (entry :function) s view (input :arguments)))
-                      (store/finish s row result nil) result)
-                    (apply (entry :function) s view (input :arguments))))
-                "code" (do
-                  (assert (config :repl) "Janet execution is not permitted")
-                  (def branch (store/branch s (view :branch)))
-                  (os/cd (path/dirname (config :file)))
-                  (var position 0)
-                  (repl/execute (config :file) (branch "source")
-                    ((first (store/query s "SELECT text FROM events WHERE id=?" [(row "admission")])) "text")
-                    (get-in (json/decode ((first (store/query s "SELECT data FROM events WHERE branch=? AND kind='user'" [(view :branch)])) "data") true true) [:input])
-                    (instructions config view)
-                    (seq [name :in (view :permissions)] {:name name :doc ((available name) :description) :module ((available name) :module)})
-                    (fn [name args]
-                      (store/checkpoint s ((dyn :zinc/task) :checkpoint))
-                      (if (= name "await")
-                        (do
-                          (def handle (first args))
-                          (assert (and (dictionary? handle) (int? (handle :job)) (not= id (handle :job))
-                                       ((inspect-job s view (handle :job)) :owned)) "await requires descendant work")
-                          (wait s (handle :job)))
-                        (do
-                          (def key (string "call:" id ":" (++ position)))
-                          (if (= name "self")
-                            (store/transact s
-                              (def event (store/append s view "call-admission" "self" {:position position :arguments args} nil id))
-                              (def handle (with-dyns [:zinc/effect (event "id")] (start-child s view (first args))))
-                              (spawn-job s (handle :job)) handle)
-                            (do
-                              (assert (index-of name (view :permissions)) "function is not permitted")
-                              (def job (store/submit s view "operation" {:function name :arguments args}
-                                {:retry-policy ((available name) :retry-policy) :key key}))
-                              (spawn-job s job)
-                              (wait s job))))))
-                    (min (config :seconds) (max 0.001 (- (((store/query s "SELECT expires FROM runs WHERE id=?" [(view :run)]) 0) "expires") (os/clock))))
-                    (config :forbid) (config :response-bytes)))
-                (error "unknown task kind"))))
+                           "agent" (infer s row input)
+                           "summarize" (memory/summarize s row input)
+                           "operation" (do
+                                         (assert (index-of (input :function) (view :permissions)) "function is not permitted")
+                                         (def entry (available (input :function)))
+                                         (apply (entry :function) s view (input :arguments)))
+                           "code" (do
+                                    (assert (config :repl) "Janet execution is not permitted")
+                                    (def branch (store/branch s (view :branch)))
+                                    (os/cd (path/dirname (config :file)))
+                                    (var position 0)
+                                    (repl/execute (config :file) (branch "source")
+                                                  ((first (store/query s "SELECT text FROM events WHERE id=?" [(row "admission")])) "text")
+                                                  (get-in (json/decode ((first (store/query s "SELECT data FROM events WHERE branch=? AND kind='user'" [(view :branch)])) "data") true true) [:input])
+                                                  (instructions config view)
+                                                  (seq [name :in (view :permissions)] {:name name :doc ((available name) :description) :module ((available name) :module)})
+                                                  (fn [name args]
+                                                    (store/checkpoint s ((dyn :zinc/task) :checkpoint))
+                                                    (if (= name "await")
+                                                      (do
+                                                        (def handle (first args))
+                                                        (assert (and (dictionary? handle) (int? (handle :job)) (not= id (handle :job))
+                                                                     ((inspect-job s view (handle :job)) :owned)) "await requires descendant work")
+                                                        (wait s (handle :job)))
+                                                      (do
+                                                        (def key (string "call:" id ":" (++ position)))
+                                                        (if (= name "self")
+                                                          (store/transact s
+                                                            (def event (store/append s view "call-admission" "self" {:position position :arguments args} nil id))
+                                                            (def handle (with-dyns [:zinc/effect (event "id")] (start-child s view (first args))))
+                                                            (spawn-job s (handle :job)) handle)
+                                                          (do
+                                                            (assert (index-of name (view :permissions)) "function is not permitted")
+                                                            (def job (store/submit s view "operation" {:function name :arguments args}
+                                                                                   {:retry-policy ((available name) :retry-policy) :key key}))
+                                                            (spawn-job s job)
+                                                            (wait s job))))))
+                                                  (min (config :seconds) (max 0.001 (- (((store/query s "SELECT expires FROM runs WHERE id=?" [(view :run)]) 0) "expires") (os/clock))))
+                                                  (config :forbid) (config :response-bytes)))
+                           (error "unknown task kind"))))
             ([err fiber]
               (def trace @"")
               (with-dyns [:err (fn [bytes]
-                (buffer/push-string trace (string/slice bytes 0 (min (length bytes) (- (config :response-bytes) (length trace))))))]
+                                 (buffer/push-string trace (string/slice bytes 0 (min (length bytes) (- (config :response-bytes) (length trace))))))]
                 (debug/stacktrace fiber))
               (store/append s view "traceback" (string trace) {} nil id)
               (set value nil)
@@ -344,17 +330,19 @@
       "response" (merge base {:type "turn" :text (event "text") :reasoning (when (data :reasoning-visible) (data :reasoning)) :final false})
       "completed" (merge base {:type "turn" :text (event "text") :reasoning (when (data :reasoning-visible) (data :reasoning)) :final true})
       "task-admission" (when (= "code" (data :kind)) (merge base {:type "tool" :call (event "task") :code (event "text")}))
-      "tool-result" (merge base {:type "tool_result" :call (event "task") :ok (data :ok) :text (event "text")} )
+      "tool-result" (merge base {:type "tool_result" :call (event "task") :ok (data :ok) :text (event "text")})
       "interruption" (when (= "uncertain" (data :state)) (merge base {:type "ambiguity" :call (event "task") :text (event "text")}))
-      "delta" (when (data :visible) (merge base {:type "delta" :channel (data :channel) :text (event "text")}))
       "error" (merge base {:type "error" :text (event "text")}) nil))
 
   (defn drain [s run after]
     (var sequence after)
-    (each event (memory/events s run after)
-      (def frame (message s event))
-      (when frame (pa/emit (string (json/encode frame))))
-      (set sequence (event "id")))
+    (while true
+      (def records (memory/events s run sequence))
+      (each event records
+        (def frame (message s event))
+        (when frame (pa/emit (string (json/encode frame))))
+        (set sequence (event "id")))
+      (when (< (length records) 256) (break)))
     sequence)
 
   (defn dispatch [bytes opaque &opt resume task]
@@ -366,8 +354,8 @@
     (def s (store/open config))
     (defer (store/close s)
       (def existing (cond task (first (store/query s "SELECT r.* FROM runs r JOIN tasks t ON t.run=r.id WHERE t.id=? AND t.actor=?" [(value :task) (s :actor)]))
-        (value :run) (first (store/query s "SELECT * FROM runs WHERE id=? AND actor=?" [(value :run) (s :actor)]))
-        (value :request) (first (store/query s "SELECT * FROM runs WHERE request=? AND actor=?" [(value :request) (s :actor)]))))
+                      (value :run) (first (store/query s "SELECT * FROM runs WHERE id=? AND actor=?" [(value :run) (s :actor)]))
+                      (value :request) (first (store/query s "SELECT * FROM runs WHERE request=? AND actor=?" [(value :request) (s :actor)]))))
       (when (or task resume) (assert existing "task/run unavailable"))
       (when existing
         (assert (= (existing "world") (config :world)) "saved world differs")
@@ -382,25 +370,25 @@
             (when resume (assert (= 0 (branch "temporary")) "temporary conversation cannot be resumed"))
             (def id (branch "id"))
             (def view (scope s id))
+            (var sequence (drain s (view :run) (get value :after 0)))
             (if (first (store/query s "SELECT id FROM events WHERE branch=? AND kind='completed'" [id]))
               (string (json/encode (result s id)))
               (do
                 (def driver (store/transact s
-                  (def prior (first (store/query s "SELECT * FROM tasks WHERE branch=? AND parent IS NULL ORDER BY id DESC LIMIT 1" [id])))
-                  (if (and prior (or (index-of (prior "state") ["queued" "running" "waiting" "done"]) (not resume))) (prior "id")
-                    (do
-                      (when prior (assert (= "retry" (prior "retry_policy")) "effectful root requires reconciliation, not replay"))
-                      (def input (get-in (json/decode ((first (store/query s "SELECT data FROM events WHERE branch=? AND kind='user'" [id])) "data") true true) [:input]))
-                      (store/submit s view (if (input :text) "agent" "code")
-                        (if prior (json/decode (prior "input") true true)
-                          (if (input :text) {:branch id :model ((s :config) :chat)} {:code (input :code)}))
-                        {:retry-policy (if (input :text) "retry" "manual") :key (string "root:" id ":" (if prior (prior "id") 0))
-                         :checkpoint (if prior (json/decode (prior "checkpoint") true true) {})})))))
-                (var sequence (get value :after 0))
+                              (def prior (first (store/query s "SELECT * FROM tasks WHERE branch=? AND parent IS NULL ORDER BY id DESC LIMIT 1" [id])))
+                              (if (and prior (or (index-of (prior "state") ["queued" "running" "waiting" "done"]) (not resume))) (prior "id")
+                                (do
+                                  (when prior (assert (= "retry" (prior "retry_policy")) "effectful root requires reconciliation, not replay"))
+                                  (def input (get-in (json/decode ((first (store/query s "SELECT data FROM events WHERE branch=? AND kind='user'" [id])) "data") true true) [:input]))
+                                  (store/submit s view (if (input :text) "agent" "code")
+                                                (if prior (json/decode (prior "input") true true)
+                                                  (if (input :text) {:branch id :model ((s :config) :chat)} {:code (input :code)}))
+                                                {:retry-policy (if (input :text) "retry" "manual") :key (string "root:" id ":" (if prior (prior "id") 0))
+                                                 :checkpoint (if prior (json/decode (prior "checkpoint") true true) {})})))))
                 (def emitter (ev/go (fn [] (try (while true (set sequence (drain s (view :run) sequence)) (ev/sleep 0.1)) ([err] nil)))))
                 (defer (ev/cancel emitter "observer detached")
                   (wait s driver)
-                  (while true (def next (drain s (view :run) sequence)) (when (= next sequence) (break)) (set sequence next))
+                  (drain s (view :run) sequence)
                   (string (json/encode (result s id)))))))))))
 
   (defn describe [bytes opaque]
@@ -423,7 +411,7 @@
     (defer (store/close s)
       (def records (memory/events s (value :run) (get value :after 0)))
       (string (json/encode {:events (filter identity (map |(message s $) records))
-        :after (if (last records) ((last records) "id") (get value :after 0)) :more (= 256 (length records))}))))
+                            :after (if (last records) ((last records) "id") (get value :after 0)) :more (= 256 (length records))}))))
 
   (defn pending [bytes opaque]
     (assert (= "" bytes) "pending takes empty input")
@@ -444,26 +432,33 @@
     (def s (store/open config))
     (defer (store/close s)
       (string (json/encode (store/transact s
-        (when (value :request) (store/query s "INSERT INTO runs(actor,request,input,world,config,expires) VALUES(?,?,'{}',?,?,?) ON CONFLICT(actor,request) DO NOTHING"
-          [(s :actor) (value :request) (config :world) (string (json/encode (merge config {:providers {}}))) (os/clock)]))
-        (def run (first (store/query s "SELECT id,world FROM runs WHERE actor=? AND (id=? OR request=?)" [(s :actor) (value :run) (value :request)])))
-        (assert (and run (= (run "world") (config :world))) "run unavailable")
-        (def completed (first (store/query s "SELECT e.id FROM events e JOIN branches b ON b.id=e.branch WHERE e.run=? AND e.kind='completed' AND b.parent IS NULL" [(run "id")])))
-        (unless completed
-          (store/query s "UPDATE tasks SET state='cancelled' WHERE actor=? AND run=? AND state IN ('queued','running','waiting','uncertain')" [(s :actor) (run "id")])
-          (unless (first (store/query s "SELECT id FROM events WHERE run=? AND kind='cancelled'" [(run "id")]))
-            (store/append s {:run (run "id")} "cancelled" "Cancellation requested; effects are not rolled back." {:reason (value :reason)})))
-        {:run (run "id") :state (if completed "completed" "cancelled")})))))
+                             (when (value :request) (store/query s "INSERT INTO runs(actor,request,input,world,config,expires) VALUES(?,?,'{}',?,?,?) ON CONFLICT(actor,request) DO NOTHING"
+                                                                 [(s :actor) (value :request) (config :world) (string (json/encode (merge config {:providers {}}))) (os/clock)]))
+                             (def run (first (store/query s "SELECT id,world FROM runs WHERE actor=? AND (id=? OR request=?)" [(s :actor) (value :run) (value :request)])))
+                             (assert (and run (= (run "world") (config :world))) "run unavailable")
+                             (def completed (first (store/query s "SELECT e.id FROM events e JOIN branches b ON b.id=e.branch WHERE e.run=? AND e.kind='completed' AND b.parent IS NULL" [(run "id")])))
+                             (unless completed
+                               (def root (first (store/query s "SELECT id FROM branches WHERE run=? AND parent IS NULL" [(run "id")])))
+                               (def tasks (store/query s
+                                                       "SELECT id,kind,state,attempt,admission,outcome FROM tasks WHERE actor=? AND run=? AND state IN ('queued','running','waiting','uncertain') ORDER BY id"
+                                                       [(s :actor) (run "id")]))
+                               # Fence scheduling; an external effect already in flight may still finish.
+                               (store/query s "UPDATE tasks SET state='cancelled' WHERE actor=? AND run=? AND state IN ('queued','running','waiting','uncertain')" [(s :actor) (run "id")])
+                               (unless (first (store/query s "SELECT id FROM events WHERE run=? AND kind='cancelled'" [(run "id")]))
+                                 (store/append s {:run (run "id") :branch (when root (root "id"))}
+                                               "cancelled" "Interrupted. Performed effects are not rolled back; running effects may still finish."
+                                               {:reason (value :reason) :tasks-at-request tasks})))
+                             {:run (run "id") :state (if completed "completed" "cancelled")})))))
 
   {"self" (fn [bytes opaque] (dispatch bytes opaque))
    "task" (fn [bytes opaque] (dispatch bytes opaque false true))
    "resume" (fn [bytes opaque] (dispatch bytes opaque true))
    "describe" describe "events" events "pending" pending "abort" abort
    "models" (fn [bytes opaque]
-     (def config (schema/configuration (spec :schema) opaque))
-     (def value (schema/request bytes [:role]))
-     (string (json/encode (model/catalogue config (get value :role "chat")))))
+              (def config (schema/configuration (spec :schema) opaque))
+              (def value (schema/request bytes [:role]))
+              (string (json/encode (model/catalogue config (get value :role "chat")))))
    "document" (fn [bytes opaque]
-     (assert (= "" bytes) "document takes empty input")
-     (def config (schema/configuration (spec :schema) opaque))
-     (instructions config {:permissions (sorted (keys (definitions config)))}))})
+                (assert (= "" bytes) "document takes empty input")
+                (def config (schema/configuration (spec :schema) opaque))
+                (instructions config {:permissions (sorted (keys (definitions config)))}))})
