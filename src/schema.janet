@@ -3,8 +3,7 @@
 (import spork/base64 :as base64)
 (import spork/utf8 :as utf8)
 
-(defn validate [schema bytes &opt discovery]
-  (def supplied (json/decode bytes true true))
+(defn validate [schema supplied &opt discovery]
   (assert (dictionary? supplied) "configuration must be an object")
   (def config @{})
   (each key (keys supplied) (assert (has-key? schema key) (string "unknown configuration field " key)))
@@ -27,10 +26,10 @@
       (when (field :maximum) (assert (<= value (field :maximum)) "setting above maximum"))
       (when (and (field :absolute) (not discovery)) (assert (path/abspath? value) "absolute path required"))
       (when (field :fields)
-        (put config key (validate (field :fields) (json/encode value) discovery)))
+        (put config key (validate (field :fields) value discovery)))
       (when (field :values)
         (each [name item] (pairs value)
-          (validate {name (field :values)} (json/encode {name item}) discovery)))
+          (validate {name (field :values)} {name item} discovery)))
       (if (= :array (field :type))
         (each item value
           (when (= :string (field :items))
@@ -39,12 +38,12 @@
         (when (field :choices) (assert (index-of value (field :choices)) "invalid setting choice")))))
   config)
 
-(defn configuration [schema bytes &opt discovery]
-  (def config (validate schema bytes discovery))
+(defn configuration [schema supplied &opt discovery]
+  (def config (validate schema supplied discovery))
   (assert (<= (config :summary-quota) (config :context-quota)) "summary quota exceeds context quota")
   (when (config :agent)
     (assert (not (get-in config [:agent :agent])) "nested execution profiles are not supported")
-    (put config :agent (configuration schema (json/encode (config :agent)) discovery))
+    (put config :agent (configuration schema (config :agent) discovery))
     (each key [:source :store :world :file]
       (assert (= (config key) (get-in config [:agent key])) "agent view changes world identity/location")))
   (unless discovery
@@ -66,8 +65,9 @@
   (each key (keys saved) (assert (has-key? schema key) "unsupported saved configuration"))
   (each key [:source :store :world :file :instructions]
     (assert (= (current key) (saved key)) "saved identity/location differs"))
-  (each key [:repl :inference :commit]
+  (each key [:repl :inference :save]
     (assert (or (not (saved key)) (current key)) (string "saved permission revoked: " key)))
+  (assert (or (nil? (saved :remote)) (= (saved :remote) (current :remote))) "saved remote changed")
   (each key [:visibility :permissions]
     (each value (saved key) (assert (index-of value (current key)) "saved grant revoked")))
   (each [name capability] (pairs (saved :capabilities))
@@ -105,6 +105,8 @@
   (each key [:request]
     (when (has-key? value key)
       (assert (and (string? (value key)) (<= 1 (length (value key)) 256)) "invalid request name")))
+  (when (has-key? value :revision)
+    (assert (and (string? (value :revision)) (<= 1 (length (value :revision)) 256) (not (string/find "\0" (value :revision)))) "invalid source revision"))
   (when (has-key? value :persist) (assert (boolean? (value :persist)) "invalid persistence flag"))
   (when (has-key? value :memory_range)
     (def range (value :memory_range))
@@ -124,14 +126,15 @@
 CREATE TABLE runs(
  id INTEGER PRIMARY KEY AUTOINCREMENT CHECK(id<=9007199254740991),source TEXT NOT NULL,
  request TEXT,input TEXT NOT NULL CHECK(json_valid(input)),world TEXT NOT NULL,
- config TEXT NOT NULL CHECK(json_valid(config)),expires REAL NOT NULL,UNIQUE(source,request)
+ config TEXT NOT NULL CHECK(json_valid(config)),expires REAL NOT NULL,
+ work_used INTEGER NOT NULL DEFAULT 0,tool_used INTEGER NOT NULL DEFAULT 0,UNIQUE(source,request)
 ) STRICT;
 CREATE INDEX runs_source ON runs(source,id);
 CREATE TABLE branches(
  id INTEGER PRIMARY KEY AUTOINCREMENT,run INTEGER NOT NULL REFERENCES runs(id),parent INTEGER REFERENCES branches(id),
  caller INTEGER REFERENCES events(id),entry INTEGER REFERENCES events(id),
  first INTEGER NOT NULL,last INTEGER NOT NULL,history_last INTEGER NOT NULL,
- world TEXT NOT NULL,code TEXT NOT NULL,temporary INTEGER NOT NULL CHECK(temporary IN (0,1)),retired INTEGER NOT NULL DEFAULT 0,
+ world TEXT NOT NULL,code TEXT NOT NULL,file TEXT,origin TEXT NOT NULL CHECK(json_valid(origin)),temporary INTEGER NOT NULL CHECK(temporary IN (0,1)),
  CHECK(first>=0 AND last>=first AND ((first=0 AND last=0) OR first>0))
 ) STRICT;
 CREATE UNIQUE INDEX root_run ON branches(run) WHERE parent IS NULL;
@@ -143,14 +146,20 @@ CREATE TABLE tasks(
  kind TEXT NOT NULL,input TEXT NOT NULL CHECK(json_valid(input)),scope TEXT NOT NULL CHECK(json_valid(scope)),
  retry_policy TEXT NOT NULL CHECK(retry_policy IN ('retry','manual')),retries INTEGER NOT NULL,
  state TEXT NOT NULL DEFAULT 'queued' CHECK(state IN ('queued','running','waiting','done','failed','cancelled','uncertain')),
- checkpoint TEXT NOT NULL DEFAULT '{}' CHECK(json_valid(checkpoint)),result TEXT CHECK(json_valid(result)),
- attempt INTEGER NOT NULL DEFAULT 0,admission INTEGER REFERENCES events(id),outcome INTEGER REFERENCES events(id),
+ checkpoint TEXT NOT NULL DEFAULT '{}' CHECK(json_valid(checkpoint)),
+ attempt INTEGER NOT NULL DEFAULT 0,owner TEXT,lease_expires REAL,admission INTEGER REFERENCES events(id),outcome INTEGER REFERENCES events(id),
  key TEXT,UNIQUE(source,key)
 ) STRICT;
 CREATE INDEX task_pending ON tasks(state,source,id);
 CREATE UNIQUE INDEX active_driver ON tasks(branch) WHERE parent IS NULL AND state IN ('queued','running','waiting');
 CREATE INDEX task_parent ON tasks(parent,id);
-CREATE TABLE leases(task INTEGER PRIMARY KEY REFERENCES tasks(id),owner TEXT NOT NULL,generation INTEGER NOT NULL,expires REAL NOT NULL) STRICT;
+CREATE TABLE volatile(
+ request TEXT NOT NULL,run INTEGER NOT NULL UNIQUE REFERENCES runs(id),root INTEGER NOT NULL REFERENCES runs(id),source TEXT NOT NULL,world TEXT NOT NULL,expires REAL NOT NULL,
+ owner TEXT,lease_expires REAL,state TEXT NOT NULL CHECK(state IN ('waiting','running','cancelled','done','failed')),
+ PRIMARY KEY(source,request)
+) STRICT;
+CREATE VIEW running AS SELECT source FROM tasks WHERE state='running' AND lease_expires>unixepoch('subsec')
+ UNION ALL SELECT source FROM volatile WHERE state='running' AND lease_expires>unixepoch('subsec') AND expires>unixepoch('subsec');
 CREATE TABLE events(
  id INTEGER PRIMARY KEY AUTOINCREMENT CHECK(id<=9007199254740991),source TEXT NOT NULL,
  run INTEGER REFERENCES runs(id),branch INTEGER REFERENCES branches(id),parent INTEGER REFERENCES events(id),
@@ -162,7 +171,7 @@ CREATE INDEX event_branch ON events(branch,id);
 CREATE INDEX event_task ON events(task,id);
 CREATE UNIQUE INDEX task_terminal ON events(task) WHERE kind='task-outcome';
 CREATE UNIQUE INDEX branch_terminal ON events(branch) WHERE kind='completed';
-CREATE UNIQUE INDEX tool_result ON events(task) WHERE kind='tool-result';
+CREATE UNIQUE INDEX tool_result ON events(parent) WHERE kind='tool-result';
 CREATE TRIGGER immutable_events_update BEFORE UPDATE ON events BEGIN SELECT raise(ABORT,'immutable events'); END;
 CREATE TRIGGER immutable_events_delete BEFORE DELETE ON events BEGIN SELECT raise(ABORT,'immutable events'); END;
 CREATE TABLE images(event INTEGER NOT NULL REFERENCES events(id),position INTEGER NOT NULL,mime TEXT NOT NULL,bytes BLOB NOT NULL,PRIMARY KEY(event,position)) WITHOUT ROWID;
@@ -173,6 +182,11 @@ CREATE TABLE usage(
  input INTEGER,output INTEGER,total INTEGER,reasoning INTEGER,cached INTEGER,raw TEXT NOT NULL CHECK(json_valid(raw))
 ) STRICT;
 CREATE UNIQUE INDEX model_terminal ON events(parent) WHERE kind='model-outcome';
+CREATE TRIGGER event_kind BEFORE INSERT ON events
+ WHEN new.kind NOT IN ('user','response','completed','tool-result','tool-ambiguity',
+ 'task-admission','task-attempt','task-outcome','model-admission','model-outcome','call-admission',
+ 'launch-uncertain','traceback','summary','interruption','cancelled','artifact','context','error','save-intent','saved','operation-outcome')
+ BEGIN SELECT raise(ABORT,'unsupported event kind'); END;
 CREATE VIEW summaries AS
  SELECT id,source,json_extract(data,'$.world') world,branch,
         json_extract(data,'$.first') first,json_extract(data,'$.last') last,
@@ -193,7 +207,7 @@ CREATE UNIQUE INDEX call_position ON events(task,json_extract(data,'$.position')
 CREATE TRIGGER summary_edge_immutable_update BEFORE UPDATE ON summary_children BEGIN SELECT raise(ABORT,'immutable summary edge'); END;
 CREATE TRIGGER summary_edge_immutable_delete BEFORE DELETE ON summary_children BEGIN SELECT raise(ABORT,'immutable summary edge'); END;
 CREATE VIRTUAL TABLE event_fts USING fts5(text,content='events',content_rowid='id',tokenize='unicode61 remove_diacritics 0');
-CREATE TRIGGER event_index AFTER INSERT ON events WHEN new.kind IN ('user','response','tools','completed','tool-result','artifact','context') BEGIN
+CREATE TRIGGER event_index AFTER INSERT ON events WHEN new.kind IN ('user','response','completed','tool-result','artifact','context','saved') OR (new.kind='task-admission' AND json_extract(new.data,'$.kind')='code') BEGIN
  INSERT INTO event_fts(rowid,text) VALUES(new.id,new.text);
 END;
 CREATE VIRTUAL TABLE event_words USING fts5vocab(event_fts,'instance');

@@ -7,35 +7,46 @@ concurrency:
 jobs:
   verify:
     runs-on: ubuntu-24.04
-    container: archlinux:base-devel
-    timeout-minutes: 15
+    timeout-minutes: 20
     steps:
-      - name: Install native tools
-        run: pacman -Syu --noconfirm janet jpm git python sqlite curl deno
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
         with: { path: zinc, persist-credentials: false }
-      - name: Read PA revision
-        id: revision
-        run: |
-          python - <<'PY'
-          import os, pathlib, re
-          revision = re.search(r'portable-agents.git" :tag "([0-9a-f]{40})"', pathlib.Path('zinc/project.janet').read_text())[1]
-          with open(os.environ['GITHUB_OUTPUT'], 'a') as output:
-              output.write('pa=' + revision + '\n')
-          PY
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
         with:
-          repository: darkhorseprojects/portable-agents
-          ref: ${{ steps.revision.outputs.pa }}
-          path: portable-agents
+          repository: janet-lang/janet
+          ref: e1963cdfe0148f83601907727e00bd672d798115
+          path: janet
           persist-credentials: false
-      - name: Build native boundary and dependencies
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          repository: janet-lang/jpm
+          ref: 029d0c4cfefd2d359ddc5344eae61a1771f4e673
+          path: jpm
+          persist-credentials: false
+      - name: Install native toolchain
         run: |
-          cd portable-agents
-          deno task check
-          deno task compile
-          cd ../zinc
+          sudo apt-get update
+          sudo apt-get install -y build-essential pkg-config libcurl4-openssl-dev
+          prefix="$RUNNER_TEMP/janet"
+          make -C janet -j2 PREFIX="$prefix"
+          make -C janet install PREFIX="$prefix"
+          echo "$prefix/bin" >> "$GITHUB_PATH"
+          echo "PREFIX=$prefix" >> "$GITHUB_ENV"
+          echo "JANET_HEADERPATH=$prefix/include/janet" >> "$GITHUB_ENV"
+          echo "JANET_LIBPATH=$prefix/lib" >> "$GITHUB_ENV"
+          echo "JANET_BINPATH=$prefix/bin" >> "$GITHUB_ENV"
+          echo "JANET_MODPATH=$prefix/lib/janet" >> "$GITHUB_ENV"
+          echo "JANET_PATH=$prefix/lib/janet" >> "$GITHUB_ENV"
+          echo "LD_LIBRARY_PATH=$prefix/lib" >> "$GITHUB_ENV"
+      - name: Install pinned Jpm
+        working-directory: jpm
+        run: janet bootstrap.janet
+      - name: Build pinned dependencies and package
+        working-directory: zinc
+        run: |
           jpm --local deps
           jpm --local install
-          cd ../portable-agents
-          jpm --modpath="$GITHUB_WORKSPACE/zinc/jpm_tree/lib" install
+      - name: Compile Janet sources
+        working-directory: zinc
+        run: |
+          JANET_PATH="$PWD/jpm_tree/lib" janet -e '(put root-env (quote pa/emit) @{:value (fn [bytes]) :private true}) (import ./src/engine)'

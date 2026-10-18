@@ -5,6 +5,8 @@
 (import ./model)
 
 (defn events [s run after]
+  (unless (s :temporary)
+    (assert (not (first (store/query s "SELECT request FROM volatile WHERE run=? AND source=?" [run (s :source)]))) "temporary execution has no durable events"))
   (assert (first (store/query s "SELECT id FROM runs WHERE id=? AND source=? AND (world=? OR world IN (SELECT value FROM json_each(?)))"
                               [run (s :source) ((s :config) :world) (string (json/encode ((s :config) :visibility)))])) "run unavailable")
   (store/query s "SELECT *,strftime('%Y-%m-%dT%H:%M:%fZ',created,'unixepoch') created_at FROM events WHERE source=? AND run=? AND id>? ORDER BY id LIMIT 256"
@@ -22,7 +24,7 @@
       ), descendants(id) AS (SELECT ? UNION SELECT c.node FROM summary_children c JOIN descendants d ON c.parent=d.id WHERE c.node IS NOT NULL)
       SELECT e.id FROM descendants d JOIN summary_children c ON c.parent=d.id JOIN events e ON e.id=c.event
       LEFT JOIN branches b ON b.id=e.branch
-      WHERE e.source!=? OR e.id NOT BETWEEN ? AND ? OR b.retired=1 OR (b.temporary=1 AND b.id NOT IN (SELECT id FROM ancestry))
+      WHERE e.source!=? OR e.id NOT BETWEEN ? AND ? OR (b.temporary=1 AND b.id NOT IN (SELECT id FROM ancestry))
         OR (coalesce(b.world,json_extract(e.data,'$.world'))!=? AND coalesce(b.world,json_extract(e.data,'$.world')) NOT IN (SELECT value FROM json_each(?))) OR (e.id>? AND NOT (e.run=? AND EXISTS(SELECT 1 FROM ancestry a WHERE a.id=e.branch AND e.id<=a.through))) LIMIT 1`
                                        [(view :branch) (ref :node) (s :source) (view :first) (view :last) (view :world) (string (json/encode (view :visibility))) (get view :history-last (view :last)) (view :run)])))
       (assert (not invalid) "summary includes unavailable sources") row)))
@@ -171,7 +173,7 @@
   (while (< (length projection) (config :history-records))
     (def node (first (store/query s `WITH RECURSIVE ancestry(id,through) AS (SELECT ?,9007199254740991 UNION ALL SELECT b.parent,min(a.through,b.last) FROM branches b JOIN ancestry a ON b.id=a.id WHERE b.parent IS NOT NULL)
       SELECT n.*, 'summary' kind FROM summaries n JOIN branches b ON b.id=n.branch
-      WHERE n.source=? AND n.world=? AND n.first>=? AND n.last<=? AND n.first>? AND b.retired=0 AND (b.temporary=0 OR b.id IN (SELECT id FROM ancestry))
+      WHERE n.source=? AND n.world=? AND n.first>=? AND n.last<=? AND n.first>? AND (b.temporary=0 OR b.id IN (SELECT id FROM ancestry))
       AND n.id NOT IN (SELECT value FROM json_each(?)) ORDER BY n.first,n.height DESC,n.id DESC LIMIT 1`
                                   [(view :branch) (s :source) (view :world) (view :first) (view :last) through (string (json/encode rejected))])))
     (unless node (break))
@@ -179,13 +181,13 @@
       (do (array/push projection {:node (node "id") :first (node "first") :last (node "last") :text (render node) :estimate (max (node "estimate") (store/estimate (render node)))})
         (set through (node "last")))
       (do (array/push rejected (node "id")) (assert (< (length rejected) (config :history-records)) "summary eligibility work ceiling exceeded"))))
-  (def source `CASE WHEN e.kind IN ('tools','model-outcome','task-outcome','cancelled','interruption','context')
+  (def source `CASE WHEN e.kind IN ('model-outcome','task-outcome','cancelled','interruption','context','saved','save-intent')
                     THEN e.text || char(10) || e.data ELSE e.text END`)
   (def records (store/visible s
                               (merge view
                                      {:covered (map |{:first ($ :first) :last ($ :last)} projection)
-                                      :kinds ["user" "response" "tools" "completed" "tool-result" "task-admission" "task-outcome"
-                                              "model-outcome" "artifact" "context" "error" "cancelled" "interruption"]
+                                      :kinds ["user" "response" "completed" "tool-result" "task-admission" "task-outcome"
+                                              "model-outcome" "artifact" "context" "error" "cancelled" "interruption" "saved" "save-intent"]
                                       :columns (string "e.id,e.source,e.branch,e.parent,e.task,e.created,e.kind,e.estimate,length(CAST(" source
                                                        " AS BLOB)) bytes,coalesce(CAST(substr(CAST(" source " AS BLOB),1,"
                                                        (* 4 (math/floor (/ (config :context-quota) 2))) ") AS TEXT),'') text")})
@@ -230,7 +232,7 @@
   (if (ref :event)
     (let [data (json/decode (row "data") true true) original (get-in data [:original :event])]
       [(cond original {:event original :field "data"}
-         (index-of (row "kind") ["response" "tools" "task-outcome" "model-outcome" "cancelled" "interruption"])
+         (index-of (row "kind") ["response" "task-outcome" "model-outcome" "cancelled" "interruption"])
          (merge ref {:field "data"})
          ref)])
     (map |(if ($ "node") {:node ($ "node")} {:event ($ "event")})
@@ -276,7 +278,7 @@
                                   {:role "user" :content (string "Summary:\n" (progress :text) "\n\nSource: " (json/encode ref)
                                                                  "\nByte range: [" (slice :offset) ", " (slice :next) ")\n\n" (slice :text))}]}
                                 (progress :request) selected))
-        (assert (and (> (length (result :text)) 0) (<= (store/estimate (result :text)) maximum))
+        (assert (and (= "complete" (result :status)) (> (length (result :text)) 0) (<= (store/estimate (result :text)) maximum))
                 "provider did not produce a bounded summary")
         (put progress :text (result :text))
         (put progress :chunks (+ 1 (progress :chunks)))
@@ -292,6 +294,7 @@
         {:node id :estimate ((describe s view {:node id}) "estimate")}))))
 
 (defn compact [s view &opt blocking]
+  (def wait-for-completion (or blocking (s :temporary)))
   (def config (s :config))
   (var receipts @[])
   (while true
@@ -309,7 +312,7 @@
                              :first ((first group) :first) :last ((last group) :last)))
     (def id (store/submit s source-view "summarize" {:view source-view :children children :model (config :chat)}
                           {:retry-policy "retry" :key key}))
-    (if blocking
+    (if wait-for-completion
       (do
         (array/push receipts ((dyn :zinc/wait) s id))
         (def node (describe s view {:node ((last receipts) :node)}))

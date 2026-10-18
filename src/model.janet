@@ -19,20 +19,23 @@
   (def provider ((config :providers) (keyword (reference :provider))))
   (assert provider "provider is not configured")
   (def s (when current (store/open config)))
-  (def client (curl/new))
+  (def client (unless (provider :transport) (curl/new)))
   (def bytes @"")
   (var next-check 0)
   (var permitted true)
-  (defer (do (curl/reset client) (when s (store/close s)))
+  (defer (do (when client (curl/reset client)) (when s (store/close s)))
     # Progress callbacks are synchronous; no channel send crosses curl's native stack.
     (def check (fn [& counts]
                  (when (and current (>= (os/clock) next-check))
                    (set next-check (+ (os/clock) 0.1))
-                   (set permitted (not (nil? (first (store/query s
-                                                                 `SELECT t.id FROM tasks t JOIN leases l ON l.task=t.id JOIN runs r ON r.id=t.run
-           WHERE t.id=? AND t.source=? AND t.attempt=? AND l.owner=? AND l.generation=t.attempt
-             AND t.state IN ('running','waiting') AND l.expires>? AND r.expires>?`
-                                                                 [(current :id) (s :source) (current :generation) (current :owner) (os/clock) (os/clock)]))))))
+                   (set permitted (not (nil? (first
+                     (if (current :volatile)
+                       (store/query s "SELECT request FROM volatile WHERE request=? AND source=? AND owner=? AND state IN ('running','waiting') AND lease_expires>? AND expires>?"
+                                    [(current :volatile) (s :source) (current :volatile-owner) (os/clock) (os/clock)])
+                       (store/query s `SELECT t.id FROM tasks t JOIN runs r ON r.id=t.run
+                         WHERE t.id=? AND t.source=? AND t.attempt=? AND t.owner=?
+                         AND t.state IN ('running','waiting') AND t.lease_expires>? AND r.expires>?`
+                         [(current :id) (s :source) (current :generation) (current :owner) (os/clock) (os/clock)])))))))
                  permitted))
     (assert (check) "HTTP job fenced")
     (def url (string (provider :url) path))
@@ -197,13 +200,19 @@
   (def choice ((value :choices) 0))
   (def message (choice :message))
   (assert (and (dictionary? message) (= "assistant" (message :role))) "invalid assistant message")
-  (def text (or (message :content) ""))
+  (def content (message :content))
+  (def text (cond (nil? content) (or (message :refusal) "") (string? content) content
+    (indexed? content) (string/join (seq [part :in content :when (= "text" (part :type))] (part :text)) "\n")
+    (error "invalid assistant content")))
+  (def refusal (message :refusal))
+  (when refusal (assert (string? refusal) "invalid refusal"))
   (def reasoning (or (message :reasoning_content) (message :reasoning) ""))
   (assert (and (string? text) (string? reasoning) (utf8/is-valid? text) (utf8/is-valid? reasoning)) "invalid assistant text")
   (def calls (or (message :tool_calls) []))
   (assert (and (indexed? calls) (<= (length calls) (config :tool-calls))) "invalid tool calls")
   (def identities @{})
-  (def tools (map (fn [call]
+  (var invalid nil)
+  (def tools (try (if (= "tool_calls" (choice :finish_reason)) (map (fn [call]
                     (assert (and (dictionary? call) (= "function" (call :type)) (string? (call :id))
                                  (> (length (call :id)) 0) (not (identities (call :id)))
                                  (= "run_janet" (get-in call [:function :name]))) "invalid or duplicate tool call")
@@ -211,13 +220,16 @@
                     (def arguments (json/decode (get-in call [:function :arguments]) true true))
                     (assert (and (dictionary? arguments) (= [:code] (tuple/slice (sort (keys arguments))))
                                  (string? (arguments :code)) (> (length (arguments :code)) 0)) "invalid Janet tool source")
-                    {:id (call :id) :code (arguments :code)}) calls))
-  (assert (case (choice :finish_reason)
-            "tool_calls" (and (input :tools) (> (length tools) 0))
-            "stop" (and (= 0 (length tools)) (> (length text) 0)) false) "incomplete completion")
+                    {:id (call :id) :code (arguments :code)}) calls) [])
+    ([err] (set invalid (string err)) [])))
+  (def status (cond invalid "invalid" (and refusal (> (length refusal) 0)) "refused"
+    (= "length" (choice :finish_reason)) "truncated" (= "content_filter" (choice :finish_reason)) "blocked"
+    (and (= "tool_calls" (choice :finish_reason)) (input :tools) (> (length tools) 0)) "tools"
+    (and (= "stop" (choice :finish_reason)) (= 0 (length calls))) "complete" "invalid"))
   (def details (or (message :reasoning_details) []))
   (assert (indexed? details) "invalid reasoning details")
-  {:text text :reasoning reasoning :reasoning-details details
+  {:text text :message message :status status :finish-reason (choice :finish_reason) :error invalid
+   :reasoning reasoning :reasoning-details details
    :reasoning-visible (not= "none" (config :thinking)) :tools tools
    :usage (value :usage) :model selected :request admission})
 
@@ -241,7 +253,7 @@
   (assert (= (length seen) (length documents)) "incomplete rerank results")
   {:results (sort (result :results) (fn [a b]
                                       (if (= (a :relevance_score) (b :relevance_score)) (< (a :index) (b :index)) (> (a :relevance_score) (b :relevance_score)))))
-   :usage (result :usage) :model selected :request admission})
+   :status "complete" :usage (result :usage) :model selected :request admission})
 
 (defn call [s input &opt request selected]
   (def role (get input :role "chat"))
@@ -253,7 +265,8 @@
     (do
       (default selected (profile (s :config) (input :model) (keyword role)))
       (assert (= (selected :reference) (input :model)) "profile does not match admitted model")
-      (def result (if (= "rerank" role) (rerank s input selected) (complete s input selected)))
+      (def result (merge (if (= "rerank" role) (rerank s input selected) (complete s input selected))
+                         {:role role :visible (not (dyn :zinc/round))}))
       (store/transact s
         (store/append s ((dyn :zinc/task) :scope) "model-outcome" "Model outcome committed." result
                       (result :request) ((dyn :zinc/task) :id)))
