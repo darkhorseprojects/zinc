@@ -9,10 +9,11 @@ service or public `invoke`/`eval` operation.
 
 ## Build
 
-Use Janet 1.42+, Jpm and the matching PA executable:
+Use Janet 1.42+, Jpm, system SQLite with FTS5 and development headers,
+pkg-config, and the matching PA executable:
 
 ```sh
-jpm --local deps
+JANET_SYSTEM_SQLITE=1 jpm --local deps
 jpm --local install
 ```
 

@@ -26,7 +26,7 @@ jobs:
       - name: Install native toolchain
         run: |
           sudo apt-get update
-          sudo apt-get install -y build-essential pkg-config libcurl4-openssl-dev
+          sudo apt-get install -y build-essential pkg-config libcurl4-openssl-dev libsqlite3-dev
           prefix="$RUNNER_TEMP/janet"
           make -C janet -j2 PREFIX="$prefix"
           make -C janet install PREFIX="$prefix"
@@ -44,7 +44,7 @@ jobs:
       - name: Build pinned dependencies and package
         working-directory: zinc
         run: |
-          jpm --local deps
+          JANET_SYSTEM_SQLITE=1 jpm --local deps
           jpm --local install
       - name: Compile Janet sources
         working-directory: zinc
