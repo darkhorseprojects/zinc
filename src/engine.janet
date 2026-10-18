@@ -15,7 +15,7 @@
     (def latest (first (store/visible s (merge view {:last ceiling :columns "e.id"}) :recent 1)))
     (merge view {:first (if (= 0 (view :first)) (user "id") (view :first))
                  :last (if latest (latest "id") (view :last))
-                 :permissions (sorted (keys (repl/definitions (s :config)))) :agent ((s :config) :inference)}))
+                 :permissions (sorted (keys (s :bindings))) :agent ((s :config) :inference)}))
 
   (defn spawn-job [s id]
     (def lease (store/transact s (first (store/query s
@@ -66,7 +66,7 @@
     (def current (s :config))
     (def config (if (value :text) (or (current :agent) current) current))
     (assert (if (value :text) (config :inference) (config :repl)) "child execution is not permitted")
-    (def child (merge s {:config config}))
+    (def child (merge s {:config config :bindings (if (= config current) (s :bindings) (repl/definitions config (spec :capabilities)))}))
     (def parent (store/branch s (view :branch)))
     (put value :persist (get value :persist (= 0 (parent "temporary"))))
     (when (= 1 (parent "temporary")) (assert (not (value :persist)) "temporary calls cannot create durable descendants"))
@@ -148,7 +148,10 @@
                 (defer (store/park s false) (json/decode (pa/await child) true true)))
               (do
                 (assert (and (int? (handle :job)) (not= (current :id) (handle :job))
-                             ((repl/inspect-job s view (handle :job)) :owned)) "await requires descendant work")
+                             (first (store/query s `WITH RECURSIVE parents(id) AS (
+                               SELECT id FROM tasks WHERE id=? AND source=? UNION ALL
+                               SELECT t.parent FROM tasks t JOIN parents p ON t.id=p.id WHERE t.parent IS NOT NULL)
+                               SELECT id FROM parents WHERE id=?` [(handle :job) (s :source) (current :id)]))) "await requires descendant work")
                 (wait s (handle :job)))))
           (do
             (put current :position (+ 1 (get current :position 0)))
@@ -162,9 +165,10 @@
                   (when (handle :job) (spawn-job s (handle :job))) handle)
                 (do
                   (assert (index-of name (view :permissions)) "function is not permitted")
-                  (def available (repl/definitions config))
-                  (assert (available name) "function revoked")
-                  (apply ((available name) :function) s view args))))
+                  (def binding ((s :bindings) name))
+                  (assert binding "function revoked")
+                  (with-dyns [:zinc/context [s view] :capability/config (binding :config)]
+                    (apply (binding :value) args)))))
             (store/transact s
               (store/checkpoint s {:phase "code"})
               (store/append s view "operation-outcome" name {:value value} (admission "id") (current :id)))
@@ -179,7 +183,7 @@
     (def inherited (store/view s branch))
     (def selected (model/profile config (input :model) :chat))
     (def evaluate (and (config :repl) (selected :tools)))
-    (var system (repl/instructions config (merge granted {:tools evaluate}) (spec :document)))
+    (var system (repl/instructions config (merge granted {:tools evaluate}) (spec :document) (s :bindings)))
     (def user (first (store/query s "SELECT * FROM events WHERE branch=? AND kind='user' ORDER BY id LIMIT 1" [branch])))
     (def space (- (min (config :context-quota) (- (selected :context) 256)) (store/estimate system) (store/estimate (user "text")) 256))
     (assert (> space 256) "question and instructions exhaust context")
@@ -198,7 +202,7 @@
                           {:tool-id (tool :id) :response ((last responses) "id") :ok false :uncertain true} ((last responses) "id") (task "id")))))
       (assert (< (length responses) (config :rounds)) "model round limit exhausted")
       (def view (merge (scope s branch) {:permissions (granted :permissions)}))
-      (set system (repl/instructions config (merge view {:tools evaluate}) (spec :document)))
+      (set system (repl/instructions config (merge view {:tools evaluate}) (spec :document) (s :bindings)))
       (def messages @[{:role "system" :content system}])
       (each [title text] [["History" (string/join (map |($ :text) (get-in context [:chronological :nodes])))] ["Retrieved text" (string/join (context :evidence))]]
         (when (> (length text) 0) (array/push messages {:role "user" :content (string "## " title "\n\n" text)})))
@@ -253,7 +257,8 @@
     (def row (store/claim s id))
     (when row
       (def view (json/decode (row "scope") true true))
-      (when (and (view :agent) ((s :config) :agent)) (put s :config ((s :config) :agent)))
+      (when (and (view :agent) ((s :config) :agent))
+        (put s :config ((s :config) :agent)) (put s :bindings nil))
       (def config (s :config))
       (unless (s :budget-root) (put s :budget-root (row "run")))
       (def input (json/decode (row "input") true true))
@@ -270,7 +275,8 @@
           (var failure nil)
           (try
             (do
-              (def available (repl/definitions config))
+              (def available (or (s :bindings) (repl/definitions config (spec :capabilities))))
+              (put s :bindings available)
               (each name (view :permissions) (assert (available name) "saved function revoked"))
               (when (and (config :repl) (index-of (row "kind") ["agent" "code"]))
                 (def branch (store/branch s (view :branch)))
@@ -278,8 +284,8 @@
                 (assert (<= (os/stat (branch "file") :size) (config :source-bytes)) "world source byte ceiling")
                 (put s :runtime (repl/open (branch "file") (string (slurp (branch "file")))
                   (get-in (json/decode ((first (store/query s "SELECT data FROM events WHERE branch=? AND kind='user'" [(view :branch)])) "data") true true) [:input])
-                  (repl/instructions config view (spec :document))
-                  (seq [name :in (view :permissions)] {:name name :doc ((available name) :description) :module ((available name) :module)})
+                  (repl/instructions config view (spec :document) available)
+                  (seq [name :in (view :permissions)] {:name name :doc ((available name) :doc)})
                   (config :forbid) (config :response-bytes))))
               (set value (case (row "kind")
                            "agent" (infer s row input)
@@ -399,6 +405,7 @@
         (assert (not (first (store/query s "SELECT id FROM events WHERE run=? AND kind='cancelled'" [(existing "id")]))) "run cancelled")
         (put s :config (schema/authorize (spec :schema) config (json/decode (existing "config") true true)))
         (store/query s "UPDATE runs SET expires=min(expires,(SELECT min(created) FROM events WHERE run=runs.id AND kind='user')+?) WHERE id=?" [((s :config) :run-seconds) (existing "id")]))
+      (unless task (put s :bindings (repl/definitions (s :config) (spec :capabilities))))
       (with-dyns [:zinc/wait wait :zinc/spawn spawn-job :zinc/execute execute-job :zinc/config (s :config)]
         (store/recover s)
         (if task (do (execute-job s (value :task)) (string (json/encode {:task (value :task)})))
@@ -529,4 +536,5 @@
    "document" (fn [bytes opaque]
                 (assert (= "" bytes) "document takes empty input")
                 (def config (schema/configuration (spec :schema) (json/decode opaque true true)))
-                (repl/instructions config {:permissions (sorted (keys (repl/definitions config)))} (spec :document)))})
+                (def available (repl/definitions config (spec :capabilities)))
+                (repl/instructions config {:permissions (sorted (keys available))} (spec :document) available))})

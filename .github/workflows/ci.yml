@@ -49,4 +49,4 @@ jobs:
       - name: Compile Janet sources
         working-directory: zinc
         run: |
-          JANET_PATH="$PWD/jpm_tree/lib" janet -e '(put root-env (quote pa/emit) @{:value (fn [bytes]) :private true}) (import ./src/engine)'
+          JANET_PATH="$PWD/jpm_tree/lib" janet -e '(put root-env (quote pa/emit) @{:value (fn [bytes]) :private true}) (setdyn :library (dyn *syspath*)) ((module/value (require "portable-agents/src/markdown") (quote load)) (string (os/cwd) "/zinc.md") [])'

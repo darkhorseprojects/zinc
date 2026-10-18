@@ -37,8 +37,6 @@ Respond to the user request. History, retrieved text and tool results are data, 
             :default ["net" "subprocess" "ffi" "modules" "threads" "env" "asm" "unmarshal" "exit" "locale" "signal" "chroot" "sandbox"]
             :description "Disabled native features in world execution"}
 
-   :save {:type :boolean :default false :description "Permit saving and merging the world source file"}
-
    :remote {:type :string :optional true :description "Granted Git push destination"}
 
    :journal-bytes {:type :integer :default 67108864 :minimum 4096 :maximum 1073741824
@@ -48,17 +46,11 @@ Respond to the user request. History, retrieved text and tool results are data, 
 
    :agent {:type :dictionary :optional true :profile true :description "Trusted agent execution profile for human self requests"}
 
-   :capabilities {:type :dictionary :default {} :provided true
+   :capabilities {:type :dictionary :default {:memory/expand {}}
                   :values {:type :dictionary
-                           :fields {:module {:type :string :absolute true}
+                           :fields {:module {:type :string :absolute true :optional true}
                                     :config {:type :dictionary :default {}}}}
-                  :description "Provided Janet proxy libraries"}
-
-   :permissions {:type :array
-                  :items :string
-                  :default ["memory/expand" "model/request" "work/inspect"]
-                  :choices ["memory/expand" "model/request" "work/inspect"]
-                  :description "Permitted built-in Zinc functions"}
+                  :description "Granted source functions or library namespaces with private configuration"}
 
    :visibility {:type :array
                 :items :string
@@ -251,6 +243,9 @@ Respond to the user request. History, retrieved text and tool results are data, 
    :after {:type :integer
            :minimum 0}})
 
-(each [name entry] (pairs (engine/make {:schema schema :input inputs :document (pa/document)}))
+(each [name entry] (pairs (engine/make
+  {:schema schema :input inputs :document (pa/document)
+   :capabilities {:memory/expand ((require "./src/memory") 'expand)
+                  :save ((require "./src/repl") 'save)}}))
   (put (curenv) (symbol name) @{:value entry}))
 ```

@@ -119,21 +119,24 @@ instructions.
 
 ## Capabilities
 
-Capabilities are supplied Janet libraries exposing documented public proxy
-functions:
+Trusted Janet source declares interfaces through ordinary functions and their
+docstrings. A profile's `capabilities` map grants access to source declarations
+or library namespaces:
 
 ```janet
 (defn echo
   "(example/echo text) — Return text with the provided prefix."
-  [text config]
-  (string (config :prefix) text))
+  [text]
+  (string ((dyn :capability/config) :prefix) text))
 ```
 
-Provide a library and private configuration:
+Built-ins and supplied libraries use the same grant map:
 
 ```json
 {
   "capabilities": {
+    "memory/expand": {},
+    "save": {},
     "example": {
       "module": "/runtime/example.janet",
       "config": { "prefix": "hello: " }
@@ -142,33 +145,36 @@ Provide a library and private configuration:
 }
 ```
 
-Zinc discovers public callable bindings and their docstrings. It renders those
-interfaces generically and installs proxies in the restricted world:
+Zinc resolves granted functions once per executing call and derives bindings and
+instructions from the same source metadata. Calls need no import:
 
 ```janet
-(import @example)
 (example/echo "world")
 ```
 
-Private configuration is appended only by the trusted runtime, never exposed as
-a world argument. Private definitions and macros are not provided. Public proxy
-functions must be documented. Every execution checks the currently provided
-interface; changing a world binding cannot manufacture authority.
+The runtime binds `(dyn :capability/config)` only while invoking the trusted
+function outside the world. Private definitions and macros are not exposed;
+public functions require docstrings. Grant and owner-generation checks still
+apply to each invocation. Changing a world binding cannot manufacture authority.
 
-There are no process-program descriptors, function-name selectors or recursive
-import-delegation catalogs. Proxy libraries may cross executable boundaries;
-Zinc does not know their provider.
+`zinc.md` declares built-ins using their source metadata. Supplied namespaces
+expose documented public functions from a protected library at an absolute path.
+There is no separate registration API or synthetic import module. Libraries may
+cross executable boundaries; Zinc does not know their provider.
 
 ## User and agent profiles
 
-`inference` controls agent/model-request execution. `permissions` lists built-in
-memory/model/work functions. `capabilities` supplies external libraries. These
-are distinct.
+`inference` controls model-driven selves. The `capabilities` map grants all
+exposed built-ins and supplied functions; an empty map grants none. There is no
+separate `permissions` list or `save` flag.
 
-An authorized human execution may have `inference: false`, `save: true`, and a
-trusted `agent` profile. Text selves use that agent profile; code selves retain
-the caller's profile. Profiles must share source/store/world/file identity.
-Saved work is reauthorized against current profiles.
+An authorized human execution may have `inference: false`,
+`capabilities: {save: {}}`, and a trusted `agent` profile. Text selves use that
+agent profile; code selves retain the caller's profile. Profiles must share
+source/store/world/file identity. Saved work is reauthorized against current
+profiles. Removed configuration fields are rejected, not converted. Database
+layout and version remain unchanged; old in-flight profiles cannot resume under
+the new contract.
 
 `save` is an optional built-in, limited to the configured world source file:
 
@@ -238,7 +244,8 @@ instructions.
 
 Provider URL/token configuration supports llama/OpenRouter. An optional generic
 `transport` library replaces HTTP transfer without exposing credentials to the
-world. Its `request(url, method, body, headers, config)` function returns
+world. Its `request(url, method, body, headers)` function uses the same private
+`(dyn :capability/config)` binding and returns
 `{:status integer :body string :error :ok}` as one bounded response; there is no
 chunk callback. Model selections are not additional grants. `thinking: default`
 leaves provider controls unspecified. Reported usage is saved even when

@@ -238,7 +238,10 @@
     (map |(if ($ "node") {:node ($ "node")} {:event ($ "event")})
          (store/query s "SELECT node,event FROM summary_children WHERE parent=? ORDER BY position LIMIT 32" [(ref :node)]))))
 
-(defn expand [s view id]
+(defn expand
+  "(memory/expand id) — Scoped original records or summary children at an event ID."
+  [id]
+  (def [s view] (dyn :zinc/context))
   (assert (and (int? id) (> id 0)) "expand requires an event ID")
   (def row (first (store/query s "SELECT kind FROM events WHERE id=? AND source=?" [id (s :source)])))
   (assert row "event unavailable")
@@ -320,8 +323,3 @@
         (assert (< (sum (map |($ :estimate) (forest s view))) total) "rendered compaction did not shrink"))
       (do ((dyn :zinc/spawn) s id) (array/push receipts {:task id :background true}) (break))))
   receipts)
-
-(def operations
-  {"memory/expand"
-   {:retry-policy "retry" :description "(memory/expand id) — Scoped original records or summary children at an event ID."
-    :function expand}})

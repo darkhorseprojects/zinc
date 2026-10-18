@@ -43,7 +43,8 @@
                   :authorization (when (provider :token) (string "Bearer " (provider :token)))})
     (def response
       (if-let [transport (provider :transport)]
-        ((module/value (require (transport :module)) 'request) url method body headers (transport :config))
+        (with-dyns [:capability/config (transport :config)]
+          ((module/value (require (transport :module)) 'request) url method body headers))
         (http/request
           {:client client :url url :method (keyword (string/ascii-lower method)) :body body
            :headers (tabseq [[key value] :in (pairs headers) :unless (nil? value)] key value)

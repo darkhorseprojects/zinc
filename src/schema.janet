@@ -28,8 +28,8 @@
       (when (field :fields)
         (put config key (validate (field :fields) value discovery)))
       (when (field :values)
-        (each [name item] (pairs value)
-          (validate {name (field :values)} {name item} discovery)))
+        (put config key (tabseq [[name item] :in (pairs value)]
+          name ((validate {name (field :values)} {name item} discovery) name))))
       (if (= :array (field :type))
         (each item value
           (when (= :string (field :items))
@@ -50,9 +50,10 @@
     (when (config :repl)
       (assert (and (config :file) (= :file (os/stat (config :file) :mode))) "world source is required"))
     (each [name capability] (pairs (config :capabilities))
-      (assert (and (peg/match ~(* (some (set "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789_-")) -1) (string name))
-                   (not (index-of name [:self :pa :memory :model :work]))) "invalid capability namespace")
-      (assert (= :file (os/stat (capability :module) :mode)) "capability library unavailable"))
+      (when (capability :module)
+        (assert (and (peg/match ~(* (some (set "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789_-")) -1) (string name))
+                     (not (index-of name [:self :pa]))) "invalid capability namespace")
+        (assert (= :file (os/stat (capability :module) :mode)) "capability library unavailable")))
     (each [name provider] (pairs (config :providers))
       (assert (index-of name [:llama :openrouter]) "unsupported provider")
       (assert (peg/match ~(* (choice "https://" "http://") (some (if-not (set "?#@ \t\r\n") 1)) -1) (provider :url)) "invalid provider base"))
@@ -65,13 +66,13 @@
   (each key (keys saved) (assert (has-key? schema key) "unsupported saved configuration"))
   (each key [:source :store :world :file :instructions]
     (assert (= (current key) (saved key)) "saved identity/location differs"))
-  (each key [:repl :inference :save]
+  (each key [:repl :inference]
     (assert (or (not (saved key)) (current key)) (string "saved permission revoked: " key)))
   (assert (or (nil? (saved :remote)) (= (saved :remote) (current :remote))) "saved remote changed")
-  (each key [:visibility :permissions]
-    (each value (saved key) (assert (index-of value (current key)) "saved grant revoked")))
+  (each value (saved :visibility) (assert (index-of value (current :visibility)) "saved grant revoked"))
   (each [name capability] (pairs (saved :capabilities))
-    (assert (= (capability :module) (get-in current [:capabilities name :module])) "saved capability revoked"))
+    (assert (and (has-key? (current :capabilities) name)
+                 (= (capability :module) (get-in current [:capabilities name :module]))) "saved capability revoked"))
   (when (saved :agent)
     (assert (current :agent) "agent execution view revoked"))
   (each [name provider] (pairs (saved :providers))

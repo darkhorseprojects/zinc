@@ -1,9 +1,6 @@
 (import spork/json :as json)
 (import spork/path :as path)
 (import ./store)
-(import ./model)
-(import ./memory)
-(import ./schema)
 
 (defn- document [node]
   (cond
@@ -58,20 +55,11 @@
        :base (when (and base (= 0 (base :status))) (base :text))
        :ref (if (and ref (= 0 (ref :status)) (string/has-prefix? "refs/heads/" (ref :text))) (ref :text) (if root "HEAD" "refs/heads/main"))})))
 
-(defn inspect-job [s view id]
-  (def row (store/task s id))
-  (def owned (or (= id ((dyn :zinc/task) :id))
-    (first (store/query s `WITH RECURSIVE parents(id) AS (
-      SELECT ? UNION ALL SELECT t.parent FROM tasks t JOIN parents p ON t.id=p.id WHERE t.parent IS NOT NULL)
-      SELECT id FROM parents WHERE id=?` [id ((dyn :zinc/task) :id)]))))
-  (unless owned (store/event s view (row "admission")))
-  {:owned (not (nil? owned)) :job id :state (row "state") :kind (row "kind")
-   :admission (row "admission") :outcome (row "outcome")
-   :children (store/query s "SELECT id,kind,admission,outcome,state FROM tasks WHERE parent=? AND source=? ORDER BY id LIMIT 256" [id (s :source)])})
-
-(defn- save [s view message &opt options]
+(defn save
+  "(save message options) — Save this call's world file; optional call, branch, merge and push."
+  [message &opt options]
+  (def [s view] (dyn :zinc/context))
   (def config (s :config))
-  (assert (config :save) "save is not permitted")
   (assert (and (string? message) (<= 1 (length message) 2048) (or (nil? options) (dictionary? options))) "save requires a message and optional settings")
   (default options {})
   (each key (keys options) (assert (index-of key [:call :branch :merge :push]) "unknown save setting"))
@@ -166,29 +154,20 @@
         (store/append s view "saved" "World pushed." receipt (intent "id")))
       receipt)))
 
-(defn definitions [config]
-  (def builtins (merge memory/operations
-    {"work/inspect" {:description "(work/inspect job) — State, children and durable receipts." :function inspect-job}
-     "model/request" {:description "(model/request request) — Complete model outcome with reported usage."
-                      :function (fn [s view value]
-                        (assert ((s :config) :inference) "model requests are not permitted")
-                        (model/call s (schema/request (json/encode value) [:role :model :messages :tools :output :query :documents])
-                                      (get-in (dyn :zinc/task) [:checkpoint :request])))}}))
-  (def selected (tabseq [name :in (config :permissions) :when (or (config :inference) (not= name "model/request"))]
-    name (do (assert (builtins name) "unknown Zinc permission") (builtins name))))
-  (when (config :save) (put selected "save" {:description "(save message options) — Save this call's world file; optional call, branch, merge and push." :function save}))
-  (each [namespace capability] (pairs (config :capabilities))
-    (each [name binding] (pairs (require (capability :module)))
+(defn definitions [config declared]
+  (def selected @{})
+  (each [grant capability] (pairs (config :capabilities))
+    (def source (if (capability :module) (require (capability :module)) {(symbol grant) (declared grant)}))
+    (unless (capability :module) (assert (declared grant) "unknown capability"))
+    (each [name binding] (pairs source)
       (when (and (symbol? name) (not (binding :private)) (not (binding :macro)) (index-of (type (binding :value)) [:function :cfunction]))
         (assert (string? (binding :doc)) "capability function requires documentation")
-        (def target (binding :value))
-        (put selected (string namespace "/" name)
-          {:description (binding :doc) :module (capability :module)
-           :function (fn [s view & args] (apply target (array/concat @[] args [(get capability :config {})])))}))))
+        (def qualified (if (capability :module) (string grant "/" name) (string name)))
+        (assert (and (not (selected qualified)) (or (not (capability :module)) (not (declared (keyword qualified))))) "capability shadows a declaration")
+        (put selected qualified (merge binding {:config (capability :config)})))))
   selected)
 
-(defn instructions [config view document-tree]
-  (def available (definitions config))
+(defn instructions [config view document-tree available]
   (string (document document-tree) "\n\n## World\n\n" (config :world)
     (when (config :instructions) (string "\n\n" (slurp (config :instructions))))
     (when (and (config :repl) (get view :tools true))
@@ -199,8 +178,8 @@
         "\n`(await (self {:text \"request\"}))` starts an independent source branch. `:persist false` keeps its journal in RAM."
         "\nChildren inherit source, not unsaved live bindings. Performed effects are not rolled back."
         "\n\n## Callable functions\n\n"
-        (string/join (seq [name :in (view :permissions) :when (available name)] (string "- " ((available name) :description))) "\n")
-        "\nProvided libraries can be imported with `(import @namespace)`. Inspect uncertain receipts before repeating effects."))))
+        (string/join (seq [name :in (view :permissions) :when (available name)] (string "- " ((available name) :doc))) "\n")
+        "\nGranted functions are already bound. Inspect uncertain receipts before repeating effects."))))
 
 (defn- request [name args]
   (def reply (ev/thread-chan 1))
@@ -222,14 +201,7 @@
   (put env 'self/document @{:value (fn [] document)})
   (each binding bindings
     (def name (binding :name))
-    (def metadata @{:value (fn [& args] (request name args)) :doc (binding :doc)})
-    (put env (symbol name) metadata)
-    (when (binding :module)
-      (def split (string/find "/" name))
-      (def module (or (module/cache (binding :module)) (make-env)))
-      (put module (symbol (string/slice name (+ split 1))) metadata)
-      (put module/cache (binding :module) module)
-      (put env (keyword (string/slice name 0 split)) (binding :module))))
+    (put env (symbol name) @{:value (fn [& args] (request name args)) :doc (binding :doc)}))
   (module/add-paths "" :source)
   (sandbox ;(map keyword forbid))
   (with-env env
