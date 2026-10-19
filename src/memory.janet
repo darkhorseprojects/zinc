@@ -40,7 +40,9 @@
       (assert (or (= 0 (length text)) (not (<= 0x80 (text 0) 0xbf))) "memory offset splits UTF-8")
       (var end (min bytes (length text)))
       (while (and (< end (length text)) (<= 0x80 (text end) 0xbf)) (++ end))
-      (merge node row {:node nil :complete nil :text (string/slice text 0 end) :offset offset :next (+ offset end)}))))
+      (def result (merge node row {:node nil :complete nil :text (string/slice text 0 end) :offset offset :next (+ offset end)}))
+      (def rendered (render result))
+      (merge result {:rendered rendered :cost (store/estimate (json/encode rendered))}))))
 
 (defn cygnet [config]
   (assert (= :file (os/stat (config :cygnet) :mode)) "Cygnet index must already exist")
@@ -151,22 +153,22 @@
 (defn context [s view limit evidence &opt prepare]
   (def budget (if ((s :config) :search) (math/floor (/ limit 2)) limit))
   (def policy (string ((s :config) :summary-quota) ":" summary-prompt))
-  (def nodes @[]) (var cursor (- (view :first) 1)) (var pending false)
+  (def nodes @[]) (var cursor (- (view :first) 1)) (var pending false) (var cost 0) (var members 0)
   (while (not pending)
     (def page (store/visible s (merge view {:first (+ cursor 1) :memory true :columns "e.id"}) :oldest ((s :config) :history-records)))
     (when (= 0 (length page)) (break))
     (each item page
       (when (and (not pending) (> (item :id) cursor))
         (var node nil)
-        (def before (sum (map |($ :count) nodes)))
+        (def before members)
         (each cached (store/query s `SELECT id,json_extract(data,'$.count') count FROM events WHERE source=? AND kind='summary' AND json_extract(data,'$.first')=?
           AND json_extract(data,'$.last')<=? AND json_extract(data,'$.policy')=? AND id NOT IN invalid_summaries ORDER BY json_extract(data,'$.height') DESC,id DESC`
           [(s :source) (item :id) (view :last) policy])
           (when (and (nil? node) (= 0 (mod before (cached :count)))) (set node (record s view (cached :id) 0 (* 4 budget)))))
         (set node (or node (record s view (item :id) 0 (* 4 budget))))
         (assert node "memory source unavailable")
-        (array/push nodes node) (set cursor (node :last))
-        (while (and (not pending) (> (sum (map |(store/estimate (json/encode (render $))) nodes)) budget))
+        (array/push nodes node) (set cursor (node :last)) (+= members (node :count)) (+= cost (node :cost))
+        (while (and (not pending) (> cost budget))
           (var index nil) (var count 2)
           (for i 0 (length nodes)
             (when (and (nil? index) (< ((nodes i) :next) ((nodes i) :total))) (set index i) (set count 1)))
@@ -178,8 +180,13 @@
             (while (and (<= (* count 2) 16) (<= (+ index (* count 2)) (length nodes))
                         (= 0 (mod (sum (map |($ :count) (slice nodes 0 index))) (* count 2)))
                         (every? (map |(and (= 0 ($ :height)) (not= "summary" ($ :kind))) (slice nodes index (+ index (* count 2)))))) (*= count 2)))
-          (def parent (compress s view (slice nodes index (+ index count)) prepare))
-          (if parent (do (array/remove nodes index count) (array/insert nodes index (record s view (parent :id) 0 (* 4 budget)))) (set pending true))))))
+          (def children (slice nodes index (+ index count)))
+          (def parent (compress s view children prepare))
+          (if parent
+            (let [replacement (record s view (parent :id) 0 (* 4 budget))]
+              (+= cost (- (replacement :cost) (sum (map |($ :cost) children))))
+              (array/remove nodes index count) (array/insert nodes index replacement))
+            (set pending true))))))
   (unless pending
     (var i (length nodes))
     (while (> i 0)
@@ -187,13 +194,17 @@
       (def children ((nodes i) :children))
       (when children
         (def expanded (map |(record s view $ 0 (* 4 budget)) children))
-        (when (and (every? expanded) (<= (sum (map |(store/estimate (json/encode (render $))) (array/concat @[] (slice nodes 0 i) expanded (slice nodes (+ i 1))))) budget))
-          (array/remove nodes i) (array/insert nodes i ;expanded) (set i (+ i (length expanded))))))
+        (when (every? expanded)
+          (def next-cost (+ cost (- (sum (map |($ :cost) expanded)) ((nodes i) :cost))))
+          (when (<= next-cost budget)
+            (set cost next-cost)
+            (array/remove nodes i) (array/insert nodes i ;expanded) (set i (+ i (length expanded)))))))
     (def raw (map |($ :id) (filter |(not= "summary" ($ :kind)) nodes)))
     (var used 0)
     {:through (view :last) :nodes nodes :evidence (seq [values :in evidence :let [row (struct ;(interleave [:id :author :at :kind :text :label] values))] :unless (index-of (row :id) raw)
-      :when (<= (+ used (store/estimate (json/encode (render row)))) (- limit budget))]
-      (do (+= used (store/estimate (json/encode (render row)))) (render row)))}))
+      :let [rendered (render row) cost (store/estimate (json/encode rendered))]
+      :when (<= (+ used cost) (- limit budget))]
+      (do (+= used cost) rendered))}))
 
 (defn expand
   "(memory/expand id offset) — Own bounded record page and summary child IDs; next is the continuation byte offset."
@@ -217,7 +228,7 @@
   (def config (s :config))
   (def selected (model/profile s (input :model) :chat))
   (def capacity (min (config :context-quota) (selected :context)))
-  (def size (sum (map |(store/estimate (json/encode (render $))) sources)))
+  (def size (sum (map |($ :cost) sources)))
   (def maximum (min (config :summary-quota) (math/floor (/ capacity 4)) (max 1 (math/floor (/ size 4)))))
   (def system {:role "system" :content (string summary-prompt " At most " (* 4 maximum) " UTF-8 bytes.")})
   (def room (- capacity maximum 512))
@@ -239,7 +250,7 @@
         (while (< index (length sources))
           (def page (record s view ((sources index) :id) offset bytes))
           (assert page "summary source unavailable")
-          (def text (render page))
+          (def text (page :rendered))
           (if (<= (model/estimate [system {:role "user" :content (string/join (array/concat @[] pages [text]) "\n\n")}]) room)
             (do (array/push pages text) (set offset (page :next))
               (when (= offset (page :total)) (++ index) (set offset 0)))
@@ -269,7 +280,7 @@
         (assert (not (first (store/query s `WITH RECURSIVE members(id) AS (SELECT value FROM json_each(?) UNION SELECT c.value FROM members m JOIN events n ON n.id=m.id,json_each(n.data,'$.children') c WHERE n.kind='summary')
           SELECT value FROM json_each(?) WHERE CAST(value AS INTEGER) NOT IN members LIMIT 1` [(string (json/encode (input :children))) (string (json/encode cited))]))) "summary cites an unrelated record")
         (def rendered (record s view (node :id) 0 (* 4 maximum)))
-        (assert (and rendered (< (store/estimate (json/encode (render rendered))) size)) "summary did not shrink its complete rendered sources")
+        (assert (and rendered (< (rendered :cost) size)) "summary did not shrink its complete rendered sources")
         {:node (node :id)}))))
 
 (defn invalidate [s id]

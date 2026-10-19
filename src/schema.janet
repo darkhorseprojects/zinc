@@ -97,7 +97,7 @@
   (def value (json/decode bytes true true))
   (assert (dictionary? value) "request must be an object")
   (each key (keys value) (assert (index-of key fields) "unknown request field"))
-  (each key [:parent :after :run :task :attempt]
+  (each key [:parent :after :run :task]
     (when (has-key? value key)
       (assert (and (int? (value key)) (<= 0 (value key) 9007199254740991)) "invalid coordinate")))
   (each key [:text :code]
@@ -123,79 +123,74 @@
   value)
 
 (defn database [&opt temporary]
-  (string `
-CREATE TABLE runs(
- id INTEGER PRIMARY KEY AUTOINCREMENT CHECK(id<=9007199254740991),source TEXT NOT NULL,
- request TEXT,input TEXT NOT NULL CHECK(json_valid(input)),world TEXT NOT NULL,
- config TEXT NOT NULL CHECK(json_valid(config)),expires REAL NOT NULL,
- root INTEGER REFERENCES runs(id),temporary INTEGER NOT NULL DEFAULT 0 CHECK(temporary IN (0,1)),
+  (string (unless temporary `
+CREATE TABLE run_controls(
+ id INTEGER PRIMARY KEY AUTOINCREMENT CHECK(id<=9007199254740991),source TEXT NOT NULL,request TEXT,world TEXT NOT NULL,
+ expires REAL NOT NULL,root INTEGER REFERENCES run_controls(id),temporary INTEGER NOT NULL DEFAULT 0 CHECK(temporary IN (0,1)),
+ cancelled INTEGER NOT NULL DEFAULT 0 CHECK(cancelled IN (0,1)),
  work_used INTEGER NOT NULL DEFAULT 0,tool_used INTEGER NOT NULL DEFAULT 0,UNIQUE(source,request)
 ) STRICT;
-CREATE INDEX runs_source ON runs(source,id);
-CREATE TABLE branches(
- id INTEGER PRIMARY KEY AUTOINCREMENT,run INTEGER NOT NULL REFERENCES runs(id),parent INTEGER REFERENCES branches(id),
+CREATE TABLE task_controls(
+ id INTEGER PRIMARY KEY AUTOINCREMENT,source TEXT NOT NULL,run INTEGER NOT NULL REFERENCES run_controls(id),
+ parent INTEGER REFERENCES task_controls(id),world TEXT NOT NULL,kind TEXT NOT NULL,
+ retry_policy TEXT NOT NULL CHECK(retry_policy IN ('retry','manual')),retries INTEGER NOT NULL DEFAULT 1,
+ state TEXT NOT NULL DEFAULT 'queued' CHECK(state IN ('queued','running','waiting','done','failed','cancelled','uncertain')),
+ attempt INTEGER NOT NULL DEFAULT 0,owner TEXT,lease_expires REAL,key TEXT,UNIQUE(source,key)
+) STRICT;
+CREATE INDEX task_pending ON task_controls(state,source,id);
+CREATE UNIQUE INDEX active_driver ON task_controls(run) WHERE parent IS NULL AND state IN ('queued','running','waiting');
+CREATE INDEX task_parent ON task_controls(parent,id);
+CREATE VIEW running AS SELECT t.source FROM task_controls t JOIN run_controls r ON r.id=t.run
+ WHERE t.state='running' AND t.lease_expires>unixepoch('subsec') AND r.expires>unixepoch('subsec') AND NOT r.cancelled;
+PRAGMA user_version=4;
+`) (string/replace-all "$schema." (if temporary "journal." "main.") `
+CREATE TABLE $schema.run_payloads(id INTEGER PRIMARY KEY,input TEXT NOT NULL CHECK(json_valid(input)),config TEXT NOT NULL CHECK(json_valid(config))) STRICT;
+CREATE TABLE $schema.branches(
+ id INTEGER PRIMARY KEY AUTOINCREMENT,run INTEGER NOT NULL REFERENCES run_payloads(id),parent INTEGER REFERENCES branches(id),
  caller INTEGER REFERENCES events(id),entry INTEGER REFERENCES events(id),
  first INTEGER NOT NULL,last INTEGER NOT NULL,history_last INTEGER NOT NULL,
  world TEXT NOT NULL,code TEXT NOT NULL,file TEXT,origin TEXT NOT NULL CHECK(json_valid(origin)),temporary INTEGER NOT NULL CHECK(temporary IN (0,1)),
+ agent INTEGER NOT NULL,depth INTEGER NOT NULL CHECK(depth>=0),visibility TEXT NOT NULL CHECK(json_valid(visibility)),
  CHECK(first>=0 AND last>=first AND ((first=0 AND last=0) OR first>0))
 ) STRICT;
-CREATE UNIQUE INDEX root_run ON branches(run) WHERE parent IS NULL;
-CREATE UNIQUE INDEX child_admission ON branches(caller) WHERE caller IS NOT NULL;
-CREATE INDEX branch_parent ON branches(parent,id);
-` (if temporary `
-CREATE TABLE tasks(
- id INTEGER PRIMARY KEY,branch INTEGER REFERENCES branches(id),parent INTEGER REFERENCES tasks(id),kind TEXT NOT NULL,
- input TEXT NOT NULL CHECK(json_valid(input)),scope TEXT NOT NULL CHECK(json_valid(scope)),
+CREATE UNIQUE INDEX $schema.root_run ON branches(run) WHERE parent IS NULL;
+CREATE UNIQUE INDEX $schema.child_admission ON branches(caller) WHERE caller IS NOT NULL;
+CREATE INDEX $schema.branch_parent ON branches(parent,id);
+CREATE TABLE $schema.task_payloads(
+ id INTEGER PRIMARY KEY,branch INTEGER NOT NULL REFERENCES branches(id),input TEXT NOT NULL CHECK(json_valid(input)),
  checkpoint TEXT NOT NULL DEFAULT '{}' CHECK(json_valid(checkpoint)),admission INTEGER REFERENCES events(id),outcome INTEGER REFERENCES events(id)
 ) STRICT;
-` `
-CREATE TABLE tasks(
- id INTEGER PRIMARY KEY AUTOINCREMENT,source TEXT NOT NULL,run INTEGER REFERENCES runs(id),
- branch INTEGER REFERENCES branches(id),parent INTEGER REFERENCES tasks(id),world TEXT NOT NULL,
- kind TEXT NOT NULL,input TEXT NOT NULL CHECK(json_valid(input)),scope TEXT NOT NULL CHECK(json_valid(scope)),
- retry_policy TEXT NOT NULL CHECK(retry_policy IN ('retry','manual')),retries INTEGER NOT NULL,
- state TEXT NOT NULL DEFAULT 'queued' CHECK(state IN ('queued','running','waiting','done','failed','cancelled','uncertain')),
- checkpoint TEXT NOT NULL DEFAULT '{}' CHECK(json_valid(checkpoint)),
- attempt INTEGER NOT NULL DEFAULT 0,owner TEXT,lease_expires REAL,admission INTEGER REFERENCES events(id),outcome INTEGER REFERENCES events(id),
- key TEXT,UNIQUE(source,key)
-) STRICT;
-CREATE INDEX task_pending ON tasks(state,source,id);
-CREATE UNIQUE INDEX active_driver ON tasks(branch) WHERE parent IS NULL AND state IN ('queued','running','waiting');
-CREATE INDEX task_parent ON tasks(parent,id);
-CREATE VIEW running AS SELECT t.source FROM tasks t JOIN runs r ON r.id=t.run
- WHERE t.state='running' AND t.lease_expires>unixepoch('subsec') AND r.expires>unixepoch('subsec');
-`) `
-CREATE TABLE events(
+CREATE TABLE $schema.events(
  id INTEGER PRIMARY KEY AUTOINCREMENT CHECK(id<=9007199254740991),source TEXT NOT NULL,
- run INTEGER REFERENCES runs(id),branch INTEGER REFERENCES branches(id),parent INTEGER REFERENCES events(id),
- task INTEGER REFERENCES tasks(id),kind TEXT NOT NULL,text TEXT NOT NULL DEFAULT '',data TEXT NOT NULL CHECK(json_valid(data)),
+ run INTEGER REFERENCES run_payloads(id),branch INTEGER REFERENCES branches(id),parent INTEGER REFERENCES events(id),
+ task INTEGER REFERENCES task_payloads(id),kind TEXT NOT NULL,text TEXT NOT NULL DEFAULT '',data TEXT NOT NULL CHECK(json_valid(data)),
  author TEXT NOT NULL CHECK(length(author)>0),
  at TEXT NOT NULL DEFAULT(strftime('%Y-%m-%dT%H:%M:%fZ','now')) CHECK(strftime('%Y-%m-%dT%H:%M:%fZ',at) IS at),
  estimate INTEGER NOT NULL CHECK(estimate>=0),created REAL NOT NULL DEFAULT(unixepoch('subsec'))
 ) STRICT;
-CREATE INDEX event_source ON events(source,id);
-CREATE INDEX event_branch ON events(branch,id);
-CREATE INDEX event_task ON events(task,id);
-CREATE UNIQUE INDEX task_entry ON events(task,json_extract(data,'$.attempt')) WHERE kind='task-attempt';
-CREATE UNIQUE INDEX task_terminal ON events(task) WHERE kind='task-outcome';
-CREATE UNIQUE INDEX branch_terminal ON events(branch) WHERE kind='completed';
-CREATE UNIQUE INDEX tool_result ON events(parent) WHERE kind='tool-result';
-CREATE TRIGGER immutable_events_update BEFORE UPDATE ON events BEGIN SELECT raise(ABORT,'immutable events'); END;
-CREATE TRIGGER immutable_events_delete BEFORE DELETE ON events BEGIN SELECT raise(ABORT,'immutable events'); END;
-CREATE TABLE images(event INTEGER NOT NULL REFERENCES events(id),position INTEGER NOT NULL,mime TEXT NOT NULL,bytes BLOB NOT NULL,PRIMARY KEY(event,position)) WITHOUT ROWID;
-CREATE TRIGGER immutable_images_update BEFORE UPDATE ON images BEGIN SELECT raise(ABORT,'immutable images'); END;
-CREATE TRIGGER immutable_images_delete BEFORE DELETE ON images BEGIN SELECT raise(ABORT,'immutable images'); END;
-CREATE TABLE usage(
+CREATE INDEX $schema.event_source ON events(source,id);
+CREATE INDEX $schema.event_branch ON events(branch,id);
+CREATE INDEX $schema.event_task ON events(task,id);
+CREATE UNIQUE INDEX $schema.task_entry ON events(task,json_extract(data,'$.attempt')) WHERE kind='task-attempt';
+CREATE UNIQUE INDEX $schema.task_terminal ON events(task) WHERE kind='task-outcome';
+CREATE UNIQUE INDEX $schema.branch_terminal ON events(branch) WHERE kind='completed';
+CREATE UNIQUE INDEX $schema.tool_result ON events(parent) WHERE kind='tool-result';
+CREATE TRIGGER $schema.immutable_events_update BEFORE UPDATE ON events BEGIN SELECT raise(ABORT,'immutable events'); END;
+CREATE TRIGGER $schema.immutable_events_delete BEFORE DELETE ON events BEGIN SELECT raise(ABORT,'immutable events'); END;
+CREATE TABLE $schema.images(event INTEGER NOT NULL REFERENCES events(id),position INTEGER NOT NULL,mime TEXT NOT NULL,bytes BLOB NOT NULL,PRIMARY KEY(event,position)) WITHOUT ROWID;
+CREATE TRIGGER $schema.immutable_images_update BEFORE UPDATE ON images BEGIN SELECT raise(ABORT,'immutable images'); END;
+CREATE TRIGGER $schema.immutable_images_delete BEFORE DELETE ON images BEGIN SELECT raise(ABORT,'immutable images'); END;
+CREATE TABLE $schema.usage(
  request INTEGER PRIMARY KEY REFERENCES events(id),provider TEXT NOT NULL,model TEXT NOT NULL,
  input INTEGER,output INTEGER,total INTEGER,reasoning INTEGER,cached INTEGER,raw TEXT NOT NULL CHECK(json_valid(raw))
 ) STRICT;
-CREATE UNIQUE INDEX model_terminal ON events(parent) WHERE kind='model-outcome';
-CREATE TRIGGER event_kind BEFORE INSERT ON events
+CREATE UNIQUE INDEX $schema.model_terminal ON events(parent) WHERE kind='model-outcome';
+CREATE TRIGGER $schema.event_kind BEFORE INSERT ON events
  WHEN new.kind NOT IN ('user','response','completed','tool-result','tool-ambiguity',
  'task-admission','task-attempt','task-outcome','model-admission','model-outcome','call-admission',
  'launch-uncertain','traceback','summary','interruption','cancelled','artifact','context','error','save-intent','saved','operation-outcome')
  BEGIN SELECT raise(ABORT,'unsupported event kind'); END;
-CREATE VIEW memory_records AS WITH records AS (
+CREATE VIEW $schema.memory_records AS WITH records AS (
  SELECT e.id,e.source,e.run,e.branch,e.parent,e.task,e.kind,
    coalesce(json_extract(m.data,'$.text'),e.text) text,
    CASE WHEN m.id IS NULL THEN e.data ELSE json_patch(m.data,e.data) END data,
@@ -204,7 +199,7 @@ CREATE VIEW memory_records AS WITH records AS (
 ), projected AS (
  SELECT e.*,CASE WHEN json_type(data,'$.message')='object' THEN
   CASE WHEN json_extract(data,'$."reasoning-visible"') THEN json_extract(data,'$.message') ELSE json_remove(json_extract(data,'$.message'),'$.reasoning','$.reasoning_content','$.reasoning_details') END END public_message FROM records e
-) SELECT e.*,(SELECT 'tmp:'||r.request||'/'||b.id||':'||e.id FROM branches b JOIN runs r ON r.id=b.run WHERE b.id=e.branch AND b.temporary=1) label,CASE
+) SELECT e.*,(SELECT 'tmp:'||json_extract(r.input,'$.request')||'/'||b.id||':'||e.id FROM branches b JOIN run_payloads r ON r.id=b.run WHERE b.id=e.branch AND b.temporary=1) label,CASE
    WHEN kind='user' THEN coalesce(nullif(text,''),json_extract(data,'$.input.code'),'')
    WHEN kind IN ('response','completed','model-outcome') AND json_type(data,'$.message')='object'
      THEN public_message || char(10) || json_object('status',json_extract(data,'$.status'))
@@ -213,31 +208,41 @@ CREATE VIEW memory_records AS WITH records AS (
    ELSE text END body,
    CASE WHEN kind IN ('user','context','response','completed','tool-result','tool-ambiguity','call-admission','operation-outcome','cancelled','save-intent','saved') THEN 1
     WHEN kind='task-admission' THEN json_extract(data,'$.kind')='code'
-    WHEN kind IN ('error','interruption') THEN NOT EXISTS(SELECT 1 FROM tasks t WHERE t.id=e.task AND t.kind='summarize')
+    WHEN kind IN ('error','interruption') THEN NOT EXISTS(SELECT 1 FROM task_payloads t JOIN events a ON a.id=t.admission WHERE t.id=e.task AND json_extract(a.data,'$.kind')='summarize')
     WHEN kind='artifact' THEN json_type(data,'$.invalidates') IS NULL ELSE 0 END memory
  FROM projected e;
-CREATE VIEW invalid_summaries AS
+CREATE VIEW $schema.conversation_records AS
+ SELECT e.*,CASE WHEN kind='response' THEN json_extract(data,'$.message') ELSE
+   json_object('role','tool','tool_call_id',json_extract(data,'$.tool-id'),'content',text) END conversation_message
+ FROM memory_records e WHERE kind='response' OR kind IN ('tool-result','tool-ambiguity') AND NOT EXISTS(
+   SELECT 1 FROM events n WHERE n.branch=e.branch AND n.id>e.id AND n.kind IN ('tool-result','tool-ambiguity')
+     AND json_extract(n.data,'$.response')=json_extract(e.data,'$.response') AND json_extract(n.data,'$.tool-id')=json_extract(e.data,'$.tool-id'));
+CREATE VIEW $schema.unresolved_tools AS
+ SELECT r.branch,r.id response,json_extract(c.value,'$.id') tool_id FROM memory_records r,json_each(r.data,'$.tools') c
+ WHERE r.kind='response' AND r.id=(SELECT max(id) FROM events WHERE branch=r.branch AND kind='response') AND NOT EXISTS(
+   SELECT 1 FROM events e WHERE e.branch=r.branch AND e.kind IN ('tool-result','tool-ambiguity')
+     AND json_extract(e.data,'$.tool-id')=json_extract(c.value,'$.id') AND json_extract(e.data,'$.response')=r.id);
+CREATE VIEW $schema.invalid_summaries AS
  WITH RECURSIVE invalid(source,id) AS (
    SELECT n.source,n.id FROM events a JOIN events n ON n.id=json_extract(a.data,'$.invalidates') AND n.source=a.source AND n.kind='summary'
    WHERE a.kind='artifact' AND json_type(a.data,'$.invalidates')='integer'
    UNION SELECT n.source,n.id FROM events n JOIN invalid i ON i.source=n.source,json_each(n.data,'$.children') c WHERE n.kind='summary' AND i.id=c.value
  ) SELECT id FROM invalid;
-CREATE UNIQUE INDEX summary_task ON events(task) WHERE kind='summary';
-CREATE INDEX summary_key ON events(source,json_extract(data,'$.policy'),json_extract(data,'$.children')) WHERE kind='summary';
-CREATE INDEX summary_start ON events(source,json_extract(data,'$.first')) WHERE kind='summary';
-CREATE INDEX summary_invalidations ON events(source,id) WHERE kind='artifact' AND json_type(data,'$.invalidates')='integer';
+CREATE UNIQUE INDEX $schema.summary_task ON events(task) WHERE kind='summary';
+CREATE INDEX $schema.summary_key ON events(source,json_extract(data,'$.policy'),json_extract(data,'$.children')) WHERE kind='summary';
+CREATE INDEX $schema.summary_start ON events(source,json_extract(data,'$.first')) WHERE kind='summary';
+CREATE INDEX $schema.summary_invalidations ON events(source,id) WHERE kind='artifact' AND json_type(data,'$.invalidates')='integer';
 
-CREATE VIEW search_records AS SELECT id,body FROM memory_records WHERE memory;
-CREATE VIRTUAL TABLE event_fts USING fts5(body,content='search_records',content_rowid='id',tokenize='unicode61 remove_diacritics 0');
-CREATE VIRTUAL TABLE event_words USING fts5vocab(event_fts,'instance');
-CREATE TABLE lexemes(id INTEGER PRIMARY KEY,source TEXT NOT NULL,term TEXT NOT NULL,UNIQUE(source,term)) STRICT;
-CREATE TABLE event_lexemes(event INTEGER NOT NULL REFERENCES events(id),lexeme INTEGER NOT NULL REFERENCES lexemes(id),PRIMARY KEY(event,lexeme)) WITHOUT ROWID;
-CREATE INDEX lexeme_events ON event_lexemes(lexeme,event);
-CREATE VIRTUAL TABLE lexeme_grams USING fts5(term,content='lexemes',content_rowid='id',tokenize='trigram',detail='none');
-CREATE TRIGGER lexeme_index AFTER INSERT ON lexemes BEGIN INSERT INTO lexeme_grams(rowid,term) VALUES(new.id,new.term); END;
-CREATE TRIGGER event_index AFTER INSERT ON events BEGIN
+CREATE VIEW $schema.search_records AS SELECT id,body FROM memory_records WHERE memory;
+CREATE VIRTUAL TABLE $schema.event_fts USING fts5(body,content='search_records',content_rowid='id',tokenize='unicode61 remove_diacritics 0');
+CREATE VIRTUAL TABLE $schema.event_words USING fts5vocab(event_fts,'instance');
+CREATE TABLE $schema.lexemes(id INTEGER PRIMARY KEY,source TEXT NOT NULL,term TEXT NOT NULL,UNIQUE(source,term)) STRICT;
+CREATE TABLE $schema.event_lexemes(event INTEGER NOT NULL REFERENCES events(id),lexeme INTEGER NOT NULL REFERENCES lexemes(id),PRIMARY KEY(event,lexeme)) WITHOUT ROWID;
+CREATE INDEX $schema.lexeme_events ON event_lexemes(lexeme,event);
+CREATE VIRTUAL TABLE $schema.lexeme_grams USING fts5(term,content='lexemes',content_rowid='id',tokenize='trigram',detail='none');
+CREATE TRIGGER $schema.lexeme_index AFTER INSERT ON lexemes BEGIN INSERT INTO lexeme_grams(rowid,term) VALUES(new.id,new.term); END;
+CREATE TRIGGER $schema.event_index AFTER INSERT ON events BEGIN
  INSERT INTO event_fts(rowid,body) SELECT id,body FROM search_records WHERE id=new.id;
 END;
-CREATE UNIQUE INDEX context_key ON events(source,json_extract(data,'$.key')) WHERE kind='context';
-PRAGMA user_version=3;
-`))
+CREATE UNIQUE INDEX $schema.context_key ON events(source,json_extract(data,'$.key')) WHERE kind='context';
+`)))

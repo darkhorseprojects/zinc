@@ -106,7 +106,7 @@
     (git directory ["update-ref" "--stdin"] (string (if previous "update " "create ") ref " " commit (when previous (string " " previous)) "\n"))
     (def receipt @{:ref ref :before previous :after commit :file (origin :path) :merged merged :pushed false})
     (store/append s view "saved" message receipt (intent :id))
-    (store/query s "UPDATE branches SET origin=? WHERE id=?" [(string (json/encode (merge origin {:ref ref :base commit :tracked true}))) (branch :id)])
+    (store/query s (string "UPDATE " (s :journal) ".branches SET origin=? WHERE id=?") [(string (json/encode (merge origin {:ref ref :base commit :tracked true}))) (branch :id)])
     (def materialized (git directory ["show" (string commit ":" (origin :path))]))
     (when (= code (string (slurp file))) (spit file materialized :wb))
     (def head (git directory ["symbolic-ref" "-q" "HEAD"] nil nil true))

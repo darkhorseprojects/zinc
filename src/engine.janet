@@ -8,13 +8,7 @@
 (import ./repl)
 
 (defn make [spec]
-  (defn scope [s branch]
-    (def view (store/view s branch))
-    (def user (first (store/query s "SELECT id FROM events WHERE branch=? AND kind='user' ORDER BY id LIMIT 1" [branch])))
-    (def latest (first (store/visible s (merge view {:last 9007199254740991 :columns "e.id"}) :recent 1)))
-    (merge view {:first (if (= 0 (view :first)) (user :id) (view :first))
-                 :last (if latest (latest :id) (view :last))
-                 :agent ((s :config) :inference)}))
+  (def scope store/view)
 
   (defn spawn-job [s id]
     (def lease (store/claim s id))
@@ -23,10 +17,10 @@
         (if (or (s :temporary) (and (= "summarize" (lease :kind)) (not (dyn :zinc/background))))
           (ev/go (fn [] ((dyn :zinc/execute) s lease)))
           (pa/spawn (merge (dyn :pa/program) {"entry" "task"})
-                    (string (json/encode {:task id :owner (lease :owner) :attempt (lease :attempt)}))
+                    (string (json/encode {:task id :owner (lease :owner)}))
                     (string (json/encode (dyn :zinc/config))) {:limits (dyn :pa/limits) :emit pa/emit}))
         ([err] (store/transact s
-                 (store/append s (json/decode ((store/task s id) :scope) true true)
+                 (store/append s (scope s (lease :branch))
                                "launch-uncertain" "Task acceptance could not be confirmed." {} nil id)))))
     id)
 
@@ -41,7 +35,7 @@
         (store/recover s)
         (when current
           (def owner (store/task s (current :id)))
-          (assert (and (= (current :generation) (owner :attempt)) (index-of (owner :state) ["running" "waiting"])) "waiting execution fenced"))
+          (assert (and (= (current :owner) (owner :owner)) (index-of (owner :state) ["running" "waiting"])) "waiting execution fenced"))
         (def row (store/task s id))
         (case (row :state)
           "done" (return done ((json/decode (row :result) true true) :value))
@@ -77,7 +71,7 @@
       (do
         (when (selected :base)
           (repl/git (selected :root) ["update-ref" "--stdin"] (string "create " (selected :ref) " " (selected :base) "\n")))
-        (def branch (store/start child value config (merge view {:event (dyn :zinc/effect)}) selected))
+        (def branch (store/start child value config (merge view {:event (dyn :zinc/effect) :agent (or (view :agent) (not= config current))}) selected))
         (def id (store/submit child (scope child (branch :id)) (if (value :text) "agent" "code")
           (if (value :text) {:branch (branch :id) :model (config :chat)} {:code (value :code)})
           {:retry-policy (if (value :text) "retry" "manual") :key (string "child:" (branch :id))}))
@@ -91,19 +85,7 @@
         (def request (string/join (map |(string/format "%02x" $) (os/cryptorand 24))))
         (def depth (+ 1 (get-in (dyn :zinc/task) [:scope :depth] 0)))
         (assert (<= depth (config :task-depth)) "agent recursion ceiling exhausted")
-        (def snapshot @{:origin selected :depth depth :budget-root (s :budget-root)
-          :deadline (((store/query s "SELECT expires FROM runs WHERE id=?" [(view :run)] true) 0) :expires)
-          :child true :archive-last (or (s :archive-last) (((store/query s "SELECT coalesce(max(id),0) n FROM events") 0) :n))})
-        (when (s :temporary)
-          (each name [:runs :branches]
-            (put snapshot name (store/query s (string "SELECT * FROM " name " WHERE " (if (= name :runs) "id" "run") "=?") [(view :run)])))
-          (put snapshot :tasks (store/query s "SELECT t.* FROM tasks t JOIN branches b ON b.id=t.branch WHERE b.run=?" [(view :run)]))
-          (def records @[]) (var after (- (visible :first) 1))
-          (while true
-            (def page (store/visible s (merge visible {:first (+ after 1) :columns "e.*"}) :oldest (config :history-records)))
-            (when (= 0 (length page)) (break))
-            (array/concat records page) (set after ((last page) :id)))
-          (put snapshot :events records))
+        (def snapshot (merge (store/snapshot s visible) {:origin selected}))
         (def handle (pa/spawn (merge (dyn :pa/program) {"entry" "self"})
           (string (json/encode (merge value {:request request :parent (get value :parent (visible :last))
             :memory_range (get value :memory_range {:start (visible :first) :end (visible :last)})})))
@@ -111,21 +93,38 @@
         (put ((dyn :zinc/task) :children) request handle)
         {:temporary request})))
 
+  (defn message [s event]
+    (when (and (event :branch) (index-of (event :kind) ["user" "response" "completed" "task-admission" "tool-result" "tool-ambiguity" "interruption" "model-outcome" "saved" "error"]))
+      (def data (json/decode (event :data) true true))
+      (def branch (store/branch s (event :branch)))
+      (def assistant (when (event :public_message) (json/decode (event :public_message) true true)))
+      (def base (merge (coordinates branch event data) {:event (if (= 0 (branch :temporary)) (event :id) :null)}))
+      (case (get {"response" "turn" "completed" "turn"} (event :kind) (event :kind))
+        "user" (merge base {:type "start" :root (and (nil? (branch :parent)) (not (get-in (s :config) [:snapshot :child])))})
+        "turn" (merge base {:type "turn" :text (event :text) :message assistant
+          :status (get data :status "complete") :usage (data :usage) :final (= "completed" (event :kind))})
+        "task-admission" (when (= "code" (data :kind)) (merge base {:type "tool" :call (event :id) :code (event :text)}))
+        "tool-result" (merge base {:type "tool_result" :call (or (get-in data [:original :event]) (event :task)) :ok (data :ok) :text (event :text)})
+        "tool-ambiguity" (merge base {:type "ambiguity" :call (event :task) :text (event :text)})
+        "interruption" (when (= "uncertain" (data :state)) (merge base {:type "ambiguity" :call (event :task) :text (event :text)}))
+        "model-outcome" (when (data :visible)
+          (merge base {:type "model" :role (data :role) :text (or (data :text) (string (json/encode (data :results))))
+            :status (data :status) :message assistant :results (data :results) :usage (data :usage)}))
+        "saved" (merge base {:type "saved" :text (event :text) :ref (data :ref) :before (data :before) :after (data :after) :pushed (data :pushed)})
+        "error" (merge base {:type "error" :text (event :text)}) nil)))
+
   (defn result [s id]
     (def branch (store/branch s id))
     (def final (first (store/query s "SELECT * FROM memory_records WHERE branch=? AND kind='completed'" [id])))
     (assert final "branch has no completion")
-    (def user (first (store/query s "SELECT id FROM events WHERE branch=? AND kind='user' ORDER BY id LIMIT 1" [id])))
-    (def usage (first (store/query s
-      "SELECT coalesce(sum(u.total),0) reported_total,count(*) FILTER(WHERE u.total IS NULL) unreported FROM events e LEFT JOIN usage u ON u.request=e.id WHERE e.source=? AND e.run=? AND e.kind='model-admission'"
-      [(s :source) (branch :run)])))
-    (def persist (= 0 (branch :temporary)))
-    (def data (json/decode (final :data) true true))
-    (merge (coordinates branch final data)
-      {:text (final :text) :start (if persist (user :id) :null) :event (if persist (final :id) :null)
+    (merge (message s final)
+      {:start (if (= 0 (branch :temporary))
+        ((first (store/query s "SELECT id FROM events WHERE branch=? AND kind='user' ORDER BY id LIMIT 1" [id])) :id) :null)
        :parent (or (branch :entry) 0) :memory_range {:start (branch :first) :end (branch :last)}
-       :tool_usage (store/tool-used s (branch :run)) :usage usage
-       :status (get data :status "complete") :context_unit "token-estimate"}))
+       :tool_usage (store/tool-used s (branch :run)) :context_unit "token-estimate"
+       :usage (first (store/query s
+         "SELECT coalesce(sum(u.total),0) reported_total,count(*) FILTER(WHERE u.total IS NULL) unreported FROM events e LEFT JOIN usage u ON u.request=e.id WHERE e.source=? AND e.run=? AND e.kind='model-admission'"
+         [(s :source) (branch :run)]))}))
 
   (defn run-code [s view code]
     (def config (s :config))
@@ -149,7 +148,7 @@
                              (first (store/query s `WITH RECURSIVE parents(id) AS (
                                SELECT id FROM tasks WHERE id=? AND source=? UNION ALL
                                SELECT t.parent FROM tasks t JOIN parents p ON t.id=p.id WHERE t.parent IS NOT NULL)
-                               SELECT id FROM parents WHERE id=?` [(handle :job) (s :source) (current :id)] true))) "await requires descendant work")
+                               SELECT id FROM parents WHERE id=?` [(handle :job) (s :source) (current :id)]))) "await requires descendant work")
                 (wait s (handle :job)))))
           (do
             (def admission (store/transact s
@@ -169,14 +168,14 @@
               (store/checkpoint s {:phase "code"})
               (store/append s view "operation-outcome" name {:value value} (admission :id) (current :id)))
             value)))
-      (min (config :seconds) (max 0.001 (- (((store/query s "SELECT expires FROM runs WHERE id=?" [(view :run)] true) 0) :expires) (os/clock))))))
+      (min (config :seconds) (max 0.001 (- (((store/query s "SELECT expires FROM main.run_controls WHERE id=?" [(view :run)]) 0) :expires) (os/clock))))))
 
   (defn infer [s task input]
     (assert ((s :config) :inference) "inference is not permitted in this view")
     (def branch (input :branch))
     (def config (s :config))
-    (def granted (json/decode (task :scope) true true))
-    (def inherited (store/view s branch))
+    (def granted (scope s branch))
+    (def inherited (store/view s branch false))
     (def selected (model/profile s (input :model) :chat))
     (def evaluate (and (config :repl) (selected :tools)))
     (def system (repl/instructions config (merge granted {:tools evaluate}) (spec :document) (s :bindings)))
@@ -194,23 +193,20 @@
     (var context (memory/context s inherited space pool))
     (while (not (first (store/query s "SELECT id FROM events WHERE branch=? AND kind='completed'" [branch])))
       (def responses (store/query s "SELECT e.id,e.data FROM memory_records e WHERE e.branch=? AND e.kind='response' ORDER BY e.id" [branch]))
-      (when (last responses)
-        (each tool ((json/decode ((last responses) :data) true true) :tools)
-          (unless (first (store/query s "SELECT id FROM events WHERE branch=? AND kind IN ('tool-result','tool-ambiguity') AND json_extract(data,'$.tool-id')=? AND json_extract(data,'$.response')=?" [branch (tool :id) ((last responses) :id)]))
-            (store/append s (scope s branch) "tool-ambiguity" "Interrupted evaluation; effects may have happened. Inspect before repeating."
-                          {:tool-id (tool :id) :response ((last responses) :id) :ok false :uncertain true} ((last responses) :id) (task :id)))))
+      (each tool (store/query s "SELECT * FROM unresolved_tools WHERE branch=?" [branch])
+        (store/append s (scope s branch) "tool-ambiguity" "Interrupted evaluation; effects may have happened. Inspect before repeating."
+          {:tool-id (tool :tool_id) :response (tool :response) :ok false :uncertain true} (tool :response) (task :id)))
       (assert (< (length responses) (config :rounds)) "model round limit exhausted")
       (def view (scope s branch))
       (def final-round (= (+ 1 (length responses)) (config :rounds)))
       (def messages @[])
       (while true
         (array/clear messages) (array/push messages {:role "system" :content system})
-        (each [title text] [["History" (string/join (map memory/render (context :nodes)))] ["Retrieved text" (string/join (context :evidence))]]
+        (each [title text] [["History" (string/join (map |($ :rendered) (context :nodes)))] ["Retrieved text" (string/join (context :evidence))]]
           (when (> (length text) 0) (array/push messages {:role "user" :content (string "## " title "\n\n" text)})))
         (array/push messages inquiry)
-        (each record (store/query s "SELECT e.* FROM memory_records e WHERE e.branch=? AND e.id>? AND e.kind IN ('response','tool-result','tool-ambiguity') AND (e.kind='response' OR NOT EXISTS(SELECT 1 FROM events newer WHERE newer.branch=e.branch AND json_extract(newer.data,'$.response')=json_extract(e.data,'$.response') AND json_extract(newer.data,'$.tool-id')=json_extract(e.data,'$.tool-id') AND newer.kind IN ('tool-result','tool-ambiguity') AND newer.id>e.id)) ORDER BY e.id" [branch (context :through)])
-          (def data (json/decode (record :data) true true))
-          (array/push messages (if (= "response" (record :kind)) (data :message) {:role "tool" :tool_call_id (data :tool-id) :content (record :text)})))
+        (each record (store/query s "SELECT conversation_message FROM conversation_records WHERE branch=? AND id>? ORDER BY id" [branch (context :through)])
+          (array/push messages (json/decode (record :conversation_message) true true)))
         (when final-round (array/push messages {:role "system" :content "Tool calls are unavailable in this inference round."}))
         (when (<= (+ (model/estimate messages) (if final-round 0 tool-size)) capacity) (break))
         (assert (< (context :through) (view :last)) "context metadata cannot fit")
@@ -249,21 +245,21 @@
     (def s (merge store {:runtime nil}))
     (def id (row :id))
     (do
-      (def view (json/decode (row :scope) true true))
+      (def view (scope s (row :branch)))
       (when (and (view :agent) ((s :config) :agent))
         (put s :config ((s :config) :agent)) (put s :bindings nil))
       (def config (s :config))
       (unless (s :budget-root) (put s :budget-root (row :run)))
       (def input (json/decode (row :input) true true))
       (store/transact s
-        (assert (first (store/query s `SELECT t.id FROM tasks t JOIN runs r ON r.id=t.run WHERE t.id=? AND t.owner=? AND t.attempt=?
-          AND t.state='running' AND t.lease_expires>? AND r.expires>?` [id (row :owner) (row :attempt) (os/clock) (os/clock)] true)) "task execution fenced")
+        (assert (first (store/query s `SELECT t.id FROM main.task_controls t JOIN main.run_controls r ON r.id=t.run WHERE t.id=? AND t.owner=?
+          AND t.state='running' AND t.lease_expires>? AND r.expires>? AND NOT r.cancelled` [id (row :owner) (os/clock) (os/clock)])) "task execution fenced")
         (store/append s view "task-attempt" "execution entered" {:attempt (row :attempt)} nil id))
       (def stop (ev/thread-chan 1))
       (def finished (ev/thread-chan 1))
-      (ev/thread store/heartbeat [config id (row :owner) (row :attempt) stop] :n finished)
+      (ev/thread store/heartbeat [config id (row :owner) stop] :n finished)
       (defer (do (ev/give stop true) (ev/take finished))
-        (with-dyns [:zinc/task @{:id id :owner (row :owner) :generation (row :attempt) :scope view
+        (with-dyns [:zinc/task @{:id id :owner (row :owner) :scope view
                     :children @{} :checkpoint (json/decode (row :checkpoint) true true)}
                     :zinc/effect (row :admission)]
           (var value nil)
@@ -303,28 +299,8 @@
           (when (s :runtime) (repl/close (s :runtime)) (put s :runtime nil))
           (unless (index-of ((store/task s id) :state) ["done" "failed"])
             (store/finish s row value failure))
-          (each pending (store/query s "SELECT id FROM tasks WHERE source=? AND run=? AND state='queued' AND EXISTS(SELECT 1 FROM runs WHERE id=tasks.run AND expires>?) ORDER BY id LIMIT ?" [(s :source) (row :run) (os/clock) (config :parallel)] true)
+          (each pending (store/query s "SELECT id FROM tasks WHERE source=? AND run=? AND state='queued' AND EXISTS(SELECT 1 FROM runs WHERE id=tasks.run AND expires>?) ORDER BY id LIMIT ?" [(s :source) (row :run) (os/clock) (config :parallel)])
             (spawn-job s (pending :id)))))))
-
-  (defn message [s event]
-    (when (and (event :branch) (index-of (event :kind) ["user" "response" "completed" "task-admission" "tool-result" "tool-ambiguity" "interruption" "model-outcome" "saved" "error"]))
-    (def data (json/decode (event :data) true true))
-    (def branch (when (event :branch) (store/branch s (event :branch))))
-    (def assistant (when (event :public_message) (json/decode (event :public_message) true true)))
-    (def base (merge (coordinates branch event data) {:event (if (= 0 (branch :temporary)) (event :id) :null)}))
-    (case (get {"response" "turn" "completed" "turn"} (event :kind) (event :kind))
-      "user" (merge base {:type "start" :root (and (nil? (branch :parent)) (not (get-in (s :config) [:snapshot :child])))})
-      "turn" (merge base {:type "turn" :text (event :text) :message assistant
-        :status (get data :status "complete") :usage (data :usage) :final (= "completed" (event :kind))})
-      "task-admission" (when (= "code" (data :kind)) (merge base {:type "tool" :call (event :id) :code (event :text)}))
-      "tool-result" (merge base {:type "tool_result" :call (or (get-in data [:original :event]) (event :task)) :ok (data :ok) :text (event :text)})
-      "tool-ambiguity" (merge base {:type "ambiguity" :call (event :task) :text (event :text)})
-      "interruption" (when (= "uncertain" (data :state)) (merge base {:type "ambiguity" :call (event :task) :text (event :text)}))
-      "model-outcome" (when (data :visible)
-        (merge base {:type "model" :role (data :role) :text (or (data :text) (string (json/encode (data :results))))
-          :status (data :status) :message assistant :results (data :results) :usage (data :usage)}))
-      "saved" (merge base {:type "saved" :text (event :text) :ref (data :ref) :before (data :before) :after (data :after) :pushed (data :pushed)})
-      "error" (merge base {:type "error" :text (event :text)}) nil)))
 
   (defn drain [s run after]
     (var sequence after)
@@ -356,15 +332,15 @@
         (assert (= 0 (existing :temporary)) "temporary execution cannot be reattached"))
       (when existing
         (assert (= (existing :world) (config :world)) "saved world differs")
-        (assert (not (first (store/query s "SELECT id FROM events WHERE run=? AND kind='cancelled'" [(existing :id)]))) "run cancelled")
+        (assert (= 0 (existing :cancelled)) "run cancelled")
         (put s :config (schema/authorize (spec :schema) config (json/decode (existing :config) true true)))
-        (store/query s "UPDATE runs SET expires=min(expires,(SELECT min(created) FROM events WHERE run=runs.id AND kind='user')+?) WHERE id=?" [((s :config) :run-seconds) (existing :id)]))
+        (store/query s "UPDATE main.run_controls SET expires=min(expires,(SELECT min(created) FROM events WHERE run=run_controls.id AND kind='user')+?) WHERE id=?" [((s :config) :run-seconds) (existing :id)]))
       (unless task (put s :bindings (repl/definitions (s :config) (spec :capabilities))))
       (with-dyns [:zinc/wait wait :zinc/spawn spawn-job :zinc/execute execute-job :zinc/config (s :config)]
         (store/recover s)
         (if task
           (let [row (store/task s (value :task))]
-            (assert (and (= (value :owner) (row :owner)) (= (value :attempt) (row :attempt))) "task ownership changed")
+            (assert (= (value :owner) (row :owner)) "task ownership changed")
             (execute-job s row) {:task (value :task)})
           (do
             (def branch (if resume (store/branch s ((first (store/query s "SELECT id FROM branches WHERE run=? AND parent IS NULL" [(existing :id)])) :id)) (store/start s value (s :config) nil
@@ -407,10 +383,10 @@
           (put parameter :default (get config key (get field :default "automatic")))
           (each key [:optional :option] (put parameter key nil))
           (array/push parameters parameter))))
-    {:input "json" :output "json" :durable true :record true :contract "inquiry-v1"
+    {:input "json" :output "json" :durable true :record true :contract "inquiry-v2"
      :profile {:field "agent" :inference "inference"} :parameters parameters})
 
-  (tabseq [[operation fields] :in [["self" (keys (spec :input))] ["task" [:task :owner :attempt]] ["resume" [:run :request :after]]
+  (tabseq [[operation fields] :in [["self" (keys (spec :input))] ["task" [:task :owner]] ["resume" [:run :request :after]]
     ["describe" []] ["document" []] ["models" [:role]] ["events" [:run :after]] ["record" [:records]]
     ["pending" [:request]] ["abort" [:run :request :reason]] ["invalidate" [:event]]]]
     operation (fn [bytes opaque]
@@ -442,17 +418,18 @@
             "abort" (store/transact s
               (assert (and (not= (nil? (value :run)) (nil? (value :request))) (string? (value :reason)) (<= (length (value :reason)) 2048)) "abort requires run or request and reason")
               (when (value :request)
-                (store/query s "INSERT INTO runs(source,request,input,world,config,expires) VALUES(?,?,'{}',?,'{}',?) ON CONFLICT(source,request) DO NOTHING"
+                (store/query s "INSERT INTO main.run_controls(source,request,world,expires) VALUES(?,?,?,?) ON CONFLICT(source,request) DO NOTHING"
                   [(s :source) (value :request) (config :world) (os/clock)]))
               (def run (first (store/query s "SELECT * FROM runs WHERE source=? AND (id=? OR request=?)" [(s :source) (value :run) (value :request)])))
               (assert (and run (= (run :world) (config :world))) "run unavailable")
               (def completed (or (first (store/query s "SELECT e.id FROM events e JOIN branches b ON b.id=e.branch WHERE e.run=? AND e.kind='completed' AND b.parent IS NULL" [(run :id)]))
                 (first (store/query s "SELECT id FROM tasks WHERE run=? AND parent IS NULL AND state='done' AND run IN (SELECT id FROM runs WHERE temporary=1)" [(run :id)]))))
               (unless completed
-                (def tasks (store/query s `UPDATE tasks SET state='cancelled' WHERE source=? AND state IN ('queued','running','waiting','uncertain')
-                  AND run IN (SELECT id FROM runs WHERE id=? OR temporary=1 AND coalesce(root,id)=?) RETURNING id,kind,attempt,admission,outcome`
+                (store/query s "UPDATE main.run_controls SET cancelled=1 WHERE id=?" [(run :id)])
+                (def tasks (store/query s `UPDATE main.task_controls SET state='cancelled' WHERE source=? AND state IN ('queued','running','waiting','uncertain')
+                  AND run IN (SELECT id FROM main.run_controls WHERE id=? OR temporary=1 AND coalesce(root,id)=?) RETURNING id,kind,attempt`
                   [(s :source) (run :id) (or (run :root) (run :id))]))
-                (unless (first (store/query s "SELECT id FROM events WHERE run=? AND kind='cancelled'" [(run :id)]))
+                (when (and (= 0 (run :temporary)) (run :input) (not (first (store/query s "SELECT id FROM events WHERE run=? AND kind='cancelled'" [(run :id)]))))
                   (store/append s {:run (run :id) :branch (get (first (store/query s "SELECT id FROM branches WHERE run=? AND parent IS NULL" [(run :id)])) :id)}
                     "cancelled" "Interrupted. Performed effects are not rolled back; running effects may still finish."
                     {:reason (when (= 0 (run :temporary)) (value :reason)) :tasks-at-request tasks})))

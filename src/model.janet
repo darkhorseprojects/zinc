@@ -1,5 +1,3 @@
-(import jurl :as http)
-(import jurl/native :as curl)
 (import spork/utf8 :as utf8)
 (import spork/json :as json)
 (import spork/base64 :as base64)
@@ -20,20 +18,20 @@
   (def provider ((config :providers) (keyword (reference :provider))))
   (assert provider "provider is not configured")
   (def s (when current (store/open config)))
-  (def client (unless (provider :transport) (curl/new)))
+  (def native (unless (provider :transport) (require "jurl/native")))
+  (def client (when native ((module/value native 'new))))
   (def bytes @"")
   (var next-check 0)
   (var permitted true)
-  (defer (do (when client (curl/reset client)) (when s (store/close s)))
-    # Progress callbacks are synchronous; no channel send crosses curl's native stack.
+  (defer (do (when client ((module/value native 'reset) client)) (when s (store/close s)))
     (def check (fn [& counts]
                  (when (and current (>= (os/clock) next-check))
                    (set next-check (+ (os/clock) 0.1))
                    (set permitted (not (nil? (first
-                     (store/query s `SELECT t.id FROM tasks t JOIN runs r ON r.id=t.run
-                       WHERE t.id=? AND t.source=? AND t.attempt=? AND t.owner=?
-                       AND t.state IN ('running','waiting') AND t.lease_expires>? AND r.expires>?`
-                       [(current :id) (s :source) (current :generation) (current :owner) (os/clock) (os/clock)]))))))
+                     (store/query s `SELECT t.id FROM main.task_controls t JOIN main.run_controls r ON r.id=t.run
+                       WHERE t.id=? AND t.source=? AND t.owner=?
+                       AND t.state IN ('running','waiting') AND t.lease_expires>? AND r.expires>? AND NOT r.cancelled`
+                       [(current :id) (s :source) (current :owner) (os/clock) (os/clock)]))))))
                  permitted))
     (assert (check) "HTTP job fenced")
     (def url (string (provider :url) path))
@@ -43,7 +41,7 @@
       (if-let [transport (provider :transport)]
         (with-dyns [:capability/config (transport :config)]
           ((module/value (require (transport :module)) 'request) url method body headers))
-        (http/request
+        ((module/value (require "jurl") 'request)
           {:client client :url url :method (keyword (string/ascii-lower method)) :body body
            :headers (tabseq [[key value] :in (pairs headers) :unless (nil? value)] key value)
            :stream (fn [chunk]
@@ -115,7 +113,7 @@
     (if (= provider "llama")
       (do
         (assert (find |(= ($ :ref) reference) (catalogue config (string role))) "exact model is unavailable")
-        (request config ref "GET" (string "/props?model=" (curl/escape id))))
+        (request config ref "GET" (string "/props?model=" ((module/value (require "jurl/native") 'escape) id))))
       (let [catalog (request config ref "GET"
                              (string "/v1/models?output_modalities=" (if (= role :rerank) "rerank" "text")) nil true)
             record (find |(= ($ :id) id) (catalog :data))]
@@ -166,7 +164,7 @@
   (assert (dictionary? raw) "invalid usage report")
   (each field [:prompt_tokens :completion_tokens :total_tokens]
     (when (has-key? raw field) (assert (and (int? (raw field)) (>= (raw field) 0)) "invalid reported usage")))
-  (store/query s "INSERT INTO usage(request,provider,model,input,output,total,reasoning,cached,raw) VALUES(?,?,?,?,?,?,?,?,?)"
+  (store/query s (string "INSERT INTO " (s :journal) ".usage(request,provider,model,input,output,total,reasoning,cached,raw) VALUES(?,?,?,?,?,?,?,?,?)")
                [request (selected :provider) (selected :id) (raw :prompt_tokens) (raw :completion_tokens) (raw :total_tokens)
                 (get-in raw [:completion_tokens_details :reasoning_tokens]) (get-in raw [:prompt_tokens_details :cached_tokens])
                 (string (json/encode raw))]))
