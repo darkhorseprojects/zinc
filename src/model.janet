@@ -12,12 +12,11 @@
     (store/charge s 1 0)
     (def event (store/append s (current :scope) "model-admission" (reference :reference)
                              {:input input :estimate size :output output} nil (current :id)))
-    (store/checkpoint s (merge (current :checkpoint) {:request (event "id")}))
-    (event "id")))
+    (store/checkpoint s (merge (current :checkpoint) {:request (event :id)}))
+    (event :id)))
 
 (defn transfer [[config reference method path body current limits]]
   (setdyn :pa/limits limits)
-  (def current (or (get current :executor) current))
   (def provider ((config :providers) (keyword (reference :provider))))
   (assert provider "provider is not configured")
   (def s (when current (store/open config)))
@@ -101,7 +100,11 @@
       (array/push models {:ref (string name ":" (record :id)) :name (get record :name (record :id))})))
   (sorted models |(< ($0 :ref) ($1 :ref))))
 
-(defn profile [config reference role]
+(defn profile [s reference role]
+  (def config (s :config))
+  (def key [(config :providers) reference role (config :thinking)])
+  (or ((s :profiles) key)
+    (do
   (def split (string/find ":" reference))
   (assert split "model reference must be provider:id")
   (def provider (string/slice reference 0 split))
@@ -139,15 +142,15 @@
               (string reference " does not advertise thinking=" thinking "; use default or an advertised effort"))))
   (def control
     (if (= provider "llama")
-      (when (get-in record [:chat_template_caps :supports_reasoning_effort]) "reasoning_effort")
+      (when (get-in record [:chat_template_caps :supports_reasoning_effort]) :reasoning_effort)
       (cond (index-of "reasoning" parameters) "reasoning"
-        (index-of "reasoning_effort" parameters) "reasoning_effort")))
+        (index-of "reasoning_effort" parameters) :reasoning_effort)))
   (when (and (= role :chat) (not (index-of thinking ["default" "none"])))
     (assert control "thinking effort is unsupported"))
   (def advertised (when (= provider "openrouter") (get-in record [:top_provider :max_completion_tokens])))
   (def output (unless (= :null advertised) advertised))
   (when output (assert (and (int? output) (<= 1 output context)) "invalid provider output capacity"))
-  (merge ref
+  (def selected (merge ref
          {:context context :output output :control control
           :tools (if (= provider "llama")
                    (and (get-in record [:chat_template_caps :supports_tools]) (get-in record [:chat_template_caps :supports_tool_calls]))
@@ -156,6 +159,7 @@
                       (not (nil? (index-of "parallel_tool_calls" parameters))))
           :images (if (= provider "llama") (get-in record [:modalities :vision])
                     (not (nil? (index-of "image" (get-in record [:architecture :input_modalities] [])))))}))
+  (put (s :profiles) key selected) selected)))
 
 (defn account [s request selected raw]
   (default raw {})
@@ -230,7 +234,6 @@
   (def details (or (message :reasoning_details) []))
   (assert (indexed? details) "invalid reasoning details")
   {:text text :message message :status status :finish-reason (choice :finish_reason) :error invalid
-   :reasoning reasoning :reasoning-details details
    :reasoning-visible (not= "none" (config :thinking)) :tools tools
    :usage (value :usage) :model selected :request admission})
 
@@ -262,9 +265,9 @@
   (def input (merge {:model ((s :config) (if (= "rerank" role) :rerank :chat))} input))
   (def cached (when request (first (store/query s
                                                 "SELECT data FROM events WHERE source=? AND parent=? AND kind='model-outcome'" [(s :source) request]))))
-  (if cached (json/decode (cached "data") true true)
+  (if cached (json/decode (cached :data) true true)
     (do
-      (default selected (profile (s :config) (input :model) (keyword role)))
+      (default selected (profile s (input :model) (keyword role)))
       (assert (= (selected :reference) (input :model)) "profile does not match admitted model")
       (def result (merge (if (= "rerank" role) (rerank s input selected) (complete s input selected))
                          {:role role :visible (not (dyn :zinc/round))}))
@@ -276,5 +279,5 @@
 (defn images [s event text]
   (def parts @[{:type "text" :text text}])
   (each row (store/query s "SELECT mime,bytes FROM images WHERE event=? ORDER BY position" [event])
-    (array/push parts {:type "image_url" :image_url {:url (string "data:" (row "mime") ";base64," (base64/encode (string (row "bytes"))))}}))
+    (array/push parts {:type "image_url" :image_url {:url (string "data:" (row :mime) ";base64," (base64/encode (string (row :bytes))))}}))
   parts)

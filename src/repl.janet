@@ -6,16 +6,13 @@
   (cond
     (string? node) node
     (dictionary? node) (if (has-key? node :content)
-                         (string (when (node :name) (string "# " (node :name) "\n\n"))
-                                 (string/join (map document (node :content)) "\n\n"))
-                         (or (node :text) (string (json/encode node))))
-    (indexed? node) (string/join (map document node) "\n")
-    ""))
+      (string (when (node :name) (string "# " (node :name) "\n\n")) (string/join (map document (node :content)) "\n\n"))
+      (or (node :text) (string (json/encode node))))
+    (indexed? node) (string/join (map document node) "\n") ""))
 
-(defn git [directory args &opt input environment]
-  (default environment {})
+(defn git [directory args &opt input environment probe]
   (def child (os/spawn ["git" "-C" directory "--literal-pathspecs" ;args] :pe
-    (merge (os/environ) environment {:in :pipe :out :pipe :err :out})))
+    (merge (os/environ) (or environment {}) {:in :pipe :out :pipe :err :out})))
   (def output @"")
   (def done (ev/chan 1))
   (ev/go (fn [] (os/proc-wait child)) nil done)
@@ -27,41 +24,33 @@
         (assert (<= (+ (length output) (length chunk)) ((dyn :zinc/config) :response-bytes)) "Git output byte ceiling")
         (buffer/push-string output chunk))
       (ev/take done)
-      {:status (child :return-code) :text (string/trim (string output)) :output (string output)})))
+      (assert (or probe (= 0 (child :return-code))) (string "Git " (string/join args " ") ": " output))
+      (when (= 0 (child :return-code)) (string output)))))
 
 (defn source [config &opt inherited revision]
-  (cond (not (config :repl)) {:code ""}
+  (cond
+    (not (config :repl)) {:code ""}
     (and inherited (not revision))
     (do
       (assert (<= (os/stat (inherited :file) :size) (config :source-bytes)) "world source byte ceiling")
       (def origin (merge inherited {:code (string (slurp (inherited :file)))}))
-      (put origin :file nil)
-      origin)
+      (put origin :file nil) origin)
     (do
       (def directory (path/dirname (config :file)))
-      (def repository (git directory ["rev-parse" "--show-toplevel"]))
-      (def root (when (= 0 (repository :status)) (repository :text)))
-      (def base (when root (git root ["rev-parse" "--verify" "--end-of-options" (string (or revision "HEAD") "^{commit}")])))
-      (when revision (assert (and base (= 0 (base :status))) "world revision unavailable"))
-      (def ref (when root (git root (if revision ["rev-parse" "--symbolic-full-name" "--verify" "--end-of-options" revision] ["symbolic-ref" "-q" "HEAD"]))))
+      (def repository (git directory ["rev-parse" "--show-toplevel"] nil nil true))
+      (def root (when repository (string/trim repository)))
+      (def base (when root (git root ["rev-parse" "--verify" "--end-of-options" (string (or revision "HEAD") "^{commit}")] nil nil true)))
+      (when revision (assert base "world revision unavailable"))
+      (def commit (when base (string/trim base)))
+      (def ref (when root (git root (if revision ["rev-parse" "--symbolic-full-name" "--verify" "--end-of-options" revision] ["symbolic-ref" "-q" "HEAD"]) nil nil true)))
       (def relative (if root (path/relpath root (config :file)) (path/basename (config :file))))
-      (def entry (when (and base (= 0 (base :status))) (git root ["ls-tree" "-z" (base :text) "--" relative])))
-      (when entry (assert (= 0 (entry :status)) (entry :text)))
-      (def tracked (and entry (not= "" (entry :output))))
+      (def tracked (and commit (not= "" (git root ["ls-tree" "-z" commit "--" relative]))))
       (when revision (assert tracked "world file is absent from the selected revision"))
-      (def code
-        (if tracked
-          (let [result (git root ["show" (string (base :text) ":" relative)])]
-            (assert (= 0 (result :status)) (result :text))
-            (result :output))
-          (do
-            (def file (config :file))
-            (assert (<= (os/stat file :size) (config :source-bytes)) "world source byte ceiling")
-            (string (slurp file)))))
+      (def code (if tracked (git root ["show" (string commit ":" relative)])
+        (do (assert (<= (os/stat (config :file) :size) (config :source-bytes)) "world source byte ceiling") (string (slurp (config :file))))))
       (assert (<= (length code) (config :source-bytes)) "world source byte ceiling")
-      {:code code :root (or root directory) :path relative :tracked (not (not tracked))
-       :base (when (and base (= 0 (base :status))) (base :text))
-       :ref (if (and ref (= 0 (ref :status)) (string/has-prefix? "refs/heads/" (ref :text))) (ref :text) (if root "HEAD" "refs/heads/main"))})))
+      {:code code :root (or root directory) :path relative :tracked (not (not tracked)) :base commit
+       :ref (if (and ref (string/has-prefix? "refs/heads/" (string/trim ref))) (string/trim ref) (if root "HEAD" "refs/heads/main"))})))
 
 (defn save
   "(save message options) — Save this call's world file; optional call, branch, merge and push."
@@ -73,89 +62,62 @@
   (each key (keys options) (assert (index-of key [:call :branch :merge :push]) "unknown save setting"))
   (when (has-key? options :call) (assert (and (int? (options :call)) (> (options :call) 0)) "invalid saved call"))
   (each key [:branch :merge]
-    (when (has-key? options key)
-      (assert (and (string? (options key)) (<= 1 (length (options key)) 256) (not (string/find "\0" (options key)))) "invalid save revision")))
+    (when (has-key? options key) (assert (and (string? (options key)) (<= 1 (length (options key)) 256) (not (string/find "\0" (options key)))) "invalid save revision")))
   (when (has-key? options :push) (assert (boolean? (options :push)) "invalid push setting"))
   (def branch (store/branch s (get options :call (view :branch))))
-  (assert (= (branch "world") (config :world)) "saved call belongs to another world")
-  (def origin (json/decode (branch "origin") true true))
+  (assert (= (branch :world) (config :world)) "saved call belongs to another world")
+  (def origin (json/decode (branch :origin) true true))
   (def directory (origin :root))
-  (def file (branch "file"))
+  (def file (branch :file))
   (assert (and file (= :file (os/stat file :mode))) "call source is unavailable")
   (assert (<= (os/stat file :size) (config :source-bytes)) "world source byte ceiling")
   (def code (string (slurp file)))
   (assert (<= (length code) (config :source-bytes)) "world source byte ceiling")
   (when (options :push) (assert (config :remote) "world push is not granted"))
-  (def initialized (git directory ["rev-parse" "--git-dir"]))
-  (unless (= 0 (initialized :status))
-    (def result (git directory ["init" "--initial-branch=main"]))
-    (assert (= 0 (result :status)) (result :text)))
+  (unless (git directory ["rev-parse" "--git-dir"] nil nil true) (git directory ["init" "--initial-branch=main"]))
   (def ref (if (options :branch) (string "refs/heads/" (options :branch)) (origin :ref)))
   (assert (not= ref "HEAD") "detached HEAD requires an explicit save branch")
-  (def checked (git directory ["check-ref-format" ref]))
-  (assert (= 0 (checked :status)) "invalid world branch")
-  (do
-    (store/checkpoint s ((dyn :zinc/task) :checkpoint))
-    (def base-source (if (and (origin :tracked) (origin :base))
-      (let [saved (git directory ["show" (string (origin :base) ":" (origin :path))])]
-        (assert (= 0 (saved :status)) (saved :text)) (saved :output))
-      (branch "code")))
-    (def current (git directory ["rev-parse" "--verify" "--end-of-options" ref]))
-    (def previous (when (= 0 (current :status)) (current :text)))
-    (def active (git directory ["symbolic-ref" "-q" "HEAD"]))
-    (assert (or (options :branch) (and (nil? previous) (not= ref (active :text))) (= previous (origin :base)))
-            "world HEAD changed; save on an explicit branch")
-    (var parent (or previous (origin :base)))
-    (var merged nil)
-    (def index (string file ".index"))
-    (defer (when (os/stat index) (os/rm index))
-      (def blob (git directory ["hash-object" "-w" "--stdin"] code))
-      (assert (= 0 (blob :status)) (blob :text))
-      (each args [["read-tree" (or parent "--empty")]
-                  ["update-index" "--add" "--cacheinfo" "100644" (blob :text) (origin :path)]]
-        (def staged (git directory args nil {"GIT_INDEX_FILE" index}))
-        (assert (= 0 (staged :status)) (staged :text)))
-      (def written (git directory ["write-tree"] nil {"GIT_INDEX_FILE" index}))
-      (assert (= 0 (written :status)) (written :text))
-      (var tree (written :text))
-      (when (options :merge)
-        (assert parent "merge requires a saved base")
-        (def target (git directory ["rev-parse" "--verify" "--end-of-options" (string (options :merge) "^{commit}")]))
-        (assert (= 0 (target :status)) (target :text))
-        (def changed (git directory ["diff" "--name-only" "-z" parent (target :text) "--"]))
-        (assert (= 0 (changed :status)) (changed :text))
-        (each name (filter |(not= "" $) (string/split "\0" (changed :output)))
-          (assert (= name (origin :path)) "merge changes files outside the world"))
-        (def draft (git directory ["commit-tree" tree "-p" parent] message))
-        (assert (= 0 (draft :status)) (draft :text))
-        (def merge-result (git directory ["merge-tree" "--write-tree" (draft :text) (target :text)]))
-        (assert (= 0 (merge-result :status)) (string "world merge not saved: " (merge-result :text)))
-        (set tree (first (string/split "\n" (merge-result :text))))
-        (set parent (draft :text))
-        (set merged (target :text)))
-      (def commit (git directory ["commit-tree" tree ;(if parent ["-p" parent] []) ;(if merged ["-p" merged] [])] message))
-      (assert (= 0 (commit :status)) (commit :text))
-      (def intent (store/transact s (store/append s view "save-intent" message {:ref ref :before previous :after (commit :text)})))
-      (def updated (git directory ["update-ref" "--stdin"]
-                       (string (if previous "update " "create ") ref " " (commit :text) (when previous (string " " previous)) "\n")))
-      (assert (= 0 (updated :status)) (string "world ref changed: " (updated :text)))
-      (def receipt @{:ref ref :before previous :after (commit :text) :file (origin :path) :merged merged :pushed false})
-      (store/append s view "saved" message receipt (intent "id"))
-      (store/query s "UPDATE branches SET origin=? WHERE id=?" [(string (json/encode (merge origin {:ref ref :base (commit :text) :tracked true}))) (branch "id")])
-      (def materialized (git directory ["show" (string (commit :text) ":" (origin :path))]))
-      (assert (= 0 (materialized :status)) (string "Saved locally; cannot materialize: " (materialized :text)))
-      (when (= code (string (slurp file))) (spit file (materialized :output) :wb))
-      (def head (git directory ["symbolic-ref" "-q" "HEAD"]))
-      (when (and (= (head :text) ref) (= base-source (string (slurp (config :file)))))
-        (spit (config :file) (materialized :output) :wb)
-        (def aligned (git directory ["reset" "--quiet" (commit :text) "--" (origin :path)]))
-        (assert (= 0 (aligned :status)) (string "Saved locally; cannot align index: " (aligned :text))))
-      (when (options :push)
-        (def pushed (git directory ["push" "--" (config :remote) (string ref ":" ref)]))
-        (assert (= 0 (pushed :status)) (string "saved locally; push outcome requires inspection: " (pushed :text)))
-        (put receipt :pushed true)
-        (store/append s view "saved" "World pushed." receipt (intent "id")))
-      receipt)))
+  (git directory ["check-ref-format" ref])
+  (store/checkpoint s ((dyn :zinc/task) :checkpoint))
+  (def base-source (if (and (origin :tracked) (origin :base)) (git directory ["show" (string (origin :base) ":" (origin :path))]) (branch :code)))
+  (def current (git directory ["rev-parse" "--verify" "--end-of-options" ref] nil nil true))
+  (def previous (when current (string/trim current)))
+  (def active (git directory ["symbolic-ref" "-q" "HEAD"] nil nil true))
+  (assert (or (options :branch) (and (nil? previous) (not= ref (when active (string/trim active)))) (= previous (origin :base))) "world HEAD changed; save on an explicit branch")
+  (var parent (or previous (origin :base)))
+  (var merged nil)
+  (def index (string file ".index"))
+  (def environment {"GIT_INDEX_FILE" index})
+  (defer (when (os/stat index) (os/rm index))
+    (def blob (string/trim (git directory ["hash-object" "-w" "--stdin"] code)))
+    (git directory ["read-tree" (or parent "--empty")] nil environment)
+    (git directory ["update-index" "--add" "--cacheinfo" "100644" blob (origin :path)] nil environment)
+    (var tree (string/trim (git directory ["write-tree"] nil environment)))
+    (when (options :merge)
+      (assert parent "merge requires a saved base")
+      (def target (string/trim (git directory ["rev-parse" "--verify" "--end-of-options" (string (options :merge) "^{commit}")])))
+      (each name (filter |(not= "" $) (string/split "\0" (git directory ["diff" "--name-only" "-z" parent target "--"])))
+        (assert (= name (origin :path)) "merge changes files outside the world"))
+      (set parent (string/trim (git directory ["commit-tree" tree "-p" parent] message)))
+      (set tree (first (string/split "\n" (git directory ["merge-tree" "--write-tree" parent target]))))
+      (set merged target))
+    (def commit (string/trim (git directory ["commit-tree" tree ;(if parent ["-p" parent] []) ;(if merged ["-p" merged] [])] message)))
+    (def intent (store/append s view "save-intent" message {:ref ref :before previous :after commit}))
+    (git directory ["update-ref" "--stdin"] (string (if previous "update " "create ") ref " " commit (when previous (string " " previous)) "\n"))
+    (def receipt @{:ref ref :before previous :after commit :file (origin :path) :merged merged :pushed false})
+    (store/append s view "saved" message receipt (intent :id))
+    (store/query s "UPDATE branches SET origin=? WHERE id=?" [(string (json/encode (merge origin {:ref ref :base commit :tracked true}))) (branch :id)])
+    (def materialized (git directory ["show" (string commit ":" (origin :path))]))
+    (when (= code (string (slurp file))) (spit file materialized :wb))
+    (def head (git directory ["symbolic-ref" "-q" "HEAD"] nil nil true))
+    (when (and head (= (string/trim head) ref) (= base-source (string (slurp (config :file)))))
+      (spit (config :file) materialized :wb)
+      (git directory ["reset" "--quiet" commit "--" (origin :path)]))
+    (when (options :push)
+      (git directory ["push" "--" (config :remote) (string ref ":" ref)])
+      (put receipt :pushed true)
+      (store/append s view "saved" "World pushed." receipt (intent :id)))
+    receipt))
 
 (defn definitions [config declared]
   (def selected @{})
@@ -194,10 +156,8 @@
 (defn- evaluate [[file source input document bindings requests evaluations forbid ceiling]]
   (def env (make-env))
   (table/clear module/cache)
-  (put env :current-file file)
-  (put env :redef true)
-  (put env 'stdout @{:value stderr})
-  (put env 'world @{:value env})
+  (put env :current-file file) (put env :redef true)
+  (put env 'stdout @{:value stderr}) (put env 'world @{:value env})
   (put env 'input @{:value (fn [] input)})
   (put env 'self @{:value (fn [value] (request "self" [value]))})
   (put env 'await @{:value (fn [handle] (request "await" [handle]))})
@@ -208,25 +168,20 @@
   (module/add-paths "" :source)
   (sandbox ;(map keyword forbid))
   (with-env env
-    (var loaded false)
-    (var evaluation nil)
+    (var loaded false) (var evaluation nil)
     (while (set evaluation (ev/take evaluations))
       (def [code reply] evaluation)
       (def output @"")
-      (def outcome
-        (try
-          (with-dyns [:zinc/requests requests :out (fn [bytes]
-            (assert (<= (+ (length output) (length bytes)) ceiling) "execution output byte ceiling")
-            (buffer/push-string output bytes))]
-            (unless loaded (eval-string source env) (set loaded true))
-            (def value (eval-string code env))
-            {:ok true :value (string output (if (string? value) value (string/format "%p" value)))})
-          ([err fiber]
-            (def trace @"")
-            (with-dyns [:err (fn [bytes]
-              (buffer/push-string trace (string/slice bytes 0 (min (length bytes) (max 0 (- ceiling (length trace)))))))]
-              (debug/stacktrace fiber))
-            {:ok false :error (string err "\n" trace)})))
+      (def outcome (try
+        (with-dyns [:zinc/requests requests :out (fn [bytes]
+          (assert (<= (+ (length output) (length bytes)) ceiling) "execution output byte ceiling") (buffer/push-string output bytes))]
+          (unless loaded (eval-string source env) (set loaded true))
+          (def value (eval-string code env))
+          {:ok true :value (string output (if (string? value) value (string/format "%p" value)))})
+        ([err fiber]
+          (def trace @"")
+          (with-dyns [:err (fn [bytes] (buffer/push-string trace (string/slice bytes 0 (min (length bytes) (max 0 (- ceiling (length trace)))))))] (debug/stacktrace fiber))
+          {:ok false :error (string err "\n" trace)})))
       (ev/give reply outcome))))
 
 (defn open [file source input document bindings forbid ceiling]
@@ -235,8 +190,7 @@
   runtime)
 
 (defn close [runtime]
-  (ev/chan-close (runtime :evaluations))
-  (ev/chan-close (runtime :requests)))
+  (ev/chan-close (runtime :evaluations)) (ev/chan-close (runtime :requests)))
 
 (defn execute [runtime code handler seconds]
   (def reply (ev/thread-chan 1))
@@ -248,6 +202,5 @@
       (cond
         (= channel reply) (do (assert (packet :ok) (packet :error)) (return done (packet :value)))
         (= channel (runtime :finished)) (error (string "World evaluator stopped: " packet))
-        (do
-          (def [name args response] packet)
+        (do (def [name args response] packet)
           (ev/give response (try {:ok true :value (handler name args)} ([err] {:ok false :error (string err)})))))))))

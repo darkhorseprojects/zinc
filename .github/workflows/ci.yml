@@ -27,13 +27,20 @@ jobs:
           ref: 029d0c4cfefd2d359ddc5344eae61a1771f4e673
           path: jpm
           persist-credentials: false
+      - uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830
+        id: toolchain
+        with:
+          path: ${{ runner.temp }}/janet
+          key: ubuntu-24.04-janet-e1963cdfe0148f83601907727e00bd672d798115-jpm-029d0c4cfefd2d359ddc5344eae61a1771f4e673
       - name: Install native toolchain
         run: |
           sudo apt-get update
           sudo apt-get install -y build-essential pkg-config libcurl4-openssl-dev libsqlite3-dev
           prefix="$RUNNER_TEMP/janet"
-          make -C janet -j2 PREFIX="$prefix"
-          make -C janet install PREFIX="$prefix"
+          if [ "${{ steps.toolchain.outputs.cache-hit }}" != true ]; then
+            make -C janet -j2 PREFIX="$prefix"
+            make -C janet install PREFIX="$prefix"
+          fi
           echo "$prefix/bin" >> "$GITHUB_PATH"
           echo "PREFIX=$prefix" >> "$GITHUB_ENV"
           echo "JANET_HEADERPATH=$prefix/include/janet" >> "$GITHUB_ENV"
@@ -43,6 +50,7 @@ jobs:
           echo "JANET_PATH=$prefix/lib/janet" >> "$GITHUB_ENV"
           echo "LD_LIBRARY_PATH=$prefix/lib" >> "$GITHUB_ENV"
       - name: Install pinned Jpm
+        if: steps.toolchain.outputs.cache-hit != 'true'
         working-directory: jpm
         run: janet bootstrap.janet
       - name: Install package
@@ -50,6 +58,41 @@ jobs:
         run: |
           JANET_SYSTEM_SQLITE=1 jpm --local deps
           jpm --local install
+      - name: Verify scheduling and temporary payload exclusion
+        working-directory: zinc
+        run: |
+          JANET_PATH="$PWD/jpm_tree/lib" janet -e '
+            (import sqlite3 :as sql)
+            (import spork/json :as json)
+            (import ./src/store)
+            (import ./src/schema)
+            (def config {:store ":memory:" :source "test" :world "test" :run-seconds 60
+              :task-quota 100 :tool-quota 1000 :task-depth 8 :parallel 1 :lease-seconds 30
+              :request-bytes 1048576 :response-bytes 1048576 :source-bytes 65536
+              :visibility [] :providers {} :capabilities {} :repl false})
+            (each temporary [false true]
+              (def s (store/open config))
+              (when temporary
+                (put s :temporary true) (put s :db (sql/open ":memory:"))
+                (sql/eval (s :db) (schema/database true)))
+              (def b (store/start s {:text "test" :request "request" :author "user"
+                :at "2026-01-01T00:00:00.000Z" :persist (not temporary)} config))
+              (def id (store/submit s (store/view s (b :id)) "agent" {:branch (b :id)} {:key "job"}))
+              (def row (store/claim s id))
+              (assert (and row (nil? (store/claim s id))))
+              (store/append s (store/view s (b :id)) "task-attempt" "entered" {:attempt (row :attempt)} nil id)
+              (assert (try (do (store/append s (store/view s (b :id)) "task-attempt" "duplicate" {:attempt (row :attempt)} nil id) false) ([err] true)))
+              (with-dyns [:zinc/task @{:id id :owner (row :owner) :generation (row :attempt)
+                :scope (json/decode (row :scope) true true)}]
+                (store/checkpoint s {:phase "test"}) (store/park s true) (store/park s false)
+                (store/finish s row "ok" nil))
+              (assert (= "done" ((store/task s id) :state)))
+              (when temporary
+                (def control ((store/query s "SELECT input,checkpoint,admission,outcome FROM tasks WHERE id=?" [id] true) 0))
+                (assert (= "{}" (control :input) (control :checkpoint)))
+                (assert (and (nil? (control :admission)) (nil? (control :outcome)))))
+              (assert (= 0 (length (store/query s "PRAGMA foreign_key_check"))))
+              (store/close s))'
       - name: Check package sources
         working-directory: zinc
         run: |
