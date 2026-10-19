@@ -23,14 +23,25 @@ dependency when using a checkout.
 
 ## Self and functions
 
-Main input selects one of text or code, not a named-operation dispatcher:
+Main input selects text or code. The trusted invoker supplies the authenticated
+`author` and source occurrence `at`, in UTC with millisecond precision:
 
 ```json
-{ "text": "Investigate the implementation", "request": "stable-operation-key" }
+{
+  "text": "Investigate the implementation",
+  "request": "stable-operation-key",
+  "author": "principal-id",
+  "at": "2026-01-01T00:00:00.000Z"
+}
 ```
 
 ```json
-{ "code": "(double 21)", "request": "another-operation-key" }
+{
+  "code": "(double 21)",
+  "request": "another-operation-key",
+  "author": "principal-id",
+  "at": "2026-01-01T00:00:00.000Z"
+}
 ```
 
 Inside world code:
@@ -40,24 +51,25 @@ Inside world code:
 (memory/expand event-id)
 ```
 
-`memory/expand` is the only exposed memory function. It accepts an event ID and
-returns scoped original records or summary children. Searching is an inquiry to
-`self`; the semantic window retrieves relevant history internally. Internal
-paged readers remain private to compaction.
+`memory/expand` is the only exposed memory function. It returns the requested
+record's own bounded page, including ID, author, occurrence time and summary child
+IDs. Follow child IDs to drill down; pass `next` as the optional byte offset while
+`next < total`. It never substitutes an admission for an actual result. Searching
+is an inquiry to `self`; the semantic window retrieves originals internally.
 
 Built-in functions are called directly. `self` admits descendant work and
 returns a durable Zinc handle. `await` reads a descendant outcome. PA handles
 remain separate, ephemeral observation handles.
 
 `record`, `describe`, `document`, `models`, `events`, `pending`, `resume` and
-`abort` are ordinary package exports used by invokers. `task` is the trusted
-executor export, not a world binding. Generated environments receive neither PA
+`abort` are ordinary package exports used by invokers. `task` executes trusted
+jobs; `invalidate` controls the summary cache. Neither is a world binding. Generated environments receive neither PA
 spawning nor private runtime configuration.
 
 ## Passive context
 
 The trusted `record` export accepts
-`{"records":[{"key":"external-id","author":"principal-id","at":"timestamp","text":"observed text"}]}`
+`{"records":[{"key":"external-id","author":"principal-id","at":"2026-01-01T00:00:00.000Z","text":"observed text"}]}`
 and returns committed `events` IDs. Repeated identical records return the same
 IDs; reusing a key with different content is an error.
 
@@ -111,7 +123,9 @@ ownership and cancellation, never temporary input/output. Temporary descendants
 stay temporary, cannot be replayed or reattached, and lose their journal when
 their executor dies. Their call files are removed on normal cleanup. This does
 not erase parent-stored inputs, provider/Discord logs, OS swap, or explicitly
-requested filesystem/Git effects.
+requested filesystem/Git effects. Admitted history must fit the RAM journal;
+exhaustion fails explicitly rather than dropping older records. Child snapshots
+retain temporary identities and do not reactivate copied historical leases.
 
 Optional `instructions` points to a plain world instruction file. Prompt
 construction reads it without executing the world merely to discover
@@ -172,9 +186,9 @@ An authorized human execution may have `inference: false`,
 `capabilities: {save: {}}`, and a trusted `agent` profile. Text selves use that
 agent profile; code selves retain the caller's profile. Profiles must share
 source/store/world/file identity. Saved work is reauthorized against current
-profiles. Removed configuration fields are rejected, not converted. Database
-layout and version remain unchanged; old in-flight profiles cannot resume under
-the new contract.
+profiles. Removed configuration fields are rejected, not converted. Old in-flight
+profiles cannot resume under a revoked contract. Store format remains 1;
+incompatible layouts require explicit fresh-store provisioning, not migration.
 
 `save` is an optional built-in, limited to the configured world source file:
 
@@ -203,7 +217,8 @@ confidentiality.
 ## Work and history
 
 SQLite format 1 stores admissions, immutable events/outcomes, attempts,
-task-owned leases, checkpoints, images and usage. Accepted task execution can
+task-owned leases, checkpoints, images and usage. Every event retains an author,
+source occurrence timestamp and separate ingestion clock. Accepted execution can
 finish and commit after its PA observer dies. It cannot survive death of its own
 executing process or OS scope.
 
@@ -229,8 +244,9 @@ events. A database insert constraint permits only explicit semantic and receipt
 kinds, never deltas or arbitrary emissions. Event IDs count ledger records, not
 conversation messages. Each complete model round emits while execution
 continues, including reasoning visibility, refusals, truncation, filtering, tool
-calls and auxiliary outcomes. Frames identify the execution and its
-source/ref/revision; temporary frames have null durable event coordinates.
+calls and auxiliary outcomes. Frames carry ID, author, occurrence time and
+source/ref/revision. Temporary coordinates are execution-qualified, never fake
+durable IDs. Internal summary completions remain cache bookkeeping.
 
 `events` returns bounded committed pages. Reattachment emits saved events before
 returning an outcome, without rerunning failed effects. Observers own delivery
@@ -238,9 +254,45 @@ receipts and cursors. Zinc has no Discord acknowledgment state or catch-up
 queue.
 
 Token estimates use `ceil(bytes / 4)`; provider-reported usage remains separate.
-Tool quota accounts full stored code/outcomes. Context and summary quotas bound
-chronology, retrieval and compaction. History and retrieved text are data, not
-instructions.
+Model requests consume the same work quota as queued tasks. Tool quota bounds
+evaluation source/outcomes. Run aggregates can grow as accepted descendants
+finish; individual receipts remain immutable.
+
+## Memory
+
+One canonical projection of the immutable ledger feeds two independent windows:
+
+- Chronology follows ledger order. Aligned, equal-level blocks summarize exact
+  ordered record membership, not global-ID intervals. Older blocks stay coarse;
+  available budget refines recent blocks down to originals.
+- Semantic retrieval searches original records beneath summaries. The original
+  inquiry anchors lexical/spelling/Cygnet expansion and reranking. A bounded,
+  checkpointed pool belongs to the call's frozen history. Only originals already
+  present verbatim are deduplicated; compaction reselects evidence, never clears it.
+
+Search defaults to a 50/50 memory-budget split. Disabling it gives chronology the
+whole allowance. Both windows count rendered provenance headers. `history-records`
+is a page/context-batch bound, not permission to omit older admitted history.
+Required preparation either produces a complete cover or fails explicitly.
+
+Small blocks read up to 16 originals; larger blocks read two children. Bounded
+source groups are compressed independently, then reduced in a balanced tree,
+not repeatedly rewritten into a growing synopsis. Existing workers, checkpoints,
+deadlines and shared quotas own all preparation. Cache identity uses ordered
+children and compression policy, so later calls reuse completed blocks.
+
+Every displayed memory item has ID, author and occurrence time. Summaries identify
+their producer and creation time separately from the source period and child IDs.
+Actual outcomes, failures and uncertainty remain distinct from admissions.
+Summaries are lossy: expand originals before relying on an uncertain action.
+
+The trusted `invalidate` export takes `{"event":ID}` and excludes that summary and
+its cached ancestors from subsequent reads. Originals remain immutable; existing
+workers rebuild missing nodes on demand. Invalidation does not cancel work or
+rewrite an already admitted model request; use explicit abort when needed.
+
+The balanced-cache approach draws on [OptMem](https://github.com/VictorTaelin/OptMem),
+with scoped ledger membership instead of a single dense note sequence.
 
 Provider URL/token configuration supports llama/OpenRouter. An optional generic
 `transport` library replaces HTTP transfer without exposing credentials to the

@@ -46,7 +46,19 @@ jobs:
         run: |
           JANET_SYSTEM_SQLITE=1 jpm --local deps
           jpm --local install
-      - name: Compile Janet sources
+      - name: Compile Janet and SQLite
         working-directory: zinc
         run: |
-          JANET_PATH="$PWD/jpm_tree/lib" janet -e '(put root-env (quote pa/emit) @{:value (fn [bytes]) :private true}) (setdyn :library (dyn *syspath*)) ((module/value (require "portable-agents/src/markdown") (quote load)) (string (os/cwd) "/zinc.md") [])'
+          JANET_PATH="$PWD/jpm_tree/lib" janet -e '
+            (put root-env (quote pa/emit) @{:value (fn [bytes]) :private true})
+            (setdyn :library (dyn *syspath*))
+            ((module/value (require "portable-agents/src/markdown") (quote load)) (string (os/cwd) "/zinc.md") [])
+            (import ./src/schema)
+            (import sqlite3 :as sql)
+            (def db (sql/open ":memory:"))
+            (sql/eval db schema/database)
+            (sql/eval db "PRAGMA trusted_schema=OFF")
+            (each view ["memory_records" "search_records" "invalid_summaries"]
+              (sql/eval db (string "EXPLAIN SELECT * FROM " view " LIMIT 0")))
+            (sql/eval db "EXPLAIN INSERT INTO events(source,kind,author,at,text,data,estimate) VALUES(?,?,?,?,?,?,?)" [nil nil nil nil nil nil nil])
+            (sql/close db)'

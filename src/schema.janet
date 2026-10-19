@@ -103,7 +103,7 @@
     (assert (and (string? (value :text)) (> (length (value :text)) 0)) "invalid question"))
   (when (has-key? value :code)
     (assert (and (string? (value :code)) (> (length (value :code)) 0)) "invalid Janet source"))
-  (each key [:request]
+  (each key [:request :author :at]
     (when (has-key? value key)
       (assert (and (string? (value key)) (<= 1 (length (value key)) 256)) "invalid request name")))
   (when (has-key? value :revision)
@@ -165,6 +165,8 @@ CREATE TABLE events(
  id INTEGER PRIMARY KEY AUTOINCREMENT CHECK(id<=9007199254740991),source TEXT NOT NULL,
  run INTEGER REFERENCES runs(id),branch INTEGER REFERENCES branches(id),parent INTEGER REFERENCES events(id),
  task INTEGER REFERENCES tasks(id),kind TEXT NOT NULL,text TEXT NOT NULL DEFAULT '',data TEXT NOT NULL CHECK(json_valid(data)),
+ author TEXT NOT NULL CHECK(length(author)>0),
+ at TEXT NOT NULL DEFAULT(strftime('%Y-%m-%dT%H:%M:%fZ','now')) CHECK(strftime('%Y-%m-%dT%H:%M:%fZ',at) IS at),
  estimate INTEGER NOT NULL CHECK(estimate>=0),created REAL NOT NULL DEFAULT(unixepoch('subsec'))
 ) STRICT;
 CREATE INDEX event_source ON events(source,id);
@@ -188,35 +190,42 @@ CREATE TRIGGER event_kind BEFORE INSERT ON events
  'task-admission','task-attempt','task-outcome','model-admission','model-outcome','call-admission',
  'launch-uncertain','traceback','summary','interruption','cancelled','artifact','context','error','save-intent','saved','operation-outcome')
  BEGIN SELECT raise(ABORT,'unsupported event kind'); END;
-CREATE VIEW summaries AS
- SELECT id,source,json_extract(data,'$.world') world,branch,
-        json_extract(data,'$.first') first,json_extract(data,'$.last') last,
-        text,estimate,json_extract(data,'$.source_estimate') source_estimate,
-        json_extract(data,'$.height') height,task
- FROM events WHERE kind='summary';
-
+CREATE VIEW memory_records AS
+ SELECT e.*,(SELECT 'tmp:'||r.request||'/'||b.id||':'||e.id FROM branches b JOIN runs r ON r.id=b.run WHERE b.id=e.branch AND b.temporary=1) label,CASE
+   WHEN kind='user' THEN coalesce(nullif(text,''),json_extract(data,'$.input.code'),'')
+   WHEN kind IN ('response','completed','model-outcome') AND json_type(data,'$.message')='object'
+     THEN (CASE WHEN json_extract(data,'$."reasoning-visible"') THEN json_extract(data,'$.message') ELSE json_remove(json_extract(data,'$.message'),'$.reasoning','$.reasoning_content','$.reasoning_details') END) || char(10) || json_object('status',json_extract(data,'$.status'))
+   WHEN kind IN ('call-admission','operation-outcome','tool-result','tool-ambiguity','cancelled','interruption','save-intent','saved','error','artifact','model-admission','model-outcome','task-outcome')
+     THEN text || char(10) || json_remove(data,'$."world-source"')
+   ELSE text END body,
+   CASE WHEN kind IN ('user','context','response','completed','tool-result','tool-ambiguity','call-admission','operation-outcome','cancelled','save-intent','saved') THEN 1
+    WHEN kind='task-admission' THEN json_extract(data,'$.kind')='code'
+    WHEN kind IN ('error','interruption') THEN NOT EXISTS(SELECT 1 FROM tasks t WHERE t.id=e.task AND t.kind='summarize')
+    WHEN kind='artifact' THEN json_type(data,'$.invalidates') IS NULL ELSE 0 END memory
+ FROM events e;
+CREATE VIEW invalid_summaries AS
+ WITH RECURSIVE invalid(source,id) AS (
+   SELECT n.source,n.id FROM events a JOIN events n ON n.id=json_extract(a.data,'$.invalidates') AND n.source=a.source AND n.kind='summary'
+   WHERE a.kind='artifact' AND json_type(a.data,'$.invalidates')='integer'
+   UNION SELECT n.source,n.id FROM events n JOIN invalid i ON i.source=n.source,json_each(n.data,'$.children') c WHERE n.kind='summary' AND i.id=c.value
+ ) SELECT id FROM invalid;
 CREATE UNIQUE INDEX summary_task ON events(task) WHERE kind='summary';
-CREATE INDEX summary_range ON events(source,kind,json_extract(data,'$.world'),json_extract(data,'$.first'),json_extract(data,'$.last'));
-
-CREATE TABLE summary_children(
- parent INTEGER NOT NULL REFERENCES events(id),position INTEGER NOT NULL,
- node INTEGER REFERENCES events(id),event INTEGER REFERENCES events(id),
- CHECK((node IS NULL)!=(event IS NULL)),PRIMARY KEY(parent,position)
-) WITHOUT ROWID;
+CREATE INDEX summary_key ON events(source,json_extract(data,'$.policy'),json_extract(data,'$.children')) WHERE kind='summary';
+CREATE INDEX summary_start ON events(source,json_extract(data,'$.first')) WHERE kind='summary';
+CREATE INDEX summary_invalidations ON events(source,id) WHERE kind='artifact' AND json_type(data,'$.invalidates')='integer';
 
 CREATE UNIQUE INDEX call_position ON events(task,json_extract(data,'$.position')) WHERE kind='call-admission';
-CREATE TRIGGER summary_edge_immutable_update BEFORE UPDATE ON summary_children BEGIN SELECT raise(ABORT,'immutable summary edge'); END;
-CREATE TRIGGER summary_edge_immutable_delete BEFORE DELETE ON summary_children BEGIN SELECT raise(ABORT,'immutable summary edge'); END;
-CREATE VIRTUAL TABLE event_fts USING fts5(text,content='events',content_rowid='id',tokenize='unicode61 remove_diacritics 0');
-CREATE TRIGGER event_index AFTER INSERT ON events WHEN new.kind IN ('user','response','completed','tool-result','artifact','context','saved') OR (new.kind='task-admission' AND json_extract(new.data,'$.kind')='code') BEGIN
- INSERT INTO event_fts(rowid,text) VALUES(new.id,new.text);
-END;
+CREATE VIEW search_records AS SELECT id,body FROM memory_records WHERE memory;
+CREATE VIRTUAL TABLE event_fts USING fts5(body,content='search_records',content_rowid='id',tokenize='unicode61 remove_diacritics 0');
 CREATE VIRTUAL TABLE event_words USING fts5vocab(event_fts,'instance');
 CREATE TABLE lexemes(id INTEGER PRIMARY KEY,source TEXT NOT NULL,term TEXT NOT NULL,UNIQUE(source,term)) STRICT;
 CREATE TABLE event_lexemes(event INTEGER NOT NULL REFERENCES events(id),lexeme INTEGER NOT NULL REFERENCES lexemes(id),PRIMARY KEY(event,lexeme)) WITHOUT ROWID;
 CREATE INDEX lexeme_events ON event_lexemes(lexeme,event);
 CREATE VIRTUAL TABLE lexeme_grams USING fts5(term,content='lexemes',content_rowid='id',tokenize='trigram',detail='none');
 CREATE TRIGGER lexeme_index AFTER INSERT ON lexemes BEGIN INSERT INTO lexeme_grams(rowid,term) VALUES(new.id,new.term); END;
+CREATE TRIGGER event_index AFTER INSERT ON events BEGIN
+ INSERT INTO event_fts(rowid,body) SELECT id,body FROM search_records WHERE id=new.id;
+END;
 CREATE UNIQUE INDEX context_key ON events(source,json_extract(data,'$.key')) WHERE kind='context';
 PRAGMA user_version=1;
 `)

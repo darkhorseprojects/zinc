@@ -9,6 +9,7 @@
   (store/transact s
     (def current (dyn :zinc/task))
     (store/checkpoint s (current :checkpoint))
+    (store/charge s 1 0)
     (def event (store/append s (current :scope) "model-admission" (reference :reference)
                              {:input input :estimate size :output output} nil (current :id)))
     (store/checkpoint s (merge (current :checkpoint) {:request (event "id")}))
