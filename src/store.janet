@@ -30,12 +30,10 @@
       (sql/eval db "PRAGMA foreign_keys=ON; PRAGMA trusted_schema=OFF; PRAGMA busy_timeout=5000; PRAGMA synchronous=FULL; PRAGMA journal_mode=WAL; PRAGMA temp_store=MEMORY;")
       (def s @{:db db :control control :source (config :source) :config config :temporary temporary})
       (def version (((query s "PRAGMA user_version") 0) "user_version"))
-      (assert (index-of version [0 1]) "unsupported Zinc database; provision a fresh database")
+      (assert (index-of version [0 2]) "unsupported Zinc database; provision a fresh database")
       (when (= version 0)
         (transact s
           (when (= 0 (((query s "PRAGMA user_version") 0) "user_version")) (query s schema/database))))
-      (assert (first (query s "SELECT name FROM pragma_table_info('events') WHERE name='author'"))
-              "incompatible Zinc database; preserve it and provision a fresh database")
       (when temporary
         (set db (sql/open ":memory:"))
         (put s :db db)
@@ -64,7 +62,13 @@
     ([err] (when (not= db control) (sql/close db)) (sql/close control) (error err))))
 
 (defn close [s]
-  (when (not= (s :db) (s :control)) (sql/close (s :db)))
+  (when (s :temporary)
+    (when (s :executor-id)
+      (sql/eval (s :control) "UPDATE tasks SET state=?,owner=NULL,lease_expires=NULL WHERE id=? AND state IN ('queued','running','waiting','uncertain')"
+        [(if (first (query s "SELECT id FROM events WHERE run=? AND kind='completed' AND branch IN (SELECT id FROM branches WHERE parent IS NULL)" [(s :temporary-run)])) "done" "failed") (s :executor-id)])
+      (each row (query s "SELECT file FROM branches WHERE run=? AND temporary=1" [(s :temporary-run)])
+        (when (and (row "file") (os/stat (row "file"))) (os/rm (row "file")))))
+    (sql/close (s :db)))
   (sql/close (s :control)))
 
 (defn charge [s work tokens]
@@ -117,7 +121,7 @@
   ), members(id) AS (SELECT ? UNION SELECT c.value FROM members m JOIN events n ON n.id=m.id,json_each(n.data,'$.children') c WHERE n.kind='summary')
   SELECT ` (get view :columns "e.*") `,coalesce(b.world,json_extract(e.data,'$.world')) world FROM `
                    (cond (view :lexical) "lexeme_grams JOIN lexemes l ON l.id=lexeme_grams.rowid JOIN event_lexemes w ON w.lexeme=l.id JOIN memory_records e ON e.id=w.event"
-                     (view :match) "event_fts JOIN memory_records e ON e.id=event_fts.rowid" (if (view :memory) "memory_records e" "events e"))
+                     (view :match) "event_fts JOIN memory_records e ON e.id=event_fts.rowid" "memory_records e")
                    ` LEFT JOIN branches b ON b.id=e.branch LEFT JOIN runs r ON r.id=e.run
   WHERE ` (if (view :match) (if (view :lexical) "lexeme_grams MATCH ? AND " "event_fts MATCH ? AND ") "") `e.source=? AND e.id BETWEEN ? AND ? AND (coalesce(b.world,json_extract(e.data,'$.world'))=? OR coalesce(b.world,json_extract(e.data,'$.world')) IN (SELECT value FROM json_each(?)))
     AND (e.id<=? OR (e.run=? AND EXISTS(SELECT 1 FROM ancestry a WHERE a.id=e.branch AND e.id<=a.through)))
@@ -142,6 +146,15 @@
 (defn start [s input config &opt caller origin]
   (when (input :code)
     (assert (<= (length (input :code)) (config :source-bytes)) "stored Janet source byte ceiling"))
+  (when (and (s :temporary) (not caller))
+    (def control (merge s {:db (s :control)}))
+    (transact control
+      (def run (((query control "INSERT INTO runs(source,request,input,world,config,expires,root,temporary) VALUES(?,?,'{}',?,'{}',?,?,1) RETURNING id"
+        [(s :source) (input :request) (config :world) (min (+ (os/clock) (config :run-seconds)) (get-in config [:snapshot :deadline] math/inf)) (get-in config [:snapshot :budget-root])]) 0) "id"))
+      (put s :temporary-run run)
+      (put s :budget-root (get-in config [:snapshot :budget-root] run))
+      (put s :executor-id (((query control "INSERT INTO tasks(source,run,world,kind,input,scope,retry_policy,retries) VALUES(?,?,?,'temporary','{}',?,'manual',0) RETURNING id"
+        [(s :source) run (config :world) (string (json/encode {:run run :world (config :world)}))]) 0) "id"))))
   (transact s
     (def admitted (table ;(kvs input)))
     (each key [:after :images] (put admitted key nil))
@@ -196,11 +209,17 @@
         (when caller (assert (or (= last 0) (and (<= (caller :first) first-id) (<= last (caller :last)))) "child history exceeds caller view"))
         (def encoded (string (json/encode admitted)))
         (assert (<= (length encoded) (config :request-bytes)) "stored request byte ceiling")
+        (def saved (merge config))
+        (when (config :agent) (put saved :agent (merge (config :agent))))
+        (each profile (filter identity [saved (saved :agent)])
+          (put profile :snapshot nil)
+          (put profile :capabilities (tabseq [[name capability] :in (pairs (profile :capabilities))] name {:module (capability :module)}))
+          (put profile :providers (tabseq [[name provider] :in (pairs (profile :providers))]
+            name {:url (provider :url) :identity (provider :identity)})))
         (def run (if caller (caller :run)
                    (((query s "INSERT INTO runs(id,source,request,input,world,config,expires) VALUES(?,?,?,?,?,?,?) RETURNING id"
-                            [(s :volatile-run) (s :source) (input :request) encoded world
-                             (string (json/encode (merge config {:snapshot nil :providers (tabseq [[name provider] :in (pairs (config :providers))]
-                                                                              name {:url (provider :url) :identity (provider :identity)})})))
+                            [(s :temporary-run) (s :source) (input :request) encoded world
+                             (string (json/encode saved))
                              (get-in config [:snapshot :deadline] (+ (os/clock) (config :run-seconds)))]) 0) "id")))
         (unless (s :budget-root) (put s :budget-root run))
         (def code (get origin :code ""))
@@ -239,9 +258,10 @@
     AND (kind='tool-result' OR kind='task-admission' AND json_extract(data,'$.kind')='code')` [(s :source) run]) 0) "estimate"))
 
 (defn checkpoint [s value]
-  (when (s :volatile)
-    (assert (first (sql/eval (s :control) "SELECT request FROM volatile WHERE request=? AND source=? AND state IN ('running','waiting') AND expires>?"
-                            [(s :volatile) (s :source) (os/clock)])) "temporary execution cancelled or expired"))
+  (when-let [executor (s :executor)]
+    (assert (first (sql/eval (s :control) `SELECT t.id FROM tasks t JOIN runs r ON r.id=t.run
+      WHERE t.id=? AND t.owner=? AND t.attempt=? AND t.state IN ('running','waiting') AND t.lease_expires>? AND r.expires>?`
+      [(executor :id) (executor :owner) (executor :generation) (os/clock) (os/clock)])) "temporary execution fenced"))
   (def current (dyn :zinc/task))
   (assert current "checkpoint requires an executing job")
   (def value (merge {:semantic (get-in current [:checkpoint :semantic])} value))
@@ -328,69 +348,55 @@
         id))))
 
 (defn park [s waiting &opt internal]
-  (when (and (s :volatile) (not internal))
-    (if waiting
-      (sql/eval (s :control) "UPDATE volatile SET state='waiting' WHERE request=? AND source=? AND state='running'" [(s :volatile) (s :source)])
-      (while true
-        (assert (first (sql/eval (s :control) "SELECT request FROM volatile WHERE request=? AND source=? AND state='waiting' AND expires>?" [(s :volatile) (s :source) (os/clock)])) "temporary execution cancelled")
-        (when (first (sql/eval (s :control)
-          `UPDATE volatile SET state='running' WHERE request=? AND source=? AND state='waiting'
-           AND (SELECT count(*) FROM tasks WHERE source=? AND state='running')+
-               (SELECT count(*) FROM volatile WHERE source=? AND state='running' AND lease_expires>?)<? RETURNING run`
-          [(s :volatile) (s :source) (s :source) (s :source) (os/clock) ((s :config) :parallel)])) (break))
-        (ev/sleep 0.1))))
   (def current (dyn :zinc/task))
   (checkpoint s (current :checkpoint))
-  (if waiting
-    (query s "UPDATE tasks SET state='waiting' WHERE id=? AND source=? AND state='running'" [(current :id) (s :source)])
-    (while true
-      (checkpoint s (current :checkpoint))
-      (when (first (query s
-                          `UPDATE tasks SET state='running' WHERE id=? AND source=? AND state='waiting'
-         AND (SELECT count(*) FROM running WHERE source=?)<? RETURNING id`
-                          [(current :id) (s :source) (s :source) ((s :config) :parallel)])) (break))
-      (ev/sleep 0.1))))
+  (each [db id] (array/concat @[]
+    (if (and (s :executor-id) (not internal)) [[(s :control) (s :executor-id)]] []) [[(s :db) (current :id)]])
+    (if waiting
+      (sql/eval db "UPDATE tasks SET state='waiting' WHERE id=? AND source=? AND state='running'" [id (s :source)])
+      (while true
+        (checkpoint s (current :checkpoint))
+        (when (first (sql/eval db `UPDATE tasks SET state='running' WHERE id=? AND source=? AND state='waiting'
+          AND (SELECT count(*) FROM running WHERE source=?)<? RETURNING id`
+          [id (s :source) (s :source) ((s :config) :parallel)])) (break))
+        (ev/sleep 0.1)))))
 
-(defn claim [s id]
-  (def owner (base64/encode (string (os/cryptorand 24))))
-
-  (transact s
-    (def row (first (query s
-                           `UPDATE tasks SET state='running',attempt=attempt+1,owner=?,lease_expires=?
-       WHERE id=? AND source=? AND state='queued'
+(defn claim [s id &opt launch]
+  (when (and (s :executor-id) (not (s :executor)))
+    (def control (merge s {:db (s :control) :temporary false}))
+    (put control :executor-id nil)
+    (when-let [row (claim control (s :executor-id))]
+      (put s :executor {:id (row "id") :owner (row "owner") :generation (row "attempt")}))
+    (unless (s :executor)
+      (assert (first (sql/eval (s :control) `SELECT t.id FROM tasks t JOIN runs r ON r.id=t.run
+        WHERE t.id=? AND t.state='queued' AND r.expires>?` [(s :executor-id) (os/clock)])) "temporary admission cancelled or expired")))
+  (when (or (not (s :executor-id)) (s :executor))
+    (transact s
+      (def row (first (query s
+        `UPDATE tasks SET state=?,attempt=attempt+?,owner=?,lease_expires=? WHERE id=? AND source=? AND state='queued'
+         AND (? OR lease_expires IS NULL OR lease_expires<=?)
          AND EXISTS(SELECT 1 FROM runs WHERE id=tasks.run AND expires>?)
          AND (SELECT count(*) FROM running WHERE source=?)<? RETURNING *`
-                           [owner (+ (os/clock) ((s :config) :lease-seconds)) id (s :source) (os/clock) (s :source) ((s :config) :parallel)])))
-
-    (when row
-      (append s (json/decode (row "scope") true true) "task-attempt"
-              "execution claimed" {:attempt (row "attempt")} nil id)
-
-      (merge row {"owner" owner}))))
+        [(if launch "queued" "running") (if launch 0 1) (base64/encode (string (os/cryptorand 24)))
+         (+ (os/clock) ((s :config) :lease-seconds)) id (s :source) (if launch 0 1) (os/clock) (os/clock) (s :source) ((s :config) :parallel)])))
+      (when (and row (not launch))
+        (append s (json/decode (row "scope") true true) "task-attempt" "execution claimed" {:attempt (row "attempt")} nil id))
+      row)))
 
 (defn heartbeat [[config id owner generation stop local]]
   (try
     (let [s (or local (open config))]
       (defer (unless local (close s))
         (while true
-          (unless (first (query s
-                                `UPDATE tasks SET lease_expires=? WHERE id=? AND owner=? AND attempt=?
-             AND state IN ('running','waiting') AND EXISTS(SELECT 1 FROM runs r
-               WHERE r.id=tasks.run AND r.expires>?) RETURNING id`
-                                [(+ (os/clock) (config :lease-seconds)) id owner generation (os/clock)]))
-            (break))
-
-          (when (s :volatile)
-            (unless (first (sql/eval (s :control)
-              "UPDATE volatile SET lease_expires=? WHERE request=? AND source=? AND owner=? AND state IN ('running','waiting') AND expires>? RETURNING request"
-              [(+ (os/clock) (config :lease-seconds)) (s :volatile) (s :source) (s :volatile-owner) (os/clock)])) (break)))
+          (each [db task owner attempt] (array/concat @[[ (s :db) id owner generation]]
+            (if (s :executor) [[(s :control) ((s :executor) :id) ((s :executor) :owner) ((s :executor) :generation)]] []))
+            (assert (first (sql/eval db `UPDATE tasks SET lease_expires=? WHERE id=? AND owner=? AND attempt=?
+              AND state IN ('running','waiting') AND EXISTS(SELECT 1 FROM runs WHERE id=tasks.run AND expires>?) RETURNING id`
+              [(+ (os/clock) (config :lease-seconds)) task owner attempt (os/clock)])) "execution fenced"))
           (def tick (ev/chan 1))
-          (def timer (ev/go (fn []
-                              (try (do (ev/sleep (/ (config :lease-seconds) 3)) (ev/give tick true)) ([err] nil)))))
-
+          (def timer (ev/go (fn [] (ev/sleep (/ (config :lease-seconds) 3)) (ev/give tick true))))
           (when (= stop ((ev/select stop tick) 1))
-            (unless (= :dead (fiber/status timer)) (ev/cancel timer "finished"))
-            (break)))))
+            (ev/cancel timer "finished") (break)))))
     ([err] nil)))
 
 (defn finish [s row value failure]
@@ -399,9 +405,8 @@
               (if (string? value) value (string (json/encode value)))))
 
   (transact s
-    (when (s :volatile)
-      (unless (first (sql/eval (s :control) "SELECT request FROM volatile WHERE request=? AND source=? AND state IN ('running','waiting')" [(s :volatile) (s :source)]))
-        (query s "UPDATE tasks SET state='cancelled' WHERE id=?" [(row "id")])))
+    (when (and (s :executor-id) (not (first (sql/eval (s :control) "SELECT id FROM tasks WHERE id=? AND state IN ('running','waiting','uncertain')" [(s :executor-id)]))))
+      (query s "UPDATE tasks SET state='cancelled' WHERE id=?" [(row "id")]))
     (assert (first (query s
                           `SELECT t.id FROM tasks t
        WHERE t.id=? AND t.owner=? AND t.attempt=?

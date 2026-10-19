@@ -17,6 +17,7 @@
 
 (defn transfer [[config reference method path body current limits]]
   (setdyn :pa/limits limits)
+  (def current (or (get current :executor) current))
   (def provider ((config :providers) (keyword (reference :provider))))
   (assert provider "provider is not configured")
   (def s (when current (store/open config)))
@@ -30,13 +31,10 @@
                  (when (and current (>= (os/clock) next-check))
                    (set next-check (+ (os/clock) 0.1))
                    (set permitted (not (nil? (first
-                     (if (current :volatile)
-                       (store/query s "SELECT request FROM volatile WHERE request=? AND source=? AND owner=? AND state IN ('running','waiting') AND lease_expires>? AND expires>?"
-                                    [(current :volatile) (s :source) (current :volatile-owner) (os/clock) (os/clock)])
-                       (store/query s `SELECT t.id FROM tasks t JOIN runs r ON r.id=t.run
-                         WHERE t.id=? AND t.source=? AND t.attempt=? AND t.owner=?
-                         AND t.state IN ('running','waiting') AND t.lease_expires>? AND r.expires>?`
-                         [(current :id) (s :source) (current :generation) (current :owner) (os/clock) (os/clock)])))))))
+                     (store/query s `SELECT t.id FROM tasks t JOIN runs r ON r.id=t.run
+                       WHERE t.id=? AND t.source=? AND t.attempt=? AND t.owner=?
+                       AND t.state IN ('running','waiting') AND t.lease_expires>? AND r.expires>?`
+                       [(current :id) (s :source) (current :generation) (current :owner) (os/clock) (os/clock)]))))))
                  permitted))
     (assert (check) "HTTP job fenced")
     (def url (string (provider :url) path))
@@ -76,16 +74,17 @@
                                         message)) messages))))
 
 (defn request [config reference method path &opt body preserve-nulls]
-  (def finished (ev/thread-chan 1))
-  (ev/thread transfer [config reference method path (when body (json/encode body)) (dyn :zinc/task) (dyn :pa/limits)] :n finished)
-  (defer (ev/chan-close finished)
-    (def [status output] (ev/take finished))
-    (assert (= :ok status) (string output))
-    (def value (json/decode output true (not preserve-nulls)))
-    (assert (dictionary? value) "model response must be an object")
-    (when (value :error)
-      (error (string "provider error: " (json/encode (value :error)))))
-    value))
+  (def args [config reference method path (when body (json/encode body)) (dyn :zinc/task) (dyn :pa/limits)])
+  (def output (if (get-in config [:providers (keyword (reference :provider)) :transport]) (transfer args)
+    (let [finished (ev/thread-chan 1)]
+      (ev/thread transfer args :n finished)
+      (defer (ev/chan-close finished)
+        (def [status result] (ev/take finished))
+        (assert (= :ok status) (string result)) result))))
+  (def value (json/decode output true (not preserve-nulls)))
+  (assert (dictionary? value) "model response must be an object")
+  (when (value :error) (error (string "provider error: " (json/encode (value :error)))))
+  value)
 
 (defn catalogue [config role]
   (assert (index-of role ["chat" "rerank"]) "unsupported model role")

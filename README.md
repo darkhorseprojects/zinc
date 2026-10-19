@@ -187,7 +187,7 @@ An authorized human execution may have `inference: false`,
 agent profile; code selves retain the caller's profile. Profiles must share
 source/store/world/file identity. Saved work is reauthorized against current
 profiles. Removed configuration fields are rejected, not converted. Old in-flight
-profiles cannot resume under a revoked contract. Store format remains 1;
+profiles cannot resume under a revoked contract. Store format is 2;
 incompatible layouts require explicit fresh-store provisioning, not migration.
 
 `save` is an optional built-in, limited to the configured world source file:
@@ -216,8 +216,9 @@ confidentiality.
 
 ## Work and history
 
-SQLite format 1 stores admissions, immutable events/outcomes, attempts,
-task-owned leases, checkpoints, images and usage. Every event retains an author,
+SQLite format 2 stores admissions, immutable events/outcomes, attempts,
+task-owned leases, checkpoints, images and usage. Temporary executors use the same
+scheduler rules with metadata-only durable task rows. Every event retains an author,
 source occurrence timestamp and separate ingestion clock. Accepted execution can
 finish and commit after its PA observer dies. It cannot survive death of its own
 executing process or OS scope.
@@ -238,8 +239,9 @@ valid. Abort fences scheduling and records the affected tasks in branch history.
 It is cooperative and does not undo effects; an external action already in
 flight may still finish. Completed roots remain completed.
 
-Model requests use complete JSON responses. Complete assistant messages, tool
-calls/results and execution receipts are persisted; transport fragments are not
+Model requests use complete JSON responses. Model outcomes are stored once;
+branch responses reference them through the canonical history projection. Complete
+assistant messages, tool calls/results and execution receipts are persisted; transport fragments are not
 events. A database insert constraint permits only explicit semantic and receipt
 kinds, never deltas or arbitrary emissions. Event IDs count ledger records, not
 conversation messages. Each complete model round emits while execution

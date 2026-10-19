@@ -6,246 +6,81 @@ Summaries are lossy. Use granted `memory/expand` to page originals or follow chi
 
 ```janet
 (module/add-syspath (dyn :library))
-
 (import ./src/engine)
 
 (def schema
-  {:inference {:type :boolean
-               :default true
-               :description "Permit inference in this execution view"}
+  @{:source {:type :string}
+    :world {:type :string}
+    :remote {:type :string :optional true}
+    :snapshot {:type :dictionary :optional true}
+    :agent {:type :dictionary :optional true}
+    :visibility {:type :array :items :string :default []}
+    :forbid {:type :array :items :string
+             :default ["net" "subprocess" "ffi" "modules" "threads" "env" "asm" "unmarshal" "exit" "locale" "signal" "chroot" "sandbox"]}
+    :capabilities {:type :dictionary :default {:memory/expand {}}
+                   :values {:type :dictionary
+                            :fields {:module {:type :string :absolute true :optional true}
+                                     :config {:type :dictionary :default {}}}}}
+    :providers {:type :dictionary :default {}
+                :values {:type :dictionary
+                         :fields {:url {:type :string}
+                                  :token {:type :string :optional true}
+                                  :identity {:type :string :optional true}
+                                  :transport {:type :dictionary :optional true
+                                              :fields {:module {:type :string :absolute true}
+                                                       :config {:type :dictionary :default {}}}}}}}
+    :thinking {:type :string :default "default" :option "thinking" :description "Reasoning effort"
+               :choices ["default" "none" "minimal" "low" "medium" "high" "xhigh" "max"]}
+    :language {:type :string :default "en"}
+    :score {:type :number :default 0}
+    :cygnet-source {:type :string :default "aae2cdb1418c1435558584a91181e1cb94459f2506c16f2be4b00e81428deaff"}})
 
-   :source {:type :string
-           :description "Authenticated history namespace"}
-
-   :store {:type :string
-           :absolute true
-           :description "Absolute SQLite path"}
-
-   :world {:type :string
-           :description "World identity"}
-
-   :repl {:type :boolean
-          :default false
-          :description "Enable task-local Janet execution"}
-
-   :file {:type :string :absolute true :optional true :description "World source file"}
-
-   :instructions {:type :string :absolute true :optional true :description "World instruction text file"}
-
-   :seconds {:type :integer :default 120 :minimum 1 :maximum 86400
-             :description "Hard deadline for world bootstrap and execution"}
-
-   :forbid {:type :array :items :string
-            :default ["net" "subprocess" "ffi" "modules" "threads" "env" "asm" "unmarshal" "exit" "locale" "signal" "chroot" "sandbox"]
-            :description "Disabled native features in world execution"}
-
-   :remote {:type :string :optional true :description "Granted Git push destination"}
-
-   :journal-bytes {:type :integer :default 67108864 :minimum 4096 :maximum 1073741824
-                   :description "Maximum RAM journal bytes for a temporary self"}
-
-   :snapshot {:type :dictionary :optional true :description "Trusted child source and ancestry snapshot"}
-
-   :agent {:type :dictionary :optional true :profile true :description "Trusted agent execution profile for human self requests"}
-
-   :capabilities {:type :dictionary :default {:memory/expand {}}
-                  :values {:type :dictionary
-                           :fields {:module {:type :string :absolute true :optional true}
-                                    :config {:type :dictionary :default {}}}}
-                  :description "Granted source functions or library namespaces with private configuration"}
-
-   :visibility {:type :array
-                :items :string
-                :default []}
-
-   :providers {:type :dictionary
-               :values {:type :dictionary
-                        :fields {:url {:type :string}
-                                 :token {:type :string :optional true}
-                                 :identity {:type :string :optional true}
-                                 :transport {:type :dictionary :optional true
-                                             :fields {:module {:type :string :absolute true}
-                                                      :config {:type :dictionary :default {}}}}}}
-               :default {}
-               :description "Provider catalogs and endpoints granting model access"}
-
-   :chat {:type :string
-          :default "llama:chat"
-          :option "chat"
-          :autocomplete "chat"
-          :description "Chat model"}
-
-   :rerank {:type :string
-            :default "llama:rerank"
-            :option "rerank"
-            :autocomplete "rerank"
-            :description "Rerank model"}
-
-   :thinking {:type :string
-              :default "default"
-              :option "thinking"
-              :description "Reasoning effort"
-              :choices ["default" "none" "minimal" "low" "medium" "high" "xhigh" "max"]}
-
-   :output {:type :integer
-            :default 0
-            :minimum 0
-            :maximum 1048576
-            :description "Provider output token ceiling; zero uses provider capacity"}
-
-   :tool-quota {:type :integer
-                :default 32768
-                :minimum 1
-                :maximum 1048576
-                :description "Run-wide evaluation source/outcome quota in estimated tokens"}
-
-   :context-quota {:type :integer
-                   :default 32768
-                   :minimum 256
-                   :maximum 1048576
-                   :description "Per-request context quota in estimated tokens"}
-
-   :summary-quota {:type :integer
-                   :default 512
-                   :minimum 128
-                   :maximum 65536
-                   :description "Summary size quota in estimated tokens"}
-
-   :history-records {:type :integer
-                     :default 1024
-                     :minimum 1
-                     :maximum 4096}
-
-   :search {:type :boolean
-            :default true
-            :description "Enable semantic retrieval within the context quota"}
-
-   :terms {:type :integer
-           :default 64
-           :minimum 1
-           :maximum 256}
-
-   :candidates {:type :integer
-                :default 16
-                :minimum 1
-                :maximum 64}
-
-   :depth {:type :integer
-           :default 1
-           :minimum 0
-           :maximum 4}
-
-   :expansion-nodes {:type :integer
-                     :default 2048
-                     :minimum 1
-                     :maximum 8192}
-
-   :language {:type :string
-              :default "en"}
-
-   :score {:type :number
-           :default 0}
-
-   :cygnet {:type :string
-            :absolute true
-            :optional true}
-
-   :stopwords {:type :string
-               :absolute true
-               :optional true}
-
-   :cygnet-source {:type :string
-                   :default "aae2cdb1418c1435558584a91181e1cb94459f2506c16f2be4b00e81428deaff"}
-
-   :run-seconds {:type :integer
-                 :default 900
-                 :minimum 1
-                 :maximum 86400
-                 :description "Run wall-clock lifetime from admission; retries and reattachment do not reset it"}
-
-   :lease-seconds {:type :integer
-                   :default 30
-                   :minimum 3
-                   :maximum 300}
-
-   :parallel {:type :integer
-              :default 4
-              :minimum 1
-              :maximum 32}
-
-   :task-depth {:type :integer
-                :default 8
-                :minimum 1
-                :maximum 32}
-
-   :task-quota {:type :integer
-                :default 4096
-                :minimum 1
-                :maximum 65536}
-
-   :rounds {:type :integer
-            :default 32
-            :minimum 1
-            :maximum 256
-            :option "rounds"
-            :description "Maximum model rounds"}
-
-   :tool-calls {:type :integer
-                :default 16
-                :minimum 1
-                :maximum 64}
-
-   :source-bytes {:type :integer
-                  :default 65536
-                  :minimum 1
-                  :maximum 1048576
-                  :description "Stored Janet source byte ceiling"}
-
-   :response-bytes {:type :integer
-                    :default 8388608
-                    :minimum 4096
-                    :maximum 16777216
-                    :description "Stored outcome/event payload byte ceiling"}
-
-   :request-bytes {:type :integer
-                   :default 8388608
-                   :minimum 4096
-                   :maximum 16777216
-                   :description "Stored input/admission payload byte ceiling"}
-
-   :image-bytes {:type :integer
-                 :default 4194304
-                 :minimum 1
-                 :maximum 8388608
-                 :description "Total stored decoded image bytes per request"}
-
-   :http-ms {:type :integer
-             :default 600000
-             :minimum 1
-             :maximum 3600000}})
+(each [key value minimum maximum]
+  [[:seconds 120 1 86400]
+   [:journal-bytes 67108864 4096 1073741824]
+   [:output 0 0 1048576]
+   [:tool-quota 32768 1 1048576]
+   [:context-quota 32768 256 1048576]
+   [:summary-quota 512 128 65536]
+   [:history-records 1024 1 4096]
+   [:terms 64 1 256]
+   [:candidates 16 1 64]
+   [:depth 1 0 4]
+   [:expansion-nodes 2048 1 8192]
+   [:run-seconds 900 1 86400]
+   [:lease-seconds 30 3 300]
+   [:parallel 4 1 32]
+   [:task-depth 8 1 32]
+   [:task-quota 4096 1 65536]
+   [:rounds 32 1 256]
+   [:tool-calls 16 1 64]
+   [:source-bytes 65536 1 1048576]
+   [:response-bytes 8388608 4096 16777216]
+   [:request-bytes 8388608 4096 16777216]
+   [:image-bytes 4194304 1 8388608]
+   [:http-ms 600000 1 3600000]]
+  (put schema key {:type :integer :default value :minimum minimum :maximum maximum}))
+(put schema :rounds (merge (schema :rounds) {:option "rounds" :description "Maximum model rounds"}))
+(each [key value] [[:inference true] [:repl false] [:search true]]
+  (put schema key {:type :boolean :default value}))
+(each key [:store :file :instructions :cygnet :stopwords]
+  (put schema key {:type :string :absolute true :optional (not= key :store)}))
+(each [key description] [[:chat "Chat model"] [:rerank "Rerank model"]]
+  (put schema key {:type :string :default (string "llama:" key)
+                   :option (string key) :autocomplete (string key) :description description}))
 
 (def inputs
   {:text {:type :string}
-
-   :parent {:type :integer
-            :minimum 0
-            :option "parent"
-            :description "Attachment event; zero starts fresh"}
-
-   :persist {:type :boolean
-             :default true
-             :option "persist"
-             :description "Include this conversation in durable history"}
-
    :code {:type :string}
    :author {:type :string}
    :at {:type :string}
    :memory_range {:type :dictionary}
    :images {:type :array}
    :request {:type :string}
+   :parent {:type :integer :minimum 0 :option "parent" :description "Attachment event; zero starts fresh"}
+   :persist {:type :boolean :default true :option "persist" :description "Include this conversation in durable history"}
    :revision {:type :string :option "revision" :description "World source commit or branch"}
-   :after {:type :integer
-           :minimum 0}})
+   :after {:type :integer :minimum 0}})
 
 (each [name entry] (pairs (engine/make
   {:schema schema :input inputs :document (pa/document)

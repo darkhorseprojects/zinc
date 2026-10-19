@@ -78,7 +78,8 @@
   (each [name provider] (pairs (saved :providers))
     (def granted (get-in current [:providers name]))
     (assert (and granted (if (provider :identity) (= (provider :identity) (granted :identity)) (= (provider :url) (granted :url)))) "saved provider revoked"))
-  (def config (merge @{} saved {:search (and (saved :search) (current :search))
+  (def config (merge @{} saved {:forbid (distinct (array/concat @[] (saved :forbid) (current :forbid)))
+                                :search (and (saved :search) (current :search))
                                 :agent (when (saved :agent) (authorize schema (current :agent) (saved :agent)))
                                 :capabilities (tabseq [name :in (keys (saved :capabilities))] name (get-in current [:capabilities name]))
                                 :providers (tabseq [name :in (keys (saved :providers))]
@@ -128,6 +129,7 @@ CREATE TABLE runs(
  id INTEGER PRIMARY KEY AUTOINCREMENT CHECK(id<=9007199254740991),source TEXT NOT NULL,
  request TEXT,input TEXT NOT NULL CHECK(json_valid(input)),world TEXT NOT NULL,
  config TEXT NOT NULL CHECK(json_valid(config)),expires REAL NOT NULL,
+ root INTEGER REFERENCES runs(id),temporary INTEGER NOT NULL DEFAULT 0 CHECK(temporary IN (0,1)),
  work_used INTEGER NOT NULL DEFAULT 0,tool_used INTEGER NOT NULL DEFAULT 0,UNIQUE(source,request)
 ) STRICT;
 CREATE INDEX runs_source ON runs(source,id);
@@ -154,13 +156,8 @@ CREATE TABLE tasks(
 CREATE INDEX task_pending ON tasks(state,source,id);
 CREATE UNIQUE INDEX active_driver ON tasks(branch) WHERE parent IS NULL AND state IN ('queued','running','waiting');
 CREATE INDEX task_parent ON tasks(parent,id);
-CREATE TABLE volatile(
- request TEXT NOT NULL,run INTEGER NOT NULL UNIQUE REFERENCES runs(id),root INTEGER NOT NULL REFERENCES runs(id),source TEXT NOT NULL,world TEXT NOT NULL,expires REAL NOT NULL,
- owner TEXT,lease_expires REAL,state TEXT NOT NULL CHECK(state IN ('waiting','running','cancelled','done','failed')),
- PRIMARY KEY(source,request)
-) STRICT;
-CREATE VIEW running AS SELECT source FROM tasks WHERE state='running' AND lease_expires>unixepoch('subsec')
- UNION ALL SELECT source FROM volatile WHERE state='running' AND lease_expires>unixepoch('subsec') AND expires>unixepoch('subsec');
+CREATE VIEW running AS SELECT t.source FROM tasks t JOIN runs r ON r.id=t.run
+ WHERE t.state='running' AND t.lease_expires>unixepoch('subsec') AND r.expires>unixepoch('subsec');
 CREATE TABLE events(
  id INTEGER PRIMARY KEY AUTOINCREMENT CHECK(id<=9007199254740991),source TEXT NOT NULL,
  run INTEGER REFERENCES runs(id),branch INTEGER REFERENCES branches(id),parent INTEGER REFERENCES events(id),
@@ -190,8 +187,13 @@ CREATE TRIGGER event_kind BEFORE INSERT ON events
  'task-admission','task-attempt','task-outcome','model-admission','model-outcome','call-admission',
  'launch-uncertain','traceback','summary','interruption','cancelled','artifact','context','error','save-intent','saved','operation-outcome')
  BEGIN SELECT raise(ABORT,'unsupported event kind'); END;
-CREATE VIEW memory_records AS
- SELECT e.*,(SELECT 'tmp:'||r.request||'/'||b.id||':'||e.id FROM branches b JOIN runs r ON r.id=b.run WHERE b.id=e.branch AND b.temporary=1) label,CASE
+CREATE VIEW memory_records AS WITH records AS (
+ SELECT e.id,e.source,e.run,e.branch,e.parent,e.task,e.kind,
+   coalesce(json_extract(m.data,'$.text'),e.text) text,
+   CASE WHEN m.id IS NULL THEN e.data ELSE json_patch(m.data,e.data) END data,
+   e.estimate,e.author,e.at,e.created
+ FROM events e LEFT JOIN events m ON e.kind IN ('response','completed') AND m.kind='model-outcome' AND m.parent=e.parent
+) SELECT e.*,(SELECT 'tmp:'||r.request||'/'||b.id||':'||e.id FROM branches b JOIN runs r ON r.id=b.run WHERE b.id=e.branch AND b.temporary=1) label,CASE
    WHEN kind='user' THEN coalesce(nullif(text,''),json_extract(data,'$.input.code'),'')
    WHEN kind IN ('response','completed','model-outcome') AND json_type(data,'$.message')='object'
      THEN (CASE WHEN json_extract(data,'$."reasoning-visible"') THEN json_extract(data,'$.message') ELSE json_remove(json_extract(data,'$.message'),'$.reasoning','$.reasoning_content','$.reasoning_details') END) || char(10) || json_object('status',json_extract(data,'$.status'))
@@ -202,7 +204,7 @@ CREATE VIEW memory_records AS
     WHEN kind='task-admission' THEN json_extract(data,'$.kind')='code'
     WHEN kind IN ('error','interruption') THEN NOT EXISTS(SELECT 1 FROM tasks t WHERE t.id=e.task AND t.kind='summarize')
     WHEN kind='artifact' THEN json_type(data,'$.invalidates') IS NULL ELSE 0 END memory
- FROM events e;
+ FROM records e;
 CREATE VIEW invalid_summaries AS
  WITH RECURSIVE invalid(source,id) AS (
    SELECT n.source,n.id FROM events a JOIN events n ON n.id=json_extract(a.data,'$.invalidates') AND n.source=a.source AND n.kind='summary'
@@ -227,5 +229,5 @@ CREATE TRIGGER event_index AFTER INSERT ON events BEGIN
  INSERT INTO event_fts(rowid,body) SELECT id,body FROM search_records WHERE id=new.id;
 END;
 CREATE UNIQUE INDEX context_key ON events(source,json_extract(data,'$.key')) WHERE kind='context';
-PRAGMA user_version=1;
+PRAGMA user_version=2;
 `)

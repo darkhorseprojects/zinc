@@ -12,8 +12,10 @@
     (indexed? node) (string/join (map document node) "\n")
     ""))
 
-(defn git [directory args &opt input]
-  (def child (os/spawn ["git" "-C" directory "--literal-pathspecs" ;args] :p {:in :pipe :out :pipe :err :out}))
+(defn git [directory args &opt input environment]
+  (default environment {})
+  (def child (os/spawn ["git" "-C" directory "--literal-pathspecs" ;args] :pe
+    (merge (os/environ) environment {:in :pipe :out :pipe :err :out})))
   (def output @"")
   (def done (ev/chan 1))
   (ev/go (fn [] (os/proc-wait child)) nil done)
@@ -28,7 +30,13 @@
       {:status (child :return-code) :text (string/trim (string output)) :output (string output)})))
 
 (defn source [config &opt inherited revision]
-  (if-not (config :repl) {:code ""}
+  (cond (not (config :repl)) {:code ""}
+    (and inherited (not revision))
+    (do
+      (assert (<= (os/stat (inherited :file) :size) (config :source-bytes)) "world source byte ceiling")
+      (def origin (merge inherited {:code (string (slurp (inherited :file)))}))
+      (put origin :file nil)
+      origin)
     (do
       (def directory (path/dirname (config :file)))
       (def repository (git directory ["rev-parse" "--show-toplevel"]))
@@ -42,12 +50,12 @@
       (def tracked (and entry (not= "" (entry :output))))
       (when revision (assert tracked "world file is absent from the selected revision"))
       (def code
-        (if (and (or revision (not inherited)) tracked)
+        (if tracked
           (let [result (git root ["show" (string (base :text) ":" relative)])]
             (assert (= 0 (result :status)) (result :text))
             (result :output))
           (do
-            (def file (or inherited (config :file)))
+            (def file (config :file))
             (assert (<= (os/stat file :size) (config :source-bytes)) "world source byte ceiling")
             (string (slurp file)))))
       (assert (<= (length code) (config :source-bytes)) "world source byte ceiling")
@@ -103,18 +111,13 @@
     (defer (when (os/stat index) (os/rm index))
       (def blob (git directory ["hash-object" "-w" "--stdin"] code))
       (assert (= 0 (blob :status)) (blob :text))
-      (def child (os/spawn ["git" "-C" directory "read-tree" (or parent "--empty")]
-                          :pe (merge (os/environ) {"GIT_INDEX_FILE" index :out stderr :err stderr})))
-      (assert (= 0 (os/proc-wait child)) "cannot prepare world index")
-      (def stage (os/spawn ["git" "-C" directory "update-index" "--add" "--cacheinfo" "100644" (blob :text) (origin :path)]
-                          :pe (merge (os/environ) {"GIT_INDEX_FILE" index :out stderr :err stderr})))
-      (assert (= 0 (os/proc-wait stage)) "cannot stage world source")
-      (def tree-process (os/spawn ["git" "-C" directory "write-tree"]
-                                 :pe (merge (os/environ) {"GIT_INDEX_FILE" index :out :pipe :err stderr})))
-      (def tree-bytes (ev/read (tree-process :out) :all))
-      (ev/close (tree-process :out))
-      (assert (= 0 (os/proc-wait tree-process)) "cannot write world tree")
-      (var tree (string/trim (string tree-bytes)))
+      (each args [["read-tree" (or parent "--empty")]
+                  ["update-index" "--add" "--cacheinfo" "100644" (blob :text) (origin :path)]]
+        (def staged (git directory args nil {"GIT_INDEX_FILE" index}))
+        (assert (= 0 (staged :status)) (staged :text)))
+      (def written (git directory ["write-tree"] nil {"GIT_INDEX_FILE" index}))
+      (assert (= 0 (written :status)) (written :text))
+      (var tree (written :text))
       (when (options :merge)
         (assert parent "merge requires a saved base")
         (def target (git directory ["rev-parse" "--verify" "--end-of-options" (string (options :merge) "^{commit}")]))
@@ -178,7 +181,7 @@
         "\n`(await (self {:text \"request\"}))` starts an independent source branch. `:persist false` keeps its journal in RAM."
         "\nChildren inherit source, not unsaved live bindings. Performed effects are not rolled back."
         "\n\n## Callable functions\n\n"
-        (string/join (seq [name :in (view :permissions) :when (available name)] (string "- " ((available name) :doc))) "\n")
+        (string/join (seq [[name binding] :in (sorted (pairs available))] (string "- " (binding :doc))) "\n")
         "\nGranted functions are already bound. Inspect uncertain receipts before repeating effects."))))
 
 (defn- request [name args]
@@ -233,19 +236,18 @@
 
 (defn close [runtime]
   (ev/chan-close (runtime :evaluations))
-  (ev/chan-close (runtime :requests))
-  (ev/chan-close (runtime :finished)))
+  (ev/chan-close (runtime :requests)))
 
 (defn execute [runtime code handler seconds]
   (def reply (ev/thread-chan 1))
   (ev/with-deadline seconds
     (ev/give (runtime :evaluations) [code reply])
-    (while true
+    (label done (while true
       (def [status channel packet] (ev/select (runtime :requests) reply (runtime :finished)))
       (assert (= status :take) "Execution closed")
       (cond
-        (= channel reply) (do (assert (packet :ok) (packet :error)) (break (packet :value)))
+        (= channel reply) (do (assert (packet :ok) (packet :error)) (return done (packet :value)))
         (= channel (runtime :finished)) (error (string "World evaluator stopped: " packet))
         (do
           (def [name args response] packet)
-          (ev/give response (try {:ok true :value (handler name args)} ([err] {:ok false :error (string err)}))))))))
+          (ev/give response (try {:ok true :value (handler name args)} ([err] {:ok false :error (string err)})))))))))

@@ -1,31 +1,13 @@
-# Source identity and passive recording
+# 0.3.0
 
-`source` replaces the history-owner name `actor`; authors are observation provenance, not ownership grants. Context-only records are bounded and idempotent, visible to the next new inquiry without creating runs, tasks or inference. Running snapshots stay frozen.
+Temporary executors use the task scheduler's lease, parking, heartbeat and cancellation rules. Their durable task rows contain control metadata only; inputs, checkpoints and outcomes remain in the bounded RAM journal.
 
-Runtime world bindings/instructions now belong to `repl.janet`; database DDL belongs to `schema.janet`. Durable scheduling remains in `engine.janet`. The evaluator has no PA spawning or private configuration.
+Model outcomes are stored once. The canonical history projection resolves branch responses to those receipts. Emitted model frames carry the assistant message rather than duplicated content/reasoning fields.
 
-# Reject fragment persistence
+All exports share one configuration, request and cleanup boundary. Discovery advertises `inquiry-v1`, exposed parameter defaults and explicit profile metadata instead of the complete application schema.
 
-The history database rejects new events outside the explicit semantic/receipt kind set. No delta or generic emission kind is accepted. Existing historical fragments remain immutable; they are not deleted, renumbered or relabeled as complete messages. The fresh store is schema version 1; old layouts are not migrated. Preserve old deployments separately.
+Child calls inherit frozen source provenance without rediscovering Git state. Alternate-index operations use the same bounded Git runner. Saved profiles exclude provider tokens and private capability configuration; reauthorization retains newly imposed native restrictions.
 
-PA observation switches and append frames are removed; use matching PA callers, executable and Janet sources. Zinc emits only committed complete segments.
+Evaluator and memory-expansion return values are fixed. REPL cleanup no longer closes the supervisor channel before its worker finishes. Event pagination no longer shadows the core identity function.
 
-# Whole messages and interrupted history
-
-Model calls use bounded complete JSON responses, not SSE fragment persistence. Existing event IDs and histories are retained. Usage reports survive response-validation failures.
-
-Automatic history attachment includes the latest committed failed/interrupted work. Abort receipts belong to branch history; cancellation is cooperative, not rollback. Reattachment emits committed messages before returning saved outcomes.
-
-Redundant context caches, memory handle wrappers and fragment machinery are removed. Source formatting now distinguishes validation, admission, execution and outcome boundaries.
-
-# Development baseline
-
-Zinc owns self, independent task execution, source-based world branches, user/agent profiles and one optional commit capability.
-
-Resident services, Unix sockets, REPL/ledger relays, fake agent delegation, Git imports and public invoke/eval selectors are removed. Built-in functions and ordinary supplied library proxies are called directly.
-
-Prompts discover the provided libraries' public callable bindings/docstrings without knowing Connector. Private configuration stays in the trusted runtime.
-
-Separate executions have separate heaps. Entry source is inherited; arbitrary live heaps and filesystem writes are not cloned or merged. Native access still requires appropriate OS confinement.
-
-Tasks can append outcomes after their PA observer dies. Deadlines, leases, generation fencing and manual effect recovery remain. Preserve old development stores and provision a fresh source-branch schema; no migrations are provided.
+The history store is schema version 2. Preserve old stores and provision a fresh path; there is no migration or compatibility adapter. Cygnet runtime assets remain format 1.
