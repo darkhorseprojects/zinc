@@ -2,6 +2,7 @@
 (import spork/json :as json)
 (import spork/base64 :as base64)
 (import ./store)
+(import sqlite3 :as sql)
 
 (defn admit [s reference input size output]
   (store/transact s
@@ -17,21 +18,20 @@
   (setdyn :pa/limits limits)
   (def provider ((config :providers) (keyword (reference :provider))))
   (assert provider "provider is not configured")
-  (def s (when current (store/open config)))
+  (def db (when current (sql/open (config :store))))
+  (when db (sql/eval db "PRAGMA busy_timeout=5000;"))
   (def native (unless (provider :transport) (require "jurl/native")))
   (def client (when native ((module/value native 'new))))
   (def bytes @"")
   (var next-check 0)
   (var permitted true)
-  (defer (do (when client ((module/value native 'reset) client)) (when s (store/close s)))
+  (defer (do (when client ((module/value native 'reset) client)) (when db (sql/close db)))
     (def check (fn [& counts]
                  (when (and current (>= (os/clock) next-check))
                    (set next-check (+ (os/clock) 0.1))
                    (set permitted (not (nil? (first
-                     (store/query s `SELECT t.id FROM main.task_controls t JOIN main.run_controls r ON r.id=t.run
-                       WHERE t.id=? AND t.source=? AND t.owner=?
-                       AND t.state IN ('running','waiting') AND t.lease_expires>? AND r.expires>? AND NOT r.cancelled`
-                       [(current :id) (s :source) (current :owner) (os/clock) (os/clock)]))))))
+                     (sql/eval db "SELECT id FROM live_tasks WHERE id=? AND source=? AND owner=?"
+                       [(current :id) (config :source) (current :owner)]))))))
                  permitted))
     (assert (check) "HTTP job fenced")
     (def url (string (provider :url) path))
@@ -41,16 +41,19 @@
       (if-let [transport (provider :transport)]
         (with-dyns [:capability/config (transport :config)]
           ((module/value (require (transport :module)) 'request) url method body headers))
-        ((module/value (require "jurl") 'request)
-          {:client client :url url :method (keyword (string/ascii-lower method)) :body body
-           :headers (tabseq [[key value] :in (pairs headers) :unless (nil? value)] key value)
-           :stream (fn [chunk]
-                     (assert (<= (+ (length bytes) (length chunk)) (config :response-bytes)) "HTTP response exceeds byte limit")
-                     (buffer/push-string bytes chunk))
-           :options {:followlocation false :ssl-verifypeer true :ssl-verifyhost 2
-                     :timeout-ms (config :http-ms) :connecttimeout-ms (min 10000 (config :http-ms))
-                     :protocols "http,https" :noprogress false :xferinfofunction check}})))
-    (def data (if (provider :transport) (response :body) (string bytes)))
+        (do
+          (def options {:url url :customrequest method :postfields body
+            :httpheader (seq [[name value] :in (pairs headers) :unless (nil? value)] (string name ": " value))
+            :writefunction (fn [chunk]
+              (assert (<= (+ (length bytes) (length chunk)) (config :response-bytes)) "HTTP response exceeds byte limit")
+              (buffer/push-string bytes chunk))
+            :followlocation false :ssl-verifypeer true :ssl-verifyhost 2
+            :timeout-ms (config :http-ms) :connecttimeout-ms (min 10000 (config :http-ms))
+            :protocols "http,https" :noprogress false :xferinfofunction check})
+          (each [key value] (pairs options) (unless (nil? value) (put client key value)))
+          (def status (:perform client))
+          {:error status :status (client :response-code) :body (string bytes)})))
+    (def data (response :body))
     (assert (<= (length data) (config :response-bytes)) "HTTP response exceeds byte limit")
     (assert (= :ok (response :error)) (string "HTTP transfer failed: " (response :error) "; effects may have happened"))
     (assert (utf8/is-valid? data) "model response is not UTF-8")
@@ -83,19 +86,19 @@
   (when (value :error) (error (string "provider error: " (json/encode (value :error)))))
   value)
 
-(defn catalogue [config role]
+(defn catalogue [config role &opt provider]
   (assert (index-of role ["chat" "rerank"]) "unsupported model role")
   (def models @[])
-  (each name (keys (config :providers))
+  (each name (if provider [(keyword provider)] (keys (config :providers)))
     (def response (request config {:provider (string name)} "GET"
-                           (if (= :openrouter name) (string "/v1/models?output_modalities=" (if (= role "chat") "text" "rerank")) "/v1/models")))
+                           (if (= :openrouter name) (string "/v1/models?output_modalities=" (if (= role "chat") "text" "rerank")) "/v1/models") nil provider))
     (assert (and (dictionary? response) (indexed? (response :data))) "invalid model catalogue")
     (def identities @{})
     (each record (response :data)
       (assert (and (dictionary? record) (string? (record :id)) (> (length (record :id)) 0)
                    (not (identities (record :id)))) "invalid or duplicate model ID")
       (put identities (record :id) true)
-      (array/push models {:ref (string name ":" (record :id)) :name (get record :name (record :id))})))
+      (array/push models (merge record {:ref (string name ":" (record :id)) :name (get record :name (record :id))}))))
   (sorted models |(< ($0 :ref) ($1 :ref))))
 
 (defn profile [s reference role]
@@ -109,15 +112,10 @@
   (def id (string/slice reference (+ split 1)))
   (assert (and (not= "" id) (index-of provider ["llama" "openrouter"])) "unsupported model reference")
   (def ref {:provider provider :id id :reference reference})
-  (def record
-    (if (= provider "llama")
-      (do
-        (assert (find |(= ($ :ref) reference) (catalogue config (string role))) "exact model is unavailable")
-        (request config ref "GET" (string "/props?model=" ((module/value (require "jurl/native") 'escape) id))))
-      (let [catalog (request config ref "GET"
-                             (string "/v1/models?output_modalities=" (if (= role :rerank) "rerank" "text")) nil true)
-            record (find |(= ($ :id) id) (catalog :data))]
-        (assert record "exact model is unavailable") record)))
+  (def catalogued (find |(= ($ :id) id) (catalogue config (string role) provider)))
+  (assert catalogued "exact model is unavailable")
+  (def record (if (= provider "llama")
+    (request config ref "GET" (string "/props?model=" ((module/value (require "jurl/native") 'escape) id))) catalogued))
   (def context
     (if (= provider "llama") (get-in record [:default_generation_settings :n_ctx])
       (if (= role :chat)

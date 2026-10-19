@@ -1,5 +1,6 @@
 (import spork/json :as json)
 (import spork/path :as path)
+(import spork/utf8 :as utf8)
 (import portable-agents/src/pa)
 (import ./store)
 (import ./model)
@@ -45,15 +46,11 @@
           "queued" (spawn-job s id))
         (ev/sleep 0.1)))))
 
-  (defn coordinates [branch event data]
-    (def origin (data :world-source))
-    {:run (branch :run) :branch (branch :id) :execution (string (branch :request) "/" (branch :id))
-     :persist (= 0 (branch :temporary)) :sequence (event :id) :author (event :author) :at (event :at)
-     :world {:file (branch :file) :path (origin :path) :ref (or (data :ref) (origin :ref)) :base (origin :base) :revision (or (data :after) (origin :base))}})
-
   (defn start-child [s granted value]
     (def view (merge granted (scope s (granted :branch))))
-    (def value (schema/request (json/encode value) [:text :code :parent :memory_range :persist :revision]))
+    (def value (schema/request
+      (postwalk |(if (dictionary? $) (tabseq [[key item] :in (pairs $)] (keyword key) item) $) value)
+      [:text :code :parent :memory_range :persist :revision]))
     (assert (not= (nil? (value :text)) (nil? (value :code))) "self requires text or code")
     (def current (s :config))
     (def config (if (value :text) (or (current :agent) current) current))
@@ -72,10 +69,7 @@
         (when (selected :base)
           (repl/git (selected :root) ["update-ref" "--stdin"] (string "create " (selected :ref) " " (selected :base) "\n")))
         (def branch (store/start child value config (merge view {:event (dyn :zinc/effect) :agent (or (view :agent) (not= config current))}) selected))
-        (def id (store/submit child (scope child (branch :id)) (if (value :text) "agent" "code")
-          (if (value :text) {:branch (branch :id) :model (config :chat)} {:code (value :code)})
-          {:retry-policy (if (value :text) "retry" "manual") :key (string "child:" (branch :id))}))
-        {:job id :branch (branch :id)})
+        {:job (store/driver child branch) :branch (branch :id)})
       (do
         (def visible (scope s (view :branch)))
         (each key [:parent] (when (> (get value key 0) 0) (store/event s visible (value key))))
@@ -96,11 +90,15 @@
   (defn message [s event]
     (when (and (event :branch) (index-of (event :kind) ["user" "response" "completed" "task-admission" "tool-result" "tool-ambiguity" "interruption" "model-outcome" "saved" "error"]))
       (def data (json/decode (event :data) true true))
-      (def branch (store/branch s (event :branch)))
+      (def origin (data :world-source))
       (def assistant (when (event :public_message) (json/decode (event :public_message) true true)))
-      (def base (merge (coordinates branch event data) {:event (if (= 0 (branch :temporary)) (event :id) :null)}))
+      (def base {:run (event :run) :branch (event :branch) :execution (string (event :request) "/" (event :branch))
+        :persist (= 0 (event :branch_temporary)) :event (if (= 0 (event :branch_temporary)) (event :id) :null)
+        :sequence (event :id) :author (event :author) :at (event :at)
+        :world {:file (event :branch_file) :path (origin :path) :ref (or (data :ref) (origin :ref))
+          :base (origin :base) :revision (or (data :after) (origin :base))}})
       (case (get {"response" "turn" "completed" "turn"} (event :kind) (event :kind))
-        "user" (merge base {:type "start" :root (and (nil? (branch :parent)) (not (get-in (s :config) [:snapshot :child])))})
+        "user" (merge base {:type "start" :root (and (nil? (event :branch_parent)) (not (get-in (s :config) [:snapshot :child])))})
         "turn" (merge base {:type "turn" :text (event :text) :message assistant
           :status (get data :status "complete") :usage (data :usage) :final (= "completed" (event :kind))})
         "task-admission" (when (= "code" (data :kind)) (merge base {:type "tool" :call (event :id) :code (event :text)}))
@@ -149,7 +147,8 @@
                                SELECT id FROM tasks WHERE id=? AND source=? UNION ALL
                                SELECT t.parent FROM tasks t JOIN parents p ON t.id=p.id WHERE t.parent IS NOT NULL)
                                SELECT id FROM parents WHERE id=?` [(handle :job) (s :source) (current :id)]))) "await requires descendant work")
-                (wait s (handle :job)))))
+                (def value (wait s (handle :job)))
+                (if (and (dictionary? value) (value :completion)) (result s ((store/task s (handle :job)) :branch)) value))))
           (do
             (def admission (store/transact s
               (store/charge s 1 0)
@@ -239,7 +238,7 @@
     (unless (s :temporary)
       (try (with-dyns [:zinc/background true] (memory/context s (scope s branch) space pool true))
         ([err] (store/append s (scope s branch) "launch-uncertain" "Background compaction preparation failed." {:error (string err)}))))
-    (result s branch))
+    {:completion ((first (store/query s "SELECT id FROM events WHERE branch=? AND kind='completed'" [branch])) :id)})
 
   (defn execute-job [store row]
     (def s (merge store {:runtime nil}))
@@ -252,8 +251,7 @@
       (unless (s :budget-root) (put s :budget-root (row :run)))
       (def input (json/decode (row :input) true true))
       (store/transact s
-        (assert (first (store/query s `SELECT t.id FROM main.task_controls t JOIN main.run_controls r ON r.id=t.run WHERE t.id=? AND t.owner=?
-          AND t.state='running' AND t.lease_expires>? AND r.expires>? AND NOT r.cancelled` [id (row :owner) (os/clock) (os/clock)])) "task execution fenced")
+        (assert (first (store/query s "SELECT id FROM main.live_tasks WHERE id=? AND owner=? AND state='running'" [id (row :owner)])) "task execution fenced")
         (store/append s view "task-attempt" "execution entered" {:attempt (row :attempt)} nil id))
       (def stop (ev/thread-chan 1))
       (def finished (ev/thread-chan 1))
@@ -352,18 +350,7 @@
             (if (first (store/query s "SELECT id FROM events WHERE branch=? AND kind='completed'" [id]))
               (result s id)
               (do
-                (def driver (store/transact s
-                              (def prior-id (first (store/query s "SELECT id FROM tasks WHERE branch=? AND parent IS NULL ORDER BY id DESC LIMIT 1" [id])))
-                              (def prior (when prior-id (store/task s (prior-id :id))))
-                              (if (and prior (or (index-of (prior :state) ["queued" "running" "waiting" "done"]) (not resume))) (prior :id)
-                                (do
-                                  (when prior (assert (= "retry" (prior :retry_policy)) "effectful root requires reconciliation, not replay"))
-                                  (def input (get-in (json/decode ((first (store/query s "SELECT data FROM events WHERE branch=? AND kind='user'" [id])) :data) true true) [:input]))
-                                  (store/submit s view (if (input :text) "agent" "code")
-                                                (if prior (json/decode (prior :input) true true)
-                                                  (if (input :text) {:branch id :model ((s :config) :chat)} {:code (input :code)}))
-                                                {:retry-policy (if (input :text) "retry" "manual") :key (string "root:" id ":" (if prior (prior :id) 0))
-                                                 :checkpoint (if prior (json/decode (prior :checkpoint) true true) {})})))))
+                (def driver (store/driver s branch resume))
                 (def emitter (ev/go (fn [] (try (while true (set sequence (drain s (view :run) sequence)) (ev/sleep 0.1)) ([err] nil)))))
                 (defer (ev/cancel emitter "observer detached")
                   (while (= "queued" ((store/task s driver) :state))
@@ -391,9 +378,9 @@
     ["pending" [:request]] ["abort" [:run :request :reason]] ["invalidate" [:event]]]]
     operation (fn [bytes opaque]
       (def config (schema/configuration (spec :schema) (json/decode opaque true true) (= operation "describe")))
-      (assert (<= (length bytes) (config :request-bytes)) "request byte ceiling")
+      (assert (and (utf8/is-valid? bytes) (<= (length bytes) (config :request-bytes))) "request must be bounded UTF-8")
       (when (index-of operation ["describe" "document"]) (assert (= "" bytes) "operation takes empty input"))
-      (def value (if (and (= "" bytes) (index-of operation ["describe" "document" "pending"])) {} (schema/request bytes fields)))
+      (def value (if (and (= "" bytes) (index-of operation ["describe" "document" "pending"])) {} (schema/request (json/decode bytes true true) fields)))
       (def s (unless (index-of operation ["describe" "document" "models"])
         (store/open config (and (= operation "self") (= false (get value :persist true))))))
       (defer (when s (store/close s))
@@ -402,7 +389,7 @@
             "describe" (describe config)
             "document" (let [available (repl/definitions config (spec :capabilities))]
               (repl/instructions config {} (spec :document) available))
-            "models" (model/catalogue config (get value :role "chat"))
+            "models" (map |{:ref ($ :ref) :name ($ :name)} (model/catalogue config (get value :role "chat")))
             "record" {:events (store/record s (value :records))}
             "invalidate" {:event ((memory/invalidate s (value :event)) :id)}
             "events" (let [records (memory/events s (value :run) (get value :after 0))]

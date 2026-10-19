@@ -187,7 +187,7 @@ An authorized human execution may have `inference: false`,
 agent profile; code selves retain the caller's profile. Profiles must share
 source/store/world/file identity. Saved work is reauthorized against current
 profiles. Removed configuration fields are rejected, not converted. Old in-flight
-profiles cannot resume under a revoked contract. Store format is 4;
+profiles cannot resume under a revoked contract. Store format is 5;
 incompatible layouts require explicit fresh-store provisioning, not migration.
 
 `save` is an optional built-in, limited to the configured world source file:
@@ -216,7 +216,7 @@ confidentiality.
 
 ## Work and history
 
-SQLite format 4 separates durable run/task controls from execution payloads.
+SQLite format 5 separates durable run/task controls from execution payloads.
 Branches own admitted history and execution profiles; tasks refer to their branch.
 Temporary executors attach a bounded RAM journal to their control connection and use
 the same transaction and scheduler rules without storing private payloads durably. Every event retains an author,

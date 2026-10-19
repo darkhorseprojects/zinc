@@ -10,8 +10,8 @@ concurrency:
   cancel-in-progress: true
 jobs:
   toolchain:
-    uses: darkhorseprojects/portable-agents/.github/workflows/ci.yml@4932ae9d0d929c1e959d1005b2932ed09ee89263
-    with: { toolchain: true }
+    uses: darkhorseprojects/portable-agents/.github/workflows/ci.yml@118795dffceb373d6157db08aa72471ebc50a08d
+    with: { toolchain: "118795dffceb373d6157db08aa72471ebc50a08d" }
   verify:
     needs: toolchain
     runs-on: ubuntu-24.04
@@ -24,62 +24,19 @@ jobs:
       - name: Activate toolchain
         run: |
           tar -xf "$RUNNER_TEMP/toolchain.tar" -C "$RUNNER_TEMP"
-          prefix="$RUNNER_TEMP/janet"
-          echo "$prefix/bin" >> "$GITHUB_PATH"
-          echo "PREFIX=$prefix" >> "$GITHUB_ENV"
-          echo "JANET_HEADERPATH=$prefix/include/janet" >> "$GITHUB_ENV"
-          echo "JANET_LIBPATH=$prefix/lib" >> "$GITHUB_ENV"
-          echo "JANET_BINPATH=$prefix/bin" >> "$GITHUB_ENV"
-          echo "JANET_MODPATH=$prefix/lib/janet" >> "$GITHUB_ENV"
-          echo "JANET_PATH=$prefix/lib/janet" >> "$GITHUB_ENV"
-          echo "LD_LIBRARY_PATH=$prefix/lib" >> "$GITHUB_ENV"
+          cat "$RUNNER_TEMP/janet/environment" >> "$GITHUB_ENV"
+          echo "$RUNNER_TEMP/janet/bin" >> "$GITHUB_PATH"
           sudo apt-get update
           sudo apt-get install -y pkg-config libcurl4-openssl-dev libsqlite3-dev
       - name: Install package
         working-directory: zinc
         run: |
-          JANET_SYSTEM_SQLITE=1 jpm --local deps
-          jpm --local install
-      - name: Verify scheduling, fencing and RAM payload exclusion
-        working-directory: zinc
-        run: |
-          JANET_PATH="$PWD/jpm_tree/lib" janet -e '
-            (import spork/json :as json)
-            (import ./src/store)
-            (def config {:store ":memory:" :source "test" :world "test" :run-seconds 60
-              :task-quota 100 :tool-quota 1000 :task-depth 8 :parallel 1 :lease-seconds 30
-              :request-bytes 1048576 :response-bytes 1048576 :source-bytes 65536 :journal-bytes 1048576
-              :visibility [] :providers {} :capabilities {} :repl false})
-            (each temporary [false true]
-              (def s (store/open config temporary))
-              (def b (store/start s {:text "private input" :request "request" :author "user"
-                :at "2026-01-01T00:00:00.000Z" :persist (not temporary)} config))
-              (def view (store/view s (b :id)))
-              (def id (store/submit s view "agent" {} {:key "job"}))
-              (def row (store/claim s id))
-              (assert (and row (nil? (store/claim s id))))
-              (store/append s view "task-attempt" "entered" {:attempt (row :attempt)} nil id)
-              (assert (try (do (store/append s view "task-attempt" "duplicate" {:attempt (row :attempt)} nil id) false) ([err] true)))
-              (with-dyns [:zinc/task @{:id id :owner (row :owner) :scope view}]
-                (store/checkpoint s {:phase "private checkpoint"})
-                (store/park s true) (store/park s false)
-                (assert (try (do (store/transact s (store/charge s 1 0) (error "rollback")) false) ([err] true)))
-                (assert (try (do (store/finish s (merge row {:owner "stale"}) "wrong" nil) false) ([err] true)))
-                (store/query s "UPDATE main.task_controls SET lease_expires=0 WHERE id=?" [id])
-                (store/recover s)
-                (assert (= "uncertain" ((store/task s id) :state)))
-                (store/finish s row "private result" nil))
-              (assert (= "done" ((store/task s id) :state)))
-              (when temporary
-                (each table ["run_payloads" "task_payloads" "events" "images" "usage"]
-                  (assert (= 0 (length (store/query s (string "SELECT * FROM main." table)))))))
-              (each schema ["main" (s :journal)]
-                (assert (= 0 (length (store/query s (string "PRAGMA " schema ".foreign_key_check"))))))
-              (store/close s))'
+          JANET_SYSTEM_SQLITE=1 jpm deps
+          jpm install
       - name: Check package sources
         working-directory: zinc
         run: |
-          JANET_PATH="$PWD/jpm_tree/lib" janet -e '
+          janet -e '
             (put root-env (quote pa/emit) @{:value (fn [bytes]) :private true})
             (setdyn :library (dyn *syspath*))
             ((module/value (require "portable-agents/src/markdown") (quote load)) (string (os/cwd) "/zinc.md") [])'

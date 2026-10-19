@@ -1,7 +1,5 @@
-(import spork/json :as json)
 (import spork/path :as path)
 (import spork/base64 :as base64)
-(import spork/utf8 :as utf8)
 
 (defn validate [schema supplied &opt discovery]
   (assert (dictionary? supplied) "configuration must be an object")
@@ -92,9 +90,7 @@
              (min (saved key) (current key))))))
   config)
 
-(defn request [bytes fields]
-  (assert (utf8/is-valid? bytes) "invalid request bytes")
-  (def value (json/decode bytes true true))
+(defn request [value fields]
   (assert (dictionary? value) "request must be an object")
   (each key (keys value) (assert (index-of key fields) "unknown request field"))
   (each key [:parent :after :run :task]
@@ -140,9 +136,10 @@ CREATE TABLE task_controls(
 CREATE INDEX task_pending ON task_controls(state,source,id);
 CREATE UNIQUE INDEX active_driver ON task_controls(run) WHERE parent IS NULL AND state IN ('queued','running','waiting');
 CREATE INDEX task_parent ON task_controls(parent,id);
-CREATE VIEW running AS SELECT t.source FROM task_controls t JOIN run_controls r ON r.id=t.run
- WHERE t.state='running' AND t.lease_expires>unixepoch('subsec') AND r.expires>unixepoch('subsec') AND NOT r.cancelled;
-PRAGMA user_version=4;
+CREATE VIEW live_tasks AS SELECT t.* FROM task_controls t JOIN run_controls r ON r.id=t.run
+ WHERE t.state IN ('running','waiting') AND t.lease_expires>unixepoch('subsec') AND r.expires>unixepoch('subsec') AND NOT r.cancelled;
+CREATE VIEW running AS SELECT source FROM live_tasks WHERE state='running';
+PRAGMA user_version=5;
 `) (string/replace-all "$schema." (if temporary "journal." "main.") `
 CREATE TABLE $schema.run_payloads(id INTEGER PRIMARY KEY,input TEXT NOT NULL CHECK(json_valid(input)),config TEXT NOT NULL CHECK(json_valid(config))) STRICT;
 CREATE TABLE $schema.branches(
@@ -199,7 +196,8 @@ CREATE VIEW $schema.memory_records AS WITH records AS (
 ), projected AS (
  SELECT e.*,CASE WHEN json_type(data,'$.message')='object' THEN
   CASE WHEN json_extract(data,'$."reasoning-visible"') THEN json_extract(data,'$.message') ELSE json_remove(json_extract(data,'$.message'),'$.reasoning','$.reasoning_content','$.reasoning_details') END END public_message FROM records e
-) SELECT e.*,(SELECT 'tmp:'||json_extract(r.input,'$.request')||'/'||b.id||':'||e.id FROM branches b JOIN run_payloads r ON r.id=b.run WHERE b.id=e.branch AND b.temporary=1) label,CASE
+) SELECT e.*,b.file branch_file,b.temporary branch_temporary,b.parent branch_parent,json_extract(r.input,'$.request') request,
+ CASE WHEN b.temporary=1 THEN 'tmp:'||json_extract(r.input,'$.request')||'/'||b.id||':'||e.id END label,CASE
    WHEN kind='user' THEN coalesce(nullif(text,''),json_extract(data,'$.input.code'),'')
    WHEN kind IN ('response','completed','model-outcome') AND json_type(data,'$.message')='object'
      THEN public_message || char(10) || json_object('status',json_extract(data,'$.status'))
@@ -210,7 +208,7 @@ CREATE VIEW $schema.memory_records AS WITH records AS (
     WHEN kind='task-admission' THEN json_extract(data,'$.kind')='code'
     WHEN kind IN ('error','interruption') THEN NOT EXISTS(SELECT 1 FROM task_payloads t JOIN events a ON a.id=t.admission WHERE t.id=e.task AND json_extract(a.data,'$.kind')='summarize')
     WHEN kind='artifact' THEN json_type(data,'$.invalidates') IS NULL ELSE 0 END memory
- FROM projected e;
+ FROM projected e LEFT JOIN branches b ON b.id=e.branch LEFT JOIN run_payloads r ON r.id=b.run;
 CREATE VIEW $schema.conversation_records AS
  SELECT e.*,CASE WHEN kind='response' THEN json_extract(data,'$.message') ELSE
    json_object('role','tool','tool_call_id',json_extract(data,'$.tool-id'),'content',text) END conversation_message
@@ -243,6 +241,12 @@ CREATE VIRTUAL TABLE $schema.lexeme_grams USING fts5(term,content='lexemes',cont
 CREATE TRIGGER $schema.lexeme_index AFTER INSERT ON lexemes BEGIN INSERT INTO lexeme_grams(rowid,term) VALUES(new.id,new.term); END;
 CREATE TRIGGER $schema.event_index AFTER INSERT ON events BEGIN
  INSERT INTO event_fts(rowid,body) SELECT id,body FROM search_records WHERE id=new.id;
+ INSERT INTO lexemes(source,term) SELECT DISTINCT new.source,term FROM
+   (SELECT term FROM event_words WHERE doc=new.id ORDER BY offset LIMIT 2048)
+   WHERE length(CAST(term AS BLOB))<=128 ON CONFLICT DO NOTHING;
+ INSERT INTO event_lexemes(event,lexeme) SELECT DISTINCT new.id,l.id FROM
+   (SELECT term FROM event_words WHERE doc=new.id ORDER BY offset LIMIT 2048) w
+   JOIN lexemes l ON l.term=w.term AND l.source=new.source ON CONFLICT DO NOTHING;
 END;
 CREATE UNIQUE INDEX $schema.context_key ON events(source,json_extract(data,'$.key')) WHERE kind='context';
 `)))

@@ -18,10 +18,6 @@
              (,sql/eval ,db "COMMIT") result)
            ([err] (,sql/eval ,db "ROLLBACK") (error err)))))))
 
-(defn- index [s id]
-  (query s (string "INSERT INTO " (s :journal) ".lexemes(source,term) SELECT DISTINCT ?,term FROM (SELECT term FROM " (s :journal) ".event_words WHERE doc=? ORDER BY offset LIMIT 2048) WHERE length(CAST(term AS BLOB))<=128 ON CONFLICT DO NOTHING") [(s :source) id])
-  (query s (string "INSERT INTO " (s :journal) ".event_lexemes(event,lexeme) SELECT DISTINCT ?,l.id FROM (SELECT term FROM " (s :journal) ".event_words WHERE doc=? ORDER BY offset LIMIT 2048) w JOIN " (s :journal) ".lexemes l ON l.term=w.term AND l.source=? ON CONFLICT DO NOTHING") [id id (s :source)]))
-
 (defn open [config &opt temporary]
   (def db (sql/open (config :store)))
   (def journal (if temporary "journal" "main"))
@@ -31,7 +27,7 @@
       (query s "PRAGMA foreign_keys=ON; PRAGMA trusted_schema=OFF; PRAGMA busy_timeout=5000; PRAGMA synchronous=FULL; PRAGMA journal_mode=WAL; PRAGMA temp_store=MEMORY;")
       (transact s
         (def version (((query s "PRAGMA user_version") 0) :user_version))
-        (assert (index-of version [0 4]) "unsupported Zinc database; provision a fresh database")
+        (assert (index-of version [0 5]) "unsupported Zinc database; provision a fresh database")
         (when (= version 0) (query s (schema/database))))
       (when temporary
         (query s "ATTACH DATABASE ':memory:' AS journal; PRAGMA foreign_keys=OFF;")
@@ -55,7 +51,6 @@
               (query s (string "INSERT OR IGNORE INTO journal." name "(" (string/join columns ",") ") VALUES(" (string/join (map (fn [_] "?") columns) ",") ")")
                 (map |(if (and (= name :images) (= $ "bytes")) (buffer (base64/decode (row :bytes))) (get row (keyword $))) columns)))))
         (query s "UPDATE journal.task_payloads SET outcome=NULL WHERE outcome NOT IN (SELECT id FROM journal.events); COMMIT")
-        (each row (query s "SELECT id FROM journal.events WHERE source=?" [(s :source)]) (index s (row :id)))
         (query s "PRAGMA foreign_keys=ON;")
         (assert (<= (* (((query s "PRAGMA journal.page_count") 0) :page_count) (((query s "PRAGMA journal.page_size") 0) :page_size)) (config :journal-bytes)) "temporary history exceeds RAM journal budget")
         (each name [:run_payloads :task_payloads :branches :events :images :usage :memory_records :conversation_records :unresolved_tools :invalid_summaries :lexemes :event_lexemes]
@@ -91,7 +86,6 @@
     (def row ((query s (string "INSERT INTO " (s :journal) ".events(source,run,branch,parent,task,kind,text,data,estimate,author,at) VALUES(?,?,?,?,?,?,?,?,?,?,coalesce(?,strftime('%Y-%m-%dT%H:%M:%fZ','now'))) RETURNING *")
       [(s :source) (scope :run) (scope :branch) parent task kind text data (estimate (string text data))
        (or (scope :author) (if branch-row (string "self:" (branch-row :request) "/" (scope :branch)) "system:zinc")) (scope :at)]) 0))
-    (index s (row :id))
     (when (s :temporary)
       (assert (<= (* (((query s "PRAGMA journal.page_count") 0) :page_count) (((query s "PRAGMA journal.page_size") 0) :page_size)) ((s :config) :journal-bytes)) "RAM journal byte ceiling"))
     row))
@@ -237,9 +231,8 @@
   (def encoded (string (json/encode value)))
   (assert (<= (length encoded) ((s :config) :request-bytes)) "stored checkpoint byte ceiling")
   (assert (first (query s (string "UPDATE " (s :journal) `.task_payloads SET checkpoint=? WHERE id IN (
-    SELECT t.id FROM main.task_controls t JOIN main.run_controls r ON r.id=t.run WHERE t.id=? AND t.source=? AND t.owner=?
-      AND t.state IN ('running','waiting') AND t.lease_expires>? AND r.expires>? AND NOT r.cancelled) RETURNING id`)
-    [encoded (current :id) (s :source) (current :owner) (os/clock) (os/clock)])) "job lease lost")
+    SELECT id FROM main.live_tasks WHERE id=? AND source=? AND owner=?) RETURNING id`)
+    [encoded (current :id) (s :source) (current :owner)])) "job lease lost")
   (put current :checkpoint value) value)
 
 (defn task [s id]
@@ -272,6 +265,20 @@
         (def event (append s view "task-admission" (if (= kind "code") (input :code) kind) {:kind kind :retry-policy retry-policy :parent (when current (current :id))} nil id))
         (query s (string "UPDATE " (s :journal) ".task_payloads SET admission=? WHERE id=?") [(event :id) id]) id))))
 
+(defn driver [s branch &opt resume]
+  (transact s
+    (def id (branch :id))
+    (def prior (first (query s "SELECT * FROM tasks WHERE branch=? AND kind IN ('agent','code') ORDER BY id DESC LIMIT 1" [id])))
+    (if (and prior (or (index-of (prior :state) ["queued" "running" "waiting" "done"]) (not resume))) (prior :id)
+      (do
+        (when prior (assert (= "retry" (prior :retry_policy)) "effectful root requires reconciliation, not replay"))
+        (def input (get-in (json/decode ((first (query s "SELECT data FROM events WHERE branch=? AND kind='user'" [id])) :data) true true) [:input]))
+        (submit s (view s id) (if (input :text) "agent" "code")
+          (if prior (json/decode (prior :input) true true)
+            (if (input :text) {:branch id :model ((s :config) :chat)} {:code (input :code)}))
+          {:retry-policy (if (input :text) "retry" "manual") :key (string "branch:" id ":" (get prior :id 0))
+           :checkpoint (if prior (json/decode (prior :checkpoint) true true) {})})))))
+
 (defn park [s waiting]
   (def current (dyn :zinc/task))
   (checkpoint s (current :checkpoint))
@@ -296,9 +303,8 @@
     (sql/eval db "PRAGMA busy_timeout=5000;")
     (try
       (while true
-        (assert (first (sql/eval db `UPDATE task_controls SET lease_expires=? WHERE id=? AND owner=? AND state IN ('running','waiting')
-          AND EXISTS(SELECT 1 FROM run_controls WHERE id=task_controls.run AND expires>? AND NOT cancelled) RETURNING id`
-          [(+ (os/clock) (config :lease-seconds)) id owner (os/clock)])) "execution fenced")
+        (assert (first (sql/eval db `UPDATE task_controls SET lease_expires=? WHERE id IN (SELECT id FROM live_tasks WHERE id=? AND owner=?) RETURNING id`
+          [(+ (os/clock) (config :lease-seconds)) id owner])) "execution fenced")
         (def tick (ev/chan 1))
         (def timer (ev/go (fn [] (ev/sleep (/ (config :lease-seconds) 3)) (ev/give tick true))))
         (when (= stop ((ev/select stop tick) 1)) (ev/cancel timer "finished") (break)))

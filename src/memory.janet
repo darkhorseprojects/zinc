@@ -133,22 +133,21 @@
           (seq [rank :in ((model/call s {:role "rerank" :query anchor :documents (map render selected)} request) :results)
                 :when (>= (rank :relevance_score) (config :score))] (let [row (selected (rank :index))] [(row :id) (row :author) (row :at) (row :kind) (row :text) (row :label)])))))))
 
-(defn- cached [s view policy ids]
+(defn- cached [s view policy ids &opt bytes]
   (def hit (first (store/query s "SELECT id FROM events WHERE source=? AND kind='summary' AND json_extract(data,'$.policy')=? AND json_extract(data,'$.children')=? AND id NOT IN invalid_summaries ORDER BY id DESC LIMIT 1"
     [(s :source) policy (string (json/encode ids))])))
-  (when hit (record s view (hit :id))))
+  (when hit (record s view (hit :id) 0 bytes)))
 
-(defn- compress [s view children prepare]
-  (def policy (string ((s :config) :summary-quota) ":" summary-prompt))
+(defn- compress [s view policy children prepare bytes]
   (def ids (map |($ :id) children))
-  (or (cached s view policy ids)
+  (or (cached s view policy ids bytes)
     (let [repair (((store/query s "SELECT coalesce(max(id),0) id FROM events WHERE source=? AND kind='artifact' AND json_type(data,'$.invalidates')='integer'" [(s :source)]) 0) :id)
           scope (merge (struct ;(catseq [key :in [:run :branch :world :history-last :visibility :exclude]] [key (view key)]))
             {:first ((first children) :first) :last ((last children) :last)})
           job (store/submit s scope "summarize" {:view scope :children ids :model ((s :config) :chat) :policy policy}
                 {:retry-policy "retry" :key (string "summary:" (view :branch) ":" repair ":" policy ":" (json/encode ids))})]
       (if prepare (do ((dyn :zinc/spawn) s job) nil)
-        (or (record s view (((dyn :zinc/wait) s job) :node)) (error "summary unavailable at the current history cut"))))))
+        (or (record s view (((dyn :zinc/wait) s job) :node) 0 bytes) (error "summary unavailable at the current history cut"))))))
 
 (defn context [s view limit evidence &opt prepare]
   (def budget (if ((s :config) :search) (math/floor (/ limit 2)) limit))
@@ -181,11 +180,11 @@
                         (= 0 (mod (sum (map |($ :count) (slice nodes 0 index))) (* count 2)))
                         (every? (map |(and (= 0 ($ :height)) (not= "summary" ($ :kind))) (slice nodes index (+ index (* count 2)))))) (*= count 2)))
           (def children (slice nodes index (+ index count)))
-          (def parent (compress s view children prepare))
+          (def parent (compress s view policy children prepare (* 4 budget)))
           (if parent
-            (let [replacement (record s view (parent :id) 0 (* 4 budget))]
-              (+= cost (- (replacement :cost) (sum (map |($ :cost) children))))
-              (array/remove nodes index count) (array/insert nodes index replacement))
+            (do
+              (+= cost (- (parent :cost) (sum (map |($ :cost) children))))
+              (array/remove nodes index count) (array/insert nodes index parent))
             (set pending true))))))
   (unless pending
     (var i (length nodes))

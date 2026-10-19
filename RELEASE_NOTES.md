@@ -14,4 +14,8 @@ Child calls inherit frozen source provenance without rediscovering Git state. Al
 
 Evaluator and memory-expansion return values are fixed. REPL cleanup no longer closes the supervisor channel before its worker finishes. Event pagination no longer shadows the core identity function.
 
-The history store is schema version 4. Preserve old stores and provision a fresh path; there is no migration or compatibility adapter. Cygnet runtime assets remain format 1.
+Live lease eligibility has one SQL definition. Store owns root and descendant driver construction, insertion triggers
+own all lexical indexing, and event pages include their branch coordinates. Agent task outcomes reference completed
+turns rather than storing another complete result. Native HTTP fencing opens only the control connection.
+
+The history store is schema version 5. Preserve old stores and provision a fresh path; there is no migration or compatibility adapter. Cygnet runtime assets remain format 1.
