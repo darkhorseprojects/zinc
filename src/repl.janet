@@ -36,6 +36,7 @@
       (def origin (merge inherited {:code (string (slurp (inherited :file)))}))
       (put origin :file nil) origin)
     (do
+      (assert (and (config :file) (= :file (os/stat (config :file) :mode))) "world source is required")
       (def directory (path/dirname (config :file)))
       (def repository (git directory ["rev-parse" "--show-toplevel"] nil nil true))
       (def root (when repository (string/trim repository)))
@@ -64,7 +65,7 @@
   (each key [:branch :merge]
     (when (has-key? options key) (assert (and (string? (options key)) (<= 1 (length (options key)) 256) (not (string/find "\0" (options key)))) "invalid save revision")))
   (when (has-key? options :push) (assert (boolean? (options :push)) "invalid push setting"))
-  (def branch (store/branch s (get options :call (view :branch))))
+  (def branch (store/call s (get options :call (view :branch))))
   (assert (= (branch :world) (config :world)) "saved call belongs to another world")
   (def origin (json/decode (branch :origin) true true))
   (def directory (origin :root))
@@ -78,7 +79,7 @@
   (def ref (if (options :branch) (string "refs/heads/" (options :branch)) (origin :ref)))
   (assert (not= ref "HEAD") "detached HEAD requires an explicit save branch")
   (git directory ["check-ref-format" ref])
-  (store/checkpoint s ((dyn :zinc/task) :checkpoint))
+  (store/checkpoint s)
   (def base-source (if (and (origin :tracked) (origin :base)) (git directory ["show" (string (origin :base) ":" (origin :path))]) (branch :code)))
   (def current (git directory ["rev-parse" "--verify" "--end-of-options" ref] nil nil true))
   (def previous (when current (string/trim current)))
@@ -106,7 +107,7 @@
     (git directory ["update-ref" "--stdin"] (string (if previous "update " "create ") ref " " commit (when previous (string " " previous)) "\n"))
     (def receipt @{:ref ref :before previous :after commit :file (origin :path) :merged merged :pushed false})
     (store/append s view "saved" message receipt (intent :id))
-    (store/query s (string "UPDATE " (s :journal) ".branches SET origin=? WHERE id=?") [(string (json/encode (merge origin {:ref ref :base commit :tracked true}))) (branch :id)])
+    (store/query s (string "UPDATE " (s :journal) ".call_payloads SET origin=? WHERE id=?") [(string (json/encode (merge origin {:ref ref :base commit :tracked true}))) (branch :id)])
     (def materialized (git directory ["show" (string commit ":" (origin :path))]))
     (when (= code (string (slurp file))) (spit file materialized :wb))
     (def head (git directory ["symbolic-ref" "-q" "HEAD"] nil nil true))
@@ -185,7 +186,7 @@
       (ev/give reply outcome))))
 
 (defn open [file source input document bindings forbid ceiling]
-  (def runtime @{:file file :requests (ev/thread-chan 1) :evaluations (ev/thread-chan 1) :finished (ev/thread-chan 1)})
+  (def runtime @{:requests (ev/thread-chan 1) :evaluations (ev/thread-chan 1) :finished (ev/thread-chan 1)})
   (ev/thread evaluate [file source input document bindings (runtime :requests) (runtime :evaluations) forbid ceiling] :n (runtime :finished))
   runtime)
 

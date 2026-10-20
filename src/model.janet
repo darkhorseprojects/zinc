@@ -6,8 +6,8 @@
 
 (defn admit [s reference input size output]
   (store/transact s
-    (def current (dyn :zinc/task))
-    (store/checkpoint s (current :checkpoint))
+    (def current (dyn :zinc/call))
+    (store/checkpoint s)
     (store/charge s 1 0)
     (def event (store/append s (current :scope) "model-admission" (reference :reference)
                              {:input input :estimate size :output output} nil (current :id)))
@@ -30,7 +30,7 @@
                  (when (and current (>= (os/clock) next-check))
                    (set next-check (+ (os/clock) 0.1))
                    (set permitted (not (nil? (first
-                     (sql/eval db "SELECT id FROM live_tasks WHERE id=? AND source=? AND owner=?"
+                     (sql/eval db "SELECT id FROM live_calls WHERE id=? AND source=? AND owner=?"
                        [(current :id) (config :source) (current :owner)]))))))
                  permitted))
     (assert (check) "HTTP job fenced")
@@ -74,7 +74,7 @@
                                         message)) messages))))
 
 (defn request [config reference method path &opt body preserve-nulls]
-  (def args [config reference method path (when body (json/encode body)) (dyn :zinc/task) (dyn :pa/limits)])
+  (def args [config reference method path (when body (json/encode body)) (dyn :zinc/call) (dyn :pa/limits)])
   (def output (if (get-in config [:providers (keyword (reference :provider)) :transport]) (transfer args)
     (let [finished (ev/thread-chan 1)]
       (ev/thread transfer args :n finished)
@@ -139,7 +139,7 @@
   (def control
     (if (= provider "llama")
       (when (get-in record [:chat_template_caps :supports_reasoning_effort]) :reasoning_effort)
-      (cond (index-of "reasoning" parameters) "reasoning"
+      (cond (index-of "reasoning" parameters) :reasoning
         (index-of "reasoning_effort" parameters) :reasoning_effort)))
   (when (and (= role :chat) (not (index-of thinking ["default" "none"])))
     (assert control "thinking effort is unsupported"))
@@ -191,8 +191,8 @@
     (when (selected :parallel) (put body :parallel_tool_calls true)))
   (unless (= "default" (config :thinking))
     (case (selected :control)
-      "reasoning" (put body :reasoning (if (= "none" (config :thinking)) {:enabled false} {:effort (config :thinking)}))
-      "reasoning_effort" (put body :reasoning_effort (config :thinking))))
+      :reasoning (put body :reasoning (if (= "none" (config :thinking)) {:enabled false} {:effort (config :thinking)}))
+      :reasoning_effort (put body :reasoning_effort (config :thinking))))
   (when (= "openrouter" (selected :provider)) (put body :provider {:require_parameters true :allow_fallbacks false}))
   (def value (request config selected "POST" "/v1/chat/completions" body))
   (account s admission selected (value :usage))
@@ -260,17 +260,19 @@
   (assert (index-of role ["chat" "rerank"]) "unknown model role")
   (def input (merge {:model ((s :config) (if (= "rerank" role) :rerank :chat))} input))
   (def cached (when request (first (store/query s
-                                                "SELECT data FROM events WHERE source=? AND parent=? AND kind='model-outcome'" [(s :source) request]))))
-  (if cached (json/decode (cached :data) true true)
+    "SELECT id,data FROM events WHERE source=? AND parent=? AND kind='model-outcome'" [(s :source) request]))))
+  (if cached (merge (json/decode (cached :data) true true) {:event (cached :id)})
     (do
       (default selected (profile s (input :model) (keyword role)))
       (assert (= (selected :reference) (input :model)) "profile does not match admitted model")
       (def result (merge (if (= "rerank" role) (rerank s input selected) (complete s input selected))
-                         {:role role :visible (not (dyn :zinc/round))}))
-      (store/transact s
-        (store/append s ((dyn :zinc/task) :scope) "model-outcome" "Model outcome committed." result
-                      (result :request) ((dyn :zinc/task) :id)))
-      result)))
+        {:role role :turn (get input :turn false) :visible (and (not (input :turn)) (not= "summarize" ((dyn :zinc/call) :kind)))}))
+      (def event (store/transact s
+        (assert (first (store/query s "SELECT id FROM main.call_controls WHERE id=? AND source=? AND owner=? AND state IN ('running','waiting','uncertain','cancelled')"
+          [((dyn :zinc/call) :id) (s :source) ((dyn :zinc/call) :owner)])) "model completion fenced")
+        (store/append s ((dyn :zinc/call) :scope) "model-outcome" "Model outcome committed." result
+          (result :request) ((dyn :zinc/call) :id))))
+      (merge result {:event (event :id)}))))
 
 (defn images [s event text]
   (def parts @[{:type "text" :text text}])

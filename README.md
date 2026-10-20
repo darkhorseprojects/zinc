@@ -187,7 +187,7 @@ An authorized human execution may have `inference: false`,
 agent profile; code selves retain the caller's profile. Profiles must share
 source/store/world/file identity. Saved work is reauthorized against current
 profiles. Removed configuration fields are rejected, not converted. Old in-flight
-profiles cannot resume under a revoked contract. Store format is 5;
+profiles cannot resume under a revoked contract. Store format is 6;
 incompatible layouts require explicit fresh-store provisioning, not migration.
 
 `save` is an optional built-in, limited to the configured world source file:
@@ -216,8 +216,9 @@ confidentiality.
 
 ## Work and history
 
-SQLite format 5 separates durable run/task controls from execution payloads.
-Branches own admitted history and execution profiles; tasks refer to their branch.
+SQLite format 6 separates durable call controls from execution payloads.
+A call owns its admitted history, source snapshot and execution profile; public run
+and branch coordinates are projections, not separate execution identities.
 Temporary executors attach a bounded RAM journal to their control connection and use
 the same transaction and scheduler rules without storing private payloads durably. Every event retains an author,
 source occurrence timestamp and separate ingestion clock. Accepted execution can
@@ -236,12 +237,13 @@ constrain it; a bounded prompt is not an unbounded transcript.
 
 Known failures are outcomes. Interrupted execution can be uncertain.
 Original-owner fencing allows late known completion while its generation remains
-valid. Abort fences scheduling and records the affected tasks in branch history.
+valid. Abort fences scheduling and records affected calls in history.
 It is cooperative and does not undo effects; an external action already in
-flight may still finish. Completed roots remain completed.
+flight may still finish. Completed roots remain completed, and accepted descendants retain their independent
+execution leases within the shared deadline and budget.
 
 Model requests use complete JSON responses. Model outcomes are stored once;
-branch responses reference them through the canonical history projection. The
+conversation, memory and completed turns project those canonical records. The
 `inquiry-v2` terminal result contains the same completed turn as the event stream,
 plus result coordinates and aggregate usage. Complete
 assistant messages, tool calls/results and execution receipts are persisted; transport fragments are not

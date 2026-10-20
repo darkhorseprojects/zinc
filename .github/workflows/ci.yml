@@ -33,10 +33,75 @@ jobs:
         run: |
           JANET_SYSTEM_SQLITE=1 jpm deps
           jpm install
-      - name: Check package sources
+      - name: Exercise installed PA boundary
         working-directory: zinc
+        shell: python
         run: |
-          janet -e '
-            (put root-env (quote pa/emit) @{:value (fn [bytes]) :private true})
-            (setdyn :library (dyn *syspath*))
-            ((module/value (require "portable-agents/src/markdown") (quote load)) (string (os/cwd) "/zinc.md") [])'
+          import base64, concurrent.futures, json, os, pathlib, shutil, sqlite3, subprocess, tempfile, time
+          root = pathlib.Path.cwd()
+          program = dict(sourceDir=str(root), entryModule="zinc.md", dependencies={"library": os.environ["JANET_PATH"]})
+          def invoke(entry, value, config, failure=False):
+              packet = dict(version=1, program=dict(program, entry=entry),
+                  input=base64.b64encode((json.dumps(value) if value is not None else "").encode()).decode(),
+                  config=base64.b64encode(json.dumps(config).encode()).decode())
+              process = subprocess.run([shutil.which("agent"), "spawn", "16777216", "128", "10"],
+                  input=json.dumps(packet)+"\n", text=True, capture_output=True, timeout=60)
+              frames = [json.loads(line) for line in process.stdout.splitlines()]
+              assert process.returncode == 0 and frames[-1]["type"] == ("error" if failure else "result"), (frames, process.stderr)
+              return frames[-1] if failure else json.loads(base64.b64decode(frames[-1]["output"]))
+          with tempfile.TemporaryDirectory(dir=root) as directory:
+              path = pathlib.Path(directory)
+              subprocess.run(["git", "init", "-q", directory], check=True)
+              world = path / "world.janet"
+              world.write_text("(defn double [x] (* 2 x))")
+              transport = path / "transport.janet"
+              transport.write_text('''(import spork/json :as json)
+          (defn request [url method body headers]
+            {:error :ok :status 200 :body (json/encode
+              (if (= method "GET") {:data [{:id "mock" :context_length 65536 :top_provider {:context_length 65536} :supported_parameters ["tools"]}]}
+                {:choices [{:finish_reason "stop" :message {:role "assistant" :content "mock answer"}}]}))})''')
+              config = dict(source="verify", world="verify", store=str(path/"history.db"), file=str(world), repl=True,
+                  inference=True, search=False, parallel=1, chat="openrouter:mock",
+                  providers={"openrouter": {"url": "https://mock.invalid", "transport": {"module": str(transport)}}})
+              assert invoke("describe", None, config)["contract"] == "inquiry-v2"
+              inquiry = dict(code="(double 21)", request="code", author="human", at="2026-01-01T00:00:00.000Z")
+              completed = invoke("self", inquiry, config)
+              assert completed["text"] == "42" and completed["final"]
+              assert invoke("self", inquiry, config) == completed
+              assert invoke("abort", dict(request="code", reason="already complete"), config)["state"] == "completed"
+              record = dict(key="passive", author="human", at=inquiry["at"], text="```janet\n(error :never-evaluate)\n```")
+              assert invoke("record", dict(records=[record]), config) == invoke("record", dict(records=[record]), config)
+              child = dict(inquiry, request="recursive", code='(await (self {:text "child"}))')
+              assert "mock answer" in invoke("self", child, config)["text"]
+              temporary = dict(inquiry, request="private", persist=False, code='"PRIVATE_PAYLOAD"')
+              assert invoke("self", temporary, config)["text"] == "PRIVATE_PAYLOAD"
+              invoke("abort", dict(request="cancel-before-admission", reason="cancel"), config)
+              invoke("self", dict(inquiry, request="cancel-before-admission"), config, failure=True)
+              with concurrent.futures.ThreadPoolExecutor() as pool:
+                  original = pool.submit(invoke, "self", dict(inquiry, request="duplicate", code="(ev/sleep 1) (double 21)"), config)
+                  deadline = time.monotonic() + 10
+                  while time.monotonic() < deadline:
+                      with sqlite3.connect(config["store"]) as db:
+                          owner = db.execute("SELECT id,owner FROM call_controls WHERE request='duplicate' AND EXISTS(SELECT 1 FROM events WHERE call=call_controls.id AND kind='call-attempt')").fetchone()
+                      if owner: break
+                      time.sleep(.01)
+                  assert owner
+                  invoke("task", dict(task=owner[0], owner=owner[1]), config, failure=True)
+                  assert original.result()["text"] == "42"
+              invoke("self", dict(inquiry, request="handoff", code='(self {:code "(double 21)"})'), config)
+              deadline = time.monotonic() + 10
+              while time.monotonic() < deadline:
+                  with sqlite3.connect(config["store"]) as db:
+                      child = db.execute("SELECT c.state FROM call_controls c JOIN call_controls p ON c.parent=p.id WHERE p.request='handoff'").fetchone()
+                  if child and child[0] == "done": break
+                  time.sleep(.01)
+              assert child and child[0] == "done"
+              records = [dict(record, key=f"summary-{i}", text=(f"fact {i} " * 100)) for i in range(32)]
+              invoke("record", dict(records=records), config)
+              assert invoke("self", dict(text="summarize", request="summary", author="human", at=inquiry["at"]), dict(config, **{"context-quota": 4096, "summary-quota": 128}))["text"] == "mock answer"
+              with sqlite3.connect(config["store"]) as db:
+                  assert db.execute("PRAGMA integrity_check").fetchone()[0] == "ok"
+                  assert db.execute("PRAGMA user_version").fetchone()[0] == 6
+                  assert db.execute("SELECT count(*) FROM events WHERE kind='user' AND json_extract(data,'$.input.request')='code'").fetchone()[0] == 1
+                  assert not db.execute("SELECT count(*) FROM events WHERE text LIKE '%PRIVATE_PAYLOAD%' OR data LIKE '%PRIVATE_PAYLOAD%'").fetchone()[0]
+                  assert db.execute("SELECT state FROM call_controls WHERE request='cancel-before-admission'").fetchone()[0] == "cancelled"
