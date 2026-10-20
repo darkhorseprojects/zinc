@@ -163,8 +163,7 @@
       (do
         (assert (= 0 (previous :cancelled)) "call cancelled")
         (assert (deep= admitted (json/decode (previous :input) true true)) "request ID reused with different work")
-        (assert (deep= (map |(table :type ($ :mime) :data (base64/encode (string ($ :bytes))))
-          (query s "SELECT mime,bytes FROM images WHERE event=? ORDER BY position" [(previous :admission)])) (get input :images @[])) "request ID reused with different images")
+        (assert (deep= (query s "SELECT mime AS type,bytes FROM images WHERE event=? ORDER BY position" [(previous :admission)]) (get input :images @[])) "request ID reused with different images")
         previous)
       (do
         (def world (config :world))
@@ -212,7 +211,7 @@
         (def input-event (append s {:branch id :author (input :author) :at (input :at)} (if summary "summary-input" "user") "" {:input admitted} (when (and entry (> entry 0)) entry) id))
         (var image-bytes 0)
         (eachp [position image] (get input :images [])
-          (def bytes (base64/decode (image :data))) (+= image-bytes (length bytes))
+          (def bytes (image :bytes)) (+= image-bytes (length bytes))
           (assert (<= image-bytes (config :image-bytes)) "stored image byte ceiling")
           (query s (string "INSERT INTO " (s :journal) ".images(event,position,mime,bytes) VALUES(?,?,?,?)") [(input-event :id) position (image :type) (buffer bytes)]))
         (charge s 1 (if (input :code) (estimate (input :code)) 0))
@@ -256,15 +255,15 @@
     [(base64/encode (string (os/cryptorand 24))) (+ (os/clock) ((s :config) :lease-seconds)) id (s :source) (os/clock) (os/clock) (s :source) ((s :config) :parallel)]))
     (call s id)))
 
-(defn heartbeat [[config id owner stop]]
-  (def db (sql/open (config :store)))
+(defn heartbeat [[file seconds id owner stop]]
+  (def db (sql/open file))
   (defer (sql/close db)
     (sql/eval db "PRAGMA busy_timeout=5000;")
     (try (while true
       (assert (first (sql/eval db "UPDATE call_controls SET lease_expires=? WHERE id IN (SELECT id FROM live_calls WHERE id=? AND owner=?) RETURNING id"
-        [(+ (os/clock) (config :lease-seconds)) id owner])) "execution fenced")
+        [(+ (os/clock) seconds) id owner])) "execution fenced")
       (def tick (ev/chan 1))
-      (def timer (ev/go (fn [] (ev/sleep (/ (config :lease-seconds) 3)) (ev/give tick true))))
+      (def timer (ev/go (fn [] (ev/sleep (/ seconds 3)) (ev/give tick true))))
       (when (= stop ((ev/select stop tick) 1)) (ev/cancel timer "finished") (break))) ([err] nil))))
 
 (defn finish [s row value failure]

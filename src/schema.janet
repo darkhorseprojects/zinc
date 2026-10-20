@@ -74,26 +74,18 @@
 (defn request [value fields]
   (assert (dictionary? value) "request must be an object")
   (each key (keys value) (assert (index-of key fields) "unknown request field"))
-  (each key [:parent :after :run :task]
-    (when (has-key? value key) (assert (and (int? (value key)) (<= 0 (value key) 9007199254740991)) "invalid coordinate")))
   (each key [:text :code]
     (when (has-key? value key) (assert (and (string? (value key)) (> (length (value key)) 0)) "invalid inquiry")))
   (each key [:request :author :at :owner :revision]
     (when (has-key? value key)
       (assert (and (string? (value key)) (<= 1 (length (value key)) 256) (not (string/find "\0" (value key)))) "invalid request name")))
   (when (has-key? value :persist) (assert (boolean? (value :persist)) "invalid persistence flag"))
-  (when (has-key? value :memory_range)
-    (def range (value :memory_range))
-    (assert (dictionary? range) "invalid memory range")
-    (each [key id] (pairs range)
-      (assert (and (index-of key [:start :end]) (int? id) (<= 0 id 9007199254740991)) "invalid memory range"))
-    (assert (or (= 0 (length range)) (and (= 2 (length range)) (<= (range :start) (range :end)) (= (= 0 (range :start)) (= 0 (range :end))))) "memory range requires inclusive start and end"))
   (when (has-key? value :images)
     (assert (and (indexed? (value :images)) (<= (length (value :images)) 4)) "invalid images")
-    (each image (value :images)
+    (put value :images (map (fn [image]
       (assert (and (dictionary? image) (deep= (sorted (keys image)) (sorted [:type :data]))
                    (index-of (image :type) ["image/png" "image/jpeg" "image/webp"]) (string? (image :data))) "invalid image")
-      (assert (= (base64/encode (base64/decode (image :data))) (image :data)) "noncanonical image data")))
+      {:type (image :type) :bytes (buffer (base64/decode (image :data)))}) (value :images))))
   value)
 
 (defn database [&opt temporary]

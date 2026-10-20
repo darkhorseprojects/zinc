@@ -9,35 +9,35 @@
 (import ./repl)
 
 (defn make [spec]
-  (defn message [s event]
+  (defn message [event]
     (when (event :branch)
       (def data (json/decode (event :data) true true))
       (def origin (data :world-source))
-      (def base {:run (event :run) :branch (event :branch) :execution (string (event :request) "/" (event :branch))
-        :persist (= 0 (event :branch_temporary)) :event (if (= 0 (event :branch_temporary)) (event :id) :null)
-        :sequence (event :id) :author (event :author) :at (event :at)
-        :world {:file (event :branch_file) :path (origin :path) :ref (or (data :ref) (origin :ref))
-          :base (origin :base) :revision (or (data :after) (origin :base))}})
-      (case (get {"response" "turn" "completed" "turn"} (event :kind) (event :kind))
-        "user" (merge base {:type "start" :root (nil? (event :branch_parent))})
-        "turn" (merge base {:type "turn" :text (event :text)
-          :message (when (event :public_message) (json/decode (event :public_message) true true))
-          :status (get data :status "complete") :usage (data :usage) :final (= "completed" (event :kind))})
-        "code-admission" (merge base {:type "tool" :call (event :id) :code (event :text)})
-        "tool-result" (merge base {:type "tool_result" :call (event :parent) :ok (data :ok) :text (event :text)})
-        "tool-ambiguity" (merge base {:type "ambiguity" :call (event :task) :text (event :text)})
-        "interruption" (when (= "uncertain" (data :state)) (merge base {:type "ambiguity" :call (event :task) :text (event :text)}))
-        "model-outcome" (when (data :visible) (merge base {:type "model" :role (data :role)
-          :text (or (data :text) (string (json/encode (data :results)))) :status (data :status)
-          :message (when (event :public_message) (json/decode (event :public_message) true true)) :results (data :results) :usage (data :usage)}))
-        "saved" (merge base {:type "saved" :text (event :text) :ref (data :ref) :before (data :before) :after (data :after) :pushed (data :pushed)})
-        "error" (merge base {:type "error" :text (event :text)}) nil)))
+      (def body (case (event :kind)
+        "user" ""
+        "response" (model/render event data)
+        "completed" (if (event :public_message) (model/render event data) (event :text))
+        "model-outcome" (when (data :visible) (model/render event data))
+        "interruption" (when (= "uncertain" (data :state)) (event :text))
+        "saved" (string "Saved " (data :ref) " @ " (string/slice (data :after) 0 7) (when (data :pushed) " · pushed") "\n" (event :text))
+        (when (index-of (event :kind) ["code-admission" "tool-result" "tool-ambiguity" "error"]) (event :text))))
+      (when body
+        {:type (if (= "user" (event :kind)) "start" "display") :body body :root (nil? (event :branch_parent))
+         :language (case (event :kind) "code-admission" "janet" "tool-result" "text" nil)
+         :run (event :run) :branch (event :branch) :execution (string (event :request) "/" (event :branch))
+         :persist (= 0 (event :branch_temporary)) :event (if (= 0 (event :branch_temporary)) (event :id) :null)
+         :sequence (event :id) :author (event :author) :at (event :at)
+         :world {:file (event :branch_file) :path (origin :path) :ref (or (data :ref) (origin :ref))
+           :base (origin :base) :revision (or (data :after) (origin :base))}})))
 
   (defn result [s id]
     (def call (store/call s id))
     (def final (first (store/query s "SELECT * FROM memory_records WHERE branch=? AND kind='completed'" [id])))
     (assert final "call has no completion")
-    (merge (message s final) {:start (if (= 0 (call :temporary)) (call :admission) :null)
+    (def data (json/decode (final :data) true true))
+    (merge (tabseq [[key value] :in (pairs (message final)) :unless (index-of key [:body :language])] key value) {:type "result" :final true :text (final :text) :status (get data :status "complete")
+      :message (when (final :public_message) (json/decode (final :public_message) true true))
+      :start (if (= 0 (call :temporary)) (call :admission) :null)
       :parent (or (call :entry) 0) :memory_range {:start (call :first) :end (call :last)}
       :tool_usage (store/tool-used s (call :run)) :context_unit "token-estimate"
       :usage (first (store/query s `SELECT coalesce(sum(u.total),0) reported_total,count(*) FILTER(WHERE u.total IS NULL) unreported
@@ -107,12 +107,19 @@
         (put ((dyn :zinc/call) :children) request handle)
         {:temporary request})))
 
-  (defn run-code [s view runtime bindings code]
+  (defn run-code [s view bindings code]
     (def config (s :config))
-    (assert (and (config :repl) runtime) "Janet execution is not permitted")
+    (assert (config :repl) "Janet execution is not permitted")
     (assert (<= (length code) (config :source-bytes)) "tool source byte ceiling")
     (store/checkpoint s)
-    (repl/execute runtime code (fn [name args]
+    (def current (dyn :zinc/call))
+    (unless (current :runtime)
+      (os/cd (path/dirname (config :file)))
+      (assert (<= (os/stat (current :file) :size) (config :source-bytes)) "world source byte ceiling")
+      (put current :runtime (repl/open (current :file) (string (slurp (current :file))) (current :input)
+        (repl/instructions config view (spec :document) bindings)
+        (seq [[name binding] :in (sorted (pairs bindings))] {:name name :doc (binding :doc)}) (config :forbid) (config :response-bytes))))
+    (repl/execute (current :runtime) code (fn [name args]
       (store/checkpoint s)
       (if (= name "await")
         (let [handle (first args) current (dyn :zinc/call)]
@@ -141,7 +148,7 @@
           value)))
       (min (config :seconds) (max 0.001 (- (view :expires) (os/clock))))))
 
-  (defn infer [s call runtime bindings]
+  (defn infer [s call bindings]
     (def id (call :id))
     (def config (s :config))
     (def inherited (store/view s id false))
@@ -187,7 +194,7 @@
       (each tool (response :tools)
         (def admission (store/transact s (store/checkpoint s) (store/charge s 1 (store/estimate (tool :code)))
           (store/append s view "code-admission" (tool :code) {:tool-id (tool :id) :response (response :event)} nil id)))
-        (def outcome (try {:ok true :text (run-code s view runtime bindings (tool :code))}
+        (def outcome (try {:ok true :text (run-code s view bindings (tool :code))}
           ([err] (when (or (= err "deadline expired") (string/has-prefix? "World evaluator stopped:" (string err))) (error err)) {:ok false :text (string err)})))
         (store/charge s 0 (store/estimate (json/encode outcome)))
         (store/transact s (store/checkpoint s)
@@ -204,26 +211,20 @@
     (def view (store/view s (if (= "summarize" (row :kind)) (row :parent) id)))
     (def stop (ev/thread-chan 1))
     (def finished (ev/thread-chan 1))
-    (ev/thread store/heartbeat [config id (row :owner) stop] :n finished)
+    (ev/thread store/heartbeat [(config :store) (config :lease-seconds) id (row :owner) stop] :n finished)
     (defer (do (ev/give stop true) (ev/take finished))
-      (with-dyns [:zinc/call @{:id id :kind (row :kind) :owner (row :owner) :scope view :children @{}
-                    :checkpoint (json/decode (row :checkpoint) true true)} :zinc/effect (row :admission)]
+      (with-dyns [:zinc/call (merge row {:scope view :children @{} :input (json/decode (row :input) true true)
+                    :checkpoint (json/decode (row :checkpoint) true true)}) :zinc/effect (row :admission)]
         (store/transact s
           (store/checkpoint s)
           (store/append s view "call-attempt" "execution entered" {:attempt (row :attempt)} nil id))
-        (var runtime nil) (var value nil) (var failure nil)
+        (var value nil) (var failure nil)
         (try
           (do
-            (def input (json/decode (row :input) true true))
+            (def input ((dyn :zinc/call) :input))
             (def bindings (if (and (not= "summarize" (row :kind)) (config :repl)) (repl/definitions config (spec :capabilities)) {}))
-            (when (and (config :repl) (not= "summarize" (row :kind)))
-              (os/cd (path/dirname (config :file)))
-              (assert (<= (os/stat (row :file) :size) (config :source-bytes)) "world source byte ceiling")
-              (set runtime (repl/open (row :file) (string (slurp (row :file))) input
-                (repl/instructions config view (spec :document) bindings)
-                (seq [[name binding] :in (sorted (pairs bindings))] {:name name :doc (binding :doc)}) (config :forbid) (config :response-bytes))))
-            (set value (case (row :kind) "text" (infer s row runtime bindings)
-              "code" (run-code s view runtime bindings (input :code)) "summarize" (memory/summarize s row input))))
+            (set value (case (row :kind) "text" (infer s row bindings)
+              "code" (run-code s view bindings (input :code)) "summarize" (memory/summarize s row input))))
           ([err fiber]
             (def trace @"")
             (with-dyns [:err (fn [bytes] (buffer/push-string trace (string/slice bytes 0 (min (length bytes) (- (config :response-bytes) (length trace))))))]
@@ -231,7 +232,7 @@
             (set failure @{:error (string err) :trace (string trace)})
             (each provider (values (config :providers))
               (when (provider :token) (each key [:error :trace] (put failure key (string/replace-all (provider :token) "[redacted]" (failure key))))))))
-        (when runtime (repl/close runtime))
+        (when-let [runtime ((dyn :zinc/call) :runtime)] (repl/close runtime))
         (store/finish s row value failure)
         (each pending (store/query s "SELECT c.id FROM main.call_controls c JOIN call_payloads p ON p.id=c.id WHERE c.source=? AND p.run=? AND c.state='queued' AND c.expires>? ORDER BY c.id LIMIT ?"
           [(s :source) (row :run) (os/clock) (config :parallel)]) (launch s (pending :id))))))
@@ -241,7 +242,7 @@
     (while true
       (def records (memory/events s run sequence))
       (each event records
-        (when-let [frame (message s event)] (pa/emit (string (json/encode frame))))
+        (when-let [frame (message event)] (pa/emit (string (json/encode frame))))
         (set sequence (event :id)))
       (when (< (length records) 256) (break)))
     sequence)
@@ -281,7 +282,7 @@
                 (result s id))))))))
 
   (defn describe [config]
-    {:input "json" :output "json" :durable true :record true :contract "inquiry-v2" :profile {:field "agent" :inference "inference"}
+    {:contract "inquiry-v3" :profile {:field "agent" :inference "inference"}
      :parameters (catseq [[target fields] :in [[:config (spec :schema)] [:input (spec :input)]]]
        (seq [[key field] :in (sorted (pairs fields)) :when (field :option)]
          (def parameter (merge (tabseq [[k v] :in (pairs field) :unless (index-of k [:optional :option])] k v)
@@ -306,7 +307,7 @@
             "invalidate" {:event ((memory/invalidate s (value :event)) :id)}
             "abort" (store/abort s value)
             "events" (let [records (memory/events s (value :run) (get value :after 0))]
-              {:events (filter identity (map |(message s $) records)) :after (get (last records) :id (get value :after 0)) :more (= 256 (length records))})
+              {:events (filter identity (map message records)) :after (get (last records) :id (get value :after 0)) :more (= 256 (length records))})
             "pending" (do (store/recover s)
               (store/query s `SELECT c.id run,c.request,c.id branch,c.id job,c.state,CASE WHEN c.kind='text' THEN 'agent' ELSE c.kind END kind,c.attempt,
                 (SELECT id FROM events WHERE call=c.id AND kind IN ('user','summary-input')) admission,

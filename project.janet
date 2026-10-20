@@ -4,7 +4,7 @@
   :description "A Janet agent with independent source branches and durable memory"
   :license "AGPL-3.0-only"
   :dependencies
-  [{:repo "https://github.com/darkhorseprojects/portable-agents.git" :tag "118795dffceb373d6157db08aa72471ebc50a08d"}
+  [{:repo "https://github.com/darkhorseprojects/portable-agents.git" :tag "e388ed3aed582e9843e54279a48ab9eeda664072"}
    {:repo "https://github.com/janet-lang/sqlite3.git" :tag "9126fe46ff1c7e42ca3d7bb9c8aed95a8236a32c"}
    {:repo "https://github.com/CosmicToast/jurl.git" :tag "e620ee820d50585c0efecfff2c2d580b5ac18213"}
    {:repo "https://github.com/janet-lang/spork.git" :tag "8a87c5ae1cbbf3a0037eeac7f172bd45da4d9910"}])

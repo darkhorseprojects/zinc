@@ -89,8 +89,8 @@ Required identity is `source`, absolute `store`, and `world`. For Janet
 execution, set `repl: true`, an absolute `file`, `seconds`, and native
 restrictions in `forbid`.
 
-Each complete call owns one detached executor, editable source file and Janet
-REPL environment. Definitions and redefinitions survive its model/tool rounds;
+Each complete call owns one detached executor and editable source file. Its Janet
+REPL environment is created only when code first executes. Definitions and redefinitions survive its model/tool rounds;
 mutations within that REPL are sequential. Parallel selves have separate files
 and environments. Hard evaluation timeout terminates the call's evaluator rather
 than reusing a possibly running heap.
@@ -244,8 +244,9 @@ execution leases within the shared deadline and budget.
 
 Model requests use complete JSON responses. Model outcomes are stored once;
 conversation, memory and completed turns project those canonical records. The
-`inquiry-v2` terminal result contains the same completed turn as the event stream,
-plus result coordinates and aggregate usage. Complete
+`inquiry-v3` terminal result retains semantic text/message/status, coordinates and aggregate usage.
+Zinc produces generic `start`/`display` presentation envelopes from committed events before returning the result;
+consumers do not interpret provider response shapes. Install matching PA protocol-2 binaries and consumers. Complete
 assistant messages, tool calls/results and execution receipts are persisted; transport fragments are not
 events. A database insert constraint permits only explicit semantic and receipt
 kinds, never deltas or arbitrary emissions. Event IDs count ledger records, not

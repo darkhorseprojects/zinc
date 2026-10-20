@@ -10,8 +10,8 @@ concurrency:
   cancel-in-progress: true
 jobs:
   toolchain:
-    uses: darkhorseprojects/portable-agents/.github/workflows/ci.yml@118795dffceb373d6157db08aa72471ebc50a08d
-    with: { toolchain: "118795dffceb373d6157db08aa72471ebc50a08d" }
+    uses: darkhorseprojects/portable-agents/.github/workflows/ci.yml@e388ed3aed582e9843e54279a48ab9eeda664072
+    with: { toolchain: "e388ed3aed582e9843e54279a48ab9eeda664072" }
   verify:
     needs: toolchain
     runs-on: ubuntu-24.04
@@ -41,10 +41,10 @@ jobs:
           root = pathlib.Path.cwd()
           program = dict(sourceDir=str(root), entryModule="zinc.md", dependencies={"library": os.environ["JANET_PATH"]})
           def invoke(entry, value, config, failure=False):
-              packet = dict(version=1, program=dict(program, entry=entry),
+              packet = dict(version=2, program=dict(program, entry=entry),
                   input=base64.b64encode((json.dumps(value) if value is not None else "").encode()).decode(),
                   config=base64.b64encode(json.dumps(config).encode()).decode())
-              process = subprocess.run([shutil.which("agent"), "spawn", "16777216", "128", "10"],
+              process = subprocess.run([shutil.which("agent"), "spawn", "16777216", "10"],
                   input=json.dumps(packet)+"\n", text=True, capture_output=True, timeout=60)
               frames = [json.loads(line) for line in process.stdout.splitlines()]
               assert process.returncode == 0 and frames[-1]["type"] == ("error" if failure else "result"), (frames, process.stderr)
@@ -58,16 +58,29 @@ jobs:
               transport.write_text('''(import spork/json :as json)
           (defn request [url method body headers]
             {:error :ok :status 200 :body (json/encode
-              (if (= method "GET") {:data [{:id "mock" :context_length 65536 :top_provider {:context_length 65536} :supported_parameters ["tools"]}]}
+              (if (= method "GET") {:data [{:id "mock" :context_length 65536 :top_provider {:context_length 65536} :supported_parameters ["tools"] :architecture {:input_modalities ["text" "image"]}}]}
                 {:choices [{:finish_reason "stop" :message {:role "assistant" :content "mock answer"}}]}))})''')
               config = dict(source="verify", world="verify", store=str(path/"history.db"), file=str(world), repl=True,
                   inference=True, search=False, parallel=1, chat="openrouter:mock",
                   providers={"openrouter": {"url": "https://mock.invalid", "transport": {"module": str(transport)}}})
-              assert invoke("describe", None, config)["contract"] == "inquiry-v2"
+              assert invoke("describe", None, config)["contract"] == "inquiry-v3"
               inquiry = dict(code="(double 21)", request="code", author="human", at="2026-01-01T00:00:00.000Z")
               completed = invoke("self", inquiry, config)
               assert completed["text"] == "42" and completed["final"]
               assert invoke("self", inquiry, config) == completed
+              with sqlite3.connect(config["store"]) as db:
+                  start = db.execute("SELECT id FROM events WHERE kind='user' AND json_extract(data,'$.input.request')='code'").fetchone()[0]
+              ranged = invoke("self", dict(inquiry, request="range", parent=start, memory_range={"end": start}), config)
+              assert ranged["text"] == "42" and ranged["memory_range"] == {"start": start, "end": start}
+              image = dict(text="image", images=[dict(type="image/png", data="YQ==")], request="image", author="human", at=inquiry["at"])
+              invoke("self", image, config)
+              assert invoke("self", dict(image, images=[dict(type="image/png", data="YR==")]), config)["text"] == "mock answer"
+              with sqlite3.connect(config["store"]) as db:
+                  assert db.execute("SELECT bytes FROM images LIMIT 1").fetchone()[0] == b"a"
+              page = invoke("events", dict(run=completed["run"]), config)
+              assert [frame["type"] for frame in page["events"]] == ["start", "display", "display"]
+              assert page["events"][1]["language"] == "janet" and page["events"][2]["body"] == "42"
+              assert "body" not in completed and completed["text"] == "42"
               assert invoke("abort", dict(request="code", reason="already complete"), config)["state"] == "completed"
               record = dict(key="passive", author="human", at=inquiry["at"], text="```janet\n(error :never-evaluate)\n```")
               assert invoke("record", dict(records=[record]), config) == invoke("record", dict(records=[record]), config)
