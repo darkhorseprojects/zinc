@@ -9,14 +9,14 @@
 (defn events [s run after]
   (assert (or (s :temporary) (not (first (store/query s "SELECT id FROM main.call_controls WHERE id=? AND source=? AND temporary=1" [run (s :source)])))) "temporary execution has no durable events")
   (assert (first (store/query s "SELECT id FROM main.call_controls WHERE id=? AND source=? AND (world=? OR world IN (SELECT value FROM json_each(?)))"
-    [run (s :source) ((s :config) :world) (string (json/encode ((s :config) :visibility)))])) "run unavailable")
+                              [run (s :source) ((s :config) :world) (string (json/encode ((s :config) :visibility)))])) "run unavailable")
   (store/query s "SELECT * FROM memory_records WHERE source=? AND run=? AND id>? ORDER BY id LIMIT 256" [(s :source) run after]))
 
 (defn render [row]
   (string "[" (or (row :label) (string "#" (row :id))) " author=" (json/encode (row :author)) " at=" (row :at) " " (row :kind)
-    (when (= "code-admission" (row :kind)) " admission, not proof of execution")
-    (when (= "summary" (row :kind)) (string " sources=" (row :count) " period=[" (row :from) "," (row :to) "]"))
-    (when (and (row :total) (or (> (row :offset) 0) (< (row :next) (row :total)))) (string " bytes=[" (row :offset) "," (row :next) ")/" (row :total))) "]\n" (row :text) "\n"))
+          (when (= "code-admission" (row :kind)) " admission, not proof of execution")
+          (when (= "summary" (row :kind)) (string " sources=" (row :count) " period=[" (row :from) "," (row :to) "]"))
+          (when (and (row :total) (or (> (row :offset) 0) (< (row :next) (row :total)))) (string " bytes=[" (row :offset) "," (row :next) ")/" (row :total))) "]\n" (row :text) "\n"))
 
 (defn- record [s view id &opt offset bytes]
   (default offset 0) (default bytes (min 65536 (math/floor (/ ((s :config) :response-bytes) 4))))
@@ -28,12 +28,12 @@
     (def node (merge {:first id :last id :height 0 :count 1} (json/decode (row :node) true true)))
     (def worlds (sorted (distinct (array/concat @[(view :world)] (view :visibility)))))
     (def allowed (cond
-      (and (= "summary" (row :kind)) (not (s :temporary)) (deep= worlds (node :complete))
-           (<= (node :last) (get view :history-last (view :last)))
-           (not (find |(<= (node :first) $ (node :last)) (get view :exclude [])))) {:total (node :count) :own (node :count)}
-      (= "summary" (row :kind)) (first (store/visible s (merge view {:first (max (view :first) (node :first)) :last (min (view :last) (node :last)) :memory true :root id
-        :columns "count(*) total,count(*) FILTER(WHERE e.id IN (SELECT id FROM members)) own"})))
-      {:total 1 :own (length (store/visible s (merge view {:first id :last id :columns "e.id"})))}))
+                   (and (= "summary" (row :kind)) (not (s :temporary)) (deep= worlds (node :complete))
+                        (<= (node :last) (get view :history-last (view :last)))
+                        (not (find |(<= (node :first) $ (node :last)) (get view :exclude [])))) {:total (node :count) :own (node :count)}
+                   (= "summary" (row :kind)) (first (store/visible s (merge view {:first (max (view :first) (node :first)) :last (min (view :last) (node :last)) :memory true :root id
+                                                                                  :columns "count(*) total,count(*) FILTER(WHERE e.id IN (SELECT id FROM members)) own"})))
+                   {:total 1 :own (length (store/visible s (merge view {:first id :last id :columns "e.id"})))}))
     (when (and (<= (view :first) (node :first) (node :last) (view :last)) (= (allowed :total) (allowed :own) (node :count)))
       (assert (<= offset (row :total)) "memory offset exceeds the original")
       (def text (row :text))
@@ -98,7 +98,7 @@
         (def corrected @{})
         (each seed (filter |(not (stops $)) lexical)
           (def exact (or (first (sql/eval (graph :db) "SELECT form FROM graph.form_concepts WHERE language=? AND form=? LIMIT 1" [(config :language) seed]))
-                        (first (store/visible s (merge view {:match (string "\"" seed "\"") :columns "e.id"}) :oldest 1))))
+                         (first (store/visible s (merge view {:match (string "\"" seed "\"") :columns "e.id"}) :oldest 1))))
           (var resolved seed)
           (unless exact
             (def chars (peg/match ~(any (capture (* 1 (any (range "\x80\xbf"))))) seed))
@@ -119,35 +119,35 @@
                 UNION SELECT e.target,r.depth+1 FROM reachable r JOIN graph.concept_edges e ON e.source=r.concept WHERE r.depth<? LIMIT ?
               ) SELECT f.form,min(r.depth) depth FROM reachable r JOIN graph.form_concepts f ON f.concept=r.concept
               WHERE f.language=? GROUP BY f.form ORDER BY depth,f.form LIMIT ?`
-                [(config :language) (string/join (slice phrases offset (+ offset width)) " ") (config :depth) (config :expansion-nodes) (config :language) (- ceiling (length terms))]))
+                                      [(config :language) (string/join (slice phrases offset (+ offset width)) " ") (config :depth) (config :expansion-nodes) (config :language) (- ceiling (length terms))]))
               (each row expanded
                 (unless (or (stops (row :form)) (index-of (row :form) terms)) (array/push terms (row :form)))))))
         (def expression (string/join (map |(string "\"" (string/replace-all "\"" "\"\"" $) "\"") terms) " OR "))
         (def selected (map (fn [row]
-          (var text (row :text))
-          (while (not (utf8/is-valid? text)) (set text (string/slice text 0 -2)))
-          (merge row {:text (string text "\n[excerpt; expand this event ID for the original]")}))
-          (if (= "" expression) [] (store/visible s (merge view {:match expression
-            :columns "e.id,e.author,e.at,e.kind,e.label,substr(CAST(snippet(event_fts,0,'','', ' … ',64) AS BLOB),1,3072) text"}) :oldest (config :candidates)))))
+                             (var text (row :text))
+                             (while (not (utf8/is-valid? text)) (set text (string/slice text 0 -2)))
+                             (merge row {:text (string text "\n[excerpt; expand this event ID for the original]")}))
+                           (if (= "" expression) [] (store/visible s (merge view {:match expression
+                                                                                  :columns "e.id,e.author,e.at,e.kind,e.label,substr(CAST(snippet(event_fts,0,'','', ' … ',64) AS BLOB),1,3072) text"}) :oldest (config :candidates)))))
         (if (= 0 (length selected)) []
           (seq [rank :in ((model/call s {:role "rerank" :query anchor :documents (map render selected)} request) :results)
                 :when (>= (rank :relevance_score) (config :score))] (let [row (selected (rank :index))] [(row :id) (row :author) (row :at) (row :kind) (row :text) (row :label)])))))))
 
 (defn- cached [s view policy ids &opt bytes]
   (def hit (first (store/query s "SELECT id FROM events WHERE source=? AND kind='summary' AND json_extract(data,'$.policy')=? AND json_extract(data,'$.children')=? AND id NOT IN invalid_summaries ORDER BY id DESC LIMIT 1"
-    [(s :source) policy (string (json/encode ids))])))
+                               [(s :source) policy (string (json/encode ids))])))
   (when hit (record s view (hit :id) 0 bytes)))
 
 (defn- compress [s view policy children prepare bytes]
   (def ids (map |($ :id) children))
   (or (cached s view policy ids bytes)
-    (let [repair (((store/query s "SELECT coalesce(max(id),0) id FROM events WHERE source=? AND kind='artifact' AND json_type(data,'$.invalidates')='integer'" [(s :source)]) 0) :id)
-          scope (merge (struct ;(catseq [key :in [:run :branch :world :history-last :visibility :exclude]] [key (view key)]))
-            {:first ((first children) :first) :last ((last children) :last)})
-          job ((store/start s {:view scope :children ids :model ((s :config) :chat) :policy policy} (s :config) (merge scope {:depth (view :depth) :expires (view :expires) :agent (view :agent)}) nil
-                (string "summary:" (view :branch) ":" repair ":" policy ":" (json/encode ids))) :id)]
-      (if prepare (do ((dyn :zinc/spawn) s job) nil)
-        (or (record s view (((dyn :zinc/wait) s job) :node) 0 bytes) (error "summary unavailable at the current history cut"))))))
+      (let [repair (((store/query s "SELECT coalesce(max(id),0) id FROM events WHERE source=? AND kind='artifact' AND json_type(data,'$.invalidates')='integer'" [(s :source)]) 0) :id)
+            scope (merge (struct ;(catseq [key :in [:run :branch :world :history-last :visibility :exclude]] [key (view key)]))
+                         {:first ((first children) :first) :last ((last children) :last)})
+            job ((store/start s {:view scope :children ids :model ((s :config) :chat) :policy policy} (s :config) (merge scope {:depth (view :depth) :expires (view :expires) :agent (view :agent)}) nil
+                              (string "summary:" (view :branch) ":" repair ":" policy ":" (json/encode ids))) :id)]
+        (if prepare (do ((dyn :zinc/spawn) s job) nil)
+          (or (record s view (((dyn :zinc/wait) s job) :node) 0 bytes) (error "summary unavailable at the current history cut"))))))
 
 (defn context [s view limit evidence &opt prepare]
   (def budget (if ((s :config) :search) (math/floor (/ limit 2)) limit))
@@ -162,7 +162,7 @@
         (def before members)
         (each cached (store/query s `SELECT id,json_extract(data,'$.count') count FROM events WHERE source=? AND kind='summary' AND json_extract(data,'$.first')=?
           AND json_extract(data,'$.last')<=? AND json_extract(data,'$.policy')=? AND id NOT IN invalid_summaries ORDER BY json_extract(data,'$.height') DESC,id DESC`
-          [(s :source) (item :id) (view :last) policy])
+                                  [(s :source) (item :id) (view :last) policy])
           (when (and (nil? node) (= 0 (mod before (cached :count)))) (set node (record s view (cached :id) 0 (* 4 budget)))))
         (set node (or node (record s view (item :id) 0 (* 4 budget))))
         (assert node "memory source unavailable")
@@ -201,9 +201,9 @@
     (def raw (map |($ :id) (filter |(not= "summary" ($ :kind)) nodes)))
     (var used 0)
     {:through (view :last) :nodes nodes :evidence (seq [values :in evidence :let [row (struct ;(interleave [:id :author :at :kind :text :label] values))] :unless (index-of (row :id) raw)
-      :let [rendered (render row) cost (store/estimate (json/encode rendered))]
-      :when (<= (+ used cost) (- limit budget))]
-      (do (+= used cost) rendered))}))
+                                                        :let [rendered (render row) cost (store/estimate (json/encode rendered))]
+                                                        :when (<= (+ used cost) (- limit budget))]
+                                                    (do (+= used cost) rendered))}))
 
 (defn expand
   "(memory/expand id offset) — Own bounded record page and summary child IDs; next is the continuation byte offset."
@@ -211,11 +211,11 @@
   (def [s view] (dyn :zinc/context))
   (var bytes (min 65536 (math/floor (/ ((s :config) :response-bytes) 4))))
   (label done (while true
-    (def original (record s view id offset bytes))
-    (assert original "memory outside granted history or invalidated")
-    (def row (struct ;(catseq [key :in [:id :label :author :at :kind :text :children :count :from :to :offset :next :total]] [key (original key)])))
-    (when (<= (length (json/encode row)) (math/floor (/ ((s :config) :response-bytes) 4))) (return done row))
-    (set bytes (math/floor (/ bytes 2))) (assert (> bytes 0) "memory metadata cannot fit"))))
+                (def original (record s view id offset bytes))
+                (assert original "memory outside granted history or invalidated")
+                (def row (struct ;(catseq [key :in [:id :label :author :at :kind :text :children :count :from :to :offset :next :total]] [key (original key)])))
+                (when (<= (length (json/encode row)) (math/floor (/ ((s :config) :response-bytes) 4))) (return done row))
+                (set bytes (math/floor (/ bytes 2))) (assert (> bytes 0) "memory metadata cannot fit"))))
 
 (defn summarize [s task input]
   (def view (input :view))
@@ -226,7 +226,7 @@
   (eachp [i child] sources (when (> i 0) (assert (< ((sources (- i 1)) :last) (child :first)) "overlapping summary sources")))
   (def config (s :config))
   (def selected (model/profile s (input :model) :chat))
-  (def capacity (min (config :context-quota) (selected :context)))
+  (def capacity (min (get config :context-quota math/inf) (selected :context)))
   (def size (sum (map |($ :cost) sources)))
   (def maximum (min (config :summary-quota) (math/floor (/ capacity 4)) (max 1 (math/floor (/ size 4)))))
   (def system {:role "system" :content (string summary-prompt " At most " (* 4 maximum) " UTF-8 bytes.")})
@@ -238,7 +238,7 @@
   (while (or (< ((progress :cursor) 0) (length sources)) (> (length frontier) 1))
     (var [index offset] (progress :cursor))
     (def reducing (and (> (length frontier) 1)
-      (or (= index (length sources)) (= ((last frontier) 0) ((frontier (- (length frontier) 2)) 0)))))
+                       (or (= index (length sources)) (= ((last frontier) 0) ((frontier (- (length frontier) 2)) 0)))))
     (def pages @[])
     (var height 0)
     (if reducing
@@ -263,23 +263,23 @@
     (put progress :cursor [index offset]) (put progress :request nil)
     (store/checkpoint s progress))
   (store/transact s
-    (store/checkpoint s progress)
-    (if-let [available (cached s view (input :policy) (input :children))]
-      {:node (available :id)}
-      (let [count (sum (map |($ :count) sources))
-            complete (and (not (s :temporary)) (= count ((first (store/visible s
-              (merge view {:branch nil :first ((first sources) :first) :last ((last sources) :last) :history-last 9007199254740991 :exclude [] :memory true :columns "count(*) n"}))) :n)))
-            node (store/append s view "summary" ((frontier 0) 1)
-              {:children (input :children) :policy (input :policy) :first ((first sources) :first) :last ((last sources) :last)
-               :height (+ (math/log2 (length sources)) ((first sources) :height)) :count count
-               :complete (when complete (sorted (distinct (array/concat @[(view :world)] (view :visibility)))))
-               :from (first (sorted (map |(get $ :from ($ :at)) sources))) :to (last (sorted (map |(get $ :to ($ :at)) sources)))} nil (task :id))]
-        (def cited (peg/match ~(any (choice (* "[#" (capture (some (range "09"))) "]") 1)) ((frontier 0) 1)))
-        (assert (not (first (store/query s `WITH RECURSIVE members(id) AS (SELECT value FROM json_each(?) UNION SELECT c.value FROM members m JOIN events n ON n.id=m.id,json_each(n.data,'$.children') c WHERE n.kind='summary')
+                  (store/checkpoint s progress)
+                  (if-let [available (cached s view (input :policy) (input :children))]
+                    {:node (available :id)}
+                    (let [count (sum (map |($ :count) sources))
+                          complete (and (not (s :temporary)) (= count ((first (store/visible s
+                                                                                             (merge view {:branch nil :first ((first sources) :first) :last ((last sources) :last) :history-last 9007199254740991 :exclude [] :memory true :columns "count(*) n"}))) :n)))
+                          node (store/append s view "summary" ((frontier 0) 1)
+                                             {:children (input :children) :policy (input :policy) :first ((first sources) :first) :last ((last sources) :last)
+                                              :height (+ (math/log2 (length sources)) ((first sources) :height)) :count count
+                                              :complete (when complete (sorted (distinct (array/concat @[(view :world)] (view :visibility)))))
+                                              :from (first (sorted (map |(get $ :from ($ :at)) sources))) :to (last (sorted (map |(get $ :to ($ :at)) sources)))} nil (task :id))]
+                      (def cited (peg/match ~(any (choice (* "[#" (capture (some (range "09"))) "]") 1)) ((frontier 0) 1)))
+                      (assert (not (first (store/query s `WITH RECURSIVE members(id) AS (SELECT value FROM json_each(?) UNION SELECT c.value FROM members m JOIN events n ON n.id=m.id,json_each(n.data,'$.children') c WHERE n.kind='summary')
           SELECT value FROM json_each(?) WHERE CAST(value AS INTEGER) NOT IN members LIMIT 1` [(string (json/encode (input :children))) (string (json/encode cited))]))) "summary cites an unrelated record")
-        (def rendered (record s view (node :id) 0 (* 4 maximum)))
-        (assert (and rendered (< (rendered :cost) size)) "summary did not shrink its complete rendered sources")
-        {:node (node :id)}))))
+                      (def rendered (record s view (node :id) 0 (* 4 maximum)))
+                      (assert (and rendered (< (rendered :cost) size)) "summary did not shrink its complete rendered sources")
+                      {:node (node :id)}))))
 
 (defn invalidate [s id]
   (def node (record s {:first 1 :last 9007199254740991 :world ((s :config) :world) :visibility ((s :config) :visibility)} id))

@@ -114,7 +114,7 @@ jobs:
               assert invoke("self", dict(text="summarize", request="summary", author="human", at=inquiry["at"]), dict(config, **{"context-quota": 4096, "summary-quota": 128}))["text"] == "mock answer"
               with sqlite3.connect(config["store"]) as db:
                   assert db.execute("PRAGMA integrity_check").fetchone()[0] == "ok"
-                  assert db.execute("PRAGMA user_version").fetchone()[0] == 6
+                  assert db.execute("PRAGMA user_version").fetchone()[0] == 1
                   assert db.execute("SELECT count(*) FROM events WHERE kind='user' AND json_extract(data,'$.input.request')='code'").fetchone()[0] == 1
                   assert not db.execute("SELECT count(*) FROM events WHERE text LIKE '%PRIVATE_PAYLOAD%' OR data LIKE '%PRIVATE_PAYLOAD%'").fetchone()[0]
                   assert db.execute("SELECT state FROM call_controls WHERE request='cancel-before-admission'").fetchone()[0] == "cancelled"

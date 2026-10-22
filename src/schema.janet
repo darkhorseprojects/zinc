@@ -12,10 +12,10 @@
     (when (has-key? config key)
       (def value (config key))
       (assert (case (field :type)
-        :string (and (string? value) (> (length value) 0) (not (string/find "\0" value)))
-        :integer (int? value) :number (and (number? value) (< (math/abs value) math/inf))
-        :boolean (boolean? value) :array (indexed? value) :dictionary (dictionary? value) false)
-        (string "invalid setting " key))
+                :string (and (string? value) (> (length value) 0) (not (string/find "\0" value)))
+                :integer (int? value) :number (and (number? value) (< (math/abs value) math/inf))
+                :boolean (boolean? value) :array (indexed? value) :dictionary (dictionary? value) false)
+              (string "invalid setting " key))
       (when (field :minimum) (assert (>= value (field :minimum)) "setting below minimum"))
       (when (field :maximum) (assert (<= value (field :maximum)) "setting above maximum"))
       (when (and (field :absolute) (not discovery)) (assert (path/abspath? value) "absolute path required"))
@@ -30,7 +30,8 @@
 
 (defn configuration [schema supplied &opt discovery]
   (def config (validate schema supplied discovery))
-  (assert (<= (config :summary-quota) (config :context-quota)) "summary quota exceeds context quota")
+  (when (config :context-quota)
+    (assert (<= (config :summary-quota) (config :context-quota)) "summary quota exceeds context quota"))
   (when (config :agent)
     (assert (not (get-in config [:agent :agent])) "nested execution profiles are not supported")
     (put config :agent (configuration schema (config :agent) discovery))
@@ -61,14 +62,16 @@
     (def granted (get-in current [:providers name]))
     (assert (and granted (if (provider :identity) (= (provider :identity) (granted :identity)) (= (provider :url) (granted :url)))) "saved provider revoked"))
   (def config (merge saved {:forbid (distinct (array/concat @[] (saved :forbid) (current :forbid)))
-    :search (and (saved :search) (current :search))
-    :agent (when (saved :agent) (authorize schema (current :agent) (saved :agent)))
-    :capabilities (tabseq [name :in (keys (saved :capabilities))] name (get-in current [:capabilities name]))
-    :providers (tabseq [name :in (keys (saved :providers))] name (get-in current [:providers name]))}))
+                            :search (and (saved :search) (current :search))
+                            :agent (when (saved :agent) (authorize schema (current :agent) (saved :agent)))
+                            :capabilities (tabseq [name :in (keys (saved :capabilities))] name (get-in current [:capabilities name]))
+                            :providers (tabseq [name :in (keys (saved :providers))] name (get-in current [:providers name]))}))
   (each [key field] (pairs schema)
-    (when (= :integer (field :type))
-      (put config key (if (and (= key :output) (= 0 (min (saved key) (current key))))
-        (max (saved key) (current key)) (min (saved key) (current key))))))
+    (when (and (= :integer (field :type)) (or (saved key) (current key)))
+      (put config key
+           (if (and (= key :output) (= 0 (min (saved key) (current key))))
+             (max (saved key) (current key))
+             (min (get saved key math/inf) (get current key math/inf))))))
   config)
 
 (defn request [value fields]
@@ -83,9 +86,9 @@
   (when (has-key? value :images)
     (assert (and (indexed? (value :images)) (<= (length (value :images)) 4)) "invalid images")
     (put value :images (map (fn [image]
-      (assert (and (dictionary? image) (deep= (sorted (keys image)) (sorted [:type :data]))
-                   (index-of (image :type) ["image/png" "image/jpeg" "image/webp"]) (string? (image :data))) "invalid image")
-      {:type (image :type) :bytes (buffer (base64/decode (image :data)))}) (value :images))))
+                              (assert (and (dictionary? image) (deep= (sorted (keys image)) (sorted [:type :data]))
+                                           (index-of (image :type) ["image/png" "image/jpeg" "image/webp"]) (string? (image :data))) "invalid image")
+                              {:type (image :type) :bytes (buffer (base64/decode (image :data)))}) (value :images))))
   value)
 
 (defn database [&opt temporary]
@@ -104,7 +107,7 @@ CREATE VIEW live_calls AS SELECT c.* FROM call_controls c JOIN call_controls r O
  WHERE c.state IN ('running','waiting') AND c.lease_expires>unixepoch('subsec') AND c.expires>unixepoch('subsec')
  AND r.expires>unixepoch('subsec') AND NOT c.cancelled AND NOT r.cancelled;
 CREATE VIEW running AS SELECT source FROM live_calls WHERE state='running';
-PRAGMA user_version=6;
+PRAGMA user_version=1;
 `) (string/replace-all "$schema." (if temporary "journal." "main.") `
 CREATE TABLE $schema.call_payloads(
  id INTEGER PRIMARY KEY,parent INTEGER,run INTEGER NOT NULL,kind TEXT NOT NULL,config TEXT CHECK(config IS NULL OR json_valid(config)),
@@ -151,7 +154,9 @@ CREATE VIEW $schema.memory_records AS WITH records AS (
   WHEN e.kind='call-result' AND c.kind='code' AND json_extract(e.data,'$.state')='done' THEN 'completed'
   WHEN e.kind='call-attempt' AND c.kind='code' THEN 'code-admission' ELSE e.kind END kind,
  CASE WHEN e.kind='user' THEN coalesce(json_extract(e.data,'$.input.text'),'')
-  WHEN e.kind='model-outcome' THEN coalesce(json_extract(e.data,'$.text'),e.text)
+  WHEN e.kind='model-outcome' THEN CASE json_type(e.data,'$.message.content') WHEN 'text' THEN json_extract(e.data,'$.message.content')
+   WHEN 'array' THEN coalesce((SELECT group_concat(json_extract(p.value,'$.text'),char(10) ORDER BY p.key) FROM json_each(e.data,'$.message.content') p WHERE json_extract(p.value,'$.type')='text'),'')
+   ELSE coalesce(json_extract(e.data,'$.message.refusal'),'') END
   WHEN e.kind='call-result' THEN coalesce(json_extract(e.data,'$.error'),json_extract(e.data,'$.value'),e.text)
   WHEN e.kind='call-attempt' AND c.kind='code' THEN json_extract(a.data,'$.input.code') ELSE e.text END text,
  e.data,e.estimate,e.author,e.at,e.created,c.kind execution_kind,

@@ -6,13 +6,13 @@
   (cond
     (string? node) node
     (dictionary? node) (if (has-key? node :content)
-      (string (when (node :name) (string "# " (node :name) "\n\n")) (string/join (map document (node :content)) "\n\n"))
-      (or (node :text) (string (json/encode node))))
+                         (string (when (node :name) (string "# " (node :name) "\n\n")) (string/join (map document (node :content)) "\n\n"))
+                         (or (node :text) (string (json/encode node))))
     (indexed? node) (string/join (map document node) "\n") ""))
 
 (defn git [directory args &opt input environment probe]
   (def child (os/spawn ["git" "-C" directory "--literal-pathspecs" ;args] :pe
-    (merge (os/environ) (or environment {}) {:in :pipe :out :pipe :err :out})))
+                       (merge (os/environ) (or environment {}) {:in :pipe :out :pipe :err :out})))
   (def output @"")
   (def done (ev/chan 1))
   (ev/go (fn [] (os/proc-wait child)) nil done)
@@ -48,7 +48,7 @@
       (def tracked (and commit (not= "" (git root ["ls-tree" "-z" commit "--" relative]))))
       (when revision (assert tracked "world file is absent from the selected revision"))
       (def code (if tracked (git root ["show" (string commit ":" relative)])
-        (do (assert (<= (os/stat (config :file) :size) (config :source-bytes)) "world source byte ceiling") (string (slurp (config :file))))))
+                  (do (assert (<= (os/stat (config :file) :size) (config :source-bytes)) "world source byte ceiling") (string (slurp (config :file))))))
       (assert (<= (length code) (config :source-bytes)) "world source byte ceiling")
       {:code code :root (or root directory) :path relative :tracked (not (not tracked)) :base commit
        :ref (if (and ref (string/has-prefix? "refs/heads/" (string/trim ref))) (string/trim ref) (if root "HEAD" "refs/heads/main"))})))
@@ -67,6 +67,7 @@
   (when (has-key? options :push) (assert (boolean? (options :push)) "invalid push setting"))
   (def branch (store/call s (get options :call (view :branch))))
   (assert (= (branch :world) (config :world)) "saved call belongs to another world")
+  (assert (= (config :file) ((json/decode (branch :config) true true) :file)) "saved world file changed")
   (def origin (json/decode (branch :origin) true true))
   (def directory (origin :root))
   (def file (branch :file))
@@ -135,17 +136,17 @@
 
 (defn instructions [config view document-tree available]
   (string (document document-tree) "\n\n## World\n\n" (config :world)
-    (when (config :instructions) (string "\n\n" (slurp (config :instructions))))
-    (when (and (config :repl) (get view :tools true))
-      (string "\nOne Janet environment lives for this call. Its editable source is `(world :current-file)`."
-        "\nDefinitions can be redefined; `(put world 'name nil)` removes a binding."
-        "\nEdit the one source file to preserve helpers; only `save` commits. HEAD is the current saved revision."
-        "\n`(input)` reads the inquiry; `(self/document)` reads these instructions."
-        "\n`(await (self {:text \"request\"}))` starts an independent source branch. `:persist false` keeps its journal in RAM."
-        "\nChildren inherit source, not unsaved live bindings. Performed effects are not rolled back."
-        "\n\n## Callable functions\n\n"
-        (string/join (seq [[name binding] :in (sorted (pairs available))] (string "- " (binding :doc))) "\n")
-        "\nGranted functions are already bound. Inspect uncertain receipts before repeating effects."))))
+          (when (config :instructions) (string "\n\n" (slurp (config :instructions))))
+          (when (and (config :repl) (get view :tools true))
+            (string "\nOne Janet environment lives for this call. Its editable source is `(world :current-file)`."
+                    "\nDefinitions can be redefined; `(put world 'name nil)` removes a binding."
+                    "\nEdit the one source file to preserve helpers; only `save` commits. HEAD is the current saved revision."
+                    "\n`(input)` reads the inquiry; `(self/document)` reads these instructions."
+                    "\n`(await (self {:text \"request\"}))` starts an independent source branch. `:persist false` keeps its journal in RAM."
+                    "\nChildren inherit source, not unsaved live bindings. Performed effects are not rolled back."
+                    "\n\n## Callable functions\n\n"
+                    (string/join (seq [[name binding] :in (sorted (pairs available))] (string "- " (binding :doc))) "\n")
+                    "\nGranted functions are already bound. Inspect uncertain receipts before repeating effects."))))
 
 (defn- request [name args]
   (def reply (ev/thread-chan 1))
@@ -174,15 +175,15 @@
       (def [code reply] evaluation)
       (def output @"")
       (def outcome (try
-        (with-dyns [:zinc/requests requests :out (fn [bytes]
-          (assert (<= (+ (length output) (length bytes)) ceiling) "execution output byte ceiling") (buffer/push-string output bytes))]
-          (unless loaded (eval-string source env) (set loaded true))
-          (def value (eval-string code env))
-          {:ok true :value (string output (if (string? value) value (string/format "%p" value)))})
-        ([err fiber]
-          (def trace @"")
-          (with-dyns [:err (fn [bytes] (buffer/push-string trace (string/slice bytes 0 (min (length bytes) (max 0 (- ceiling (length trace)))))))] (debug/stacktrace fiber))
-          {:ok false :error (string err "\n" trace)})))
+                     (with-dyns [:zinc/requests requests :out (fn [bytes]
+                                                                (assert (<= (+ (length output) (length bytes)) ceiling) "execution output byte ceiling") (buffer/push-string output bytes))]
+                       (unless loaded (eval-string source env) (set loaded true))
+                       (def value (eval-string code env))
+                       {:ok true :value (string output (if (string? value) value (string/format "%p" value)))})
+                     ([err fiber]
+                       (def trace @"")
+                       (with-dyns [:err (fn [bytes] (buffer/push-string trace (string/slice bytes 0 (min (length bytes) (max 0 (- ceiling (length trace)))))))] (debug/stacktrace fiber))
+                       {:ok false :error (string err "\n" trace)})))
       (ev/give reply outcome))))
 
 (defn open [file source input document bindings forbid ceiling]
@@ -198,10 +199,10 @@
   (ev/with-deadline seconds
     (ev/give (runtime :evaluations) [code reply])
     (label done (while true
-      (def [status channel packet] (ev/select (runtime :requests) reply (runtime :finished)))
-      (assert (= status :take) "Execution closed")
-      (cond
-        (= channel reply) (do (assert (packet :ok) (packet :error)) (return done (packet :value)))
-        (= channel (runtime :finished)) (error (string "World evaluator stopped: " packet))
-        (do (def [name args response] packet)
-          (ev/give response (try {:ok true :value (handler name args)} ([err] {:ok false :error (string err)})))))))))
+                  (def [status channel packet] (ev/select (runtime :requests) reply (runtime :finished)))
+                  (assert (= status :take) "Execution closed")
+                  (cond
+                    (= channel reply) (do (assert (packet :ok) (packet :error)) (return done (packet :value)))
+                    (= channel (runtime :finished)) (error (string "World evaluator stopped: " packet))
+                    (do (def [name args response] packet)
+                      (ev/give response (try {:ok true :value (handler name args)} ([err] {:ok false :error (string err)})))))))))

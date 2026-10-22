@@ -52,10 +52,11 @@ Inside world code:
 ```
 
 `memory/expand` is the only exposed memory function. It returns the requested
-record's own bounded page, including ID, author, occurrence time and summary child
-IDs. Follow child IDs to drill down; pass `next` as the optional byte offset while
-`next < total`. It never substitutes an admission for an actual result. Searching
-is an inquiry to `self`; the semantic window retrieves originals internally.
+record's own bounded page, including ID, author, occurrence time and summary
+child IDs. Follow child IDs to drill down; pass `next` as the optional byte
+offset while `next < total`. It never substitutes an admission for an actual
+result. Searching is an inquiry to `self`; the semantic window retrieves
+originals internally.
 
 Built-in functions are called directly. `self` admits descendant work and
 returns a durable Zinc handle. `await` reads a descendant outcome. PA handles
@@ -63,8 +64,9 @@ remain separate, ephemeral observation handles.
 
 `record`, `describe`, `document`, `models`, `events`, `pending`, `resume` and
 `abort` are ordinary package exports used by invokers. `task` executes trusted
-jobs; `invalidate` controls the summary cache. Neither is a world binding. Generated environments receive neither PA
-spawning nor private runtime configuration.
+jobs; `invalidate` controls the summary cache. Neither is a world binding.
+Generated environments receive neither PA spawning nor private runtime
+configuration.
 
 ## Passive context
 
@@ -89,11 +91,12 @@ Required identity is `source`, absolute `store`, and `world`. For Janet
 execution, set `repl: true`, an absolute `file`, `seconds`, and native
 restrictions in `forbid`.
 
-Each complete call owns one detached executor and editable source file. Its Janet
-REPL environment is created only when code first executes. Definitions and redefinitions survive its model/tool rounds;
-mutations within that REPL are sequential. Parallel selves have separate files
-and environments. Hard evaluation timeout terminates the call's evaluator rather
-than reusing a possibly running heap.
+Each complete call owns one detached executor and editable source file. Its
+Janet REPL environment is created only when code first executes. Definitions and
+redefinitions survive its model/tool rounds; mutations within that REPL are
+sequential. Parallel selves have separate files and environments. Closing
+channels does not terminate CPU-bound evaluation; hard termination requires
+executor-level enforcement.
 
 ```text
 admitted world entry source
@@ -171,10 +174,13 @@ function outside the world. Private definitions and macros are not exposed;
 public functions require docstrings. Grant and owner-generation checks still
 apply to each invocation. Changing a world binding cannot manufacture authority.
 
-`zinc.md` declares built-ins using their source metadata. Supplied namespaces
-expose documented public functions from a protected library at an absolute path.
-There is no separate registration API or synthetic import module. Libraries may
-cross executable boundaries; Zinc does not know their provider.
+The named `capabilities` table in `zinc.md` is the index of optional built-ins
+and their source metadata. Adding a declaration does not grant it; profiles
+still select their own capabilities. `self`, `await`, `input` and
+`self/document` remain runtime intrinsics. Supplied namespaces expose documented
+public functions from a protected library at an absolute path. There is no
+separate registration API or synthetic import module. Libraries may cross
+executable boundaries; Zinc does not know their provider.
 
 ## User and agent profiles
 
@@ -186,8 +192,8 @@ An authorized human execution may have `inference: false`,
 `capabilities: {save: {}}`, and a trusted `agent` profile. Text selves use that
 agent profile; code selves retain the caller's profile. Profiles must share
 source/store/world/file identity. Saved work is reauthorized against current
-profiles. Removed configuration fields are rejected, not converted. Old in-flight
-profiles cannot resume under a revoked contract. Store format is 6;
+profiles. Removed configuration fields are rejected, not converted. Old
+in-flight profiles cannot resume under a revoked contract. Store format is 1;
 incompatible layouts require explicit fresh-store provisioning, not migration.
 
 `save` is an optional built-in, limited to the configured world source file:
@@ -199,6 +205,11 @@ incompatible layouts require explicit fresh-store provisioning, not migration.
 (save "Keep an earlier call" {:call CALL-ID})
 (save "Publish" {:push true})
 ```
+
+Without `:call`, `save` operates on its executing call's world file. A later
+inquiry creates another call and does not implicitly select an earlier edited
+world. Saving that earlier work requires its call ID. Agents must have an
+explicit `save` capability to commit their own worlds.
 
 It initializes Git when necessary, stages new world files, creates explicit
 commits and updates refs with compare-and-swap. Merges must affect only the
@@ -216,14 +227,14 @@ confidentiality.
 
 ## Work and history
 
-SQLite format 6 separates durable call controls from execution payloads.
-A call owns its admitted history, source snapshot and execution profile; public run
-and branch coordinates are projections, not separate execution identities.
-Temporary executors attach a bounded RAM journal to their control connection and use
-the same transaction and scheduler rules without storing private payloads durably. Every event retains an author,
-source occurrence timestamp and separate ingestion clock. Accepted execution can
-finish and commit after its PA observer dies. It cannot survive death of its own
-executing process or OS scope.
+SQLite format 1 separates durable call controls from execution payloads. A call
+owns its admitted history, source snapshot and execution profile; public run and
+branch coordinates are projections, not separate execution identities. Temporary
+executors attach a bounded RAM journal to their control connection and use the
+same transaction and scheduler rules without storing private payloads durably.
+Every event retains an author, source occurrence timestamp and separate
+ingestion clock. Accepted execution can finish and commit after its PA observer
+dies. It cannot survive death of its own executing process or OS scope.
 
 `parallel` bounds running tasks; waits release and reacquire slots, including
 recursion at one slot. `task-depth`, `task-quota` and the admission-anchored
@@ -237,29 +248,38 @@ constrain it; a bounded prompt is not an unbounded transcript.
 
 Known failures are outcomes. Interrupted execution can be uncertain.
 Original-owner fencing allows late known completion while its generation remains
-valid. Abort fences scheduling and records affected calls in history.
-It is cooperative and does not undo effects; an external action already in
-flight may still finish. Completed roots remain completed, and accepted descendants retain their independent
-execution leases within the shared deadline and budget.
+valid. Abort fences scheduling and records affected calls in history. It is
+cooperative and does not undo effects; an external action already in flight may
+still finish. Completed roots remain completed, and accepted descendants retain
+their independent execution leases within the shared deadline and budget.
 
 Model requests use complete JSON responses. Model outcomes are stored once;
 conversation, memory and completed turns project those canonical records. The
-`inquiry-v3` terminal result retains semantic text/message/status, coordinates and aggregate usage.
-Zinc produces generic `start`/`display` presentation envelopes from committed events before returning the result;
-consumers do not interpret provider response shapes. Install matching PA protocol-2 binaries and consumers. Complete
-assistant messages, tool calls/results and execution receipts are persisted; transport fragments are not
-events. A database insert constraint permits only explicit semantic and receipt
-kinds, never deltas or arbitrary emissions. Event IDs count ledger records, not
-conversation messages. Each complete model round emits while execution
-continues, including reasoning visibility, refusals, truncation, filtering, tool
-calls and auxiliary outcomes. Frames carry ID, author, occurrence time and
-source/ref/revision. Temporary coordinates are execution-qualified, never fake
-durable IDs. Internal summary completions remain cache bookkeeping.
+`inquiry-v3` terminal result retains semantic text/message/status, coordinates
+and aggregate usage. Zinc produces generic `start`/`display` presentation
+envelopes from committed events before returning the result; consumers do not
+interpret provider response shapes. Install matching PA protocol-2 binaries and
+consumers. Complete assistant messages, tool calls/results and execution
+receipts are persisted; transport fragments are not events. A database insert
+constraint permits only explicit semantic and receipt kinds, never deltas or
+arbitrary emissions. Event IDs count ledger records, not conversation messages.
+Each complete model round emits while execution continues, including reasoning
+visibility, refusals, truncation, filtering, tool calls and auxiliary outcomes.
+Frames carry ID, author, occurrence time and source/ref/revision. Temporary
+coordinates are execution-qualified, never fake durable IDs. Internal summary
+completions remain cache bookkeeping.
 
 `events` returns bounded committed pages. Reattachment emits saved events before
 returning an outcome, without rerunning failed effects. Observers own delivery
 receipts and cursors. Zinc has no Discord acknowledgment state or catch-up
 queue.
+
+Context and output ceilings are derived from the selected provider's advertised
+capacities. `context-quota` is an optional operator cap, not a default 32K
+restriction. `output: 0` uses available provider capacity rather than an
+arbitrary fraction of the context window. Existing saved caps remain effective
+when work is reauthorized. Explicit provider reasoning constraints are checked
+before a completion request.
 
 Token estimates use `ceil(bytes / 4)`; provider-reported usage remains separate.
 Model requests consume the same work quota as queued tasks. Tool quota bounds
@@ -276,31 +296,36 @@ One canonical projection of the immutable ledger feeds two independent windows:
 - Semantic retrieval searches original records beneath summaries. The original
   inquiry anchors lexical/spelling/Cygnet expansion and reranking. A bounded,
   checkpointed pool belongs to the call's frozen history. Only originals already
-  present verbatim are deduplicated; compaction reselects evidence, never clears it.
+  present verbatim are deduplicated; compaction reselects evidence, never clears
+  it.
 
-Search defaults to a 50/50 memory-budget split. Disabling it gives chronology the
-whole allowance. Both windows count rendered provenance headers. `history-records`
-is a page/context-batch bound, not permission to omit older admitted history.
-Required preparation either produces a complete cover or fails explicitly.
+Search defaults to a 50/50 memory-budget split. Disabling it gives chronology
+the whole allowance. Both windows count rendered provenance headers.
+`history-records` is a page/context-batch bound, not permission to omit older
+admitted history. Required preparation either produces a complete cover or fails
+explicitly.
 
 Small blocks read up to 16 originals; larger blocks read two children. Bounded
-source groups are compressed independently, then reduced in a balanced tree,
-not repeatedly rewritten into a growing synopsis. Existing workers, checkpoints,
+source groups are compressed independently, then reduced in a balanced tree, not
+repeatedly rewritten into a growing synopsis. Existing workers, checkpoints,
 deadlines and shared quotas own all preparation. Cache identity uses ordered
 children and compression policy, so later calls reuse completed blocks.
 
-Every displayed memory item has ID, author and occurrence time. Summaries identify
-their producer and creation time separately from the source period and child IDs.
-Actual outcomes, failures and uncertainty remain distinct from admissions.
-Summaries are lossy: expand originals before relying on an uncertain action.
+Every displayed memory item has ID, author and occurrence time. Summaries
+identify their producer and creation time separately from the source period and
+child IDs. Actual outcomes, failures and uncertainty remain distinct from
+admissions. Summaries are lossy: expand originals before relying on an uncertain
+action.
 
-The trusted `invalidate` export takes `{"event":ID}` and excludes that summary and
-its cached ancestors from subsequent reads. Originals remain immutable; existing
-workers rebuild missing nodes on demand. Invalidation does not cancel work or
-rewrite an already admitted model request; use explicit abort when needed.
+The trusted `invalidate` export takes `{"event":ID}` and excludes that summary
+and its cached ancestors from subsequent reads. Originals remain immutable;
+existing workers rebuild missing nodes on demand. Invalidation does not cancel
+work or rewrite an already admitted model request; use explicit abort when
+needed.
 
-The balanced-cache approach draws on [OptMem](https://github.com/VictorTaelin/OptMem),
-with scoped ledger membership instead of a single dense note sequence.
+The balanced-cache approach draws on
+[OptMem](https://github.com/VictorTaelin/OptMem), with scoped ledger membership
+instead of a single dense note sequence.
 
 Provider URL/token configuration supports llama/OpenRouter. An optional generic
 `transport` library replaces HTTP transfer without exposing credentials to the
