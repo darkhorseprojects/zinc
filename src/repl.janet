@@ -44,7 +44,7 @@
       (when revision (assert base "world revision unavailable"))
       (def commit (when base (string/trim base)))
       (def ref (when root (git root (if revision ["rev-parse" "--symbolic-full-name" "--verify" "--end-of-options" revision] ["symbolic-ref" "-q" "HEAD"]) nil nil true)))
-      (def relative (if root (path/relpath root (config :file)) (path/basename (config :file))))
+      (def relative (if root (string/join (path/parts (path/relpath root (config :file))) "/") (path/basename (config :file))))
       (def tracked (and commit (not= "" (git root ["ls-tree" "-z" commit "--" relative]))))
       (when revision (assert tracked "world file is absent from the selected revision"))
       (def code (if tracked (git root ["show" (string commit ":" relative)])
