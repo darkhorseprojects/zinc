@@ -9,13 +9,18 @@ service or public `invoke`/`eval` operation.
 
 ## Build
 
-Use Janet 1.42+, Jpm, system SQLite with FTS5 and development headers,
-pkg-config, and the matching PA executable:
+Use Janet 1.42+, Jpm, libcurl development headers/libraries, and the matching
+PA executable. POSIX builds require pkg-config. MSVC builds require `CURL_ROOT`
+pointing to shared libcurl and its runtime DLL directory on `PATH`.
 
 ```sh
-JANET_SYSTEM_SQLITE=1 jpm --local deps
+jpm --local --cflags=-std=c99,-DSQLITE_ENABLE_FTS5 deps
 jpm --local install
 ```
+
+For MSVC, use `--cflags=/nologo,/MD,/DSQLITE_ENABLE_FTS5` instead.
+This builds the pinned SQLite with FTS5. CI is configured to test native execution,
+Git saves and HTTP transfer on Linux, macOS and Windows, each on x86-64 and ARM64.
 
 Zinc installs package sources, not an executable. Select `zinc.md` export `self`
 through PA's `spawn` SDK or CLI. Supply `jpm_tree/lib` as the explicit `library`
