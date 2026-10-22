@@ -2,12 +2,13 @@ name: CI
 on:
   push:
     branches: [main]
+    tags: ["v*"]
   pull_request:
   workflow_dispatch:
 permissions: { contents: read }
 concurrency:
   group: zinc-${{ github.workflow }}-${{ github.ref }}
-  cancel-in-progress: true
+  cancel-in-progress: ${{ !startsWith(github.ref, 'refs/tags/') }}
 jobs:
   toolchain:
     uses: darkhorseprojects/portable-agents/.github/workflows/ci.yml@5b096511204a1fe6d9968a69c2334a567853c568
@@ -31,7 +32,10 @@ jobs:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
         with: { path: zinc, persist-credentials: false }
       - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093
-        with: { name: "janet-toolchain-${{ matrix.id }}", path: "${{ runner.temp }}" }
+        with: {
+          name: "janet-toolchain-${{ matrix.id }}",
+          path: "${{ runner.temp }}",
+        }
       - uses: ilammy/msvc-dev-cmd@0b201ec74fa43914dc39ae48a89fd1d8cb592756
         if: runner.os == 'Windows'
         with: { arch: "${{ runner.arch == 'ARM64' && 'arm64' || 'x64' }}" }
@@ -87,3 +91,35 @@ jobs:
           flags = "/nologo,/MD,/DSQLITE_ENABLE_FTS5" if os.name == "nt" else "-std=c99,-DSQLITE_ENABLE_FTS5"
           subprocess.run(["jpm", f"--cflags={flags}", "deps"], check=True)
           subprocess.run(["jpm", "install"], check=True)
+      - name: Package runtime
+        working-directory: zinc
+        run: jpm run package
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: zinc-${{ matrix.id }}
+          path: zinc/dist/zinc-v*-${{ matrix.id }}.*
+          if-no-files-found: error
+  release:
+    if: startsWith(github.ref, 'refs/tags/v')
+    needs: build
+    runs-on: ubuntu-24.04
+    environment: release
+    permissions: { contents: write }
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093
+        with: { pattern: zinc-*, path: artifacts, merge-multiple: true }
+      - name: Check release assets
+        run: |
+          cd artifacts
+          test "$(find . -maxdepth 1 -type f | wc -l)" -eq 6
+          for target in linux-x86_64 linux-aarch64 macos-x86_64 macos-aarch64 windows-x86_64 windows-aarch64; do
+            test "$(find . -name "zinc-v*-$target.*" | wc -l)" -eq 1
+          done
+          sha256sum zinc-* > SHA256SUMS
+      - uses: softprops/action-gh-release@3bb12739c298aeb8a4eeaf626c5b8d85266b0e65
+        with: {
+          files: "artifacts/*",
+          body_path: RELEASE_NOTES.md,
+          overwrite_files: false,
+        }
