@@ -1,5 +1,6 @@
 (import spork/path :as path)
 (import spork/base64 :as base64)
+(import spork/json :as json)
 
 (defn validate [schema supplied &opt discovery]
   (assert (dictionary? supplied) "configuration must be an object")
@@ -63,6 +64,7 @@
     (assert (and granted (if (provider :identity) (= (provider :identity) (granted :identity)) (= (provider :url) (granted :url)))) "saved provider revoked"))
   (def config (merge saved {:forbid (distinct (array/concat @[] (saved :forbid) (current :forbid)))
                             :search (and (saved :search) (current :search))
+                            :score (max (saved :score) (current :score))
                             :agent (when (saved :agent) (authorize schema (current :agent) (saved :agent)))
                             :capabilities (tabseq [name :in (keys (saved :capabilities))] name (get-in current [:capabilities name]))
                             :providers (tabseq [name :in (keys (saved :providers))] name (get-in current [:providers name]))}))
@@ -73,6 +75,10 @@
              (max (saved key) (current key))
              (min (get saved key math/inf) (get current key math/inf))))))
   config)
+
+(defn data [value]
+  (json/encode value)
+  (postwalk |(if (dictionary? $) (tabseq [[key item] :in (pairs $)] key item) $) value))
 
 (defn request [value fields]
   (assert (dictionary? value) "request must be an object")
@@ -147,23 +153,24 @@ CREATE TRIGGER $schema.event_kind BEFORE INSERT ON events
  'model-admission','model-outcome','call-admission','launch-uncertain','summary','interruption','cancelled','artifact','context','save-intent','saved','operation-outcome')
  BEGIN SELECT raise(ABORT,'unsupported event kind'); END;
 CREATE VIEW $schema.memory_records AS WITH records AS (
- SELECT e.id,e.source,e.call task,c.run,CASE WHEN c.kind='summarize' THEN c.parent ELSE c.id END branch,e.parent,
+ SELECT e.id,e.source,e.call task,c.run,CASE WHEN c.kind='summarize' THEN c.parent ELSE c.id END branch,
+ CASE WHEN e.kind='call-result' AND c.kind='code' THEN (SELECT id FROM events n WHERE n.call=c.id AND n.kind='call-attempt' ORDER BY id DESC LIMIT 1) ELSE e.parent END parent,
  CASE WHEN e.kind='model-outcome' AND json_extract(e.data,'$.turn') THEN
    CASE WHEN json_extract(e.data,'$.status') IN ('complete','refused','blocked') THEN 'completed' ELSE 'response' END
-  WHEN e.kind='call-result' AND json_type(e.data,'$.error')='text' THEN 'error'
+  WHEN e.kind='call-result' AND json_type(e.data,'$.error')='object' THEN 'error'
   WHEN e.kind='call-result' AND c.kind='code' AND json_extract(e.data,'$.state')='done' THEN 'completed'
   WHEN e.kind='call-attempt' AND c.kind='code' THEN 'code-admission' ELSE e.kind END kind,
  CASE WHEN e.kind='user' THEN coalesce(json_extract(e.data,'$.input.text'),'')
   WHEN e.kind='model-outcome' THEN CASE json_type(e.data,'$.message.content') WHEN 'text' THEN json_extract(e.data,'$.message.content')
    WHEN 'array' THEN coalesce((SELECT group_concat(json_extract(p.value,'$.text'),char(10) ORDER BY p.key) FROM json_each(e.data,'$.message.content') p WHERE json_extract(p.value,'$.type')='text'),'')
    ELSE coalesce(json_extract(e.data,'$.message.refusal'),'') END
-  WHEN e.kind='call-result' THEN coalesce(json_extract(e.data,'$.error'),json_extract(e.data,'$.value'),e.text)
+  WHEN e.kind='call-result' THEN coalesce(json_extract(e.data,'$.error.message'),json_extract(e.data,'$.value'),e.text)
   WHEN e.kind='call-attempt' AND c.kind='code' THEN json_extract(a.data,'$.input.code') ELSE e.text END text,
  e.data,e.estimate,e.author,e.at,e.created,c.kind execution_kind,
  CASE WHEN json_type(e.data,'$.message')='object' THEN CASE WHEN json_extract(e.data,'$."reasoning-visible"') THEN json_extract(e.data,'$.message')
   ELSE json_remove(json_extract(e.data,'$.message'),'$.reasoning','$.reasoning_content','$.reasoning_details') END END public_message
  FROM events e LEFT JOIN call_payloads c ON c.id=e.call LEFT JOIN events a ON a.call=c.id AND a.kind='user'
-) SELECT e.*,b.file branch_file,b.temporary branch_temporary,b.parent branch_parent,json_extract(a.data,'$.input.request') request,
+) SELECT e.*,b.world branch_world,b.file branch_file,b.temporary branch_temporary,b.parent branch_parent,json_extract(a.data,'$.input.request') request,
  CASE WHEN b.temporary=1 THEN 'tmp:'||json_extract(a.data,'$.input.request')||'/'||b.id||':'||e.id END label,
  CASE WHEN e.kind='user' THEN coalesce(nullif(e.text,''),json_extract(e.data,'$.input.code'),'')
   WHEN e.kind IN ('response','completed','model-outcome') AND json_type(e.data,'$.message')='object' THEN e.public_message||char(10)||json_object('status',json_extract(e.data,'$.status'))

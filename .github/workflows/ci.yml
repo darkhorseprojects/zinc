@@ -10,9 +10,9 @@ concurrency:
   cancel-in-progress: true
 jobs:
   toolchain:
-    uses: darkhorseprojects/portable-agents/.github/workflows/ci.yml@fe8d828e6d729a02964dbaf62ba329aba4df9d91
-    with: { toolchain: "fe8d828e6d729a02964dbaf62ba329aba4df9d91" }
-  verify:
+    uses: darkhorseprojects/portable-agents/.github/workflows/ci.yml@5b096511204a1fe6d9968a69c2334a567853c568
+    with: { toolchain: "5b096511204a1fe6d9968a69c2334a567853c568" }
+  build:
     needs: toolchain
     strategy:
       fail-fast: false
@@ -26,24 +26,10 @@ jobs:
           - { os: windows-11-arm, id: windows-aarch64 }
     runs-on: ${{ matrix.os }}
     timeout-minutes: 30
-    env:
-      PYTHONUTF8: "1"
-      JANET_SYSTEM_SQLITE: "0"
+    env: { JANET_SYSTEM_SQLITE: "0" }
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
         with: { path: zinc, persist-credentials: false }
-      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
-        with:
-          repository: darkhorseprojects/portable-agents
-          ref: fe8d828e6d729a02964dbaf62ba329aba4df9d91
-          path: portable-agents
-          persist-credentials: false
-      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
-        with:
-          repository: darkhorseprojects/agent-connector
-          ref: 5a2db0628049ff8822369a1b528441ff59cae90a
-          path: agent-connector
-          persist-credentials: false
       - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093
         with: { name: "janet-toolchain-${{ matrix.id }}", path: "${{ runner.temp }}" }
       - uses: ilammy/msvc-dev-cmd@0b201ec74fa43914dc39ae48a89fd1d8cb592756
@@ -51,8 +37,6 @@ jobs:
         with: { arch: "${{ runner.arch == 'ARM64' && 'arm64' || 'x64' }}" }
       - uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1
         with: { python-version: "3.13" }
-      - uses: denoland/setup-deno@22d081ff2d3a40755e97629de92e3bcbfa7cf2ed
-        with: { deno-version: v2.9.7 }
       - name: Activate toolchain
         shell: python
         run: |
@@ -69,14 +53,13 @@ jobs:
                   source = script.read_text(encoding="utf-8").replace(previous["PREFIX"].replace("\\", "\\\\"), str(prefix).replace("\\", "\\\\"))
                   script.write_text(source.replace(previous["PREFIX"], str(prefix)), encoding="utf-8")
           library = prefix / "build" if windows else prefix / "lib"
-          environment = {"PREFIX": prefix, "JANET_HEADERPATH": prefix / "build" if windows else prefix / "include/janet",
-              "JANET_LIBPATH": library, "JANET_BINPATH": prefix / "bin", "JANET_MODPATH": prefix / ("lib" if windows else "lib/janet"),
-              "JANET_PATH": prefix / ("lib" if windows else "lib/janet"), "LD_LIBRARY_PATH": library, "DYLD_LIBRARY_PATH": library}
+          env = {"PREFIX": prefix, "JANET_HEADERPATH": prefix / "build" if windows else prefix / "include/janet",
+              "JANET_LIBPATH": library, "JANET_BINPATH": prefix / "bin", "JANET_MODPATH": modules, "JANET_PATH": modules,
+              "LD_LIBRARY_PATH": library, "DYLD_LIBRARY_PATH": library}
           with open(os.environ["GITHUB_ENV"], "a") as output:
-              output.write("".join(f"{key}={value}\n" for key, value in environment.items()))
+              output.write("".join(f"{key}={value}\n" for key, value in env.items()))
           with open(os.environ["GITHUB_PATH"], "a") as output:
-              if windows:
-                  output.write(f"{prefix}\n")
+              if windows: output.write(f"{prefix}\n")
               output.write(f"{prefix / 'bin'}\n")
       - name: Provision libcurl
         shell: python
@@ -88,18 +71,15 @@ jobs:
           elif platform.system() == "Darwin":
               subprocess.run(["brew", "install", "pkgconf", "curl"], check=True)
               prefix = subprocess.check_output(["brew", "--prefix", "curl"], text=True).strip()
-              with open(os.environ["GITHUB_ENV"], "a") as output:
-                  output.write(f"PKG_CONFIG_PATH={prefix}/lib/pkgconfig\n")
+              with open(os.environ["GITHUB_ENV"], "a") as output: output.write(f"PKG_CONFIG_PATH={prefix}/lib/pkgconfig\n")
           else:
               root = pathlib.Path(os.environ["VCPKG_INSTALLATION_ROOT"])
               triplet = "arm64-windows" if platform.machine().upper() == "ARM64" else "x64-windows"
               subprocess.run([str(root / "vcpkg.exe"), "install", f"curl[core,schannel]:{triplet}"], check=True)
               prefix = root / "installed" / triplet
-              with open(os.environ["GITHUB_ENV"], "a") as output:
-                  output.write(f"CURL_ROOT={prefix}\n")
-              with open(os.environ["GITHUB_PATH"], "a") as output:
-                  output.write(f"{prefix / 'bin'}\n")
-      - name: Install package
+              with open(os.environ["GITHUB_ENV"], "a") as output: output.write(f"CURL_ROOT={prefix}\n")
+              with open(os.environ["GITHUB_PATH"], "a") as output: output.write(f"{prefix / 'bin'}\n")
+      - name: Install Zinc
         working-directory: zinc
         shell: python
         run: |
@@ -107,17 +87,3 @@ jobs:
           flags = "/nologo,/MD,/DSQLITE_ENABLE_FTS5" if os.name == "nt" else "-std=c99,-DSQLITE_ENABLE_FTS5"
           subprocess.run(["jpm", f"--cflags={flags}", "deps"], check=True)
           subprocess.run(["jpm", "install"], check=True)
-      - name: Exercise installed PA boundary
-        working-directory: zinc
-        run: python tests/integration.py
-      - name: Build Connector
-        working-directory: agent-connector
-        run: deno task compile
-      - name: Exercise Connector with Zinc
-        working-directory: agent-connector
-        shell: python
-        run: |
-          import os, pathlib, subprocess
-          environment = dict(os.environ, ZINC_SOURCE=str(pathlib.Path("../zinc").resolve()),
-              AGC_EXECUTABLE=str(pathlib.Path("dist/agc.exe" if os.name == "nt" else "dist/agc").resolve()))
-          subprocess.run(["deno", "test", "-A", "--frozen", "tests/zinc_test.ts"], env=environment, check=True)

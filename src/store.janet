@@ -3,6 +3,7 @@
 (import spork/base64 :as base64)
 (import spork/utf8 :as utf8)
 (import ./schema)
+(import spork/path :as path)
 
 (defn estimate [bytes] (math/ceil (/ (length bytes) 4)))
 (defn query [s statement &opt parameters] (sql/eval (s :db) statement (or parameters [])))
@@ -26,8 +27,9 @@
       (unless (= 1 (((query s "PRAGMA user_version") 0) :user_version))
         (transact s
                   (def version (((query s "PRAGMA user_version") 0) :user_version))
-                  (assert (index-of version [0 1]) "unsupported Zinc database; provision a fresh database")
+                  (assert (index-of version [0 1]) "unsupported Zinc database; preserve it and provision a fresh database")
                   (when (= version 0) (query s (schema/database)))))
+      (assert (first (query s "SELECT name FROM main.sqlite_schema WHERE name='memory_records' AND instr(sql,'$.error.message')>0 AND instr(sql,'branch_world')>0")) "incompatible Zinc layout; preserve it and provision a fresh database")
       (when temporary
         (query s "ATTACH DATABASE ':memory:' AS journal; PRAGMA foreign_keys=OFF;")
         (query s (string "PRAGMA journal.max_page_count=" (math/floor (/ (config :journal-bytes) (((query s "PRAGMA journal.page_size") 0) :page_size)))))
@@ -205,7 +207,7 @@
                 (when (and (not summary) (config :repl))
                   (def directory (string (config :store) ".worlds"))
                   (os/mkdir directory) (os/chmod directory 8r700)
-                  (def file (string directory "/" (string/join (map |(string/format "%02x" $) (os/cryptorand 18))) ".janet"))
+                  (def file (path/join directory (string (string/join (map |(string/format "%02x" $) (os/cryptorand 18))) ".janet")))
                   (with [out (file/open file :wbn)] (file/write out code)) (os/chmod file 8r600)
                   (query s (string "UPDATE " (s :journal) ".call_payloads SET file=? WHERE id=?") [file id]))
                 (def input-event (append s {:branch id :author (input :author) :at (input :at)} (if summary "summary-input" "user") "" {:input admitted} (when (and entry (> entry 0)) entry) id))

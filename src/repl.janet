@@ -54,11 +54,11 @@
        :ref (if (and ref (string/has-prefix? "refs/heads/" (string/trim ref))) (string/trim ref) (if root "HEAD" "refs/heads/main"))})))
 
 (defn save
-  "(save message options) — Save this call's world file; optional call, branch, merge and push."
+  "(save message options) — Commit world source; optional call, branch, merge and push. Continue in a new self after merging."
   [message &opt options]
   (def [s view] (dyn :zinc/context))
   (def config (s :config))
-  (assert (and (string? message) (<= 1 (length message) 2048) (or (nil? options) (dictionary? options))) "save requires a message and optional settings")
+  (assert (and (string? message) (> (length (string/trim message)) 0) (<= (length message) 2048) (or (nil? options) (dictionary? options))) "save requires a message and optional settings")
   (default options {})
   (each key (keys options) (assert (index-of key [:call :branch :merge :push]) "unknown save setting"))
   (when (has-key? options :call) (assert (and (int? (options :call)) (> (options :call) 0)) "invalid saved call"))
@@ -138,15 +138,13 @@
   (string (document document-tree) "\n\n## World\n\n" (config :world)
           (when (config :instructions) (string "\n\n" (slurp (config :instructions))))
           (when (and (config :repl) (get view :tools true))
-            (string "\nOne Janet environment lives for this call. Its editable source is `(world :current-file)`."
-                    "\nDefinitions can be redefined; `(put world 'name nil)` removes a binding."
-                    "\nEdit the one source file to preserve helpers; only `save` commits. HEAD is the current saved revision."
+            (string "\nTop-level single-name `def` and `defn` update this call's world source. Redefine normally; `(def name nil)` removes a definition."
+                    "\nOther expressions execute without becoming source. Use `let` for temporary handles; definition initializers run when a branch loads. Only granted `save` commits."
                     "\n`(input)` reads the inquiry; `(self/document)` reads these instructions."
                     "\n`(await (self {:text \"request\"}))` starts an independent source branch. `:persist false` keeps its journal in RAM."
-                    "\nChildren inherit source, not unsaved live bindings. Performed effects are not rolled back."
+                    "\nParallel calls fork the same source and history; effects are not rolled back or implicitly merged."
                     "\n\n## Callable functions\n\n"
-                    (string/join (seq [[name binding] :in (sorted (pairs available))] (string "- " (binding :doc))) "\n")
-                    "\nGranted functions are already bound. Inspect uncertain receipts before repeating effects."))))
+                    (string/join (seq [[name binding] :in (sorted (pairs available))] (string "- " (binding :doc))) "\n")))))
 
 (defn- request [name args]
   (def reply (ev/thread-chan 1))
@@ -155,11 +153,11 @@
   (assert (and outcome (outcome :ok)) (get outcome :error "Execution closed"))
   (outcome :value))
 
-(defn- evaluate [[file source input document bindings requests evaluations forbid ceiling]]
+(defn- evaluate [[source input document bindings requests evaluations forbid limits]]
   (def env (make-env))
   (table/clear module/cache)
-  (put env :current-file file) (put env :redef true)
-  (put env 'stdout @{:value stderr}) (put env 'world @{:value env})
+  (put env :redef true)
+  (put env 'stdout @{:value stderr})
   (put env 'input @{:value (fn [] input)})
   (put env 'self @{:value (fn [value] (request "self" [value]))})
   (put env 'await @{:value (fn [handle] (request "await" [handle]))})
@@ -170,25 +168,52 @@
   (module/add-paths "" :source)
   (sandbox ;(map keyword forbid))
   (with-env env
-    (var loaded false) (var evaluation nil)
+    (var forms nil)
+    (var loaded false) (var loaded-source source) (var evaluation nil)
     (while (set evaluation (ev/take evaluations))
       (def [code reply] evaluation)
       (def output @"")
       (def outcome (try
                      (with-dyns [:zinc/requests requests :out (fn [bytes]
-                                                                (assert (<= (+ (length output) (length bytes)) ceiling) "execution output byte ceiling") (buffer/push-string output bytes))]
-                       (unless loaded (eval-string source env) (set loaded true))
-                       (def value (eval-string code env))
-                       {:ok true :value (string output (if (string? value) value (string/format "%p" value)))})
+                                                                (assert (<= (+ (length output) (length bytes)) (limits :output)) "execution output byte ceiling")
+                                                                (buffer/push-string output bytes))]
+                       (unless loaded
+                         (set forms (parse-all source))
+                         (each form forms
+                           (assert (and (tuple? form) (= :parens (tuple/type form)) (index-of (first form) ['def 'defn]) (symbol? (get form 1))) "world source requires single-name def or defn forms")
+                           (eval form env))
+                         (set loaded true))
+                       (var value nil)
+                       (each form (parse-all code)
+                         (def declaration (and (tuple? form) (= :parens (tuple/type form)) (index-of (first form) ['def 'defn])))
+                         (def next (array ;forms))
+                         (when declaration
+                           (assert (symbol? (get form 1)) "persistent definitions require one name")
+                           (def name (form 1))
+                           (var index nil)
+                           (eachp [i prior] next (when (= name (prior 1)) (set index i)))
+                           (when index (array/remove next index))
+                           (unless (and (= 'def (first form)) (nil? (last form)))
+                             (array/insert next (or index (length next)) form)))
+                         (def source (string/join (map |(string/format "%n" $) next) "\n"))
+                         (assert (<= (length source) (limits :source)) "world source byte ceiling")
+                         (set value (eval form env))
+                         (when declaration
+                           (request "world/source" [loaded-source source])
+                           (set loaded-source source)
+                           (array/clear forms) (array/concat forms next)
+                           (when (and (= 'def (first form)) (nil? (last form))) (put env (form 1) nil))))
+                       {:ok true :value (string output (if (string? value) value (string/format "%n" value)))})
                      ([err fiber]
                        (def trace @"")
-                       (with-dyns [:err (fn [bytes] (buffer/push-string trace (string/slice bytes 0 (min (length bytes) (max 0 (- ceiling (length trace)))))))] (debug/stacktrace fiber))
-                       {:ok false :error (string err "\n" trace)})))
+                       (with-dyns [:err (fn [bytes] (buffer/push-string trace bytes))] (debug/stacktrace fiber))
+                       {:ok false :error (if (and (dictionary? err) (string? (err :code)) (string? (err :message))) (merge {:detail (string trace)} err)
+                                           {:code "EvaluationFailed" :message (if (string? err) err (string/format "%n" err)) :detail (string trace)})})))
       (ev/give reply outcome))))
 
-(defn open [file source input document bindings forbid ceiling]
+(defn open [source input document bindings forbid limits]
   (def runtime @{:requests (ev/thread-chan 1) :evaluations (ev/thread-chan 1) :finished (ev/thread-chan 1)})
-  (ev/thread evaluate [file source input document bindings (runtime :requests) (runtime :evaluations) forbid ceiling] :n (runtime :finished))
+  (ev/thread evaluate [source input document bindings (runtime :requests) (runtime :evaluations) forbid limits] :n (runtime :finished))
   runtime)
 
 (defn close [runtime]
@@ -205,4 +230,4 @@
                     (= channel reply) (do (assert (packet :ok) (packet :error)) (return done (packet :value)))
                     (= channel (runtime :finished)) (error (string "World evaluator stopped: " packet))
                     (do (def [name args response] packet)
-                      (ev/give response (try {:ok true :value (handler name args)} ([err] {:ok false :error (string err)})))))))))
+                      (ev/give response (try {:ok true :value (handler name args)} ([err] {:ok false :error err})))))))))
