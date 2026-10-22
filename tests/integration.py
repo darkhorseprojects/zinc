@@ -12,6 +12,7 @@ import threading
 import time
 
 root = pathlib.Path.cwd()
+assert (root / "models.ini").read_bytes() == (pathlib.Path(os.environ["JANET_PATH"]) / "zinc/models.ini").read_bytes()
 program = dict(sourceDir=str(root), entryModule="zinc.md", dependencies={"library": os.environ["JANET_PATH"]})
 os.environ.update(GIT_AUTHOR_NAME="Zinc CI", GIT_AUTHOR_EMAIL="zinc@example.invalid",
                   GIT_COMMITTER_NAME="Zinc CI", GIT_COMMITTER_EMAIL="zinc@example.invalid")

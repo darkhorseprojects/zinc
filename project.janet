@@ -9,4 +9,4 @@
    {:repo "https://github.com/CosmicToast/jurl.git" :tag "e620ee820d50585c0efecfff2c2d580b5ac18213"}
    {:repo "https://github.com/janet-lang/spork.git" :tag "8a87c5ae1cbbf3a0037eeac7f172bd45da4d9910"}])
 
-(declare-source :source ["src" "zinc.md"] :prefix "zinc")
+(declare-source :source ["src" "zinc.md" "models.ini"] :prefix "zinc")
