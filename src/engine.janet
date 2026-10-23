@@ -20,7 +20,10 @@
                   "model-outcome" (when (and (= "chat" (data :role)) (data :visible)) (model/render event data))
                   "interruption" (when (= "uncertain" (data :state)) (event :text))
                   "saved" (string "Saved " (data :ref) " @ " (string/slice (data :after) 0 7) (when (data :pushed) " · pushed") "\n" (event :text))
-                  (when (and (not= false (data :display)) (index-of (event :kind) ["code-admission" "tool-result" "tool-ambiguity" "error"])) (event :text))))
+                  "summary" (string "compacted " (data :count) " records · sources #" (data :first) "–#" (data :last) " · summary #" (event :id))
+                  (when (and (not= false (data :display)) (index-of (event :kind) ["code-admission" "tool-result" "tool-ambiguity" "error"]))
+                    (if-let [failure (data :error)]
+                      (string/trim (string (get-in failure [:context :output] "") "\n" (failure :code) ": " (failure :message))) (event :text)))))
       (when body
         {:type (if (= "user" (event :kind)) "start" "display") :body body :kind (event :kind) :root (nil? (event :branch_parent))
          :caller (or (event :branch_parent) :null) :prompt (if (data :turn) (event :parent) :null)
@@ -224,23 +227,27 @@
                   (def admission (store/transact s (store/checkpoint s) (store/charge s 1 (if parallel 0 (store/estimate (tool :code))))
                                                  (store/append s view (if parallel "call-admission" "code-admission") (if parallel "self" (tool :code))
                                                                {:tool-id (tool :id) :response (response :event)} nil id)))
-                  [tool admission (when parallel (with-dyns [:zinc/effect (admission :id)] (start-child s fork {:code (tool :code)} origin)))]))
+                  [tool admission (when parallel (try (with-dyns [:zinc/effect (admission :id)] (start-child s fork {:code (tool :code)} origin)) ([err fiber] {:error (schema/failure "ToolFailed" err fiber)})))]))
       (each [_ _ handle] work (when (handle :job) (launch s (handle :job))))
       (each [tool admission handle] work
         (def outcome (try
-                       {:ok true :text (if parallel
+                       {:ok true :text (if (handle :error) (error (handle :error)) (if parallel
                                          (if (handle :temporary)
                                            (let [parked (store/park s true)]
                                              (defer (when parked (store/park s false))
                                                ((json/decode (pa/await (((dyn :zinc/call) :children) (handle :temporary))) true true) :text)))
                                            (wait s (handle :job)))
-                                         (run-code s view bindings (tool :code)))}
-                       ([err] (when (= err "deadline expired") (error err))
-                              {:ok false :text (if (and (dictionary? err) (string? (err :message))) (err :message) (string/format "%n" err)) :error err})))
+                                         (run-code s view bindings (tool :code))))}
+                       ([err fiber]
+                         (when (= err "deadline expired") (error err))
+                         (def failure (schema/failure "ToolFailed" err fiber))
+                         {:ok false :text (failure :message) :error failure})))
         (store/charge s 0 (store/estimate (json/encode outcome)))
         (store/transact s (store/checkpoint s)
-                        (store/append s view "tool-result" (outcome :text)
-                                      (merge outcome {:tool-id (tool :id) :response (response :event) :child (handle :branch) :display (not parallel)}) (admission :id) id))))
+                        (store/append s view "tool-result" (if (outcome :ok) (outcome :text) (string (json/encode outcome)))
+                                      (merge outcome {:tool-id (tool :id) :response (response :event) :child (handle :branch) :display (or (not parallel) (has-key? handle :error))}) (admission :id) id))
+        (unless (outcome :ok)
+          (pa/diagnostic "warn" (merge (outcome :error) {:context (merge (or (get-in outcome [:error :context]) {}) {:tool-call {:branch id :tool (tool :id) :event (admission :id)}})})))))
     (unless (s :temporary)
       (try (with-dyns [:zinc/background true] (memory/context s (store/view s id) space pool true))
         ([err] (store/append s (store/view s id) "launch-uncertain" "Background compaction preparation failed." {:error (string err)}))))
@@ -270,10 +277,7 @@
             (when (= "code" (row :kind)) (store/charge s 0 (store/estimate (json/encode value)))))
           ([err fiber]
             (set value nil)
-            (def trace @"")
-            (with-dyns [:err (fn [bytes] (buffer/push-string trace bytes))] (debug/stacktrace fiber))
-            (set failure @{:error (if (and (dictionary? err) (string? (err :code)) (string? (err :message))) (merge {:detail (string trace)} err)
-                                    {:code "ExecutionFailed" :message (if (string? err) err (string/format "%n" err)) :detail (string trace)})})
+            (set failure @{:error (schema/failure "ExecutionFailed" err fiber)})
             (put failure :error (postwalk (fn [value]
                                             (if (string? value) (reduce (fn [text provider]
                                                                           (if (provider :token) (string/replace-all (provider :token) "[redacted]" text) text)) value (values (config :providers))) value)) (failure :error)))))

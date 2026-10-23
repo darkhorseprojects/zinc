@@ -72,7 +72,7 @@
                   (ev/thread transfer args :n finished)
                   (defer (ev/chan-close finished)
                     (def [status result] (ev/take finished))
-                    (assert (= :ok status) (string result)) result))))
+                    (assert (= :ok status) result) result))))
   (def value (json/decode output true (not preserve-nulls)))
   (assert (dictionary? value) "model response must be an object")
   (when (value :error) (error (string "provider error: " (json/encode (value :error)))))
@@ -278,15 +278,13 @@
                                                               (map |(if (and (dictionary? $) (has-key? $ :text)) (if (string? ($ :text)) ($ :text) (string (json/encode ($ :text)))) (string (json/encode $))) (get message :reasoning_details []))))) "\n"))
   (when (> (length reasoning) 0)
     (array/push parts (string "> " (string/replace-all "\n" "\n> " (string/replace-all "\r" "\n" (string/replace-all "\r\n" "\n" (string/trimr reasoning)))))))
-  (def text (if (data :results) (string (json/encode (data :results))) (row :text)))
-  (when (> (length (string/trim text)) 0) (array/push parts text))
+  (when (> (length (string/trim (row :text))) 0) (array/push parts (row :text)))
   (def extra (tabseq [[key value] :in (pairs message) :unless (index-of key [:role :content :refusal :tool_calls :reasoning :reasoning_content :reasoning_details])] key value))
   (each value [(when (indexed? (message :content)) (filter |(not= "text" ($ :type)) (message :content)))
                (when (index-of (data :status) ["invalid" "truncated"]) (message :tool_calls)) extra]
     (when (and value (> (length value) 0)) (array/push parts (string "```json\n" (json/encode value) "\n```"))))
   (unless (index-of (get data :status "complete") ["complete" "tools"]) (array/push parts (string "[" (data :status) "]")))
   (when (and (= 0 (length parts)) (not= "tools" (data :status))) (array/push parts "[empty model response]"))
-  (when (= "model-outcome" (row :kind)) (array/insert parts 0 (string "**" (data :role) " model outcome**")))
   (string/join parts "\n\n"))
 
 (defn images [s event text]

@@ -15,8 +15,9 @@
 - Rerank scores remain inspectable without rendering model bookkeeping.
 - Native filesystem access is forbidden by default; save remains an explicit
   grant.
-- Structured diagnostics preserve detail across matching PA protocol-3
-  boundaries.
+- Tool failures retain printed output and structured details, including parallel
+  admission failures; matching PA protocol-3 diagnostics preserve boundary stacks.
+- Committed compaction displays source membership, not generated summary text.
 - Stopwords, resource provenance and the Cygnet builder install with package
   sources.
 - Tests and embedded CI fixtures are removed; six-platform build CI remains.

@@ -11,8 +11,8 @@ concurrency:
   cancel-in-progress: ${{ !startsWith(github.ref, 'refs/tags/') }}
 jobs:
   toolchain:
-    uses: darkhorseprojects/portable-agents/.github/workflows/ci.yml@5b096511204a1fe6d9968a69c2334a567853c568
-    with: { toolchain: "5b096511204a1fe6d9968a69c2334a567853c568" }
+    uses: darkhorseprojects/portable-agents/.github/workflows/ci.yml@84e725fa2cfc008e9b9653dbda7a1fd80ae82425
+    with: { toolchain: "84e725fa2cfc008e9b9653dbda7a1fd80ae82425" }
   build:
     needs: toolchain
     strategy:
@@ -93,7 +93,9 @@ jobs:
           subprocess.run(["jpm", "install"], check=True)
       - name: Package runtime
         working-directory: zinc
-        run: jpm run package
+        run: |
+          jpm run package
+          janet -e '(module/add-syspath (os/realpath "build/package/zinc/lib")) (import sqlite3 :as sql) (import jurl/native) (import portable-agents/host) (def db (sql/open ":memory:")) (sql/eval db "CREATE VIRTUAL TABLE required_fts USING fts5(text)") (sql/close db)'
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
         with:
           name: zinc-${{ matrix.id }}

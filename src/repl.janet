@@ -1,6 +1,7 @@
 (import spork/json :as json)
 (import spork/path :as path)
 (import ./store)
+(import ./schema)
 
 (defn- document [node]
   (cond
@@ -169,7 +170,7 @@
   (sandbox ;(map keyword forbid))
   (with-env env
     (var forms nil)
-    (var loaded false) (var loaded-source source) (var evaluation nil)
+    (var loaded-source source) (var evaluation nil)
     (while (set evaluation (ev/take evaluations))
       (def [code reply] evaluation)
       (def output @"")
@@ -177,12 +178,12 @@
                      (with-dyns [:zinc/requests requests :out (fn [bytes]
                                                                 (assert (<= (+ (length output) (length bytes)) (limits :output)) "execution output byte ceiling")
                                                                 (buffer/push-string output bytes))]
-                       (unless loaded
-                         (set forms (parse-all source))
-                         (each form forms
+                       (unless forms
+                         (def parsed (parse-all source))
+                         (each form parsed
                            (assert (and (tuple? form) (= :parens (tuple/type form)) (index-of (first form) ['def 'defn]) (symbol? (get form 1))) "world source requires single-name def or defn forms")
                            (eval form env))
-                         (set loaded true))
+                         (set forms parsed))
                        (var value nil)
                        (each form (parse-all code)
                          (def declaration (and (tuple? form) (= :parens (tuple/type form)) (index-of (first form) ['def 'defn])))
@@ -201,14 +202,12 @@
                          (when declaration
                            (request "world/source" [loaded-source source])
                            (set loaded-source source)
-                           (array/clear forms) (array/concat forms next)
+                           (set forms next)
                            (when (and (= 'def (first form)) (nil? (last form))) (put env (form 1) nil))))
                        {:ok true :value (string output (if (string? value) value (string/format "%n" value)))})
                      ([err fiber]
-                       (def trace @"")
-                       (with-dyns [:err (fn [bytes] (buffer/push-string trace bytes))] (debug/stacktrace fiber))
-                       {:ok false :error (if (and (dictionary? err) (string? (err :code)) (string? (err :message))) (merge {:detail (string trace)} err)
-                                           {:code "EvaluationFailed" :message (if (string? err) err (string/format "%n" err)) :detail (string trace)})})))
+                       (def failure (schema/failure "EvaluationFailed" err fiber))
+                       {:ok false :error (merge failure {:context {:output (string output) :cause (failure :context)}})})))
       (ev/give reply outcome))))
 
 (defn open [source input document bindings forbid limits]

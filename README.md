@@ -7,8 +7,9 @@ optional; Zinc has no resident service or socket.
 ## Install
 
 Extract the matching `zinc-v0.2.0-TARGET.tar.gz` (`.zip` on Windows) as your
-deployment's `runtime` directory. Linux, macOS and Windows each have x86-64 and
-ARM64 artifacts. The archive contains one `zinc` directory:
+deployment's `runtime` directory: rename the extracted top-level `zinc` folder
+to `runtime`, rather than nesting it under `runtime/zinc`. Linux, macOS and
+Windows each have x86-64 and ARM64 artifacts. The archive contains:
 
 ```text
 zinc/
@@ -29,8 +30,11 @@ cache, test suite or application state in the artifact. Install the matching
 protocol-3 `agent` separately; Zinc is a source package, not a third executable.
 The normal native executor needs neither Jpm nor an external Janet interpreter
 at runtime. Native extensions still require their linked system libraries,
-including libcurl and, when linked dynamically, SQLite with FTS5. On Windows put
-libcurl's runtime DLL directory on `PATH`.
+including libcurl and, when linked dynamically, SQLite with FTS5. These are
+platform-specific packages, not self-contained executables. On Windows put
+libcurl's runtime DLL directory on `PATH`. World-enabled execution also requires
+Git on `PATH`; merging requires Git's `merge-tree --write-tree` support. HTTPS
+requires the platform's CA trust. Match the Janet ABI used to build native modules.
 
 Select the extracted package directly:
 
@@ -74,8 +78,12 @@ dependencies from Jpm's configured module path and writes
 `dist/zinc-v0.2.0-TARGET.tar.gz` (or `.zip`). Packaging is a native Jpm task
 using its configured tar command; Windows uses the bundled BSD tar for ZIP
 output. Jpm's `jpm_tree` and PA's `janet-toolchain-TARGET` tarball are build
-inputs, not deployment layouts. A developer checkout can still use Jpm's normal
-source installation; release artifacts expose Zinc at their root.
+inputs, not deployment layouts. `declare-source` installs under Jpm's `zinc`
+module prefix; the explicit `package` task instead assembles `build/package/zinc`
+from source plus an allowlist of runtime modules and archives that directory.
+PA's reusable workflow exports the pinned Janet/Jpm toolchain for those builds.
+Neither toolchain nor package creation starts a service. A developer checkout
+can use normal Jpm source installation; release artifacts expose Zinc at their root.
 
 ## Calls and worlds
 
@@ -149,7 +157,10 @@ Git metadata, private stores and credentials with OS confinement. PA's protocol
 output descriptor is private; ordinary process stdout cannot forge frames.
 
 Calls share admission-anchored deadlines, work/tool budgets and parallel slots.
-Waits release slots. Cancellation is cooperative and does not undo effects.
+Waits release slots. Ordinary tool failures return structured errors to the next
+model round and preserve output printed before failure. Deadlines, cancellation,
+lease fencing and exhausted shared budgets remain terminal. Cancellation does
+not undo effects.
 Interrupted effects remain uncertain; code is not automatically replayed. Saved
 calls are reauthorized against current grants. Observation survives neither
 executor death nor OS process-scope termination.
@@ -184,7 +195,10 @@ Trusted exports also include `record`, `describe`, `document`, `models`,
 world bindings. `record` passively stores authenticated context without
 executing it. `inquiry-v3` presentation retains self branches, tool results and
 reasoning visibility while hiding rerank output and summary bookkeeping.
-Diagnostics retain code, message, detail and context; configured ceilings fail
-explicitly rather than silently truncating. Database schema version is 1;
+Committed compaction is presented as source membership, not summarizer model
+output. Background compaction may finish after observation closes; its events
+remain inspectable without a notification service. Tool failures use PA's
+structured diagnostic channel. Diagnostics retain code, message, detail and
+context; configured ceilings fail explicitly rather than silently truncating. Database schema version is 1;
 incompatible layouts are rejected. Preserve old stores and explicitly provision
 a fresh path.

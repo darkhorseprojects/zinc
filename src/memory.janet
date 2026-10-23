@@ -10,7 +10,9 @@
   (assert (or (s :temporary) (not (first (store/query s "SELECT id FROM main.call_controls WHERE id=? AND source=? AND temporary=1" [run (s :source)])))) "temporary execution has no durable events")
   (assert (first (store/query s "SELECT id FROM main.call_controls WHERE id=? AND source=? AND (world=? OR world IN (SELECT value FROM json_each(?)))"
                               [run (s :source) ((s :config) :world) (string (json/encode ((s :config) :visibility)))])) "run unavailable")
-  (store/query s "SELECT * FROM memory_records WHERE source=? AND run=? AND id>? ORDER BY id LIMIT 256" [(s :source) run after]))
+  (store/query s (string "SELECT * FROM memory_records WHERE source=? AND "
+                         (if (s :temporary) "task IN (SELECT id FROM main.call_controls WHERE coalesce(root,id)=?)" "run=?")
+                         " AND id>? ORDER BY id LIMIT 256") [(s :source) (if (s :temporary) (s :budget-root) run) after]))
 
 (defn render [row]
   (string "[" (or (row :label) (string "#" (row :id))) " author=" (json/encode (row :author)) " at=" (row :at) " " (row :kind)
