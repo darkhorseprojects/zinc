@@ -86,7 +86,7 @@
                                [:text :code :parent :memory_range :persist :revision]))
     (assert (not= (nil? (value :text)) (nil? (value :code))) "self requires text or code")
     (def config (if (value :text) (or ((s :config) :agent) (s :config)) (s :config)))
-    (assert (if (value :text) (config :inference) (config :repl)) "child execution is not permitted")
+    (assert (if (value :text) (config :inference) (get-in config [:repl :enabled])) "child execution is not permitted")
     (def parent (store/call s (view :branch)))
     (put value :author (string "self:" (parent :request) "/" (parent :id)))
     (put value :at (((store/query s "SELECT strftime('%Y-%m-%dT%H:%M:%fZ','now') at") 0) :at))
@@ -114,19 +114,22 @@
 
   (defn run-code [s view bindings code]
     (def config (s :config))
-    (assert (config :repl) "Janet execution is not permitted")
+    (assert (get-in config [:repl :enabled]) "Janet execution is not permitted")
     (assert (<= (length code) (config :source-bytes)) "tool source byte ceiling")
     (store/checkpoint s)
     (def current (dyn :zinc/call))
     (unless (current :runtime)
       (os/cd (path/dirname (config :file)))
       (assert (<= (os/stat (current :file) :size) (config :source-bytes)) "world source byte ceiling")
+      (def public (repl/public config (spec :schema)))
       (put current :runtime (repl/open (string (slurp (current :file))) (current :input)
-                                       (repl/instructions config view (spec :document) bindings)
-                                       (seq [[name binding] :in (sorted (pairs bindings))] {:name name :doc (binding :doc)}) (config :forbid)
+                                       (repl/instructions config view (spec :document) bindings public) public
+                                       (seq [[name binding] :in (sorted (pairs bindings))] {:name name :doc (binding :doc)})
                                        {:source (config :source-bytes) :output (config :response-bytes)})))
     (repl/execute (current :runtime) code (fn [name args]
                                             (store/checkpoint s)
+                                            (assert (or (= name "world/source") (bindings name)) "function revoked")
+                                            (when (get-in bindings [name :intrinsic]) (assert (= 1 (length args)) "invalid intrinsic arity"))
                                             (def args (schema/data args))
                                             (cond
                                               (= name "world/source")
@@ -172,8 +175,8 @@
     (def config (s :config))
     (def inherited (store/view s id false))
     (def selected (model/profile s (config :chat) :chat))
-    (def tools (filter |(or (config :repl) (not= "function" ($ :type))) (selected :tools)))
-    (def system (repl/instructions config (merge inherited {:tools (find |(= "function" ($ :type)) tools)}) (spec :document) bindings))
+    (def tools (filter |(or (get-in config [:repl :enabled]) (not= "function" ($ :type))) (selected :tools)))
+    (def system (repl/instructions config (merge inherited {:tools (find |(= "function" ($ :type)) tools)}) (spec :document) bindings (repl/public config (spec :schema))))
     (def user (first (store/query s "SELECT * FROM memory_records WHERE task=? AND kind='user'" [id])))
     (def inquiry {:role "user" :content (model/images s (user :id) (memory/render user))})
     (def tool-size (if (> (length tools) 0) (store/estimate (json/encode tools)) 0))
@@ -192,7 +195,7 @@
                       {:tool-id (tool :tool_id) :response (tool :response) :ok false :uncertain true} (tool :response) id))
       (assert (< (length responses) (config :rounds)) "model round limit exhausted")
       (def view (store/view s id))
-      (def world (when (config :repl) {:role "user" :content (string "## World source\n\n" (slurp (call :file)))}))
+      (def world (when (get-in config [:repl :enabled]) {:role "user" :content (string "## World source\n\n" (slurp (call :file)))}))
       (set space (- capacity (model/estimate (filter identity [{:role "system" :content system} world inquiry])) tool-size 256))
       (assert (> space 256) "question, world source and instructions exhaust context")
       (set context (memory/context s inherited space pool))
@@ -270,7 +273,7 @@
         (try
           (do
             (def input ((dyn :zinc/call) :input))
-            (def bindings (if (and (not= "summarize" (row :kind)) (config :repl)) (repl/definitions config (spec :capabilities)) {}))
+            (def bindings (if (and (not= "summarize" (row :kind)) (get-in config [:repl :enabled])) (repl/definitions config (spec :schema)) {}))
             (set value (case (row :kind) "text" (infer s row bindings)
                          "code" (run-code s view bindings (input :code)) "summarize" (memory/summarize s row input)))
             (when (= "code" (row :kind)) (store/charge s 0 (store/estimate (json/encode value)))))
@@ -279,7 +282,7 @@
             (set failure @{:error (schema/failure "ExecutionFailed" err fiber)})
             (put failure :error (postwalk (fn [value]
                                             (if (string? value) (reduce (fn [text provider]
-                                                                          (if (provider :token) (string/replace-all (provider :token) "[redacted]" text) text)) value (values (config :providers))) value)) (failure :error)))))
+                                                                          (if-let [token (when (provider :token-env) (os/getenv (provider :token-env)))] (string/replace-all token "[redacted]" text) text)) value (values (config :providers))) value)) (failure :error)))))
         (when-let [runtime ((dyn :zinc/call) :runtime)] (repl/close runtime))
         (when (and (> (length ((dyn :zinc/call) :children)) 0)
                    (first (store/query s "SELECT id FROM main.live_calls WHERE id=? AND owner=?" [id (row :owner)])))
@@ -318,7 +321,7 @@
         (do
           (unless (= operation "resume")
             (assert (and (value :author) (value :at) (not= (nil? (value :text)) (nil? (value :code)))) "self requires text or code, authenticated author and occurrence time")
-            (assert (if (value :text) ((s :config) :inference) ((s :config) :repl)) "execution is not permitted in this view")
+            (assert (if (value :text) ((s :config) :inference) (get-in (s :config) [:repl :enabled])) "execution is not permitted in this view")
             (unless (value :request) (put value :request (string/join (map |(string/format "%02x" $) (os/cryptorand 24))))))
           (def call (if (= operation "resume") existing (store/start s value (s :config) nil
                                                                      (unless existing (or (get-in (s :config) [:snapshot :origin]) (repl/source (s :config) nil (value :revision)))))))
@@ -344,7 +347,7 @@
     {:contract "inquiry-v3" :profile {:field "agent" :inference "inference"}
      :parameters (catseq [[target fields] :in [[:config (spec :schema)] [:input (spec :input)]]]
                    (seq [[key field] :in (sorted (pairs fields)) :when (field :option)]
-                     (def parameter (merge (tabseq [[k v] :in (pairs field) :unless (index-of k [:optional :option])] k v)
+                     (def parameter (merge (tabseq [[k v] :in (pairs field) :unless (index-of k [:optional :option :repl])] k v)
                                            {:name (field :option) :path (string target "." key) :type (string (field :type)) :default (get config key (get field :default "automatic"))}))
                      (when (and (= target :config) (= :integer (field :type)) (> (config key) 0)) (put parameter :maximum (config key))) parameter))})
 
@@ -352,6 +355,7 @@
                                    ["describe" []] ["document" []] ["models" [:role]] ["views" [:event]] ["render" [:event]] ["events" [:run :after]] ["record" [:records]] ["pending" [:request]] ["abort" [:run :request :reason]] ["invalidate" [:event]]]]
     operation (fn [bytes opaque]
                 (def config (schema/configuration (spec :schema) (json/decode opaque true true) (= operation "describe")))
+                (unless (index-of operation ["describe" "models"]) (repl/definitions config (spec :schema)))
                 (assert (and (utf8/is-valid? bytes) (<= (length bytes) (config :request-bytes))) "request must be bounded UTF-8")
                 (when (index-of operation ["describe" "document"]) (assert (= "" bytes) "operation takes empty input"))
                 (def value (if (and (= "" bytes) (index-of operation ["describe" "document" "pending"])) {} (schema/request (json/decode bytes true true) fields)))
@@ -360,7 +364,7 @@
                   (with-dyns [:zinc/config config]
                     (def output (cond
                                   (= operation "describe") (describe config)
-                                  (= operation "document") (repl/instructions config {} (spec :document) (repl/definitions config (spec :capabilities)))
+                                  (= operation "document") (repl/instructions config {} (spec :document) (repl/definitions config (spec :schema)) (repl/public config (spec :schema)))
                                   (= operation "models") (map |{:ref ($ :ref) :name ($ :name)} (model/catalogue config (get value :role "chat")))
                                   (= operation "record") {:events (store/record s (value :records))}
                                   (index-of operation ["views" "render"])

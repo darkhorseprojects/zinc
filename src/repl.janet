@@ -30,7 +30,7 @@
 
 (defn source [config &opt inherited revision]
   (cond
-    (not (config :repl)) {:code ""}
+    (not (get-in config [:repl :enabled])) {:code ""}
     (and inherited (not revision))
     (do
       (assert (<= (os/stat (inherited :file) :size) (config :source-bytes)) "world source byte ceiling")
@@ -122,8 +122,13 @@
       (store/append s view "saved" "World pushed." receipt (intent :id)))
     receipt))
 
-(defn definitions [config declared]
-  (def selected @{})
+(defn definitions [config fields]
+  (def available @{})
+  (each [key field] (pairs fields)
+    (each [name binding] (pairs (get-in field [:repl :functions] {}))
+      (assert (not (available name)) "duplicate callable declaration")
+      (put available name (merge binding {:config (config key)}))))
+  (def declared (get-in fields [:capabilities :repl :builtins]))
   (each [grant capability] (pairs (config :capabilities))
     (def source (if (capability :module) (require (capability :module)) {(symbol grant) (declared grant)}))
     (unless (capability :module) (assert (declared grant) "unknown capability"))
@@ -131,19 +136,42 @@
       (when (and (symbol? name) (not (binding :private)) (not (binding :macro)) (index-of (type (binding :value)) [:function :cfunction]))
         (assert (string? (binding :doc)) "capability function requires documentation")
         (def qualified (if (capability :module) (string grant "/" name) (string name)))
-        (assert (and (not (selected qualified)) (or (not (capability :module)) (not (declared (keyword qualified))))) "capability shadows a declaration")
-        (put selected qualified (merge binding {:config (capability :config)})))))
-  selected)
+        (assert (and (not (available qualified))
+                     (not (index-of qualified ["input" "self/document" "settings" "resources" "world/source"]))) "capability shadows a declaration")
+        (put available qualified (merge binding {:config (capability :config)})))))
+  (tabseq [name :in (get-in config [:repl :functions])]
+    (def binding (available name))
+    (assert (and binding (string? (binding :doc))) (string "unknown or undocumented REPL function: " name))
+    name binding))
 
-(defn instructions [config view document-tree available]
+(defn public [config fields]
+  {:settings (tabseq [name :in (get-in config [:repl :values])]
+               (def key (keyword name))
+               (assert (get-in fields [key :repl :value]) "configuration is not REPL-visible")
+               key (config key))
+   :resources
+   (tabseq [[key field] :in (pairs fields) :let [access (get field :repl {})] :when (access :public)
+            :let [grants (tabseq [[name grant] :in (pairs (config key))
+                                  :let [functions (sorted (seq [[function binding] :in (pairs (access :functions))
+                                                               :when (and (index-of function (get-in config [:repl :functions]))
+                                                                          (or (not (binding :permission)) (grant (binding :permission))))] function))]
+                                  :when (> (length functions) 0)]
+                          name (merge (tabseq [field :in (access :public) :when (has-key? grant field)] field (grant field))
+                                      {:functions functions}))]
+            :when (> (length grants) 0)] key grants)})
+
+(defn instructions [config view document-tree available public]
   (string (document document-tree) "\n\n## World\n\n" (config :world)
           (when (config :instructions) (string "\n\n" (slurp (config :instructions))))
-          (when (and (config :repl) (get view :tools true))
+          (when (and (get-in config [:repl :enabled]) (get view :tools true))
             (string "\nTop-level single-name `def` and `defn` update this call's world source. Redefine normally; `(def name nil)` removes a definition."
                     "\nOther expressions execute without becoming source. Use `let` for temporary handles; definition initializers run when a branch loads. Only granted `save` commits."
                     "\n`(input)` reads the inquiry; `(self/document)` reads these instructions."
-                    "\n`(await (self {:text \"request\"}))` starts an independent source branch. `:persist false` keeps its journal in RAM."
+                    "\n`(settings)` reads selected configuration; `(resources)` reads the named grants below. Neither changes permissions."
+                    (when (available "self") "\n`self` starts an independent branch; text uses the configured agent profile. `:persist false` keeps its journal in RAM.")
                     "\nParallel calls fork the same source and history; effects are not rolled back or implicitly merged."
+                    "\n\n## REPL settings\n\n" (json/encode (public :settings))
+                    "\n\n## Named resources\n\n" (json/encode (public :resources))
                     "\n\n## Callable functions\n\n"
                     (string/join (seq [[name binding] :in (sorted (pairs available))] (string "- " (binding :doc))) "\n")))))
 
@@ -154,20 +182,21 @@
   (assert (and outcome (outcome :ok)) (get outcome :error "Execution closed"))
   (outcome :value))
 
-(defn- evaluate [[source input document bindings requests evaluations forbid limits]]
+(defn- evaluate [[source input document public bindings requests evaluations limits]]
   (def env (make-env))
   (table/clear module/cache)
   (put env :redef true)
   (put env 'stdout @{:value stderr})
   (put env 'input @{:value (fn [] input)})
-  (put env 'self @{:value (fn [value] (request "self" [value]))})
-  (put env 'await @{:value (fn [handle] (request "await" [handle]))})
   (put env 'self/document @{:value (fn [] document)})
+  (put env 'settings @{:value (fn [] (schema/data (public :settings)))})
+  (put env 'resources @{:value (fn [] (schema/data (public :resources)))})
   (each binding bindings
     (def name (binding :name))
     (put env (symbol name) @{:value (fn [& args] (request name args)) :doc (binding :doc)}))
   (module/add-paths "" :source)
-  (sandbox ;(map keyword forbid))
+  (sandbox :fs :net :subprocess :ffi :modules :threads :env :asm
+           :unmarshal :exit :locale :signal :chroot :sandbox)
   (with-env env
     (var forms nil)
     (var loaded-source source) (var evaluation nil)
@@ -210,9 +239,9 @@
                        {:ok false :error (merge failure {:context {:output (string output) :cause (failure :context)}})})))
       (ev/give reply outcome))))
 
-(defn open [source input document bindings forbid limits]
+(defn open [source input document public bindings limits]
   (def runtime @{:requests (ev/thread-chan 1) :evaluations (ev/thread-chan 1) :finished (ev/thread-chan 1)})
-  (ev/thread evaluate [source input document bindings (runtime :requests) (runtime :evaluations) forbid limits] :n (runtime :finished))
+  (ev/thread evaluate [source input document public bindings (runtime :requests) (runtime :evaluations) limits] :n (runtime :finished))
   runtime)
 
 (defn close [runtime]

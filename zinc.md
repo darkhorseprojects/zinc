@@ -9,14 +9,12 @@ Code admissions record intent, not execution.
 (module/add-syspath (dyn :library))
 (import ./src/engine)
 
-(def capabilities
-  {:memory/expand ((require "./src/memory") 'expand)
-   :save ((require "./src/repl") 'save)})
+(def capability (require "./src/capability"))
 
 (def schema
   {:source {:type :string
             :description "Authenticated history namespace"}
-   :world {:type :string
+   :world {:type :string :repl {:value true}
            :description "World identity"}
    :store {:type :string :absolute true
            :description "Private SQLite history path"}
@@ -32,39 +30,66 @@ Code admissions record intent, not execution.
            :description "Agent execution profile used by human text selves"}
    :inference {:type :boolean :default true
                :description "Permit model-driven execution"}
-   :repl {:type :boolean :default false
-          :description "Permit call-local Janet execution"}
+   :repl
+   {:type :dictionary :default {}
+    :description "Call-local Janet permissions"
+    :fields {:enabled {:type :boolean :default false}
+             :functions {:type :array :items :string :default []}
+             :values {:type :array :items :string :default []}}
+    :repl {:functions {"self" {:intrinsic true :doc "(self request) — Start a child; text uses the configured agent profile."}
+                       "await" {:intrinsic true :doc "(await handle) — Wait for owned descendant work."}}}}
+   :fs
+   {:type :dictionary :default {}
+    :values {:type :dictionary
+             :fields {:root {:type :string :absolute true}
+                      :read {:type :boolean :default true}
+                      :write {:type :boolean :default false}
+                      :description {:type :string :optional true}}}
+    :repl {:public [:root :description]
+           :functions {"fs/list" (merge (capability 'list) {:permission :read})
+                       "fs/read" (merge (capability 'read) {:permission :read})
+                       "fs/write" (merge (capability 'write) {:permission :write})}}}
+   :http
+   {:type :dictionary :default {}
+    :values {:type :dictionary
+             :fields {:url {:type :string}
+                      :methods {:type :array :items :string :default ["GET"]
+                                :choices ["GET" "HEAD" "POST" "PUT" "PATCH" "DELETE"]}
+                      :description {:type :string :optional true}}}
+    :repl {:public [:url :methods :description]
+           :functions {"http/request" (capability 'request)}}}
+   :processes
+   {:type :dictionary :default {}
+    :values {:type :dictionary
+             :fields {:argv {:type :array :items :string :minimum 1}
+                      :env {:type :dictionary :default {} :values {:type :string}}
+                      :description {:type :string :optional true}}}
+    :repl {:public [:argv :description]
+           :functions {"process/run" (capability 'run)}}}
    :capabilities
    {:type :dictionary
     :default {:memory/expand {}}
     :description "Granted source functions or library namespaces"
+    :repl {:builtins {:memory/expand ((require "./src/memory") 'expand)
+                      :save ((require "./src/repl") 'save)}}
     :values {:type :dictionary
              :fields {:module {:type :string :absolute true :optional true}
                       :config {:type :dictionary :default {}}}}}
    :visibility {:type :array :items :string :default []
                 :description "Additional world histories visible in this source"}
-   :forbid
-   {:type :array :items :string
-    :description "Native facilities disabled inside world execution"
-    :default ["fs" "net" "subprocess" "ffi" "modules" "threads" "env" "asm"
-              "unmarshal" "exit" "locale" "signal" "chroot" "sandbox"]}
    :providers
    {:type :dictionary :default {}
-    :description "Provider endpoints and private transports"
+    :description "Provider endpoints, credential references and model grants"
     :values
     {:type :dictionary
      :fields {:url {:type :string}
-              :token {:type :string :optional true}
-              :identity {:type :string :optional true}
-              :transport
-              {:type :dictionary :optional true
-               :fields {:module {:type :string :absolute true}
-                        :config {:type :dictionary :default {}}}}}}}
-   :chat {:type :string :default "llama:chat"
+              :token-env {:type :string :optional true}
+              :models {:type :array :items :string :optional true}}}}
+   :chat {:type :string :default "llama:chat" :repl {:value true}
           :option "chat" :autocomplete "chat" :description "Chat model"}
    :rerank {:type :string :default "llama:rerank"
             :option "rerank" :autocomplete "rerank" :description "Rerank model"}
-   :thinking {:type :string :default "default"
+   :thinking {:type :string :default "default" :repl {:value true}
               :option "thinking" :description "Reasoning effort"
               :choices ["default" "none" "minimal" "low" "medium" "high" "xhigh" "max"]}
    :web-search {:type :boolean :default false
@@ -149,7 +174,6 @@ Code admissions record intent, not execution.
 (each [name entry]
   (pairs (engine/make {:schema schema
                        :input inputs
-                       :document (pa/document)
-                       :capabilities capabilities}))
+                       :document (pa/document)}))
   (put (curenv) (symbol name) @{:value entry}))
 ```

@@ -2,52 +2,7 @@
 (import spork/json :as json)
 (import spork/base64 :as base64)
 (import ./store)
-(import sqlite3 :as sql)
-
-(defn transfer [[config provider method path body current limits]]
-  (setdyn :pa/limits limits)
-  (assert provider "provider is not configured")
-  (def db (when current (sql/open (config :store))))
-  (when db (sql/eval db "PRAGMA busy_timeout=5000;"))
-  (def native (unless (provider :transport) (require "jurl/native")))
-  (def client (when native ((module/value native 'new))))
-  (def bytes @"")
-  (var next-check 0)
-  (var permitted true)
-  (defer (do (when client ((module/value native 'reset) client)) (when db (sql/close db)))
-    (def check (fn [& counts]
-                 (when (and current (>= (os/clock) next-check))
-                   (set next-check (+ (os/clock) 0.1))
-                   (set permitted (not (nil? (first
-                                               (sql/eval db "SELECT id FROM live_calls WHERE id=? AND source=? AND owner=?"
-                                                         [(current :id) (config :source) (current :owner)]))))))
-                 permitted))
-    (assert (check) "HTTP job fenced")
-    (def url (string (provider :url) path))
-    (def headers {:content-type "application/json" :accept "application/json"
-                  :authorization (when (provider :token) (string "Bearer " (provider :token)))})
-    (def response
-      (if-let [transport (provider :transport)]
-        (with-dyns [:capability/config (transport :config)]
-          ((module/value (require (transport :module)) 'request) url method body headers))
-        (do
-          (def options {:url url :customrequest method :postfields body
-                        :httpheader (seq [[name value] :in (pairs headers) :unless (nil? value)] (string name ": " value))
-                        :writefunction (fn [chunk]
-                                         (assert (<= (+ (length bytes) (length chunk)) (config :response-bytes)) "HTTP response exceeds byte limit")
-                                         (buffer/push-string bytes chunk))
-                        :followlocation false :ssl-verifypeer true :ssl-verifyhost 2
-                        :timeout-ms (config :http-ms) :connecttimeout-ms (min 10000 (config :http-ms))
-                        :protocols "http,https" :noprogress false :xferinfofunction check})
-          (each [key value] (pairs options) (unless (nil? value) (put client key value)))
-          (def status (:perform client))
-          {:error status :status (client :response-code) :body (string bytes)})))
-    (def data (response :body))
-    (assert (<= (length data) (config :response-bytes)) "HTTP response exceeds byte limit")
-    (assert (= :ok (response :error)) (string "HTTP transfer failed: " (response :error) "; effects may have happened"))
-    (assert (utf8/is-valid? data) "model response is not UTF-8")
-    (assert (<= 200 (response :status) 299) (string "model HTTP " (response :status) ": " data))
-    data))
+(import ./http)
 
 (def- tool
   {:type "function" :function
@@ -64,16 +19,11 @@
 
 (defn request [config reference method path &opt body preserve-nulls]
   (def provider (get-in config [:providers (keyword (reference :provider))]))
-  (def current (dyn :zinc/call))
-  (def args [{:store (config :store) :source (config :source) :response-bytes (config :response-bytes) :http-ms (config :http-ms)}
-             provider method path body (when current {:id (current :id) :owner (current :owner)}) (dyn :pa/limits)])
-  (def output (if (provider :transport) (transfer args)
-                (let [finished (ev/thread-chan 1)]
-                  (ev/thread transfer args :n finished)
-                  (defer (ev/chan-close finished)
-                    (def [status result] (ev/take finished))
-                    (assert (= :ok status) result) result))))
-  (def value (json/decode output true (not preserve-nulls)))
+  (when (and (= "POST" method) (has-key? provider :models))
+    (assert (index-of ((json/decode body true true) :model) (provider :models)) "model is not granted"))
+  (def response (http/request config provider method path body))
+  (assert (<= 200 (response :status) 299) (string "model HTTP " (response :status) ": " (response :body)))
+  (def value (json/decode (response :body) true (not preserve-nulls)))
   (assert (dictionary? value) "model response must be an object")
   (when-let [failure (or (value :error) (get-in value [:choices 0 :error]))]
     (error (string "provider error: " (json/encode failure))))
@@ -87,11 +37,13 @@
                            (if (= :openrouter name) (string "/v1/models?output_modalities=" (if (= role "chat") "text" "rerank")) "/v1/models") nil provider))
     (assert (and (dictionary? response) (indexed? (response :data))) "invalid model catalogue")
     (def identities @{})
+    (def granted (get-in config [:providers name]))
     (each record (response :data)
       (assert (and (dictionary? record) (string? (record :id)) (> (length (record :id)) 0)
                    (not (identities (record :id)))) "invalid or duplicate model ID")
       (put identities (record :id) true)
-      (array/push models (merge record {:ref (string name ":" (record :id)) :name (get record :name (record :id))}))))
+      (when (or (not (has-key? granted :models)) (index-of (record :id) (granted :models)))
+        (array/push models (merge record {:ref (string name ":" (record :id)) :name (get record :name (record :id))})))))
   (sorted models |(< ($0 :ref) ($1 :ref))))
 
 (defn profile [s reference role]

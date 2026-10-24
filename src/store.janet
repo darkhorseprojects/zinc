@@ -185,8 +185,7 @@
                   (when (saved :agent) (put saved :agent (merge (saved :agent))))
                   (each profile (filter identity [saved (saved :agent)])
                     (put profile :snapshot nil)
-                    (put profile :capabilities (tabseq [[name capability] :in (pairs (profile :capabilities))] name {:module (capability :module)}))
-                    (put profile :providers (tabseq [[name provider] :in (pairs (profile :providers))] name {:url (provider :url) :identity (provider :identity)}))))
+                    (put profile :capabilities (tabseq [[name capability] :in (pairs (profile :capabilities))] name {:module (capability :module)}))))
                 (def temporary (if (s :temporary) 1 0))
                 (when caller (assert (or (= temporary 1) (= 0 ((call s (caller :branch)) :temporary))) "temporary calls cannot create durable descendants"))
                 (def depth (if summary (caller :depth) (if caller (+ 1 (caller :depth)) (get-in config [:snapshot :depth] 0))))
@@ -204,7 +203,7 @@
                        [id (or (when caller (caller :branch)) (get-in config [:snapshot :parent-call])) run (cond summary "summarize" (input :code) "code" "text")
                         (when (and saved (not summary)) (string (json/encode saved))) entry first-id last (if caller (caller :history-last) last) world code
                         (string (json/encode (tabseq [[k v] :in (pairs (or origin {})) :unless (= k :code)] k v))) temporary (if (and caller (caller :agent)) 1 0) depth (string (json/encode (config :visibility)))])
-                (when (and (not summary) (config :repl))
+                (when (and (not summary) (get-in config [:repl :enabled]))
                   (def directory (string (config :store) ".worlds"))
                   (os/mkdir directory) (os/chmod directory 8r700)
                   (def file (path/join directory (string (string/join (map |(string/format "%02x" $) (os/cryptorand 18))) ".janet")))

@@ -13,8 +13,12 @@
 - Trusted `views` and `render` exports inspect saved prompts without
   recomputation.
 - Rerank scores remain inspectable without rendering model bookkeeping.
-- Native filesystem access is forbidden by default; save remains an explicit
-  grant.
+- REPL profiles explicitly select functions and schema-approved settings. Named
+  filesystem roots, HTTP bases and fixed commands execute through data-only host calls.
+- Native REPL authority is always disabled; named grants and selected settings
+  appear in prompts. Saved calls cannot acquire newly added grants.
+- Zinc owns provider model allowlists and `token-env` credential references;
+  Connector model transports and boolean `repl` configuration are removed.
 - Tool failures retain printed output and structured details, including parallel
   admission failures; matching PA protocol-3 diagnostics preserve boundary stacks.
 - Committed compaction displays source membership, not generated summary text.

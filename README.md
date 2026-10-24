@@ -50,7 +50,7 @@ program:
 Keep `ac.yaml`, the world and private databases outside `runtime`. The model
 server preset is always `runtime/models.ini`; packaging does not start servers,
 register commands, change configuration, or migrate state. Connector's `agc`
-materializes its own proxies under the deployment's `.agc/libraries`.
+materializes its Discord library under the deployment's `.agc/libraries`.
 
 Model weights and the Cygnet index are separately provisioned assets, not
 bundled state. Keep the generated index outside `runtime`, for example
@@ -99,7 +99,7 @@ and input provenance:
 }
 ```
 
-Use `code` instead of `text` for direct execution. `repl: true` requires an
+Use `code` instead of `text` for direct execution. `repl.enabled: true` requires an
 absolute world `file`. Each call owns an editable source snapshot and restricted
 Janet environment. Root calls start at Git HEAD or explicit `revision`.
 
@@ -139,22 +139,70 @@ call requires its ID; a new call does not silently select earlier edits.
 
 ## Authority and lifetime
 
-`inference` permits model execution; `repl` permits Janet evaluation.
-`capabilities` grants documented built-ins or public functions from protected
-absolute library paths. An empty map grants none. `memory/expand`, `save`, and
-supplied namespaces all use that map. `self`, `await`, `input` and
-`self/document` are intrinsics. Generated environments receive neither private
-runtime configuration nor PA spawning. Capability requests execute outside the
-world; arguments and results are plain data with table prototypes removed.
-Functions, fibers, channels and native handles cannot cross that boundary.
+`inference` permits model execution; `repl.enabled` permits Janet evaluation.
+`repl.functions` selects the exact callable set, including `self` and `await`.
+`capabilities` supplies documented built-ins or public functions from protected
+absolute Janet library paths; selecting a function still requires its grant.
+`input`, `self/document`, `settings` and `resources` are data-only intrinsics.
+Generated environments receive neither private runtime configuration nor PA spawning.
+Host calls use plain data with table prototypes removed; functions, fibers,
+channels and native handles cannot cross the boundary.
 
-Default native restrictions include filesystem, network, subprocess, FFI,
-modules, threads and environment access. Definitions update their own source
-through the trusted host without native filesystem permission. Supplying a
-custom `forbid` list explicitly chooses the remaining native authority. Native
-filesystem/subprocess grants can bypass logical restrictions; protect libraries,
-Git metadata, private stores and credentials with OS confinement. PA's protocol
-output descriptor is private; ordinary process stdout cannot forge frames.
+```yaml
+repl:
+  enabled: true
+  functions: [memory/expand, self, await, fs/list, fs/read, http/request, process/run]
+  values: [world, chat, thinking]
+fs:
+  workspace: { root: /srv/workspace, read: true, write: false }
+http:
+  docs: { url: "https://docs.example.org/api/", methods: [GET] }
+processes:
+  status:
+    argv: [/usr/bin/git, -C, /srv/workspace, status, --short]
+    env: {}
+```
+
+`(fs/list :workspace ".")`, `(fs/read :workspace "README.md")` and
+`(fs/write :workspace "notes.txt" "text")` require the selected function and the
+root's read/write permission. File contents are bounded UTF-8; paths cannot be
+absolute, traverse parents or follow symlinks. Listing results are bounded by
+`history-records` and `response-bytes`; Janet enumerates the directory before
+checking those limits.
+
+`(http/request :docs "GET" ["guide" "intro"] nil)` accepts only literal path
+segments, a granted method and optional text body. Redirects and ambient proxies
+are disabled. Responses are bounded UTF-8 `{status body}` values, including HTTP
+error statuses. `(process/run :status)` accepts only a configured name and returns
+`{exit output}` with merged, bounded UTF-8 stdout/stderr. Commands have fixed argv,
+empty stdin and an explicit environment; they do not inherit provider credentials.
+Executable paths must be absolute. Use tool arguments such as `git -C`, not a
+process-global working-directory change.
+
+The application schema declares host functions with `:repl {:functions ...}` and
+safe named-resource fields with `:public`. Only fields annotated
+`:repl {:value true}` may appear in `repl.values`; `(settings)` returns those
+values. `(resources)` and the prompt use the same effective grant projection,
+without process environments or private library configuration. Profiles replace
+whole top-level maps, not recursively merged permissions. Omitting `self` prevents
+that REPL from delegating to the configured agent profile.
+
+Native filesystem, network, subprocess, FFI, modules, threads and environment
+access are always disabled in generated evaluators; `forbid` is no longer a setting.
+Definitions update source through the host. Resource roots are logical scopes,
+not OS confinement: path validation cannot prevent concurrent symlink races, and
+named commands retain native OS authority. Running editable scripts or build files
+can grant arbitrary native execution. Isolate hostile filesystem mutation,
+process descendants and network egress at the OS level. Keep private stores,
+credentials, trusted libraries and Git control data outside granted roots.
+PA's protocol output descriptor is private; ordinary stdout cannot forge frames.
+
+Provider credentials use `token-env`, resolved only by trusted code. Optional
+provider `models` lists exact provider-local IDs; omission permits all catalogued
+models and `[]` permits none. For OpenRouter, set `token-env: OPENROUTER_API_KEY`
+and provision that variable in the deployment environment. Connector no longer
+owns provider authentication or transports. Credential values are not saved in
+call configuration or rendered into prompts.
 
 Calls share admission-anchored deadlines, work/tool budgets and parallel slots.
 Waits release slots. Tool failures preserve prior output and return structured
@@ -163,7 +211,9 @@ without pending tools completes a run. Tools stay available through the round
 limit. Provider failures, deadlines, cancellation, lease fencing and exhausted
 shared budgets remain terminal. Cancellation does not undo effects; interrupted
 code is not automatically replayed. Saved
-calls are reauthorized against current grants. Observation survives neither
+calls are reauthorized against current grants. Changed named-resource or provider
+policies invalidate saved grants; newly added resources/functions are not acquired
+by old calls. Observation survives neither
 executor death nor OS process-scope termination.
 
 `persist: false` keeps payloads in bounded RAM journals; descendants remain
