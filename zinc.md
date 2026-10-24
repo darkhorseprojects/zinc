@@ -67,6 +67,8 @@ Code admissions record intent, not execution.
    :thinking {:type :string :default "default"
               :option "thinking" :description "Reasoning effort"
               :choices ["default" "none" "minimal" "low" "medium" "high" "xhigh" "max"]}
+   :web-search {:type :boolean :default false
+                :option "web-search" :description "Permit provider-managed web search"}
    :output {:type :integer :default 0 :minimum 0 :maximum 1048576
             :description "Output token ceiling; zero uses provider capacity"}
    :context-quota {:type :integer :optional true :minimum 256

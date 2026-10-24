@@ -51,7 +51,7 @@
   (each key (keys saved) (assert (has-key? schema key) "unsupported saved configuration"))
   (each key [:source :store :world :file :instructions]
     (assert (= (current key) (saved key)) "saved identity/location differs"))
-  (each key [:repl :inference]
+  (each key [:repl :inference :web-search]
     (assert (or (not (saved key)) (current key)) (string "saved permission revoked: " key)))
   (assert (or (nil? (saved :remote)) (= (saved :remote) (current :remote))) "saved remote changed")
   (each value (saved :visibility) (assert (index-of value (current :visibility)) "saved grant revoked"))

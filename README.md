@@ -157,11 +157,12 @@ Git metadata, private stores and credentials with OS confinement. PA's protocol
 output descriptor is private; ordinary process stdout cannot forge frames.
 
 Calls share admission-anchored deadlines, work/tool budgets and parallel slots.
-Waits release slots. Ordinary tool failures return structured errors to the next
-model round and preserve output printed before failure. Deadlines, cancellation,
-lease fencing and exhausted shared budgets remain terminal. Cancellation does
-not undo effects.
-Interrupted effects remain uncertain; code is not automatically replayed. Saved
+Waits release slots. Tool failures preserve prior output and return structured
+errors to the model. Nonfinal generations continue; only final answer content
+without pending tools completes a run. Tools stay available through the round
+limit. Provider failures, deadlines, cancellation, lease fencing and exhausted
+shared budgets remain terminal. Cancellation does not undo effects; interrupted
+code is not automatically replayed. Saved
 calls are reauthorized against current grants. Observation survives neither
 executor death nor OS process-scope termination.
 
@@ -170,6 +171,9 @@ temporary. Durable controls retain only scheduling identifiers, leases, budgets
 and cancellation. Temporary calls cannot be reattached. Normal cleanup removes
 their source files. Explicit filesystem/Git effects, provider/Discord retention
 and OS swap remain outside this guarantee.
+
+`web-search: true` enables OpenRouter's server-side search independently of Janet
+execution and memory `search`. Unsupported providers reject it.
 
 ## Memory and inspection
 
