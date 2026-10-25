@@ -132,113 +132,255 @@
 (defn database [&opt temporary]
   (string (unless temporary `
 CREATE TABLE call_controls(
- id INTEGER PRIMARY KEY AUTOINCREMENT CHECK(id<=9007199254740991),source TEXT NOT NULL,world TEXT NOT NULL,request TEXT,
- parent INTEGER REFERENCES call_controls(id),root INTEGER REFERENCES call_controls(id),kind TEXT NOT NULL CHECK(kind IN ('text','code','summarize')),
- temporary INTEGER NOT NULL CHECK(temporary IN (0,1)),expires REAL NOT NULL,cancelled INTEGER NOT NULL DEFAULT 0 CHECK(cancelled IN (0,1)),
- state TEXT NOT NULL DEFAULT 'queued' CHECK(state IN ('queued','running','waiting','done','failed','cancelled','uncertain')),
- attempt INTEGER NOT NULL DEFAULT 0,owner TEXT,lease_expires REAL,retries INTEGER NOT NULL DEFAULT 1,key TEXT,
- work_used INTEGER NOT NULL DEFAULT 0,tool_used INTEGER NOT NULL DEFAULT 0,UNIQUE(source,request),UNIQUE(source,key)
+  id INTEGER PRIMARY KEY AUTOINCREMENT CHECK(id<=9007199254740991),
+  source TEXT NOT NULL,
+  world TEXT NOT NULL,
+  request TEXT,
+  parent INTEGER REFERENCES call_controls(id),
+  root INTEGER REFERENCES call_controls(id),
+  kind TEXT NOT NULL CHECK(kind IN ('text','code','summarize')),
+  temporary INTEGER NOT NULL CHECK(temporary IN (0,1)),
+  expires REAL NOT NULL,
+  cancelled INTEGER NOT NULL DEFAULT 0 CHECK(cancelled IN (0,1)),
+  state TEXT NOT NULL DEFAULT 'queued' CHECK(state IN ('queued','running','waiting','done','failed','cancelled','uncertain')),
+  attempt INTEGER NOT NULL DEFAULT 0,
+  owner TEXT,
+  lease_expires REAL,
+  retries INTEGER NOT NULL DEFAULT 1,
+  key TEXT,
+  work_used INTEGER NOT NULL DEFAULT 0,
+  tool_used INTEGER NOT NULL DEFAULT 0,
+  UNIQUE(source,request),
+  UNIQUE(source,key)
 ) STRICT;
 CREATE INDEX call_pending ON call_controls(source,state,id);
 CREATE INDEX call_parent ON call_controls(parent,id);
-CREATE VIEW live_calls AS SELECT c.* FROM call_controls c JOIN call_controls r ON r.id=coalesce(c.root,c.id)
- WHERE c.state IN ('running','waiting') AND c.lease_expires>unixepoch('subsec') AND c.expires>unixepoch('subsec')
- AND r.expires>unixepoch('subsec') AND NOT c.cancelled AND NOT r.cancelled;
+CREATE VIEW live_calls AS
+  SELECT c.*
+  FROM call_controls c JOIN call_controls r ON r.id=coalesce(c.root,c.id)
+  WHERE c.state IN ('running','waiting')
+    AND c.lease_expires>unixepoch('subsec') AND c.expires>unixepoch('subsec')
+    AND r.expires>unixepoch('subsec') AND NOT c.cancelled AND NOT r.cancelled;
 CREATE VIEW running AS SELECT source FROM live_calls WHERE state='running';
 PRAGMA user_version=1;
 `) (string/replace-all "$schema." (if temporary "journal." "main.") `
 CREATE TABLE $schema.call_payloads(
- id INTEGER PRIMARY KEY,parent INTEGER,run INTEGER NOT NULL,kind TEXT NOT NULL,config TEXT CHECK(config IS NULL OR json_valid(config)),
- entry INTEGER,first INTEGER NOT NULL,last INTEGER NOT NULL,history_last INTEGER NOT NULL,world TEXT NOT NULL,
- code TEXT NOT NULL DEFAULT '',file TEXT,origin TEXT NOT NULL DEFAULT '{}' CHECK(json_valid(origin)),temporary INTEGER NOT NULL,
- agent INTEGER NOT NULL,depth INTEGER NOT NULL,visibility TEXT NOT NULL CHECK(json_valid(visibility)),
- checkpoint TEXT NOT NULL DEFAULT '{}' CHECK(json_valid(checkpoint)),
- CHECK(first>=0 AND last>=first AND ((first=0 AND last=0) OR first>0))
+  id INTEGER PRIMARY KEY,
+  parent INTEGER,
+  run INTEGER NOT NULL,
+  kind TEXT NOT NULL,
+  config TEXT CHECK(config IS NULL OR json_valid(config)),
+  entry INTEGER,
+  first INTEGER NOT NULL,
+  last INTEGER NOT NULL,
+  history_last INTEGER NOT NULL,
+  world TEXT NOT NULL,
+  code TEXT NOT NULL DEFAULT '',
+  file TEXT,
+  origin TEXT NOT NULL DEFAULT '{}' CHECK(json_valid(origin)),
+  temporary INTEGER NOT NULL,
+  agent INTEGER NOT NULL,
+  depth INTEGER NOT NULL,
+  visibility TEXT NOT NULL CHECK(json_valid(visibility)),
+  checkpoint TEXT NOT NULL DEFAULT '{}' CHECK(json_valid(checkpoint)),
+  CHECK(first>=0 AND last>=first AND ((first=0 AND last=0) OR first>0))
 ) STRICT;
 CREATE INDEX $schema.call_history_parent ON call_payloads(parent,id);
 CREATE TABLE $schema.events(
- id INTEGER PRIMARY KEY AUTOINCREMENT CHECK(id<=9007199254740991),source TEXT NOT NULL,call INTEGER REFERENCES call_payloads(id),
- parent INTEGER REFERENCES events(id),kind TEXT NOT NULL,text TEXT NOT NULL DEFAULT '',data TEXT NOT NULL CHECK(json_valid(data)),
- author TEXT NOT NULL CHECK(length(author)>0),
- at TEXT NOT NULL DEFAULT(strftime('%Y-%m-%dT%H:%M:%fZ','now')) CHECK(strftime('%Y-%m-%dT%H:%M:%fZ',at) IS at),
- estimate INTEGER NOT NULL CHECK(estimate>=0),created REAL NOT NULL DEFAULT(unixepoch('subsec'))
+  id INTEGER PRIMARY KEY AUTOINCREMENT CHECK(id<=9007199254740991),
+  source TEXT NOT NULL,
+  call INTEGER REFERENCES call_payloads(id),
+  parent INTEGER REFERENCES events(id),
+  kind TEXT NOT NULL,
+  text TEXT NOT NULL DEFAULT '',
+  data TEXT NOT NULL CHECK(json_valid(data)),
+  author TEXT NOT NULL CHECK(length(author)>0),
+  at TEXT NOT NULL DEFAULT(strftime('%Y-%m-%dT%H:%M:%fZ','now')) CHECK(strftime('%Y-%m-%dT%H:%M:%fZ',at) IS at),
+  estimate INTEGER NOT NULL CHECK(estimate>=0),
+  created REAL NOT NULL DEFAULT(unixepoch('subsec'))
 ) STRICT;
 CREATE INDEX $schema.event_source ON events(source,id);
 CREATE INDEX $schema.event_call ON events(call,id);
 CREATE UNIQUE INDEX $schema.call_input ON events(call) WHERE kind IN ('user','summary-input');
 CREATE UNIQUE INDEX $schema.call_entry ON events(call,json_extract(data,'$.attempt')) WHERE kind='call-attempt';
 CREATE UNIQUE INDEX $schema.call_terminal ON events(call,json_extract(data,'$.attempt')) WHERE kind='call-result';
-CREATE UNIQUE INDEX $schema.call_answer ON events(call) WHERE kind='model-outcome' AND json_extract(data,'$.turn')=1 AND json_extract(data,'$.status') IN ('complete','refused','blocked');
+CREATE UNIQUE INDEX $schema.call_answer ON events(call)
+  WHERE kind='model-outcome' AND json_extract(data,'$.turn')=1
+    AND json_extract(data,'$.status') IN ('complete','refused','blocked');
 CREATE UNIQUE INDEX $schema.tool_result ON events(parent) WHERE kind='tool-result';
-CREATE TRIGGER $schema.immutable_events_update BEFORE UPDATE ON events BEGIN SELECT raise(ABORT,'immutable events'); END;
-CREATE TRIGGER $schema.immutable_events_delete BEFORE DELETE ON events BEGIN SELECT raise(ABORT,'immutable events'); END;
-CREATE TABLE $schema.images(event INTEGER NOT NULL REFERENCES events(id),position INTEGER NOT NULL,mime TEXT NOT NULL,bytes BLOB NOT NULL,PRIMARY KEY(event,position)) WITHOUT ROWID;
-CREATE TRIGGER $schema.immutable_images_update BEFORE UPDATE ON images BEGIN SELECT raise(ABORT,'immutable images'); END;
-CREATE TRIGGER $schema.immutable_images_delete BEFORE DELETE ON images BEGIN SELECT raise(ABORT,'immutable images'); END;
+CREATE TRIGGER $schema.immutable_events_update BEFORE UPDATE ON events
+  BEGIN SELECT raise(ABORT,'immutable events'); END;
+CREATE TRIGGER $schema.immutable_events_delete BEFORE DELETE ON events
+  BEGIN SELECT raise(ABORT,'immutable events'); END;
+CREATE TABLE $schema.images(
+  event INTEGER NOT NULL REFERENCES events(id),
+  position INTEGER NOT NULL,
+  mime TEXT NOT NULL,
+  bytes BLOB NOT NULL,
+  PRIMARY KEY(event,position)
+) WITHOUT ROWID;
+CREATE TRIGGER $schema.immutable_images_update BEFORE UPDATE ON images
+  BEGIN SELECT raise(ABORT,'immutable images'); END;
+CREATE TRIGGER $schema.immutable_images_delete BEFORE DELETE ON images
+  BEGIN SELECT raise(ABORT,'immutable images'); END;
 CREATE TABLE $schema.usage(
- request INTEGER PRIMARY KEY REFERENCES events(id),provider TEXT NOT NULL,model TEXT NOT NULL,
- input INTEGER,output INTEGER,total INTEGER,reasoning INTEGER,cached INTEGER,raw TEXT NOT NULL CHECK(json_valid(raw))
+  request INTEGER PRIMARY KEY REFERENCES events(id),
+  provider TEXT NOT NULL,
+  model TEXT NOT NULL,
+  input INTEGER,
+  output INTEGER,
+  total INTEGER,
+  reasoning INTEGER,
+  cached INTEGER,
+  raw TEXT NOT NULL CHECK(json_valid(raw))
 ) STRICT;
 CREATE UNIQUE INDEX $schema.model_terminal ON events(parent) WHERE kind='model-outcome';
 CREATE TRIGGER $schema.event_kind BEFORE INSERT ON events
- WHEN new.kind NOT IN ('user','summary-input','call-attempt','call-result','code-admission','tool-result','tool-ambiguity',
- 'model-admission','model-outcome','call-admission','launch-uncertain','summary','interruption','cancelled','artifact','context','save-intent','saved','operation-outcome')
- BEGIN SELECT raise(ABORT,'unsupported event kind'); END;
+  WHEN new.kind NOT IN (
+    'user','summary-input','call-attempt','call-result','code-admission','tool-result','tool-ambiguity',
+    'model-admission','model-outcome','call-admission','launch-uncertain','summary','interruption',
+    'cancelled','artifact','context','save-intent','saved','operation-outcome'
+  )
+  BEGIN SELECT raise(ABORT,'unsupported event kind'); END;
 CREATE VIEW $schema.memory_records AS WITH records AS (
- SELECT e.id,e.source,e.call task,c.run,CASE WHEN c.kind='summarize' THEN c.parent ELSE c.id END branch,
- CASE WHEN e.kind='call-result' AND c.kind='code' THEN (SELECT id FROM events n WHERE n.call=c.id AND n.kind='call-attempt' ORDER BY id DESC LIMIT 1) ELSE e.parent END parent,
- CASE WHEN e.kind='model-outcome' AND json_extract(e.data,'$.turn') THEN
-   CASE WHEN json_extract(e.data,'$.status') IN ('complete','refused','blocked') THEN 'completed' ELSE 'response' END
-  WHEN e.kind='call-result' AND json_type(e.data,'$.error')='object' THEN 'error'
-  WHEN e.kind='call-result' AND c.kind='code' AND json_extract(e.data,'$.state')='done' THEN 'completed'
-  WHEN e.kind='call-attempt' AND c.kind='code' THEN 'code-admission' ELSE e.kind END kind,
- CASE WHEN e.kind='user' THEN coalesce(json_extract(e.data,'$.input.text'),'')
-  WHEN e.kind='model-outcome' THEN CASE json_type(e.data,'$.message.content') WHEN 'text' THEN json_extract(e.data,'$.message.content')
-   WHEN 'array' THEN coalesce((SELECT group_concat(json_extract(p.value,'$.text'),char(10) ORDER BY p.key) FROM json_each(e.data,'$.message.content') p WHERE json_extract(p.value,'$.type')='text'),'')
-   ELSE coalesce(json_extract(e.data,'$.message.refusal'),'') END
-  WHEN e.kind='call-result' THEN coalesce(json_extract(e.data,'$.error.message'),json_extract(e.data,'$.value'),e.text)
-  WHEN e.kind='call-attempt' AND c.kind='code' THEN json_extract(a.data,'$.input.code') ELSE e.text END text,
- e.data,e.estimate,e.author,e.at,e.created,c.kind execution_kind,
- CASE WHEN json_type(e.data,'$.message')='object' THEN CASE WHEN json_extract(e.data,'$."reasoning-visible"') THEN json_extract(e.data,'$.message')
-  ELSE json_remove(json_extract(e.data,'$.message'),'$.reasoning','$.reasoning_content','$.reasoning_details') END END public_message
- FROM events e LEFT JOIN call_payloads c ON c.id=e.call LEFT JOIN events a ON a.call=c.id AND a.kind='user'
-) SELECT e.*,b.world branch_world,b.file branch_file,b.temporary branch_temporary,b.parent branch_parent,json_extract(a.data,'$.input.request') request,
- CASE WHEN b.temporary=1 THEN 'tmp:'||json_extract(a.data,'$.input.request')||'/'||b.id||':'||e.id END label,
- CASE WHEN e.kind='user' THEN coalesce(nullif(e.text,''),json_extract(e.data,'$.input.code'),'')
-  WHEN e.kind IN ('response','completed','model-outcome') AND json_type(e.data,'$.message')='object' THEN e.public_message||char(10)||json_object('status',json_extract(e.data,'$.status'))
-  WHEN e.kind IN ('call-admission','operation-outcome','tool-result','tool-ambiguity','cancelled','interruption','save-intent','saved','error','artifact','model-admission','model-outcome','call-result') THEN e.text||char(10)||json_remove(e.data,'$."world-source"') ELSE e.text END body,
- CASE WHEN e.kind IN ('user','context','response','completed','code-admission','tool-result','tool-ambiguity','call-admission','operation-outcome','cancelled','save-intent','saved') THEN 1
-  WHEN e.kind IN ('error','interruption') THEN e.execution_kind<>'summarize'
-  WHEN e.kind='artifact' THEN json_type(e.data,'$.invalidates') IS NULL ELSE 0 END memory
- FROM records e LEFT JOIN call_payloads b ON b.id=e.branch LEFT JOIN events a ON a.call=e.run AND a.kind='user';
-CREATE VIEW $schema.conversation_records AS SELECT e.*,CASE WHEN kind='response' THEN json_extract(data,'$.message') ELSE
- json_object('role','tool','tool_call_id',json_extract(data,'$.tool-id'),'content',text) END conversation_message
- FROM memory_records e WHERE kind='response' OR kind IN ('tool-result','tool-ambiguity') AND NOT EXISTS(
- SELECT 1 FROM events n WHERE n.call=e.task AND n.id>e.id AND n.kind IN ('tool-result','tool-ambiguity')
- AND json_extract(n.data,'$.response')=json_extract(e.data,'$.response') AND json_extract(n.data,'$.tool-id')=json_extract(e.data,'$.tool-id'));
-CREATE VIEW $schema.unresolved_tools AS SELECT r.branch,r.id response,json_extract(c.value,'$.id') tool_id FROM memory_records r,json_each(r.data,'$.tools') c
- WHERE r.kind='response' AND r.id=(SELECT max(id) FROM memory_records WHERE branch=r.branch AND kind='response') AND NOT EXISTS(
- SELECT 1 FROM events e WHERE e.call=r.task AND e.kind IN ('tool-result','tool-ambiguity')
- AND json_extract(e.data,'$.tool-id')=json_extract(c.value,'$.id') AND json_extract(e.data,'$.response')=r.id);
+  SELECT e.id,e.source,e.call task,c.run,
+    CASE WHEN c.kind='summarize' THEN c.parent ELSE c.id END branch,
+    CASE
+      WHEN e.kind='call-result' AND c.kind='code' THEN (
+        SELECT id FROM events n
+        WHERE n.call=c.id AND n.kind='call-attempt'
+        ORDER BY id DESC LIMIT 1
+      )
+      ELSE e.parent
+    END parent,
+    CASE
+      WHEN e.kind='model-outcome' AND json_extract(e.data,'$.turn') THEN
+        CASE
+          WHEN json_extract(e.data,'$.status') IN ('complete','refused','blocked') THEN 'completed'
+          ELSE 'response'
+        END
+      WHEN e.kind='call-result' AND json_type(e.data,'$.error')='object' THEN 'error'
+      WHEN e.kind='call-result' AND c.kind='code' AND json_extract(e.data,'$.state')='done' THEN 'completed'
+      WHEN e.kind='call-attempt' AND c.kind='code' THEN 'code-admission'
+      ELSE e.kind
+    END kind,
+    CASE
+      WHEN e.kind='user' THEN coalesce(json_extract(e.data,'$.input.text'),'')
+      WHEN e.kind='model-outcome' THEN
+        CASE json_type(e.data,'$.message.content')
+          WHEN 'text' THEN json_extract(e.data,'$.message.content')
+          WHEN 'array' THEN coalesce((
+            SELECT group_concat(json_extract(p.value,'$.text'),char(10) ORDER BY p.key)
+            FROM json_each(e.data,'$.message.content') p
+            WHERE json_extract(p.value,'$.type')='text'
+          ),'')
+          ELSE coalesce(json_extract(e.data,'$.message.refusal'),'')
+        END
+      WHEN e.kind='call-result' THEN coalesce(json_extract(e.data,'$.error.message'),json_extract(e.data,'$.value'),e.text)
+      WHEN e.kind='call-attempt' AND c.kind='code' THEN json_extract(a.data,'$.input.code')
+      ELSE e.text
+    END text,
+    e.data,e.estimate,e.author,e.at,e.created,c.kind execution_kind,
+    CASE WHEN json_type(e.data,'$.message')='object' THEN
+      CASE
+        WHEN json_extract(e.data,'$."reasoning-visible"') THEN json_extract(e.data,'$.message')
+        ELSE json_remove(json_extract(e.data,'$.message'),'$.reasoning','$.reasoning_content','$.reasoning_details')
+      END
+    END public_message
+  FROM events e
+  LEFT JOIN call_payloads c ON c.id=e.call
+  LEFT JOIN events a ON a.call=c.id AND a.kind='user'
+)
+SELECT e.*,b.world branch_world,b.file branch_file,b.temporary branch_temporary,b.parent branch_parent,
+  json_extract(a.data,'$.input.request') request,
+  CASE WHEN b.temporary=1 THEN 'tmp:'||json_extract(a.data,'$.input.request')||'/'||b.id||':'||e.id END label,
+  CASE
+    WHEN e.kind='user' THEN coalesce(nullif(e.text,''),json_extract(e.data,'$.input.code'),'')
+    WHEN e.kind IN ('response','completed','model-outcome') AND json_type(e.data,'$.message')='object'
+      THEN e.public_message||char(10)||json_object('status',json_extract(e.data,'$.status'))
+    WHEN e.kind IN (
+      'call-admission','operation-outcome','tool-result','tool-ambiguity','cancelled','interruption',
+      'save-intent','saved','error','artifact','model-admission','model-outcome','call-result'
+    ) THEN e.text||char(10)||json_remove(e.data,'$."world-source"')
+    ELSE e.text
+  END body,
+  CASE
+    WHEN e.kind IN (
+      'user','context','response','completed','code-admission','tool-result','tool-ambiguity',
+      'call-admission','operation-outcome','cancelled','save-intent','saved'
+    ) THEN 1
+    WHEN e.kind IN ('error','interruption') THEN e.execution_kind<>'summarize'
+    WHEN e.kind='artifact' THEN json_type(e.data,'$.invalidates') IS NULL
+    ELSE 0
+  END memory
+FROM records e
+LEFT JOIN call_payloads b ON b.id=e.branch
+LEFT JOIN events a ON a.call=e.run AND a.kind='user';
+CREATE VIEW $schema.conversation_records AS
+  SELECT e.*,
+    CASE
+      WHEN kind='response' THEN json_extract(data,'$.message')
+      ELSE json_object('role','tool','tool_call_id',json_extract(data,'$.tool-id'),'content',text)
+    END conversation_message
+  FROM memory_records e
+  WHERE kind='response' OR kind IN ('tool-result','tool-ambiguity') AND NOT EXISTS(
+    SELECT 1 FROM events n
+    WHERE n.call=e.task AND n.id>e.id AND n.kind IN ('tool-result','tool-ambiguity')
+      AND json_extract(n.data,'$.response')=json_extract(e.data,'$.response')
+      AND json_extract(n.data,'$.tool-id')=json_extract(e.data,'$.tool-id')
+  );
+CREATE VIEW $schema.unresolved_tools AS
+  SELECT r.branch,r.id response,json_extract(c.value,'$.id') tool_id
+  FROM memory_records r,json_each(r.data,'$.tools') c
+  WHERE r.kind='response'
+    AND r.id=(SELECT max(id) FROM memory_records WHERE branch=r.branch AND kind='response')
+    AND NOT EXISTS(
+      SELECT 1 FROM events e
+      WHERE e.call=r.task AND e.kind IN ('tool-result','tool-ambiguity')
+        AND json_extract(e.data,'$.tool-id')=json_extract(c.value,'$.id')
+        AND json_extract(e.data,'$.response')=r.id
+    );
 CREATE VIEW $schema.invalid_summaries AS WITH RECURSIVE invalid(source,id) AS (
- SELECT n.source,n.id FROM events a JOIN events n ON n.id=json_extract(a.data,'$.invalidates') AND n.source=a.source AND n.kind='summary'
- WHERE a.kind='artifact' AND json_type(a.data,'$.invalidates')='integer'
- UNION SELECT n.source,n.id FROM events n JOIN invalid i ON i.source=n.source,json_each(n.data,'$.children') c WHERE n.kind='summary' AND i.id=c.value
-) SELECT id FROM invalid;
+  SELECT n.source,n.id
+  FROM events a
+  JOIN events n ON n.id=json_extract(a.data,'$.invalidates') AND n.source=a.source AND n.kind='summary'
+  WHERE a.kind='artifact' AND json_type(a.data,'$.invalidates')='integer'
+  UNION
+  SELECT n.source,n.id
+  FROM events n JOIN invalid i ON i.source=n.source,json_each(n.data,'$.children') c
+  WHERE n.kind='summary' AND i.id=c.value
+)
+SELECT id FROM invalid;
 CREATE UNIQUE INDEX $schema.summary_call ON events(call) WHERE kind='summary';
-CREATE INDEX $schema.summary_key ON events(source,json_extract(data,'$.policy'),json_extract(data,'$.children')) WHERE kind='summary';
+CREATE INDEX $schema.summary_key ON events(source,json_extract(data,'$.policy'),json_extract(data,'$.children'))
+  WHERE kind='summary';
 CREATE INDEX $schema.summary_start ON events(source,json_extract(data,'$.first')) WHERE kind='summary';
-CREATE INDEX $schema.summary_invalidations ON events(source,id) WHERE kind='artifact' AND json_type(data,'$.invalidates')='integer';
+CREATE INDEX $schema.summary_invalidations ON events(source,id)
+  WHERE kind='artifact' AND json_type(data,'$.invalidates')='integer';
 CREATE VIEW $schema.search_records AS SELECT id,body FROM memory_records WHERE memory;
-CREATE VIRTUAL TABLE $schema.event_fts USING fts5(body,content='search_records',content_rowid='id',tokenize='unicode61 remove_diacritics 0');
+CREATE VIRTUAL TABLE $schema.event_fts USING fts5(
+  body,content='search_records',content_rowid='id',tokenize='unicode61 remove_diacritics 0'
+);
 CREATE VIRTUAL TABLE $schema.event_words USING fts5vocab(event_fts,'instance');
-CREATE TABLE $schema.lexemes(id INTEGER PRIMARY KEY,source TEXT NOT NULL,term TEXT NOT NULL,UNIQUE(source,term)) STRICT;
-CREATE TABLE $schema.event_lexemes(event INTEGER NOT NULL REFERENCES events(id),lexeme INTEGER NOT NULL REFERENCES lexemes(id),PRIMARY KEY(event,lexeme)) WITHOUT ROWID;
+CREATE TABLE $schema.lexemes(
+  id INTEGER PRIMARY KEY,
+  source TEXT NOT NULL,
+  term TEXT NOT NULL,
+  UNIQUE(source,term)
+) STRICT;
+CREATE TABLE $schema.event_lexemes(
+  event INTEGER NOT NULL REFERENCES events(id),
+  lexeme INTEGER NOT NULL REFERENCES lexemes(id),
+  PRIMARY KEY(event,lexeme)
+) WITHOUT ROWID;
 CREATE INDEX $schema.lexeme_events ON event_lexemes(lexeme,event);
-CREATE VIRTUAL TABLE $schema.lexeme_grams USING fts5(term,content='lexemes',content_rowid='id',tokenize='trigram',detail='none');
-CREATE TRIGGER $schema.lexeme_index AFTER INSERT ON lexemes BEGIN INSERT INTO lexeme_grams(rowid,term) VALUES(new.id,new.term); END;
+CREATE VIRTUAL TABLE $schema.lexeme_grams USING fts5(
+  term,content='lexemes',content_rowid='id',tokenize='trigram',detail='none'
+);
+CREATE TRIGGER $schema.lexeme_index AFTER INSERT ON lexemes
+  BEGIN INSERT INTO lexeme_grams(rowid,term) VALUES(new.id,new.term); END;
 CREATE TRIGGER $schema.event_index AFTER INSERT ON events BEGIN
- INSERT INTO event_fts(rowid,body) SELECT id,body FROM search_records WHERE id=new.id;
+  INSERT INTO event_fts(rowid,body) SELECT id,body FROM search_records WHERE id=new.id;
 END;
 CREATE UNIQUE INDEX $schema.context_key ON events(source,json_extract(data,'$.key')) WHERE kind='context';
 `)))
