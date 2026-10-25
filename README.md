@@ -107,6 +107,7 @@ and input provenance:
 Use `code` instead of `text` for direct execution. `repl.enabled: true` requires an
 absolute world `file`. Each call owns an editable source snapshot and restricted
 Janet environment. Root calls start at Git HEAD or explicit `revision`.
+The optional `instructions` path supplies additional world instructions.
 
 ```janet
 (defn double [x] (* 2 x))
@@ -210,10 +211,11 @@ and provision that variable in the deployment environment. Connector no longer
 owns provider authentication or transports. Credential values are not saved in
 call configuration or rendered into prompts.
 
-Calls share admission-anchored deadlines, work/tool budgets and parallel slots.
-Waits release slots. Tool failures preserve prior output and return structured
-errors to the model. Nonfinal generations continue; only final answer content
-without pending tools completes a run. Tools stay available through the round
+`run-seconds` bounds the call tree from root admission; `seconds` bounds each
+Janet evaluation, including waits. Calls share work/tool budgets and parallel
+slots. Waits release slots. Tool failures preserve prior output and return
+structured errors to the model. Nonfinal generations continue; only final answer
+content without pending tools completes a run. Tools stay available through the round
 limit. Provider failures, deadlines, cancellation, lease fencing and exhausted
 shared budgets remain terminal. Cancellation does not undo effects; interrupted
 code is not automatically replayed. Saved

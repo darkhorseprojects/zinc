@@ -232,7 +232,7 @@
         (array/clear messages) (array/push messages {:role "system" :content system})
         (when world (array/push messages world))
         (table/clear views) (put views :through (context :through))
-        (each [key title rows] [[:chronological "Chronological memory" (context :nodes)] [:semantic "Semantic memory" (context :evidence)]]
+        (each [key title rows] [[:chronological "Chronological memory" (context :nodes)] [:semantic "Retrieved excerpts" (context :evidence)]]
           (def text (string/join (map |($ :rendered) rows)))
           (put views key @{:message (when (> (length text) 0) (length messages))
                            :records (seq [row :in rows] (tabseq [field :in [:id :label :first :last :children :offset :next :total :score] :when (has-key? row field)] field (row field)))})
@@ -243,7 +243,7 @@
         (each record (store/query s "SELECT conversation_message,json_extract(data,'$.status') status FROM conversation_records WHERE branch=? AND id>? ORDER BY id" [id (context :through)])
           (array/push messages (json/decode (record :conversation_message) true true))
           (when (= "continue" (record :status))
-            (array/push messages {:role "system" :content "Continue the inquiry; the previous response did not complete it."})))
+            (array/push messages {:role "system" :content "Continue the inquiry."})))
         (when (<= (+ (model/estimate messages) tool-size) capacity) (break))
         (assert (< (context :through) (view :last)) "context metadata cannot fit")
         (set context (memory/context s (merge view {:exclude [(user :id)]}) space pool)))

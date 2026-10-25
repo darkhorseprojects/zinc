@@ -55,7 +55,7 @@
        :ref (if (and ref (string/has-prefix? "refs/heads/" (string/trim ref))) (string/trim ref) (if root "HEAD" "refs/heads/main"))})))
 
 (defn save
-  "(save message options) — Commit world source; optional call, branch, merge and push. Continue in a new self after merging."
+  "Commit world source to Git, not live state. options: :call, :branch, :merge, :push. After merging, continue in a new child."
   [message &opt options]
   (def [s view] (dyn :zinc/context))
   (def config (s :config))
@@ -159,16 +159,13 @@
 (defn instructions [config document-tree available public]
   (string (document document-tree)
           (when (config :instructions) (string "\n\n## World instructions\n\n" (slurp (config :instructions))))
-          "\n\n## World\n\n" (json/encode (config :world))
+          "\n\n## World ID\n\n" (json/encode (config :world))
           (when (and (get-in config [:repl :enabled]) available)
-            (string "\n\n## Janet\n\nOne environment lasts for this call. Top-level single-name `def` and `defn` update its source; `(def name nil)` removes a definition.\nOther expressions execute without entering the source. Initializers run again when a child loads that source; use `let` for temporary values and effects.\n`(input)` returns the inquiry; `(self/document)` returns these instructions. `(settings)` and `(resources)` return the selected settings and grants."
-                    (when (available "save") "\n`save` commits source to Git; it does not preserve the live environment.")
+            (string "\n\n## Janet\n\nTop-level single-name `def` and `defn` update this call's source; `(def name nil)` removes a definition. Other forms execute without updating source.\nCalls run source initializers when their environments load; use `let` for temporary values and effects.\n`(input)`: admitted input map. `(self/document)`: these instructions. `(settings)`: exposed settings. `(resources)`: callable resource grants."
                     (string/join (seq [[title value] :in [["Settings" (public :settings)] ["Resources" (public :resources)]] :when (> (length value) 0)]
-                                   (string "\n\n## " title "\n\n" (json/encode value))))
+                                   (string "\n\n## " title "\n\n" (json/encode value "  " "\n"))))
                     (when (> (length available) 0)
-                      (string "\n\n## Functions\n\n" (string/join (map |(($ 1) :doc) (sorted (pairs available))) "\n\n")))
-                    (when (and (available "self") (available "await"))
-                      "\n\n`(let [child (self {:text \"Compare the alternatives.\" :persist false})] ((await child) :text))`")))))
+                      (string "\n\n## Functions\n\n" (string/join (map |(($ 1) :doc) (sorted (pairs available))) "\n\n")))))))
 
 (defn- request [name args]
   (def reply (ev/thread-chan 1))

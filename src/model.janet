@@ -5,10 +5,13 @@
 (import ./http)
 
 (def- tool
-  {:type "function" :function
-   {:name "run_janet" :description "Evaluate Janet source. One tool call uses the current call's environment; multiple tool calls in one response each use a separate child copied from the same source and history. Child source changes do not merge into the caller."
-    :parameters {:type "object" :additionalProperties false :required ["code"]
-                 :properties {:code {:type "string"}}}}})
+  {:type "function"
+   :function {:name "run_janet"
+              :description "Evaluate Janet source. One tool call uses the current environment. Multiple calls in one response use separate children with the same source and history snapshot. Child source changes do not merge automatically."
+              :parameters {:type "object"
+                           :additionalProperties false
+                           :required ["code"]
+                           :properties {:code {:type "string"}}}}})
 
 (defn estimate [messages]
   (store/estimate (json/encode (map (fn [message]
