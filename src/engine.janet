@@ -13,14 +13,17 @@
     (when (event :branch)
       (def data (json/decode (event :data) true true))
       (def origin (data :world-source))
+      (def durable (= 0 (event :branch_temporary)))
+      (def coordinate (if durable "#" "local "))
       (def body (case (event :kind)
                   "user" ""
-                  "response" (model/render event data)
-                  "completed" (if (event :public_message) (model/render event data) (event :text))
-                  "model-outcome" (when (and (= "chat" (data :role)) (data :visible)) (model/render event data))
+                  "response" (model/render event)
+                  "completed" (if (event :public_message) (model/render event) (event :text))
+                  "model-outcome" (when (and (= "chat" (data :role)) (data :visible)) (model/render event))
                   "interruption" (when (= "uncertain" (data :state)) (event :text))
                   "saved" (string "Saved " (data :ref) " @ " (string/slice (data :after) 0 7) (when (data :pushed) " · pushed") "\n" (event :text))
-                  "summary" (string "compacted " (data :count) " records · sources #" (data :first) "–#" (data :last) " · summary #" (event :id))
+                  "summary" (string "summary " coordinate (event :id) " · " (data :count)
+                                    " records · source range " coordinate (data :first) "–" (data :last))
                   (when (and (not= false (data :display)) (index-of (event :kind) ["code-admission" "tool-result" "tool-ambiguity" "error"]))
                     (if-let [failure (data :error)]
                       (string/trim (string (get-in failure [:context :output] "") "\n" (failure :code) ": " (failure :message))) (event :text)))))
@@ -28,10 +31,10 @@
         {:type (if (= "user" (event :kind)) "start" "display") :body body :kind (event :kind) :root (nil? (event :branch_parent))
          :caller (or (event :branch_parent) :null) :prompt (if (data :turn) (event :parent) :null)
          :related (if (and (not (data :turn)) (index-of (event :kind) ["tool-result" "tool-ambiguity" "completed"])) (or (event :parent) :null) :null)
-         :status (or (data :status) (case (event :kind) "error" "failed" "tool-ambiguity" "uncertain" (if (= false (data :ok)) "failed" "complete")))
+         :status (or (data :status) (case (event :kind) "code-admission" "admitted" "error" "failed" "tool-ambiguity" "uncertain" (if (= false (data :ok)) "failed" "complete")))
          :language (case (event :kind) "code-admission" "janet" "tool-result" "text" nil)
          :run (event :run) :branch (event :branch) :execution (string (event :request) "/" (event :branch))
-         :persist (= 0 (event :branch_temporary)) :event (if (= 0 (event :branch_temporary)) (event :id) :null)
+         :persist durable :event (if durable (event :id) :null)
          :sequence (event :id) :author (event :author) :at (event :at)
          :world {:name (event :branch_world) :file (event :branch_file) :path (origin :path) :ref (or (data :ref) (origin :ref))
                  :base (origin :base) :revision (or (data :after) (origin :base))}})))
@@ -40,8 +43,7 @@
     (def call (store/call s id))
     (def final (first (store/query s "SELECT * FROM memory_records WHERE branch=? AND kind='completed'" [id])))
     (assert final "call has no completion")
-    (def data (json/decode (final :data) true true))
-    (merge (tabseq [[key value] :in (pairs (message final)) :unless (index-of key [:body :language])] key value) {:type "result" :final true :text (final :text) :status (get data :status "complete")
+    (merge (tabseq [[key value] :in (pairs (message final)) :unless (index-of key [:body :language])] key value) {:type "result" :final true :text (final :text)
                                                                                                                   :message (when (final :public_message) (json/decode (final :public_message) true true))
                                                                                                                   :start (if (= 0 (call :temporary)) (call :admission) :null)
                                                                                                                   :parent (or (call :entry) 0) :memory_range {:start (call :first) :end (call :last)}
@@ -81,7 +83,7 @@
           (ev/take done)
           (unless (= :dead (fiber/status worker)) (error (fiber/last-value worker)))
           (def [ok value] (fiber/last-value worker))
-          (if ok (json/decode value true true) (error value)))
+          (if ok value (error value)))
         (label done (while true
                     (store/recover s)
                     (when current (store/checkpoint s))
@@ -119,6 +121,7 @@
           (when (> id 0) (store/event s view id)))
         (assert (< (view :depth) (config :task-depth)) "agent recursion ceiling exhausted")
         (def request (string/join (map |(string/format "%02x" $) (os/cryptorand 24))))
+        (def entry (get value :parent (view :last)))
         (def limits (dyn :pa/limits))
         (def process (os/spawn [(dyn :pa/executable) "run" (string (limits "frameBytes")) (string (limits "admissionSeconds"))]
                               :d {:in :pipe :out :pipe :err stderr}))
@@ -129,8 +132,8 @@
         (defer (unless admitted (ev/close (process :out)))
           (defer (ev/close (process :in))
             (wire/send (process :in) (wire/request {"version" wire/version "program" (merge (dyn :pa/program) {"entry" "self"})
-                                                   "input" (wire/base64 (string (json/encode (merge value {:request request :parent (get value :parent (view :last))
-                                                                                                         :memory_range (get value :memory_range {:start (view :first) :end (view :last)})}))))
+                                                   "input" (wire/base64 (string (json/encode (merge value {:request request :parent entry
+                                                                                                         :memory_range (get value :memory_range {:start (if (= 0 entry) 0 (view :first)) :end entry})}))))
                                                    "config" (wire/base64 (string (json/encode (merge config {:snapshot (merge (store/snapshot s view) {:origin origin})}))))})))
           (ev/with-deadline (limits "admissionSeconds") (wire/output reader true))
           (def done (ev/chan))
@@ -138,10 +141,10 @@
                         (defer (ev/chan-close done)
                           (try
                             (defer (ev/close (process :out))
-                              (def output (wire/output reader))
+                              (def output (json/decode (wire/output reader) true true))
                               (ev/take exited)
                               (assert (= 0 (process :return-code)) "ProcessFailure")
-                              [true output])
+                              [true (if (value :code) (output :text) output)])
                             ([err] [false err])))))
           (put ((dyn :zinc/call) :children) request [worker done])
           (set admitted true)
@@ -158,45 +161,38 @@
       (assert (<= (os/stat (current :file) :size) (config :source-bytes)) "world source byte ceiling")
       (def public (repl/public config (spec :schema)))
       (put current :runtime (repl/open (string (slurp (current :file))) (current :input)
-                                       (repl/instructions config view (spec :document) bindings public) public
-                                       (seq [[name binding] :in (sorted (pairs bindings))] {:name name :doc (binding :doc)})
+                                       (repl/instructions config (spec :document) bindings public) public
+                                       (tabseq [[name binding] :in (pairs bindings)] name (binding :doc))
                                        {:source (config :source-bytes) :output (config :response-bytes)})))
     (repl/execute (current :runtime) code (fn [name args]
                                             (store/checkpoint s)
-                                            (assert (or (= name "world/source") (bindings name)) "function revoked")
-                                            (when (get-in bindings [name :intrinsic]) (assert (= 1 (length args)) "invalid intrinsic arity"))
+                                            (def binding (bindings name))
+                                            (assert (or (= name "world/source") binding) "function revoked")
+                                            (when (get binding :intrinsic) (assert (= 1 (length args)) "invalid intrinsic arity"))
                                             (def args (schema/data args))
-                                            (cond
-                                              (= name "world/source")
+                                            (case name
+                                              "world/source"
                                               (do (assert (and (= 2 (length args)) (every? (map string? args)) (<= (length (args 1)) (config :source-bytes))) "invalid world source update")
                                                 (assert (= (args 0) (string (slurp (current :file)))) "world source changed; continue in a new self after merging")
                                                 (spit (current :file) (args 1) :wb) nil)
-                                              (= name "await")
-                                              (let [handle (first args) current (dyn :zinc/call)]
+                                              "await"
+                                              (let [handle (first args)]
                                                 (assert (dictionary? handle) "await requires a self handle")
-                                                (if (handle :temporary)
-                                                  (wait s (handle :temporary))
-                                                  (do
-                                                    (assert (and (int? (handle :job)) (not= (current :id) (handle :job))
-                                                                 (first (store/query s `WITH RECURSIVE parents(id) AS (SELECT parent FROM main.call_controls WHERE id=? AND source=?
+                                                (unless (handle :temporary)
+                                                  (assert (and (int? (handle :job)) (not= (current :id) (handle :job))
+                                                               (first (store/query s `WITH RECURSIVE parents(id) AS (SELECT parent FROM main.call_controls WHERE id=? AND source=?
                   UNION SELECT c.parent FROM main.call_controls c JOIN parents p ON c.id=p.id WHERE c.parent IS NOT NULL)
-                  SELECT id FROM parents WHERE id=?` [(handle :job) (s :source) (current :id)]))) "await requires descendant work")
-                                                    (wait s (handle :job)))))
+                  SELECT id FROM parents WHERE id=?` [(handle :job) (s :source) (current :id)]))) "await requires descendant work"))
+                                                (wait s (or (handle :temporary) (handle :job))))
                                               (let [admission (store/transact s (store/charge s 1 0)
                                                                               (store/append s view "call-admission" name {:arguments args} nil ((dyn :zinc/call) :id)))]
                                                 (def value (if (= name "self")
                                                              (let [handle (with-dyns [:zinc/effect (admission :id)] (start-child s (merge view (store/view s (view :branch))) (first args)))]
                                                                (when (handle :job) (launch s (handle :job))) handle)
-                                                             (let [binding (bindings name)]
-                                                               (assert binding "function revoked")
-                                                               (def presentation @[]) (var after 0)
-                                                               (while (< after (admission :id))
-                                                                 (def records (memory/events s (view :run) after))
-                                                                 (each event records
-                                                                   (when (<= (event :id) (admission :id)) (when-let [frame (message event)] (array/push presentation frame)))
-                                                                   (set after (event :id)))
-                                                                 (when (< (length records) 256) (break)))
-                                                               (schema/data (with-dyns [:zinc/context [s view] :capability/config (binding :config) :capability/presentation presentation] (apply (binding :value) args))))))
+                                                             (schema/data
+                                                               (with-dyns [:zinc/context [s view] :capability/config (binding :config)
+                                                                           :capability/presentation (filter identity (map message (memory/events s (view :run) 0 (admission :id))))]
+                                                                 (apply (binding :value) args)))))
                                                 (store/transact s (store/checkpoint s)
                                                                 (store/append s view "operation-outcome" name {:value value} (admission :id) ((dyn :zinc/call) :id)))
                                                 value)))
@@ -208,7 +204,7 @@
     (def inherited (store/view s id false))
     (def selected (model/profile s (config :chat) :chat))
     (def tools (filter |(or (get-in config [:repl :enabled]) (not= "function" ($ :type))) (selected :tools)))
-    (def system (repl/instructions config (merge inherited {:tools (find |(= "function" ($ :type)) tools)}) (spec :document) bindings (repl/public config (spec :schema))))
+    (def system (repl/instructions config (spec :document) (when (find |(= "function" ($ :type)) tools) bindings) (repl/public config (spec :schema))))
     (def user (first (store/query s "SELECT * FROM memory_records WHERE task=? AND kind='user'" [id])))
     (def inquiry {:role "user" :content (model/images s (user :id) (memory/render user))})
     (def tool-size (if (> (length tools) 0) (store/estimate (json/encode tools)) 0))
@@ -247,7 +243,7 @@
         (each record (store/query s "SELECT conversation_message,json_extract(data,'$.status') status FROM conversation_records WHERE branch=? AND id>? ORDER BY id" [id (context :through)])
           (array/push messages (json/decode (record :conversation_message) true true))
           (when (= "continue" (record :status))
-            (array/push messages {:role "user" :content "Continue from the recorded output. Use tools if needed; end with a final response, including any refusal or limitation."})))
+            (array/push messages {:role "system" :content "Continue the inquiry; the previous response did not complete it."})))
         (when (<= (+ (model/estimate messages) tool-size) capacity) (break))
         (assert (< (context :through) (view :last)) "context metadata cannot fit")
         (set context (memory/context s (merge view {:exclude [(user :id)]}) space pool)))
@@ -266,9 +262,7 @@
       (each [tool admission handle] work
         (def outcome (try
                        {:ok true :text (if (get handle :error) (error (get handle :error)) (if parallel
-                                         (if (handle :temporary)
-                                           ((wait s (handle :temporary)) :text)
-                                           (wait s (handle :job)))
+                                         (wait s (or (handle :temporary) (handle :job)))
                                          (run-code s view bindings (tool :code))))}
                        ([err fiber]
                          (when (= err "deadline expired") (error err))
@@ -383,7 +377,7 @@
                                    ["describe" []] ["instructions" []] ["models" [:role]] ["views" [:event]] ["render" [:event]] ["events" [:run :after]] ["record" [:records]] ["pending" [:request]] ["abort" [:run :request :reason]] ["invalidate" [:event]]]]
     operation (fn [bytes opaque]
                 (def config (schema/configuration (spec :schema) (json/decode opaque true true) (= operation "describe")))
-                (unless (index-of operation ["describe" "models"]) (repl/definitions config (spec :schema)))
+                (unless (index-of operation ["describe" "instructions" "models"]) (repl/definitions config (spec :schema)))
                 (assert (and (utf8/is-valid? bytes) (<= (length bytes) (config :request-bytes))) "request must be bounded UTF-8")
                 (when (index-of operation ["describe" "instructions"]) (assert (= "" bytes) "operation takes empty input"))
                 (def value (if (and (= "" bytes) (index-of operation ["describe" "instructions" "pending"])) {} (schema/request (json/decode bytes true true) fields)))
@@ -392,7 +386,7 @@
                   (with-dyns [:zinc/config config]
                     (def output (cond
                                   (= operation "describe") (describe config)
-                                  (= operation "instructions") (repl/instructions config {} (spec :document) (repl/definitions config (spec :schema)) (repl/public config (spec :schema)))
+                                  (= operation "instructions") (repl/instructions config (spec :document) (repl/definitions config (spec :schema)) (repl/public config (spec :schema)))
                                   (= operation "models") (map |{:ref ($ :ref) :name ($ :name)} (model/catalogue config (get value :role "chat")))
                                   (= operation "record") {:events (store/record s (value :records))}
                                   (index-of operation ["views" "render"])

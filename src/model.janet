@@ -6,7 +6,7 @@
 
 (def- tool
   {:type "function" :function
-   {:name "run_janet" :description "Evaluate Janet in the current world."
+   {:name "run_janet" :description "Evaluate Janet source. One tool call uses the current call's environment; multiple tool calls in one response each use a separate child copied from the same source and history. Child source changes do not merge into the caller."
     :parameters {:type "object" :additionalProperties false :required ["code"]
                  :properties {:code {:type "string"}}}}})
 
@@ -226,21 +226,17 @@
                                  (store/append s (current :scope) "model-outcome" "Model outcome committed." (tabseq [[key value] :in (pairs result) :unless (= key :text)] key value) admission (current :id))))
       (merge result {:event (event :id)}))))
 
-(defn render [row data]
+(defn render [row]
   (def message (if (row :public_message) (json/decode (row :public_message) true true) {}))
-  (def parts @[])
   (def reasoning (string/join (distinct (filter |(and (string? $) (> (length (string/trim $)) 0))
-                                                (array/concat @[(message :reasoning_content) (message :reasoning)]
-                                                              (map |(if (and (dictionary? $) (has-key? $ :text)) (if (string? ($ :text)) ($ :text) (string (json/encode ($ :text)))) (string (json/encode $))) (get message :reasoning_details []))))) "\n"))
-  (when (> (length reasoning) 0)
-    (array/push parts (string "> " (string/replace-all "\n" "\n> " (string/replace-all "\r" "\n" (string/replace-all "\r\n" "\n" (string/trimr reasoning)))))))
-  (when (> (length (string/trim (row :text))) 0) (array/push parts (row :text)))
-  (def extra (tabseq [[key value] :in (pairs message) :unless (index-of key [:role :content :refusal :tool_calls :reasoning :reasoning_content :reasoning_details])] key value))
-  (each value [(when (indexed? (message :content)) (filter |(not= "text" ($ :type)) (message :content))) extra]
-    (when (and value (> (length value) 0)) (array/push parts (string "```json\n" (json/encode value) "\n```"))))
-  (unless (index-of (get data :status "complete") ["complete" "tools"]) (array/push parts (string "[" (data :status) "]")))
-  (when (and (= 0 (length parts)) (not= "tools" (data :status))) (array/push parts "[empty model response]"))
-  (string/join parts "\n\n"))
+                                              (array/concat @[(message :reasoning_content) (message :reasoning)]
+                                                            (seq [part :in (get message :reasoning_details []) :when (dictionary? part)] (part :text))))) "\n"))
+  (def content (when (indexed? (message :content)) (filter |(not= "text" ($ :type)) (message :content))))
+  (def parts (filter identity [(when (> (length reasoning) 0) (string "Reasoning:\n\n" reasoning))
+                               (when (> (length (string/trim (row :text))) 0) (row :text))
+                               (when (and content (> (length content) 0)) (string "Non-text content:\n\n```json\n" (json/encode content) "\n```"))]))
+  (if (> (length parts) 0) (string/join parts "\n\n")
+    (if (> (length (get message :tool_calls [])) 0) "" "[empty model response]")))
 
 (defn images [s event text]
   (def parts @[{:type "text" :text text}])

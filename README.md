@@ -123,11 +123,12 @@ references. World files contain definitions, not general startup programs.
 Initializers run when a branch loads; use `let` for temporary handles and
 effects.
 
-One tool call continues the current environment. Multiple tool calls fork
-independent siblings from one frozen source/history cut. All siblings retain the
-same base revision; results do not implicitly merge their source. Text selves
-use an explicitly configured `agent` profile; code selves retain the caller's.
-Profiles must share source/store/world/file identity.
+One tool call continues the current environment; multiple calls fork siblings
+from one source/history cut. Child source changes do not merge into the caller.
+`self` returns a handle; `await` returns evaluation text for code children or a
+result map with `:text` for text children. Text uses `agent` when configured;
+otherwise both use the caller profile. Profiles share source/store/world/file
+identity. `:parent 0` defaults to empty history, not empty source.
 
 Only granted `save` commits:
 
@@ -221,11 +222,10 @@ policies invalidate saved grants; newly added resources/functions are not acquir
 by old calls. Observation survives neither
 executor death nor OS process-scope termination.
 
-`persist: false` keeps payloads in bounded RAM journals; descendants remain
-temporary. Durable controls retain only scheduling identifiers, leases, budgets
-and cancellation. Temporary calls cannot be reattached. Normal cleanup removes
-their source files. Explicit filesystem/Git effects, provider/Discord retention
-and OS swap remain outside this guarantee.
+`persist: false` uses a bounded RAM journal; descendants remain temporary and
+cannot be reattached. It is not private execution: controls and source files can
+reach disk, and durable callers can record child input and output. Normal cleanup
+removes temporary source files. External effects and retention are unchanged.
 
 `web-search: true` enables OpenRouter's server-side search independently of Janet
 execution and memory `search`. Unsupported providers reject it.

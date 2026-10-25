@@ -139,16 +139,12 @@
         (assert (and (not (available qualified))
                      (not (index-of qualified ["input" "self/document" "settings" "resources" "world/source"]))) "capability shadows a declaration")
         (put available qualified (merge binding {:config (capability :config)})))))
-  (tabseq [name :in (get-in config [:repl :functions])]
-    (def binding (available name))
-    (assert (and binding (string? (binding :doc))) (string "unknown or undocumented REPL function: " name))
-    name binding))
+  (tabseq [name :in (get-in config [:repl :functions]) :let [binding (available name)]]
+    name (do (assert (and binding (string? (binding :doc))) (string "unknown or undocumented REPL function: " name)) binding)))
 
 (defn public [config fields]
   {:settings (tabseq [name :in (get-in config [:repl :values])]
-               (def key (keyword name))
-               (assert (get-in fields [key :repl :value]) "configuration is not REPL-visible")
-               key (config key))
+               (keyword name) (config (keyword name)))
    :resources
    (tabseq [[key field] :in (pairs fields) :let [access (get field :repl {})] :when (access :public)
             :let [grants (tabseq [[name grant] :in (pairs (config key))
@@ -160,20 +156,19 @@
                                       {:functions functions}))]
             :when (> (length grants) 0)] key grants)})
 
-(defn instructions [config view document-tree available public]
-  (string (document document-tree) "\n\n## World\n\n" (config :world)
-          (when (config :instructions) (string "\n\n" (slurp (config :instructions))))
-          (when (and (get-in config [:repl :enabled]) (get view :tools true))
-            (string "\nTop-level single-name `def` and `defn` update this call's world source. Redefine normally; `(def name nil)` removes a definition."
-                    "\nOther expressions execute without becoming source. Use `let` for temporary handles; definition initializers run when a branch loads. Only granted `save` commits."
-                    "\n`(input)` reads the inquiry; `(self/document)` reads these instructions."
-                    "\n`(settings)` reads selected configuration; `(resources)` reads the named grants below. Neither changes permissions."
-                    (when (available "self") "\n`self` starts an independent branch; text uses the configured agent profile. `:persist false` keeps its journal in RAM.")
-                    "\nParallel calls fork the same source and history; effects are not rolled back or implicitly merged."
-                    "\n\n## REPL settings\n\n" (json/encode (public :settings))
-                    "\n\n## Named resources\n\n" (json/encode (public :resources))
-                    "\n\n## Callable functions\n\n"
-                    (string/join (seq [[name binding] :in (sorted (pairs available))] (string "- " (binding :doc))) "\n")))))
+(defn instructions [config document-tree available public]
+  (string (document document-tree)
+          (when (config :instructions) (string "\n\n## World instructions\n\n" (slurp (config :instructions))))
+          "\n\n## World\n\n" (json/encode (config :world))
+          (when (and (get-in config [:repl :enabled]) available)
+            (string "\n\n## Janet\n\nOne environment lasts for this call. Top-level single-name `def` and `defn` update its source; `(def name nil)` removes a definition.\nOther expressions execute without entering the source. Initializers run again when a child loads that source; use `let` for temporary values and effects.\n`(input)` returns the inquiry; `(self/document)` returns these instructions. `(settings)` and `(resources)` return the selected settings and grants."
+                    (when (available "save") "\n`save` commits source to Git; it does not preserve the live environment.")
+                    (string/join (seq [[title value] :in [["Settings" (public :settings)] ["Resources" (public :resources)]] :when (> (length value) 0)]
+                                   (string "\n\n## " title "\n\n" (json/encode value))))
+                    (when (> (length available) 0)
+                      (string "\n\n## Functions\n\n" (string/join (map |(($ 1) :doc) (sorted (pairs available))) "\n\n")))
+                    (when (and (available "self") (available "await"))
+                      "\n\n`(let [child (self {:text \"Compare the alternatives.\" :persist false})] ((await child) :text))`")))))
 
 (defn- request [name args]
   (def reply (ev/thread-chan 1))
@@ -191,9 +186,8 @@
   (put env 'self/document @{:value (fn [] document)})
   (put env 'settings @{:value (fn [] (schema/data (public :settings)))})
   (put env 'resources @{:value (fn [] (schema/data (public :resources)))})
-  (each binding bindings
-    (def name (binding :name))
-    (put env (symbol name) @{:value (fn [& args] (request name args)) :doc (binding :doc)}))
+  (each [name documentation] (pairs bindings)
+    (put env (symbol name) @{:value (fn [& args] (request name args)) :doc documentation}))
   (module/add-paths "" :source)
   (sandbox :fs :net :subprocess :ffi :modules :threads :env :asm
            :unmarshal :exit :locale :signal :chroot :sandbox)
