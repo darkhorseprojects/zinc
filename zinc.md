@@ -6,7 +6,6 @@ Summaries are lossy; use granted `memory/expand` for originals and child IDs.
 Code admissions record intent, not execution.
 
 ```janet
-(module/add-syspath (dyn :library))
 (import ./src/engine)
 
 (def capability (require "./src/capability"))
@@ -174,6 +173,6 @@ Code admissions record intent, not execution.
 (each [name entry]
   (pairs (engine/make {:schema schema
                        :input inputs
-                       :document (pa/document)}))
+                       :document document}))
   (put (curenv) (symbol name) @{:value entry}))
 ```

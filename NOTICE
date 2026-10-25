@@ -1,8 +1,8 @@
 Zinc third-party notices
 ========================
 
-Runtime artifacts bundle Portable Agents' Janet runtime, Spork, the Janet
-SQLite binding and Jurl. Janet modules are pinned in the source repository's
+Runtime artifacts bundle Portable Agents' Janet libraries, Remarkable, Spork,
+the Janet SQLite binding and Jurl. Janet modules are pinned in the source repository's
 project.janet. The executors, system libraries, model servers, model weights
 and Cygnet index are separately provisioned. Each component remains subject
 to its own license terms; bundled dependency license texts follow below.
@@ -25,6 +25,13 @@ Spork
 Copyright (c) 2022 Calvin Rose and contributors.
 Source: https://github.com/janet-lang/spork
 License: MIT; bundled third-party code retains its upstream licenses.
+
+Remarkable
+----------
+Copyright (c) 2021 Michael Camilleri and Contributors
+Source: https://github.com/pyrmont/remarkable
+Revision: e3bbf2f5e18c1b3ed33ccf7872b6719351334424
+License: MIT
 
 Stopwords ISO
 -------------
@@ -76,6 +83,7 @@ License: Apache-2.0
 Bundled MIT components
 ----------------------
 Spork: Copyright (c) 2022 Calvin Rose and contributors
+Remarkable: Copyright (c) 2021 Michael Camilleri and Contributors
 Janet SQLite binding: Copyright (c) 2018 Calvin Rose
 Stopwords ISO: Copyright (c) 2020 Gene Diaz
 

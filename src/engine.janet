@@ -1,7 +1,7 @@
 (import spork/json :as json)
 (import spork/path :as path)
 (import spork/utf8 :as utf8)
-(import portable-agents/src/pa)
+(import portable-agents/src/protocol :as wire)
 (import ./store)
 (import ./model)
 (import ./memory)
@@ -56,9 +56,16 @@
         (cond here ((dyn :zinc/execute) s row)
           (or (s :temporary) (and (= "summarize" (row :kind)) (not (dyn :zinc/background))))
           (ev/go (fn [] ((dyn :zinc/execute) s row)))
-          (pa/spawn (merge (dyn :pa/program) {"entry" "task"})
-                    (string (json/encode {:task id :owner (row :owner)}))
-                    (string (json/encode (dyn :zinc/config))) {:limits (dyn :pa/limits) :emit pa/emit :diagnostic pa/diagnostic}))
+          (let [limits (dyn :pa/limits)
+                process (os/spawn [(dyn :pa/executable) "run" (string (limits "frameBytes")) (string (limits "admissionSeconds"))]
+                                  :d {:in :pipe :out :pipe :err stderr})]
+            (ev/spawn (os/proc-wait process))
+            (defer (ev/close (process :out))
+              (defer (ev/close (process :in))
+                (wire/send (process :in) (wire/request {"version" wire/version "program" (merge (dyn :pa/program) {"entry" "task"})
+                                                       "input" (wire/base64 (string (json/encode {:task id :owner (row :owner)})))
+                                                       "config" (wire/base64 (string (json/encode (dyn :zinc/config))))})))
+              (ev/with-deadline (limits "admissionSeconds") (wire/output (wire/reader (process :out) true) true)))))
         ([err] (store/append s (store/view s (if (= "summarize" (row :kind)) (row :parent) id))
                              "launch-uncertain" "Call acceptance could not be confirmed." {:error err} nil id))))
     id)
@@ -67,7 +74,15 @@
     (def current (dyn :zinc/call))
     (def parked (when current (store/park s true)))
     (defer (when (and parked (= "waiting" (get (first (store/query s "SELECT state FROM main.call_controls WHERE id=?" [(current :id)])) :state))) (store/park s false))
-      (label done (while true
+      (if (string? id)
+        (let [child ((current :children) id)]
+          (assert child "temporary self is not owned by this call")
+          (def [worker done] child)
+          (ev/take done)
+          (unless (= :dead (fiber/status worker)) (error (fiber/last-value worker)))
+          (def [ok value] (fiber/last-value worker))
+          (if ok (json/decode value true true) (error value)))
+        (label done (while true
                     (store/recover s)
                     (when current (store/checkpoint s))
                     (def row (first (store/query s "SELECT state,kind FROM main.call_controls WHERE id=? AND source=?" [id (s :source)])))
@@ -79,7 +94,7 @@
                       "uncertain" (error (string "Call #" id ": uncertain effects; inspect receipts, do not replay."))
                       "cancelled" (error "call cancelled")
                       "queued" (launch s id here))
-                    (ev/sleep 0.1)))))
+                    (ev/sleep 0.1))))))
 
   (defn start-child [s view value &opt snapshot]
     (def value (schema/request (postwalk |(if (dictionary? $) (tabseq [[k v] :in (pairs $)] (keyword k) v) $) value)
@@ -104,13 +119,33 @@
           (when (> id 0) (store/event s view id)))
         (assert (< (view :depth) (config :task-depth)) "agent recursion ceiling exhausted")
         (def request (string/join (map |(string/format "%02x" $) (os/cryptorand 24))))
-        (def handle (pa/spawn (merge (dyn :pa/program) {"entry" "self"})
-                              (string (json/encode (merge value {:request request :parent (get value :parent (view :last))
-                                                                 :memory_range (get value :memory_range {:start (view :first) :end (view :last)})})))
-                              (string (json/encode (merge config {:snapshot (merge (store/snapshot s view) {:origin origin})})))
-                              {:limits (dyn :pa/limits) :emit pa/emit :diagnostic pa/diagnostic}))
-        (put ((dyn :zinc/call) :children) request handle)
-        {:temporary request})))
+        (def limits (dyn :pa/limits))
+        (def process (os/spawn [(dyn :pa/executable) "run" (string (limits "frameBytes")) (string (limits "admissionSeconds"))]
+                              :d {:in :pipe :out :pipe :err stderr}))
+        (def exited (ev/chan 1))
+        (ev/go (fn [] (os/proc-wait process)) nil exited)
+        (def reader (wire/reader (process :out) true))
+        (var admitted false)
+        (defer (unless admitted (ev/close (process :out)))
+          (defer (ev/close (process :in))
+            (wire/send (process :in) (wire/request {"version" wire/version "program" (merge (dyn :pa/program) {"entry" "self"})
+                                                   "input" (wire/base64 (string (json/encode (merge value {:request request :parent (get value :parent (view :last))
+                                                                                                         :memory_range (get value :memory_range {:start (view :first) :end (view :last)})}))))
+                                                   "config" (wire/base64 (string (json/encode (merge config {:snapshot (merge (store/snapshot s view) {:origin origin})}))))})))
+          (ev/with-deadline (limits "admissionSeconds") (wire/output reader true))
+          (def done (ev/chan))
+          (def worker (ev/spawn
+                        (defer (ev/chan-close done)
+                          (try
+                            (defer (ev/close (process :out))
+                              (def output (wire/output reader))
+                              (ev/take exited)
+                              (assert (= 0 (process :return-code)) "ProcessFailure")
+                              [true output])
+                            ([err] [false err])))))
+          (put ((dyn :zinc/call) :children) request [worker done])
+          (set admitted true)
+          {:temporary request}))))
 
   (defn run-code [s view bindings code]
     (def config (s :config))
@@ -140,10 +175,7 @@
                                               (let [handle (first args) current (dyn :zinc/call)]
                                                 (assert (dictionary? handle) "await requires a self handle")
                                                 (if (handle :temporary)
-                                                  (let [child ((current :children) (handle :temporary))]
-                                                    (assert child "temporary self is not owned by this call")
-                                                    (def parked (store/park s true))
-                                                    (defer (when parked (store/park s false)) (json/decode (pa/await child) true true)))
+                                                  (wait s (handle :temporary))
                                                   (do
                                                     (assert (and (int? (handle :job)) (not= (current :id) (handle :job))
                                                                  (first (store/query s `WITH RECURSIVE parents(id) AS (SELECT parent FROM main.call_controls WHERE id=? AND source=?
@@ -164,7 +196,7 @@
                                                                    (when (<= (event :id) (admission :id)) (when-let [frame (message event)] (array/push presentation frame)))
                                                                    (set after (event :id)))
                                                                  (when (< (length records) 256) (break)))
-                                                               (schema/data (with-dyns [:zinc/context [s view] :capability/config (binding :config) :pa/presentation presentation] (apply (binding :value) args))))))
+                                                               (schema/data (with-dyns [:zinc/context [s view] :capability/config (binding :config) :capability/presentation presentation] (apply (binding :value) args))))))
                                                 (store/transact s (store/checkpoint s)
                                                                 (store/append s view "operation-outcome" name {:value value} (admission :id) ((dyn :zinc/call) :id)))
                                                 value)))
@@ -235,9 +267,7 @@
         (def outcome (try
                        {:ok true :text (if (get handle :error) (error (get handle :error)) (if parallel
                                          (if (handle :temporary)
-                                           (let [parked (store/park s true)]
-                                             (defer (when parked (store/park s false))
-                                               ((json/decode (pa/await (((dyn :zinc/call) :children) (handle :temporary))) true true) :text)))
+                                           ((wait s (handle :temporary)) :text)
                                            (wait s (handle :job)))
                                          (run-code s view bindings (tool :code))))}
                        ([err fiber]
@@ -249,7 +279,7 @@
                         (store/append s view "tool-result" (if (outcome :ok) (outcome :text) (string (json/encode outcome)))
                                       (merge outcome {:tool-id (tool :id) :response (response :event) :child (get handle :branch) :display (or (not parallel) (has-key? handle :error))}) (admission :id) id))
         (unless (outcome :ok)
-          (pa/diagnostic "warn" (merge (outcome :error) {:context (merge (or (get-in outcome [:error :context]) {}) {:tool-call {:branch id :tool (tool :id) :event (admission :id)}})})))))
+          (eprint (json/encode (merge (outcome :error) {:context (merge (or (get-in outcome [:error :context]) {}) {:tool-call {:branch id :tool (tool :id) :event (admission :id)}})}))))))
     (unless (s :temporary)
       (try (with-dyns [:zinc/background true] (memory/context s (store/view s id) space pool true))
         ([err] (store/append s (store/view s id) "launch-uncertain" "Background compaction preparation failed." {:error (string err)}))))
@@ -286,10 +316,8 @@
         (when-let [runtime ((dyn :zinc/call) :runtime)] (repl/close runtime))
         (when (and (> (length ((dyn :zinc/call) :children)) 0)
                    (first (store/query s "SELECT id FROM main.live_calls WHERE id=? AND owner=?" [id (row :owner)])))
-          (def parked (store/park s true))
-          (defer (when parked (store/park s false))
-            (each child (values ((dyn :zinc/call) :children))
-              (try (pa/await child) ([err] (pa/diagnostic "warn" (if (dictionary? err) err {:code "ChildFailed" :message (string err)})))))))
+          (each request (keys ((dyn :zinc/call) :children))
+            (try (wait s request) ([err] (eprint (json/encode (if (dictionary? err) err {:code "ChildFailed" :message (string err)})))))))
         (store/finish s row value failure)
         (each pending (store/query s "SELECT c.id FROM main.call_controls c JOIN call_payloads p ON p.id=c.id WHERE c.source=? AND p.run=? AND c.state='queued' AND c.expires>? ORDER BY c.id LIMIT ?"
                                    [(s :source) (row :run) (os/clock) (config :parallel)]) (launch s (pending :id))))))
@@ -299,7 +327,7 @@
     (while true
       (def records (memory/events s run sequence))
       (each event records
-        (when-let [frame (message event)] (pa/emit (string (json/encode frame))))
+        (when-let [frame (message event)] (print (json/encode frame)))
         (set sequence (event :id)))
       (when (< (length records) 256) (break)))
     sequence)
@@ -331,7 +359,7 @@
             (assert (and (= "text" (call :kind)) (> (call :expires) (os/clock))) "call requires reconciliation or its deadline expired")
             (store/query s "UPDATE main.call_controls SET state='queued',retries=1,owner=NULL,lease_expires=NULL WHERE id=? AND state IN ('failed','uncertain')" [id]))
           (def emitter (ev/go (fn [] (try (while true (set sequence (drain s (call :run) sequence)) (ev/sleep 0.1))
-                                       ([err] (pa/diagnostic "warn" {:code "ObservationFailed" :message (string err)}))))))
+                                       ([err] (eprint (json/encode {:code "ObservationFailed" :message (string err)})))))))
           (defer (do (ev/cancel emitter "observer detached") (drain s (call :run) sequence))
             (var failure nil)
             (try (wait s id true) ([err] (set failure err)))
@@ -344,7 +372,7 @@
             (if failure (error failure) (result s id)))))))
 
   (defn describe [config]
-    {:contract "inquiry-v3" :profile {:field "agent" :inference "inference"}
+    {:contract "inquiry-v1" :profile {:field "agent" :inference "inference"}
      :parameters (catseq [[target fields] :in [[:config (spec :schema)] [:input (spec :input)]]]
                    (seq [[key field] :in (sorted (pairs fields)) :when (field :option)]
                      (def parameter (merge (tabseq [[k v] :in (pairs field) :unless (index-of k [:optional :option :repl])] k v)
@@ -352,19 +380,19 @@
                      (when (and (= target :config) (= :integer (field :type)) (> (config key) 0)) (put parameter :maximum (config key))) parameter))})
 
   (tabseq [[operation fields] :in [["self" (keys (spec :input))] ["task" [:task :owner]] ["resume" [:run :request :after]]
-                                   ["describe" []] ["document" []] ["models" [:role]] ["views" [:event]] ["render" [:event]] ["events" [:run :after]] ["record" [:records]] ["pending" [:request]] ["abort" [:run :request :reason]] ["invalidate" [:event]]]]
+                                   ["describe" []] ["instructions" []] ["models" [:role]] ["views" [:event]] ["render" [:event]] ["events" [:run :after]] ["record" [:records]] ["pending" [:request]] ["abort" [:run :request :reason]] ["invalidate" [:event]]]]
     operation (fn [bytes opaque]
                 (def config (schema/configuration (spec :schema) (json/decode opaque true true) (= operation "describe")))
                 (unless (index-of operation ["describe" "models"]) (repl/definitions config (spec :schema)))
                 (assert (and (utf8/is-valid? bytes) (<= (length bytes) (config :request-bytes))) "request must be bounded UTF-8")
-                (when (index-of operation ["describe" "document"]) (assert (= "" bytes) "operation takes empty input"))
-                (def value (if (and (= "" bytes) (index-of operation ["describe" "document" "pending"])) {} (schema/request (json/decode bytes true true) fields)))
-                (def s (unless (index-of operation ["describe" "document" "models"]) (store/open config (and (= operation "self") (= false (get value :persist true))))))
+                (when (index-of operation ["describe" "instructions"]) (assert (= "" bytes) "operation takes empty input"))
+                (def value (if (and (= "" bytes) (index-of operation ["describe" "instructions" "pending"])) {} (schema/request (json/decode bytes true true) fields)))
+                (def s (unless (index-of operation ["describe" "instructions" "models"]) (store/open config (and (= operation "self") (= false (get value :persist true))))))
                 (defer (when s (store/close s))
                   (with-dyns [:zinc/config config]
                     (def output (cond
                                   (= operation "describe") (describe config)
-                                  (= operation "document") (repl/instructions config {} (spec :document) (repl/definitions config (spec :schema)) (repl/public config (spec :schema)))
+                                  (= operation "instructions") (repl/instructions config {} (spec :document) (repl/definitions config (spec :schema)) (repl/public config (spec :schema)))
                                   (= operation "models") (map |{:ref ($ :ref) :name ($ :name)} (model/catalogue config (get value :role "chat")))
                                   (= operation "record") {:events (store/record s (value :records))}
                                   (index-of operation ["views" "render"])
@@ -396,4 +424,4 @@
                 AND (? IS NOT NULL OR c.state IN ('queued','running','waiting','failed','uncertain','cancelled')) ORDER BY c.id`
                                                                          [(s :source) (config :world) (value :request) (value :request) (value :request)]))
                                   (run s value operation)))
-                    (if (= operation "document") output (string (json/encode output))))))))
+                    (if (= operation "instructions") output (string (json/encode output))))))))

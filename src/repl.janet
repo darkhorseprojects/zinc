@@ -7,7 +7,7 @@
   (cond
     (string? node) node
     (dictionary? node) (if (has-key? node :content)
-                         (string (when (node :name) (string "# " (node :name) "\n\n")) (string/join (map document (node :content)) "\n\n"))
+                         (string (when (node :name) (string (string/repeat "#" (node :level)) " " (node :name) "\n\n")) (string/join (map document (node :content)) "\n\n"))
                          (or (node :text) (string (json/encode node))))
     (indexed? node) (string/join (map document node) "\n") ""))
 

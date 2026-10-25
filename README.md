@@ -24,10 +24,10 @@ zinc/
   NOTICE
 ```
 
-`lib` contains only runtime dependencies: PA's Janet runtime, Spork's
-path/codecs, SQLite and Jurl. There is no Jpm tree, static library, header,
+`lib` contains only runtime dependencies: PA's Janet libraries, Remarkable,
+Spork's path/codecs, SQLite and Jurl. There is no Jpm tree, static library, header,
 cache, test suite or application state in the artifact. Install the matching
-protocol-3 `agent` separately; Zinc is a source package, not a third executable.
+schema-1 `agent` separately; Zinc is a source package, not a third executable.
 The normal native executor needs neither Jpm nor an external Janet interpreter
 at runtime. Native extensions still require their linked system libraries,
 including libcurl and, when linked dynamically, SQLite with FTS5. These are
@@ -39,13 +39,18 @@ requires the platform's CA trust. Match the Janet ABI used to build native modul
 Select the extracted package directly:
 
 ```yaml
+environment:
+  JANET_PATH: /srv/agents/runtime/lib
 program:
   sourceDir: runtime
   entryModule: zinc.md
   entry: self
-  dependencies:
-    library: runtime/lib
 ```
+
+Set `JANET_PATH` before loading Markdown; adding paths inside the module is too
+late for its parser. Normal Janet callers import `portable-agents/src/markdown`
+first, then import Zinc and call its byte-valued exports normally. Independent
+workers use ordinary `os/spawn`, `ev/` and Zinc's durable call IDs, not PA handles.
 
 Keep `ac.yaml`, the world and private databases outside `runtime`. The model
 server preset is always `runtime/models.ini`; packaging does not start servers,
@@ -144,7 +149,7 @@ call requires its ID; a new call does not silently select earlier edits.
 `capabilities` supplies documented built-ins or public functions from protected
 absolute Janet library paths; selecting a function still requires its grant.
 `input`, `self/document`, `settings` and `resources` are data-only intrinsics.
-Generated environments receive neither private runtime configuration nor PA spawning.
+Generated environments receive neither private runtime configuration nor host process access.
 Host calls use plain data with table prototypes removed; functions, fibers,
 channels and native handles cannot cross the boundary.
 
@@ -244,15 +249,18 @@ that snapshot without inference, evaluation or recomputation. Scope is enforced
 against current source/world/visibility. Missing exact capture fails explicitly.
 Temporary prompts are not durably inspectable.
 
-Trusted exports also include `record`, `describe`, `document`, `models`,
+The module's `document` value contains its section-oriented prose tree.
+Trusted exports also include `record`, `describe`, `instructions`, `models`,
 `events`, `pending`, `resume`, `abort`, `task` and `invalidate`; they are not
 world bindings. `record` passively stores authenticated context without
-executing it. `inquiry-v3` presentation retains self branches, tool results and
+executing it. `inquiry-v1` presentation retains self branches, tool results and
 reasoning visibility while hiding rerank output and summary bookkeeping.
 Committed compaction is presented as source membership, not summarizer model
 output. Background compaction may finish after observation closes; its events
-remain inspectable without a notification service. Tool failures use PA's
-structured diagnostic channel. Diagnostics retain code, message, detail and
-context; configured ceilings fail explicitly rather than silently truncating. Database schema version is 1;
+remain inspectable without a notification service. Presentation is newline-delimited
+application JSON written with `print`; logs use `eprint`, and returned bytes carry
+the final outcome. PA only transports these streams. Accepted workers survive
+caller death and closed observation; executor death requires Zinc recovery.
+Configured ceilings fail explicitly rather than silently truncating. Database schema version is 1;
 incompatible layouts are rejected. Preserve old stores and explicitly provision
 a fresh path.
