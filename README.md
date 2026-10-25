@@ -48,7 +48,7 @@ program:
 ```
 
 Set `JANET_PATH` before loading Markdown; adding paths inside the module is too
-late for its parser. Normal Janet callers import `portable-agents/src/markdown`
+late for its parser. Normal Janet callers import `portable-agents/markdown`
 first, then import Zinc and call its byte-valued exports normally. Independent
 workers use ordinary `os/spawn`, `ev/` and Zinc's durable call IDs, not PA handles.
 

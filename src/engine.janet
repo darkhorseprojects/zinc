@@ -1,7 +1,7 @@
 (import spork/json :as json)
 (import spork/path :as path)
 (import spork/utf8 :as utf8)
-(import portable-agents/src/protocol :as wire)
+(import portable-agents/protocol :as wire)
 (import ./store)
 (import ./model)
 (import ./memory)

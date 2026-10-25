@@ -1,6 +1,6 @@
 # Zinc 0.2.0
 
-- Standard Janet processes and fibers replace PA spawn/await handles.
+- Standard Janet processes and fibers replace PA spawn/await handles; imports use `portable-agents/protocol`.
 - Durable completion remains in SQLite; temporary outcomes remain in their owning call.
 - Ordinary stdout carries inquiry-v1 NDJSON presentation; stderr carries logs.
 - Remarkable supplies CommonMark parsing and the module's structured `document` value.

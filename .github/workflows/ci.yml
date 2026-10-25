@@ -11,8 +11,8 @@ concurrency:
   cancel-in-progress: ${{ !startsWith(github.ref, 'refs/tags/') }}
 jobs:
   toolchain:
-    uses: darkhorseprojects/portable-agents/.github/workflows/ci.yml@9e6eaf58391447bf2d102b69f22817f3397dacf2
-    with: { toolchain: "9e6eaf58391447bf2d102b69f22817f3397dacf2" }
+    uses: darkhorseprojects/portable-agents/.github/workflows/ci.yml@63a6d52583abea43d5473ff8a84c5e07ad9d4119
+    with: { toolchain: "63a6d52583abea43d5473ff8a84c5e07ad9d4119" }
   build:
     needs: toolchain
     strategy:
