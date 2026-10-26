@@ -37,8 +37,8 @@
          :run (event :run) :branch (event :branch) :execution (string (event :request) "/" (event :branch))
          :persist durable :event (if durable (event :id) :null)
          :sequence (event :id) :author (event :author) :at (event :at)
-         :world {:name (event :branch_world) :file (event :branch_file) :path (origin :path) :ref (or (data :ref) (origin :ref))
-                 :base (origin :base) :revision (or (data :after) (origin :base))}})))
+         :world {:path (origin :path) :blob (or (data :blob) (origin :blob)) :ref (or (data :ref) (origin :ref))
+                 :revision (or (data :after) (origin :base))}})))
 
   (defn result [s id]
     (def call (store/call s id))
@@ -50,8 +50,8 @@
                                                                                                                   :parent (or (call :entry) 0) :memory_range {:start (call :first) :end (call :last)}
                                                                                                                   :tool_usage (store/tool-used s (call :run)) :context_unit "token-estimate"
                                                                                                                   :usage (first (store/query s `SELECT coalesce(sum(u.total),0) reported_total,count(*) FILTER(WHERE u.total IS NULL) unreported
-        FROM memory_records e LEFT JOIN usage u ON u.request=e.id WHERE e.source=? AND e.run=? AND e.kind='model-admission'`
-                                                                                                                                             [(s :source) (call :run)]))}))
+        FROM memory_records e LEFT JOIN usage u ON u.request=e.id WHERE e.run=? AND e.kind='model-admission'`
+                                                                                                                                             [(call :run)]))}))
 
   (defn worker [entry input config]
     (def limits (dyn :pa/limits))
@@ -102,7 +102,7 @@
         (label done (while true
                       (store/recover s)
                       (when current (store/checkpoint s))
-                      (def row (first (store/query s "SELECT state,kind FROM main.call_controls WHERE id=? AND source=?" [id (s :source)])))
+                      (def row (first (store/query s "SELECT state,kind FROM main.call_controls WHERE id=?" [id])))
                       (assert row "call unavailable")
                       (case (row :state)
                         "done" (return done (if (= "text" (row :kind)) (result s id)
@@ -128,7 +128,7 @@
                        {:ref (string "refs/heads/self/" (string/join (map |(string/format "%02x" $) (os/cryptorand 12))))}))
     (if (value :persist)
       (do
-        (when (origin :base) (repl/git (origin :root) ["update-ref" "--stdin"] (string "create " (origin :ref) " " (origin :base) "\n")))
+        (repl/git (origin :root) ["update-ref" "--stdin"] (string "create " (origin :ref) " " (origin :base) "\n"))
         (def call (store/start s value config (merge view {:event (dyn :zinc/effect) :agent (or (view :agent) (not= config (s :config)))}) origin))
         {:job (call :id) :branch (call :id)})
       (do
@@ -161,7 +161,7 @@
     (store/checkpoint s)
     (def current (dyn :zinc/call))
     (unless (current :runtime)
-      (os/cd (path/dirname (config :file)))
+      (os/cd (path/dirname (config :world)))
       (assert (<= (os/stat (current :file) :size) (config :source-bytes)) "world source byte ceiling")
       (def public (repl/public config (spec :schema)))
       (put current :runtime (repl/open (string (slurp (current :file))) (current :input)
@@ -179,7 +179,9 @@
                       "world/source"
                       (do (assert (and (= 2 (length args)) (every? (map string? args)) (<= (length (args 1)) (config :source-bytes))) "invalid world source update")
                         (assert (= (args 0) (string (slurp (current :file)))) "world source changed; continue in a new self after merging")
-                        (spit (current :file) (args 1) :wb) nil)
+                        (def blob (string/trim (repl/git (path/dirname (config :world)) ["hash-object" "-w" "--stdin"] (args 1))))
+                        (spit (current :file) (args 1) :wb)
+                        (store/query s (string "UPDATE " (s :journal) ".call_payloads SET origin=json_set(origin,'$.blob',?) WHERE id=?") [blob (current :id)]) nil)
                       (let [admission (store/transact s (store/charge s 1 0)
                                                       (store/append s view "call-admission" name {:arguments args} nil ((dyn :zinc/call) :id)))]
                         (def value
@@ -375,8 +377,8 @@
           (each request (keys ((dyn :zinc/call) :children))
             (try (wait s request) ([err] (eprint (json/encode (if (dictionary? err) err {:code "ChildFailed" :message (string err)})))))))
         (store/finish s row value failure)
-        (each pending (store/query s "SELECT c.id FROM main.call_controls c JOIN call_payloads p ON p.id=c.id WHERE c.source=? AND p.run=? AND c.state='queued' AND c.expires>? ORDER BY c.id LIMIT ?"
-                                   [(s :source) (row :run) (os/clock) (config :parallel)]) (launch s (pending :id))))))
+        (each pending (store/query s "SELECT c.id FROM main.call_controls c JOIN call_payloads p ON p.id=c.id WHERE p.run=? AND c.state='queued' AND c.expires>? ORDER BY c.id LIMIT ?"
+                                   [(row :run) (os/clock) (config :parallel)]) (launch s (pending :id))))))
 
   (defn drain [s run after]
     (var sequence after)
@@ -389,11 +391,11 @@
     sequence)
 
   (defn run [s value operation]
-    (def existing (first (store/query s "SELECT * FROM calls WHERE source=? AND (id=? OR request_key=?)" [(s :source) (or (value :task) (value :run)) (value :request)])))
+    (def existing (first (store/query s "SELECT * FROM calls WHERE id=? OR request_key=?" [(or (value :task) (value :run)) (value :request)])))
     (when (index-of operation ["task" "resume"]) (assert existing "call unavailable"))
     (when existing
       (assert (= 0 (existing :temporary)) "temporary execution cannot be reattached")
-      (assert (and (= (existing :world) ((s :config) :world)) (= 0 (existing :cancelled))) "saved call unavailable")
+      (assert (= 0 (existing :cancelled)) "saved call unavailable")
       (put s :config (schema/authorize (spec :schema) (s :config) (json/decode (existing :config) true true)))
       (put s :budget-root (or (existing :root) (existing :id)))
       (store/query s "UPDATE main.call_controls SET expires=min(expires,(SELECT created FROM events WHERE call=call_controls.id AND kind='user')+?) WHERE id=?"
@@ -421,7 +423,7 @@
             (try (wait s id true) ([err] (set failure err)))
             (while true
               (store/recover s)
-              (def children (store/query s "SELECT c.id,c.state,p.run FROM main.call_controls c LEFT JOIN call_payloads p ON p.id=c.id WHERE c.source=? AND c.root=? AND c.kind<>'summarize' AND c.state IN ('queued','running','waiting') ORDER BY c.id" [(s :source) (or (call :root) id)]))
+              (def children (store/query s "SELECT c.id,c.state,p.run FROM main.call_controls c LEFT JOIN call_payloads p ON p.id=c.id WHERE c.root=? AND c.kind<>'summarize' AND c.state IN ('queued','running','waiting') ORDER BY c.id" [(or (call :root) id)]))
               (when (= 0 (length children)) (break))
               (each child children (when (and (= "queued" (child :state)) (= (call :run) (child :run))) (launch s (child :id))))
               (ev/sleep 0.1))
@@ -455,7 +457,7 @@
                                   (index-of operation ["views" "render"])
                                   (do
                                     (assert (and (int? (value :event)) (> (value :event) 0)) "choose a model-admission event")
-                                    (def row (store/event s {:world (config :world) :visibility (config :visibility) :first 1 :last 9007199254740991} (value :event)))
+                                    (def row (store/event s {:first 1 :last 9007199254740991} (value :event)))
                                     (assert (= "model-admission" (row :kind)) "point must identify a model-admission event")
                                     (def data (json/decode (row :data) true true))
                                     (assert (get-in data [:request :body]) "exact request was not recorded")
@@ -477,8 +479,8 @@
                 (SELECT id FROM events WHERE call=c.id AND kind IN ('user','summary-input')) admission,
                 (SELECT id FROM events WHERE call=c.id AND kind='call-result' ORDER BY id DESC LIMIT 1) outcome,
                 CASE WHEN c.temporary OR c.kind='code' THEN 'manual' ELSE 'retry' END retry_policy,c.expires run_expires,c.lease_expires,c.temporary
-                FROM main.call_controls c WHERE c.request IS NOT NULL AND c.source=? AND c.world=? AND (? IS NULL OR c.request=?)
+                FROM main.call_controls c WHERE c.request IS NOT NULL AND (? IS NULL OR c.request=?)
                 AND (? IS NOT NULL OR c.state IN ('queued','running','waiting','failed','uncertain','cancelled')) ORDER BY c.id`
-                                                                         [(s :source) (config :world) (value :request) (value :request) (value :request)]))
+                                                                         [(value :request) (value :request) (value :request)]))
                                   (run s value operation)))
                     (if (= operation "instructions") output (string (json/encode output))))))))

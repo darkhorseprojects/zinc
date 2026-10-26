@@ -54,14 +54,15 @@ Use verified local weights for reproducible deployments.
 
 ## Execution and durability
 
-The invoker supplies absolute `store`, `source`, `world` and authenticated input:
+The invoker supplies absolute `store` and `world` paths and authenticated input.
+Each database binds to one canonical, Git-tracked world file; sharing it shares history.
 
 ```json
 {"text":"Investigate this","request":"operation-key","author":"principal","at":"2026-01-01T00:00:00.000Z"}
 ```
 
 Use `code` instead of `text` for direct Janet execution. A `repl` object enables
-evaluation and requires an absolute world `file`; omit it to disable evaluation.
+evaluation; omit it to disable evaluation.
 
 ```janet
 (defmacro twice [x] ~(+ ,x ,x))
@@ -72,7 +73,7 @@ evaluation and requires an absolute world `file`; omit it to disable evaluation.
 `self` returns the completed result, not a future: evaluation text for code,
 a map with `:text` for inquiries. Text uses the configured `agent` profile,
 otherwise the caller profile; code uses the caller profile. Profiles share
-source/store/world/file identity. Use native fibers to run children concurrently:
+store/world identity. Use native fibers to run children concurrently:
 
 ```janet
 (ev/gather (self {:code "(+ 20 22)"}) (self {:text "Investigate independently"}))
@@ -89,8 +90,8 @@ no live REPL heap is durable. Supervisors must not kill the containing job/cgrou
 
 Calls copy source, not live bindings. Root source comes from Git HEAD or
 `:revision`; children copy the caller's current source. Single-name `def`, `defn`
-and `defmacro` update source after successful evaluation; `(def name nil)` removes
-a declaration. Other expressions execute without becoming startup source.
+and `defmacro` add or replace source declarations after successful evaluation;
+a definition evaluating to nil removes its declaration. Other expressions execute without becoming startup source.
 Initializers run on load: use `let` for temporary values and effects.
 
 `:parent` attaches history; `:memory_range {:start id :end id}` bounds visibility.
@@ -104,8 +105,8 @@ automatically. Selected `save` commits source, not heap state:
 (save "Publish" {:push true})
 ```
 
-Save uses Git compare-and-swap, preserves dirty canonical files and restricts
-merges to the world file. Push additionally requires `remote`.
+Source snapshots carry Git blob IDs. Save uses Git compare-and-swap, preserves
+dirty canonical files and restricts merges to the world file. Push requires `remote`.
 
 `run-seconds` bounds the tree; `seconds` bounds each evaluation including waits.
 Waits release parallel slots. Descendants share work/tool budgets. Cancellation
@@ -179,11 +180,13 @@ credential references. Credentials are resolved in trusted code, never saved in
 configuration or prompts. `web-search` is OpenRouter provider search, independent
 of memory `search`. Unsupported capabilities fail rather than falling back.
 
-Chronological memory uses balanced summaries with source membership and
-invalidation. Retrieval uses FTS, exact Cygnet expansion and reranking against
-the inquiry; no spelling-correction index is maintained. `score` is the minimum
-reranker score. Search splits available memory space equally; disabling it gives
-chronology the full budget. `memory/expand` pages records and summary children.
+Chronology uses balanced summaries with checked membership and invalidation.
+Search extracts words, removes stopwords, expands exact Cygnet matches, and finds
+character-trigram matches in history vocabulary. Unknown words are preserved.
+One FTS index supplies recent candidates; only the reranker scores relevance.
+Vocabulary scanning trades large-store throughput for one index and no spelling dictionary.
+`score` is the reranker cutoff. Search splits memory space equally; disabling it
+gives chronology the full budget. `memory/expand` pages records and summary children.
 Estimates are `ceil(bytes/4)`; provider usage is stored separately.
 
 Each model round records the exact serialized request, source snapshot and memory
@@ -196,5 +199,5 @@ passive authenticated history, never executable turns.
 Presentation is application NDJSON on stdout; logs use stderr; the final return
 value carries the outcome. PA only transports bytes. Background compaction may
 finish after observation closes. Limits fail explicitly instead of truncating.
-**Zinc database version is 2.** Preserve old stores and provision a fresh path;
+**Zinc database version is 3.** Preserve old stores and provision a fresh path;
 there is no migration or compatibility mode.

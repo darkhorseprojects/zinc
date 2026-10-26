@@ -14,8 +14,8 @@
                  (when (and current (>= (os/clock) next-check))
                    (set next-check (+ (os/clock) 0.1))
                    (set permitted (not (nil? (first
-                     (sql/eval db "SELECT id FROM live_calls WHERE id=? AND source=? AND owner=?"
-                               [(current :id) (config :source) (current :owner)]))))))
+                     (sql/eval db "SELECT id FROM live_calls WHERE id=? AND owner=?"
+                               [(current :id) (current :owner)]))))))
                  permitted))
     (assert (check) "HTTP job fenced")
     (def token (when (endpoint :token-env) (os/getenv (endpoint :token-env))))
@@ -41,7 +41,7 @@
   (assert endpoint "HTTP endpoint is not configured")
   (def current (dyn :zinc/call))
   (def finished (ev/thread-chan 1))
-  (ev/thread transfer [(tabseq [key :in [:store :source :response-bytes :http-ms]] key (config key)) endpoint method suffix body
+  (ev/thread transfer [(tabseq [key :in [:store :response-bytes :http-ms]] key (config key)) endpoint method suffix body
                        (when current {:id (current :id) :owner (current :owner) :expires (get-in current [:scope :expires])})] :n finished)
   (defer (ev/chan-close finished)
     (def [status result] (ev/take finished))

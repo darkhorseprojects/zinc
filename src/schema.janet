@@ -39,12 +39,13 @@
 
 (defn configuration [schema supplied &opt discovery]
   (def config (validate schema supplied discovery))
+  (unless discovery (put config :world (os/realpath (config :world))))
   (when (config :context-quota)
     (assert (<= (config :summary-quota) (config :context-quota)) "summary quota exceeds context quota"))
   (when (config :agent)
     (assert (not (get-in config [:agent :agent])) "nested execution profiles are not supported")
     (put config :agent (configuration schema (config :agent) discovery))
-    (each key [:source :store :world :file]
+    (each key [:store :world]
       (assert (= (config key) (get-in config [:agent key])) "agent view changes world identity/location")))
   (when-let [repl (config :repl)]
     (put repl :values (select (seq [[key field] :in (pairs schema) :when (get-in field [:repl :value])] (string key)) (repl :values)))
@@ -71,7 +72,7 @@
 
 (defn authorize [schema current saved]
   (each key (keys saved) (assert (has-key? schema key) "unsupported saved configuration"))
-  (each key [:source :store :world :file :instructions]
+  (each key [:store :world :instructions]
     (assert (= (current key) (saved key)) "saved identity/location differs"))
   (each key [:inference :web-search]
     (assert (or (not (saved key)) (current key)) (string "saved permission revoked: " key)))
@@ -84,7 +85,6 @@
     (each [name grant] (pairs (saved field))
       (assert (deep= grant (get-in current [field name])) "saved resource changed or revoked")))
   (assert (or (nil? (saved :remote)) (= (saved :remote) (current :remote))) "saved remote changed")
-  (each value (saved :visibility) (assert (index-of value (current :visibility)) "saved grant revoked"))
   (each [name module] (pairs (get-in saved [:repl :modules] {}))
     (assert (= (module :module) (get-in current [:repl :modules name :module])) "saved module revoked"))
   (when (saved :agent) (assert (current :agent) "agent execution view revoked"))
@@ -136,10 +136,9 @@
 
 (defn database [&opt temporary]
   (string (unless temporary `
+CREATE TABLE world(id INTEGER PRIMARY KEY CHECK(id=1),file TEXT NOT NULL) STRICT;
 CREATE TABLE call_controls(
   id INTEGER PRIMARY KEY AUTOINCREMENT CHECK(id<=9007199254740991),
-  source TEXT NOT NULL,
-  world TEXT NOT NULL,
   request TEXT,
   parent INTEGER REFERENCES call_controls(id),
   root INTEGER REFERENCES call_controls(id),
@@ -155,10 +154,10 @@ CREATE TABLE call_controls(
   key TEXT,
   work_used INTEGER NOT NULL DEFAULT 0,
   tool_used INTEGER NOT NULL DEFAULT 0,
-  UNIQUE(source,request),
-  UNIQUE(source,key)
+  UNIQUE(request),
+  UNIQUE(key)
 ) STRICT;
-CREATE INDEX call_pending ON call_controls(source,state,id);
+CREATE INDEX call_pending ON call_controls(state,id);
 CREATE INDEX call_parent ON call_controls(parent,id);
 CREATE VIEW live_calls AS
   SELECT c.*
@@ -166,8 +165,8 @@ CREATE VIEW live_calls AS
   WHERE c.state IN ('running','waiting')
     AND c.lease_expires>unixepoch('subsec') AND c.expires>unixepoch('subsec')
     AND r.expires>unixepoch('subsec') AND NOT c.cancelled AND NOT r.cancelled;
-CREATE VIEW running AS SELECT source FROM live_calls WHERE state='running';
-PRAGMA user_version=2;
+CREATE VIEW running AS SELECT id FROM live_calls WHERE state='running';
+PRAGMA user_version=3;
 `) (string/replace-all "$schema." (if temporary "journal." "main.") `
 CREATE TABLE $schema.call_payloads(
   id INTEGER PRIMARY KEY,
@@ -179,21 +178,17 @@ CREATE TABLE $schema.call_payloads(
   first INTEGER NOT NULL,
   last INTEGER NOT NULL,
   history_last INTEGER NOT NULL,
-  world TEXT NOT NULL,
-  code TEXT NOT NULL DEFAULT '',
   file TEXT,
   origin TEXT NOT NULL DEFAULT '{}' CHECK(json_valid(origin)),
   temporary INTEGER NOT NULL,
   agent INTEGER NOT NULL,
   depth INTEGER NOT NULL,
-  visibility TEXT NOT NULL CHECK(json_valid(visibility)),
   checkpoint TEXT NOT NULL DEFAULT '{}' CHECK(json_valid(checkpoint)),
   CHECK(first>=0 AND last>=first AND ((first=0 AND last=0) OR first>0))
 ) STRICT;
 CREATE INDEX $schema.call_history_parent ON call_payloads(parent,id);
 CREATE TABLE $schema.events(
   id INTEGER PRIMARY KEY AUTOINCREMENT CHECK(id<=9007199254740991),
-  source TEXT NOT NULL,
   call INTEGER REFERENCES call_payloads(id),
   parent INTEGER REFERENCES events(id),
   kind TEXT NOT NULL,
@@ -204,7 +199,6 @@ CREATE TABLE $schema.events(
   estimate INTEGER NOT NULL CHECK(estimate>=0),
   created REAL NOT NULL DEFAULT(unixepoch('subsec'))
 ) STRICT;
-CREATE INDEX $schema.event_source ON events(source,id);
 CREATE INDEX $schema.event_call ON events(call,id);
 CREATE UNIQUE INDEX $schema.call_input ON events(call) WHERE kind IN ('user','summary-input');
 CREATE UNIQUE INDEX $schema.call_entry ON events(call,json_extract(data,'$.attempt')) WHERE kind='call-attempt';
@@ -248,7 +242,7 @@ CREATE TRIGGER $schema.event_kind BEFORE INSERT ON events
   )
   BEGIN SELECT raise(ABORT,'unsupported event kind'); END;
 CREATE VIEW $schema.memory_records AS WITH records AS (
-  SELECT e.id,e.source,e.call task,c.run,
+  SELECT e.id,e.call task,c.run,
     CASE WHEN c.kind='summarize' THEN c.parent ELSE c.id END branch,
     CASE
       WHEN e.kind='call-result' AND c.kind='code' THEN (
@@ -279,7 +273,7 @@ CREATE VIEW $schema.memory_records AS WITH records AS (
   FROM events e
   LEFT JOIN call_payloads c ON c.id=e.call
 )
-SELECT e.*,b.world branch_world,b.file branch_file,b.temporary branch_temporary,b.parent branch_parent,
+SELECT e.*,b.temporary branch_temporary,b.parent branch_parent,
   json_extract(a.data,'$.input.request') request,
   CASE WHEN b.temporary=1 THEN 'tmp:'||json_extract(a.data,'$.input.request')||'/'||b.id||':'||e.id END label,
   CASE
@@ -327,29 +321,25 @@ CREATE VIEW $schema.unresolved_tools AS
         AND json_extract(e.data,'$.tool-id')=json_extract(c.value,'$.id')
         AND json_extract(e.data,'$.response')=r.id
     );
-CREATE VIEW $schema.invalid_summaries AS WITH RECURSIVE invalid(source,id) AS (
-  SELECT n.source,n.id
-  FROM events a
-  JOIN events n ON n.id=json_extract(a.data,'$.invalidates') AND n.source=a.source AND n.kind='summary'
+CREATE VIEW $schema.invalid_summaries AS WITH RECURSIVE invalid(id) AS (
+  SELECT n.id FROM events a JOIN events n ON n.id=json_extract(a.data,'$.invalidates') AND n.kind='summary'
   WHERE a.kind='artifact' AND json_type(a.data,'$.invalidates')='integer'
-  UNION
-  SELECT n.source,n.id
-  FROM events n JOIN invalid i ON i.source=n.source,json_each(n.data,'$.children') c
-  WHERE n.kind='summary' AND i.id=c.value
+  UNION SELECT n.id FROM events n,json_each(n.data,'$.children') c JOIN invalid i ON i.id=c.value WHERE n.kind='summary'
 )
 SELECT id FROM invalid;
 CREATE UNIQUE INDEX $schema.summary_call ON events(call) WHERE kind='summary';
-CREATE INDEX $schema.summary_key ON events(source,json_extract(data,'$.policy'),json_extract(data,'$.children'))
+CREATE INDEX $schema.summary_key ON events(json_extract(data,'$.policy'),json_extract(data,'$.children'))
   WHERE kind='summary';
-CREATE INDEX $schema.summary_start ON events(source,json_extract(data,'$.first')) WHERE kind='summary';
-CREATE INDEX $schema.summary_invalidations ON events(source,id)
+CREATE INDEX $schema.summary_start ON events(json_extract(data,'$.first')) WHERE kind='summary';
+CREATE INDEX $schema.summary_invalidations ON events(id)
   WHERE kind='artifact' AND json_type(data,'$.invalidates')='integer';
 CREATE VIEW $schema.search_records AS SELECT id,body FROM memory_records WHERE memory;
 CREATE VIRTUAL TABLE $schema.event_fts USING fts5(
   body,content='search_records',content_rowid='id',tokenize='unicode61 remove_diacritics 0'
 );
+CREATE VIRTUAL TABLE $schema.event_words USING fts5vocab(event_fts,'row');
 CREATE TRIGGER $schema.event_index AFTER INSERT ON events BEGIN
   INSERT INTO event_fts(rowid,body) SELECT id,body FROM search_records WHERE id=new.id;
 END;
-CREATE UNIQUE INDEX $schema.context_key ON events(source,json_extract(data,'$.key')) WHERE kind='context';
+CREATE UNIQUE INDEX $schema.context_key ON events(json_extract(data,'$.key')) WHERE kind='context';
 `)))

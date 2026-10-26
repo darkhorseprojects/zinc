@@ -119,7 +119,7 @@
   (assert (index-of role ["chat" "rerank"]) "unknown model role")
   (def input (merge {:model (config (if (= "rerank" role) :rerank :chat))} input))
   (def event
-    (or (when pending (first (store/query s "SELECT id,data,text FROM events WHERE source=? AND parent=? AND kind='model-outcome'" [(s :source) pending])))
+    (or (when pending (first (store/query s "SELECT id,data,text FROM events WHERE parent=? AND kind='model-outcome'" [pending])))
         (do
           (default selected (profile s (input :model) (keyword role)))
           (assert (= (selected :reference) (input :model)) "profile does not match admitted model")
@@ -218,8 +218,8 @@
                    :visible (and (= role "chat") (not (input :turn)) (not= "summarize" (current :kind)))}))
               ([err] (error {:code "InvalidModelResponse" :message (string err) :detail (string (json/encode value)) :context {:request admission}}))))
           (store/transact s
-                          (assert (first (store/query s "SELECT id FROM main.call_controls WHERE id=? AND source=? AND owner=? AND state IN ('running','waiting','uncertain','cancelled')"
-                                                      [(current :id) (s :source) (current :owner)])) "model completion fenced")
+                          (assert (first (store/query s "SELECT id FROM main.call_controls WHERE id=? AND owner=? AND state IN ('running','waiting','uncertain','cancelled')"
+                                                      [(current :id) (current :owner)])) "model completion fenced")
                           (def content (get-in result [:message :content]))
                           (store/append s (current :scope) "model-outcome"
                                         (cond (string? content) content

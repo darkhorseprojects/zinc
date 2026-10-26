@@ -14,10 +14,8 @@ without a result. Inspect before repeating.
 (import ./src/engine)
 
 (def schema
-  {:source {:type :string}
-   :world {:type :string :repl {:value true}}
+  {:world {:type :string :absolute true :repl {:value true}}
    :store {:type :string :absolute true}
-   :file {:type :string :absolute true :optional true}
    :instructions {:type :string :absolute true :optional true}
    :remote {:type :string :optional true}
    :snapshot {:type :dictionary :optional true}
@@ -69,7 +67,6 @@ Children share the root deadline and budgets. Waiting releases a slot. Workers p
                                  :description {:type :string :optional true}}}
                :repl {:public [:argv :description]
                       :functions {"process/run" {:doc "(process/run name) runs fixed argv/env with empty stdin; returns {:exit :output}."}}}}
-   :visibility {:type :array :items :string :default []}
    :providers {:type :dictionary
                :default {}
                :values {:type :dictionary
