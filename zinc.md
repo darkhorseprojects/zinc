@@ -102,7 +102,7 @@ Children share the root deadline and budgets. Waiting releases a slot. Workers p
    :response-bytes {:type :integer :default 8388608 :minimum 4096 :maximum 16777216}
    :image-bytes {:type :integer :default 4194304 :minimum 1 :maximum 8388608}
    :history-records {:type :integer :default 1024 :minimum 1 :maximum 4096}
-   :search {:type :boolean :default true}
+   :memory-retrieval {:type :boolean :default true}
    :terms {:type :integer :default 64 :minimum 1 :maximum 256}
    :candidates {:type :integer :default 16 :minimum 1 :maximum 64}
    :depth {:type :integer :default 1 :minimum 0 :maximum 4}

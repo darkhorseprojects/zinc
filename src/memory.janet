@@ -59,7 +59,7 @@
     ([err] (sql/close db) (error err))))
 
 (defn semantic-window [s view anchor &opt request]
-  (if (or (not ((s :config) :search)) (= (view :last) 0)) []
+  (if (or (not ((s :config) :memory-retrieval)) (= (view :last) 0)) []
     (let [config (s :config)]
       (assert (utf8/is-valid? anchor) "invalid query UTF-8")
       (def stops (get (json/decode (slurp (config :stopwords)) true true) (keyword (config :language))))
@@ -118,7 +118,7 @@
           (or (record s view (((dyn :zinc/wait) s job) :node) 0 bytes) (error "summary unavailable at the current history cut"))))))
 
 (defn context [s view limit evidence &opt prepare]
-  (def budget (if ((s :config) :search) (math/floor (/ limit 2)) limit))
+  (def budget (if ((s :config) :memory-retrieval) (math/floor (/ limit 2)) limit))
   (def policy (string ((s :config) :summary-quota) ":" summary-prompt))
   (def nodes @[]) (var cursor (- (view :first) 1)) (var pending false) (var cost 0) (var members 0)
   (while (not pending)

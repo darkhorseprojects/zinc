@@ -91,7 +91,7 @@
   (each [name provider] (pairs (saved :providers))
     (def granted (get-in current [:providers name]))
     (assert (and granted (deep= provider granted)) "saved provider changed or revoked"))
-  (def config (merge saved {:search (and (saved :search) (current :search))
+  (def config (merge saved {:memory-retrieval (and (saved :memory-retrieval) (current :memory-retrieval))
                             :score (max (saved :score) (current :score))
                             :agent (when (saved :agent) (authorize schema (current :agent) (saved :agent)))
                             :repl (when (saved :repl)

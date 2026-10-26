@@ -6,7 +6,7 @@
   :dependencies
   [{:repo "https://github.com/darkhorseprojects/portable-agents.git" :tag "df0d6590e081698a73842ae5baaa963b21e5a63d"}
    {:repo "https://github.com/janet-lang/sqlite3.git" :tag "9126fe46ff1c7e42ca3d7bb9c8aed95a8236a32c"}
-   {:repo "https://github.com/darkhorseprojects/jurl.git" :tag "f34af1ae3cd503c81086e3b12cb6043640c43801"}
+   {:repo "https://github.com/darkhorseprojects/jurl.git" :tag "0a1aa237e4e1941cd6d15018a81d03052050ecef"}
    {:repo "https://github.com/janet-lang/spork.git" :tag "8a87c5ae1cbbf3a0037eeac7f172bd45da4d9910"}])
 
 (declare-source :source ["src" "zinc.md" "models.ini" "models.lock"] :prefix "zinc")

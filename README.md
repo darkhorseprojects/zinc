@@ -48,8 +48,9 @@ native modules from an unrelated Janet installation.
 Model weights and the Cygnet index are separately provisioned. `models.lock`
 records provenance; `tools/cygnet_index.py SOURCE OUTPUT` verifies the upstream
 Cygnet database and builds the runtime index using Python 3.11+. The upstream
-database itself is not a runtime index. Set `search: false` to run without Cygnet
-or a reranker; missing search resources never trigger an automatic fallback.
+database itself is not a runtime index. Configure absolute `cygnet` and `stopwords`
+paths; execution validates both resources before accepting work, even with empty history.
+Set `memory-retrieval: false` to use chronology without retrieved excerpts or a reranker.
 Use verified local weights for reproducible deployments.
 
 ## Execution and durability
@@ -178,20 +179,22 @@ Saved execution is reauthorized against current grants and module/setup paths.
 Provider configuration grants URLs, optional exact model IDs and `token-env`
 credential references. Credentials are resolved in trusted code, never saved in
 configuration or prompts. `web-search` is OpenRouter provider search, independent
-of memory `search`. Unsupported capabilities fail rather than falling back.
+of local `memory-retrieval`. Unsupported capabilities fail rather than falling back.
 
 Chronology uses balanced summaries with checked membership and invalidation.
-Search extracts words, removes stopwords, expands exact Cygnet matches, and finds
+Memory retrieval extracts words, removes stopwords, expands exact Cygnet matches, and finds
 character-trigram matches in history vocabulary. Unknown words are preserved.
 One FTS index supplies recent candidates; only the reranker scores relevance.
 Vocabulary scanning trades large-store throughput for one index and no spelling dictionary.
-`score` is the reranker cutoff. Search splits memory space equally; disabling it
+This is lexical history retrieval with model reranking, not web or vector search.
+`score` is the reranker cutoff. Retrieval splits memory space equally; disabling it
 gives chronology the full budget. `memory/expand` pages records and summary children.
 Estimates are `ceil(bytes/4)`; provider usage is stored separately.
 
 Each model round records the exact serialized request, source snapshot and memory
 window coordinates before sending. `views` and `render` read that capture without
 inference or recomputation. Temporary requests are not durably inspectable.
+Saved calls using the former `search` setting cannot resume; their history remains readable.
 Other trusted exports include `describe`, `instructions`, `models`, `record`,
 `events`, `pending`, `resume`, `abort`, `task` and `invalidate`. `record` stores
 passive authenticated history, never executable turns.

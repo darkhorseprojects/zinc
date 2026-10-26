@@ -1,4 +1,5 @@
 (import spork/json :as json)
+(import sqlite3 :as sql)
 (import spork/path :as path)
 (import spork/utf8 :as utf8)
 (import portable-agents/protocol :as wire)
@@ -442,7 +443,14 @@
     operation (fn [bytes opaque]
                 (def config (schema/configuration (spec :schema) (json/decode opaque true true) (= operation "describe")))
                 (when (index-of operation ["self" "task" "resume" "instructions"])
-                  (each profile (filter identity [config (config :agent)]) (repl/definitions profile (spec :schema))))
+                  (each profile (filter identity [config (config :agent)])
+                    (repl/definitions profile (spec :schema))
+                    (when (and (profile :inference) (profile :memory-retrieval))
+                      (each key [:stopwords :cygnet]
+                        (assert (and (profile key) (= :file (os/stat (profile key) :mode))) (string key " file required for memory-retrieval")))
+                      (def stops (get (json/decode (slurp (profile :stopwords)) true true) (keyword (profile :language))))
+                      (assert (and (indexed? stops) (> (length stops) 0)) "unsupported stopword language")
+                      (sql/close (memory/cygnet profile)))))
                 (assert (and (utf8/is-valid? bytes) (<= (length bytes) (config :request-bytes))) "request must be bounded UTF-8")
                 (when (index-of operation ["describe" "instructions"]) (assert (= "" bytes) "operation takes empty input"))
                 (def value (if (and (= "" bytes) (index-of operation ["describe" "instructions" "pending"])) {} (schema/request (json/decode bytes true true) fields)))
