@@ -24,12 +24,11 @@
   (try
     (do
       (query s "PRAGMA foreign_keys=ON; PRAGMA trusted_schema=OFF; PRAGMA busy_timeout=5000; PRAGMA synchronous=FULL; PRAGMA journal_mode=WAL; PRAGMA temp_store=MEMORY;")
-      (unless (= 1 (((query s "PRAGMA user_version") 0) :user_version))
+      (unless (= 2 (((query s "PRAGMA user_version") 0) :user_version))
         (transact s
                   (def version (((query s "PRAGMA user_version") 0) :user_version))
-                  (assert (index-of version [0 1]) "unsupported Zinc database; preserve it and provision a fresh database")
+                  (assert (index-of version [0 2]) "unsupported Zinc database; preserve it and provision a fresh database")
                   (when (= version 0) (query s (schema/database)))))
-      (assert (first (query s "SELECT name FROM main.sqlite_schema WHERE name='memory_records' AND instr(sql,'$.error.message')>0 AND instr(sql,'branch_world')>0")) "incompatible Zinc layout; preserve it and provision a fresh database")
       (when temporary
         (query s "ATTACH DATABASE ':memory:' AS journal; PRAGMA foreign_keys=OFF;")
         (query s (string "PRAGMA journal.max_page_count=" (math/floor (/ (config :journal-bytes) (((query s "PRAGMA journal.page_size") 0) :page_size)))))
@@ -52,11 +51,9 @@
                     (each row (get-in config [:snapshot name] [])
                       (query s (string "INSERT OR IGNORE INTO journal." name "(" (string/join columns ",") ") VALUES(" (string/join (map (fn [_] "?") columns) ",") ")")
                              (map |(if (and (= name :images) (= $ "bytes")) (buffer (base64/decode (row :bytes))) (get row (keyword $))) columns)))))
-        (query s `INSERT INTO journal.lexemes(source,term) SELECT DISTINCT e.source,w.term FROM journal.event_words w JOIN journal.events e ON e.id=w.doc
-          WHERE length(CAST(w.term AS BLOB))<=128 AND w.offset<2048 ON CONFLICT DO NOTHING;
-          PRAGMA foreign_keys=ON;`)
+        (query s "PRAGMA foreign_keys=ON;")
         (assert (<= (* (((query s "PRAGMA journal.page_count") 0) :page_count) (((query s "PRAGMA journal.page_size") 0) :page_size)) (config :journal-bytes)) "temporary history exceeds RAM journal budget")
-        (each name [:call_payloads :events :images :usage :memory_records :conversation_records :unresolved_tools :invalid_summaries :lexemes]
+        (each name [:call_payloads :events :images :usage :memory_records :conversation_records :unresolved_tools :invalid_summaries]
           (query s (string "CREATE TEMP VIEW " name " AS SELECT * FROM journal." name))))
       (query s (string `CREATE TEMP VIEW calls AS SELECT c.id,c.source,c.world,c.parent,c.root,c.kind,c.temporary,c.expires,c.cancelled,
         c.state,c.attempt,c.owner,c.lease_expires,c.retries,c.key,c.work_used,c.tool_used,c.request request_key,
@@ -96,7 +93,6 @@
             (def row ((query s (string "INSERT INTO " (s :journal) ".events(source,call,parent,kind,text,data,estimate,author,at) VALUES(?,?,?,?,?,?,?,?,coalesce(?,strftime('%Y-%m-%dT%H:%M:%fZ','now'))) RETURNING *")
                              [(s :source) (or execution (scope :branch)) parent kind text encoded (estimate (string text encoded))
                               (or (scope :author) (if context (string "self:" (context :request) "/" (context :id)) "system:zinc")) (scope :at)]) 0))
-            (query s (string "INSERT INTO " (s :journal) ".lexemes(source,term) SELECT DISTINCT ?,term FROM (SELECT term FROM " (s :journal) ".event_words WHERE doc=? ORDER BY offset LIMIT 2048) WHERE length(CAST(term AS BLOB))<=128 ON CONFLICT DO NOTHING") [(s :source) (row :id)])
             (when (s :temporary)
               (assert (<= (* (((query s "PRAGMA journal.page_count") 0) :page_count) (((query s "PRAGMA journal.page_size") 0) :page_size)) ((s :config) :journal-bytes)) "RAM journal byte ceiling"))
             row))
@@ -120,16 +116,15 @@
     SELECT ?,9007199254740991 UNION ALL SELECT c.parent,min(a.through,c.last) FROM call_payloads c JOIN ancestry a ON c.id=a.id WHERE c.parent IS NOT NULL
   ), members(id) AS (SELECT ? UNION SELECT c.value FROM members m JOIN events n ON n.id=m.id,json_each(n.data,'$.children') c WHERE n.kind='summary')
   SELECT ` (get view :columns "e.*") `,coalesce(b.world,json_extract(e.data,'$.world')) world FROM `
-                   (cond (view :lexical) (string (s :journal) ".lexeme_grams JOIN lexemes l ON l.id=lexeme_grams.rowid JOIN " (s :journal) ".event_words w ON w.term=l.term AND w.offset<2048 JOIN memory_records e ON e.id=w.doc AND e.source=l.source")
-                     (view :match) (string (s :journal) ".event_fts JOIN memory_records e ON e.id=event_fts.rowid") "memory_records e")
+                   (if (view :match) (string (s :journal) ".event_fts JOIN memory_records e ON e.id=event_fts.rowid") "memory_records e")
                    ` LEFT JOIN call_payloads b ON b.id=e.branch WHERE `
-                   (when (view :match) (if (view :lexical) "lexeme_grams MATCH ? AND " "event_fts MATCH ? AND "))
+                   (when (view :match) "event_fts MATCH ? AND ")
                    `e.source=? AND e.id BETWEEN ? AND ? AND (coalesce(b.world,json_extract(e.data,'$.world'))=? OR coalesce(b.world,json_extract(e.data,'$.world')) IN (SELECT value FROM json_each(?)))
     AND (e.id<=? OR (e.run=? AND EXISTS(SELECT 1 FROM ancestry a WHERE a.id=e.branch AND e.id<=a.through)))
     AND (e.kind='context' OR b.temporary=0 OR b.id IN (SELECT id FROM ancestry) OR (? AND e.id<=?))
     AND (? IS NULL OR e.kind IN (SELECT value FROM json_each(?))) AND e.id NOT IN (SELECT value FROM json_each(?))`
                    (when (view :memory) " AND e.memory") " ORDER BY "
-                   (if (view :match) (if (view :lexical) "l.term,e.id" "bm25(event_fts),e.id") (string "e.id " (if (= order :recent) "DESC" "ASC"))) " LIMIT ?")
+                   (if (view :match) "bm25(event_fts),e.id" (string "e.id " (if (= order :recent) "DESC" "ASC"))) " LIMIT ?")
          (array/concat @[(view :branch) (view :root)] (if (view :match) [(view :match)] [])
                        [(s :source) (view :first) (view :last) (view :world) (string (json/encode (get view :visibility [])))
                         (get view :history-last (view :last)) (view :run) (if (s :temporary) 1 0) (get view :history-last (view :last))
@@ -182,7 +177,8 @@
                   (when (saved :agent) (put saved :agent (merge (saved :agent))))
                   (each profile (filter identity [saved (saved :agent)])
                     (put profile :snapshot nil)
-                    (put profile :capabilities (tabseq [[name capability] :in (pairs (profile :capabilities))] name {:module (capability :module)}))))
+                    (when-let [repl (profile :repl)]
+                      (put profile :repl (merge repl {:modules (tabseq [[name module] :in (pairs (repl :modules))] name {:module (module :module)})})))))
                 (def temporary (if (s :temporary) 1 0))
                 (when caller (assert (or (= temporary 1) (= 0 ((call s (caller :branch)) :temporary))) "temporary calls cannot create durable descendants"))
                 (def depth (if summary (caller :depth) (if caller (+ 1 (caller :depth)) (get-in config [:snapshot :depth] 0))))
@@ -200,13 +196,13 @@
                        [id (or (when caller (caller :branch)) (get-in config [:snapshot :parent-call])) run (cond summary "summarize" (input :code) "code" "text")
                         (when (and saved (not summary)) (string (json/encode saved))) entry first-id last (if caller (caller :history-last) last) world code
                         (string (json/encode (tabseq [[k v] :in (pairs (or origin {})) :unless (= k :code)] k v))) temporary (if (and caller (caller :agent)) 1 0) depth (string (json/encode (config :visibility)))])
-                (when (and (not summary) (get-in config [:repl :enabled]))
+                (when (and (not summary) (config :repl))
                   (def directory (string (config :store) ".worlds"))
                   (os/mkdir directory) (os/chmod directory 8r700)
                   (def file (path/join directory (string (string/join (map |(string/format "%02x" $) (os/cryptorand 18))) ".janet")))
                   (with [out (file/open file :wbn)] (file/write out code)) (os/chmod file 8r600)
                   (query s (string "UPDATE " (s :journal) ".call_payloads SET file=? WHERE id=?") [file id]))
-                (def input-event (append s {:branch id :author (input :author) :at (input :at)} (if summary "summary-input" "user") "" {:input admitted} (when (and entry (> entry 0)) entry) id))
+                (def input-event (append s {:branch id :author (input :author) :at (input :at)} (if summary "summary-input" "user") (get input :text (get input :code "")) {:input admitted} (when (and entry (> entry 0)) entry) id))
                 (var image-bytes 0)
                 (eachp [position image] (get input :images [])
                   (def bytes (image :bytes)) (+= image-bytes (length bytes))
@@ -239,7 +235,8 @@
   (checkpoint s)
   (if waiting
     (first (query s "UPDATE main.call_controls SET state='waiting' WHERE id=? AND owner=? AND state='running' RETURNING id" [(current :id) (current :owner)]))
-    (while true
+    (while (and (= 0 (get current :waiters 0))
+                (= "waiting" (get (first (query s "SELECT state FROM main.call_controls WHERE id=?" [(current :id)])) :state)))
       (checkpoint s)
       (when (first (query s "UPDATE main.call_controls SET state='running' WHERE id=? AND owner=? AND state='waiting' AND (SELECT count(*) FROM running WHERE source=?)<? RETURNING id"
                           [(current :id) (current :owner) (s :source) ((s :config) :parallel)])) (break))
@@ -268,11 +265,12 @@
   (transact s
             (def owner (first (query s `UPDATE main.call_controls SET state=CASE WHEN state='cancelled' THEN state WHEN ? THEN 'failed' ELSE 'done' END,
               owner=NULL,lease_expires=NULL WHERE id=? AND owner=? AND state IN ('running','waiting','uncertain','cancelled') RETURNING state`
-                                    [(not (nil? failure)) (row :id) (row :owner)])))
+                                     [(not (nil? failure)) (row :id) (row :owner)])))
             (assert owner "call completion fenced")
             (def state (owner :state))
             (def outcome (merge {:ok (= state "done") :value value :state state :attempt (row :attempt)} (or failure {})))
-            (append s (view s (if (= "summarize" (row :kind)) (row :parent) (row :id))) "call-result" "" outcome nil (row :id))
+            (append s (view s (if (= "summarize" (row :kind)) (row :parent) (row :id))) "call-result"
+                    (if failure (get-in failure [:error :message]) (if (string? value) value "")) outcome nil (row :id))
             outcome))
 
 (defn recover [s]

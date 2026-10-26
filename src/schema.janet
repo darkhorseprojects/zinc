@@ -29,6 +29,14 @@
         (when (field :choices) (assert (index-of item (field :choices)) "invalid setting choice")))))
   config)
 
+(defn select [names selections]
+  (sorted (distinct (catseq [selection :in selections]
+                      (def matches (filter |(or (= selection "*") (= selection $)
+                                                (and (string/has-suffix? "/*" selection)
+                                                     (string/has-prefix? (string/slice selection 0 (- (length selection) 1)) $))) names))
+                      (assert (> (length matches) 0) (string "unknown selection: " selection))
+                      matches))))
+
 (defn configuration [schema supplied &opt discovery]
   (def config (validate schema supplied discovery))
   (when (config :context-quota)
@@ -38,16 +46,11 @@
     (put config :agent (configuration schema (config :agent) discovery))
     (each key [:source :store :world :file]
       (assert (= (config key) (get-in config [:agent key])) "agent view changes world identity/location")))
-  (each [name capability] (pairs (config :capabilities))
-    (when (capability :module)
+  (when-let [repl (config :repl)]
+    (put repl :values (select (seq [[key field] :in (pairs schema) :when (get-in field [:repl :value])] (string key)) (repl :values)))
+    (each name (keys (repl :modules))
       (assert (and (peg/match ~(* (some (set "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789_-")) -1) (string name))
-                   (not (index-of name [:self :pa]))) "invalid capability namespace")))
-  (each key [:functions :values]
-    (def names (get-in config [:repl key]))
-    (assert (= (length names) (length (distinct names))) "duplicate REPL selection")
-    (assert (or (get-in config [:repl :enabled]) (= 0 (length names))) "disabled REPL has selections"))
-  (each name (get-in config [:repl :values])
-    (assert (get-in schema [(keyword name) :repl :value]) "configuration is not REPL-visible"))
+                   (not (index-of name [:core :self :pa :fs :http :process :memory]))) "invalid module namespace")))
   (each field [:fs :http :processes]
     (each name (keys (config field))
       (assert (peg/match ~(* (some (set "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789_-")) -1) (string name)) "invalid resource name")))
@@ -57,8 +60,8 @@
   (each [name endpoint] (pairs (config :http))
     (def url (endpoint :url))
     (assert (and (peg/match ~(* (choice "https://" "http://")
-                              (some (set "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789.-:[]"))
-                              "/" (any (set "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789_-~./")) -1) url)
+                                (some (set "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789.-:[]"))
+                                "/" (any (set "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789_-~./")) -1) url)
                  (string/has-suffix? "/" url)
                  (not (find |(index-of $ ["." ".."]) (string/split "/" url)))) "invalid HTTP base"))
   (each [name provider] (pairs (config :providers))
@@ -72,18 +75,18 @@
     (assert (= (current key) (saved key)) "saved identity/location differs"))
   (each key [:inference :web-search]
     (assert (or (not (saved key)) (current key)) (string "saved permission revoked: " key)))
-  (assert (or (not (get-in saved [:repl :enabled])) (get-in current [:repl :enabled])) "saved REPL revoked")
-  (each key [:functions :values]
-    (each name (get-in saved [:repl key])
+  (assert (or (not (saved :repl)) (current :repl)) "saved REPL revoked")
+  (assert (= (get-in saved [:repl :setup]) (get-in current [:repl :setup])) "saved REPL setup changed")
+  (each key [:bindings :values]
+    (each name (get-in saved [:repl key] [])
       (assert (index-of name (get-in current [:repl key])) "saved REPL selection revoked")))
   (each field [:fs :http :processes]
     (each [name grant] (pairs (saved field))
       (assert (deep= grant (get-in current [field name])) "saved resource changed or revoked")))
   (assert (or (nil? (saved :remote)) (= (saved :remote) (current :remote))) "saved remote changed")
   (each value (saved :visibility) (assert (index-of value (current :visibility)) "saved grant revoked"))
-  (each [name capability] (pairs (saved :capabilities))
-    (assert (and (has-key? (current :capabilities) name)
-                 (= (capability :module) (get-in current [:capabilities name :module]))) "saved capability revoked"))
+  (each [name module] (pairs (get-in saved [:repl :modules] {}))
+    (assert (= (module :module) (get-in current [:repl :modules name :module])) "saved module revoked"))
   (when (saved :agent) (assert (current :agent) "agent execution view revoked"))
   (each [name provider] (pairs (saved :providers))
     (def granted (get-in current [:providers name]))
@@ -91,7 +94,9 @@
   (def config (merge saved {:search (and (saved :search) (current :search))
                             :score (max (saved :score) (current :score))
                             :agent (when (saved :agent) (authorize schema (current :agent) (saved :agent)))
-                            :capabilities (tabseq [name :in (keys (saved :capabilities))] name (get-in current [:capabilities name]))
+                            :repl (when (saved :repl)
+                                    (merge (saved :repl)
+                                           {:modules (tabseq [name :in (keys (get-in saved [:repl :modules]))] name (get-in current [:repl :modules name]))}))
                             :providers (tabseq [name :in (keys (saved :providers))] name (get-in current [:providers name]))}))
   (each [key field] (pairs schema)
     (when (and (= :integer (field :type)) (or (saved key) (current key)))
@@ -105,7 +110,7 @@
   (def trace @"")
   (with-dyns [:err (fn [bytes] (buffer/push-string trace bytes))] (debug/stacktrace fiber))
   (def value (if (and (dictionary? err) (string? (err :code)) (string? (err :message))) err
-                {:code code :message (if (string? err) err (string/format "%n" err))}))
+               {:code code :message (if (string? err) err (string/format "%n" err))}))
   (merge value {:detail (string (or (value :detail) "") "\n" trace)}))
 
 (defn data [value]
@@ -162,7 +167,7 @@ CREATE VIEW live_calls AS
     AND c.lease_expires>unixepoch('subsec') AND c.expires>unixepoch('subsec')
     AND r.expires>unixepoch('subsec') AND NOT c.cancelled AND NOT r.cancelled;
 CREATE VIEW running AS SELECT source FROM live_calls WHERE state='running';
-PRAGMA user_version=1;
+PRAGMA user_version=2;
 `) (string/replace-all "$schema." (if temporary "journal." "main.") `
 CREATE TABLE $schema.call_payloads(
   id INTEGER PRIMARY KEY,
@@ -264,23 +269,7 @@ CREATE VIEW $schema.memory_records AS WITH records AS (
       WHEN e.kind='call-attempt' AND c.kind='code' THEN 'code-admission'
       ELSE e.kind
     END kind,
-    CASE
-      WHEN e.kind='user' THEN coalesce(json_extract(e.data,'$.input.text'),'')
-      WHEN e.kind='model-outcome' THEN
-        CASE json_type(e.data,'$.message.content')
-          WHEN 'text' THEN json_extract(e.data,'$.message.content')
-          WHEN 'array' THEN coalesce((
-            SELECT group_concat(json_extract(p.value,'$.text'),char(10) ORDER BY p.key)
-            FROM json_each(e.data,'$.message.content') p
-            WHERE json_extract(p.value,'$.type')='text'
-          ),'')
-          ELSE coalesce(json_extract(e.data,'$.message.refusal'),'')
-        END
-      WHEN e.kind='call-result' THEN coalesce(json_extract(e.data,'$.error.message'),json_extract(e.data,'$.value'),e.text)
-      WHEN e.kind='call-attempt' AND c.kind='code' THEN json_extract(a.data,'$.input.code')
-      ELSE e.text
-    END text,
-    e.data,e.estimate,e.author,e.at,e.created,c.kind execution_kind,
+    e.text,e.data,e.estimate,e.author,e.at,e.created,c.kind execution_kind,
     CASE WHEN json_type(e.data,'$.message')='object' THEN
       CASE
         WHEN json_extract(e.data,'$."reasoning-visible"') THEN json_extract(e.data,'$.message')
@@ -289,13 +278,11 @@ CREATE VIEW $schema.memory_records AS WITH records AS (
     END public_message
   FROM events e
   LEFT JOIN call_payloads c ON c.id=e.call
-  LEFT JOIN events a ON a.call=c.id AND a.kind='user'
 )
 SELECT e.*,b.world branch_world,b.file branch_file,b.temporary branch_temporary,b.parent branch_parent,
   json_extract(a.data,'$.input.request') request,
   CASE WHEN b.temporary=1 THEN 'tmp:'||json_extract(a.data,'$.input.request')||'/'||b.id||':'||e.id END label,
   CASE
-    WHEN e.kind='user' THEN coalesce(nullif(e.text,''),json_extract(e.data,'$.input.code'),'')
     WHEN e.kind IN ('response','completed','model-outcome') AND json_type(e.data,'$.message')='object'
       THEN e.public_message||char(10)||json_object('status',json_extract(e.data,'$.status'))
     WHEN e.kind IN (
@@ -361,18 +348,6 @@ CREATE VIEW $schema.search_records AS SELECT id,body FROM memory_records WHERE m
 CREATE VIRTUAL TABLE $schema.event_fts USING fts5(
   body,content='search_records',content_rowid='id',tokenize='unicode61 remove_diacritics 0'
 );
-CREATE VIRTUAL TABLE $schema.event_words USING fts5vocab(event_fts,'instance');
-CREATE TABLE $schema.lexemes(
-  id INTEGER PRIMARY KEY,
-  source TEXT NOT NULL,
-  term TEXT NOT NULL,
-  UNIQUE(source,term)
-) STRICT;
-CREATE VIRTUAL TABLE $schema.lexeme_grams USING fts5(
-  term,content='lexemes',content_rowid='id',tokenize='trigram',detail='none'
-);
-CREATE TRIGGER $schema.lexeme_index AFTER INSERT ON lexemes
-  BEGIN INSERT INTO lexeme_grams(rowid,term) VALUES(new.id,new.term); END;
 CREATE TRIGGER $schema.event_index AFTER INSERT ON events BEGIN
   INSERT INTO event_fts(rowid,body) SELECT id,body FROM search_records WHERE id=new.id;
 END;

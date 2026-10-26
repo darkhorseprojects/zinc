@@ -30,7 +30,7 @@
 
 (defn source [config &opt inherited revision]
   (cond
-    (not (get-in config [:repl :enabled])) {:code ""}
+    (not (config :repl)) {:code ""}
     (and inherited (not revision))
     (do
       (assert (<= (os/stat (inherited :file) :size) (config :source-bytes)) "world source byte ceiling")
@@ -123,49 +123,50 @@
     receipt))
 
 (defn definitions [config fields]
-  (def available @{})
-  (each [key field] (pairs fields)
-    (each [name binding] (pairs (get-in field [:repl :functions] {}))
-      (assert (not (available name)) "duplicate callable declaration")
-      (put available name (merge binding {:config (config key)}))))
-  (def declared (get-in fields [:capabilities :repl :builtins]))
-  (each [grant capability] (pairs (config :capabilities))
-    (def source (if (capability :module) (require (capability :module)) {(symbol grant) (declared grant)}))
-    (unless (capability :module) (assert (declared grant) "unknown capability"))
-    (each [name binding] (pairs source)
-      (when (and (symbol? name) (not (binding :private)) (not (binding :macro)) (index-of (type (binding :value)) [:function :cfunction]))
-        (assert (string? (binding :doc)) "capability function requires documentation")
-        (def qualified (if (capability :module) (string grant "/" name) (string name)))
-        (assert (and (not (available qualified))
-                     (not (index-of qualified ["input" "self/document" "settings" "resources" "world/source"]))) "capability shadows a declaration")
-        (put available qualified (merge binding {:config (capability :config)})))))
-  (tabseq [name :in (get-in config [:repl :functions]) :let [binding (available name)]]
-    name (do (assert (and binding (string? (binding :doc))) (string "unknown or undocumented REPL function: " name)) binding)))
+  (if-not (config :repl) {}
+    (do
+      (def base (make-env))
+      (def available (tabseq [name :in (all-bindings base) :unless (get (base name) :private)]
+                       (cond (= name '*) "core/multiply" (string/find "/" (string name)) (string name) (string "core/" name)) {:local name}))
+      (each [key field] (pairs fields)
+        (each [name binding] (pairs (get-in field [:repl :functions] {}))
+          (put available name binding)))
+      (each [namespace module] (pairs (get-in config [:repl :modules]))
+        (each [name binding] (pairs (require (module :module)))
+          (when (and (symbol? name) (not (binding :private)) (not (binding :macro)) (index-of (type (binding :value)) [:function :cfunction]))
+            (def qualified (string namespace "/" name))
+            (assert (and (not (available qualified)) (not= qualified "world/source")) "host function shadows a binding")
+            (assert (string? (binding :doc)) "host function requires documentation")
+            (put available qualified (merge binding {:config (module :config)})))))
+      (def selected (schema/select (keys available) (get-in config [:repl :bindings])))
+      (put (config :repl) :bindings selected)
+      (tabseq [name :in selected] name (available name)))))
 
 (defn public [config fields]
-  {:settings (tabseq [name :in (get-in config [:repl :values])]
+  {:settings (tabseq [name :in (get-in config [:repl :values] [])]
                (keyword name) (config (keyword name)))
    :resources
-   (tabseq [[key field] :in (pairs fields) :let [access (get field :repl {})] :when (access :public)
+   (tabseq [[key field] :in (pairs fields) :let [access (get field :repl {})] :when (and (config :repl) (access :public))
             :let [grants (tabseq [[name grant] :in (pairs (config key))
                                   :let [functions (sorted (seq [[function binding] :in (pairs (access :functions))
-                                                               :when (and (index-of function (get-in config [:repl :functions]))
-                                                                          (or (not (binding :permission)) (grant (binding :permission))))] function))]
+                                                                :when (and (index-of function (get-in config [:repl :bindings]))
+                                                                           (or (not (binding :permission)) (grant (binding :permission))))] function))]
                                   :when (> (length functions) 0)]
-                          name (merge (tabseq [field :in (access :public) :when (has-key? grant field)] field (grant field))
-                                      {:functions functions}))]
+                           name (merge (tabseq [field :in (access :public) :when (has-key? grant field)] field (grant field))
+                                       {:functions functions}))]
             :when (> (length grants) 0)] key grants)})
 
 (defn instructions [config document-tree available public]
   (string (document document-tree)
           (when (config :instructions) (string "\n\n## World instructions\n\n" (slurp (config :instructions))))
           "\n\n## World ID\n\n" (json/encode (config :world))
-          (when (and (get-in config [:repl :enabled]) available)
-            (string "\n\n## Janet\n\nTop-level single-name `def` and `defn` update this call's source; `(def name nil)` removes a definition. Other forms execute without updating source.\nCalls run source initializers when their environments load; use `let` for temporary values and effects.\n`(input)`: admitted input map. `(self/document)`: these instructions. `(settings)`: exposed settings. `(resources)`: callable resource grants."
+          (when (and (config :repl) available)
+            (string "\n\n## Janet\n\nTop-level single-name `def`, `defn` and `defmacro` update this call's source; `(def name nil)` removes a definition. Other forms execute without updating source.\nCalls run source initializers when their environments load; use `let` for temporary values and effects.\n`(input)`: admitted input map. `(self/document)`: these instructions. `(settings)`: exposed settings. `(resources)`: callable resource grants."
                     (string/join (seq [[title value] :in [["Settings" (public :settings)] ["Resources" (public :resources)]] :when (> (length value) 0)]
                                    (string "\n\n## " title "\n\n" (json/encode value "  " "\n"))))
                     (when (> (length available) 0)
-                      (string "\n\n## Functions\n\n" (string/join (map |(($ 1) :doc) (sorted (pairs available))) "\n\n")))))))
+                      (string "\n\n## Bindings\n\n" (string/join (get-in config [:repl :bindings]) ", ")
+                              "\n\n" (string/join (seq [[_ binding] :in (sorted (pairs available)) :unless (binding :local)] (binding :doc)) "\n\n")))))))
 
 (defn- request [name args]
   (def reply (ev/thread-chan 1))
@@ -174,18 +175,22 @@
   (assert (and outcome (outcome :ok)) (get outcome :error "Execution closed"))
   (outcome :value))
 
-(defn- evaluate [[source input document public bindings requests evaluations limits]]
-  (def env (make-env))
+(defn- evaluate [[source input document public bindings requests evaluations limits config]]
+  (def base (make-env))
+  (def env (make-env @{}))
+  (each [name binding] (pairs bindings)
+    (if-let [local (binding :local)] (put env local (base local))
+      (put env (symbol name) @{:value (fn [& args] (request name args)) :doc (binding :doc)})))
+  (def options (if (config :setup) ((module/value (require (config :setup)) 'configure) env) {}))
+  (each key (keys options) (assert (index-of key [:parser :read :expander :on-compile-warning]) "unsupported REPL option"))
   (table/clear module/cache)
   (put env :redef true)
+  (put env :zinc/requests requests)
   (put env 'stdout @{:value stderr})
   (put env 'input @{:value (fn [] input)})
   (put env 'self/document @{:value (fn [] document)})
   (put env 'settings @{:value (fn [] (schema/data (public :settings)))})
   (put env 'resources @{:value (fn [] (schema/data (public :resources)))})
-  (each [name documentation] (pairs bindings)
-    (put env (symbol name) @{:value (fn [& args] (request name args)) :doc documentation}))
-  (module/add-paths "" :source)
   (sandbox :fs :net :subprocess :ffi :modules :threads :env :asm
            :unmarshal :exit :locale :signal :chroot :sandbox)
   (with-env env
@@ -195,44 +200,50 @@
       (def [code reply] evaluation)
       (def output @"")
       (def outcome (try
-                     (with-dyns [:zinc/requests requests :out (fn [bytes]
-                                                                (assert (<= (+ (length output) (length bytes)) (limits :output)) "execution output byte ceiling")
-                                                                (buffer/push-string output bytes))]
+                     (do
+                       (put env :out (fn [bytes]
+                                       (assert (<= (+ (length output) (length bytes)) (limits :output)) "execution output byte ceiling")
+                                       (buffer/push-string output bytes)))
                        (unless forms
                          (def parsed (parse-all source))
                          (each form parsed
-                           (assert (and (tuple? form) (= :parens (tuple/type form)) (index-of (first form) ['def 'defn]) (symbol? (get form 1))) "world source requires single-name def or defn forms")
+                           (assert (and (tuple? form) (= :parens (tuple/type form)) (index-of (first form) ['def 'defn 'defmacro]) (symbol? (get form 1))) "world source requires named declarations")
                            (eval form env))
                          (set forms parsed))
-                       (var value nil)
-                       (each form (parse-all code)
-                         (def declaration (and (tuple? form) (= :parens (tuple/type form)) (index-of (first form) ['def 'defn])))
-                         (def next (array ;forms))
-                         (when declaration
-                           (assert (symbol? (get form 1)) "persistent definitions require one name")
-                           (def name (form 1))
-                           (var index nil)
-                           (eachp [i prior] next (when (= name (prior 1)) (set index i)))
-                           (when index (array/remove next index))
-                           (unless (and (= 'def (first form)) (nil? (last form)))
-                             (array/insert next (or index (length next)) form)))
-                         (def source (string/join (map |(string/format "%n" $) next) "\n"))
-                         (assert (<= (length source) (limits :source)) "world source byte ceiling")
-                         (set value (eval form env))
-                         (when declaration
-                           (request "world/source" [loaded-source source])
-                           (set loaded-source source)
-                           (set forms next)
-                           (when (and (= 'def (first form)) (nil? (last form))) (put env (form 1) nil))))
+                       (var value nil) (var supplied false)
+                       (run-context
+                         (merge options
+                                {:env env
+                                 :chunks (fn [buf _] (unless supplied (buffer/push-string buf code) (set supplied true)))
+                                 :on-status (fn [f result] (if (= :dead (fiber/status f)) result (error result)))
+                                 :on-compile-error (fn [err &] (error err))
+                                 :on-parse-error (fn [parser &] (error (parser/error parser)))
+                                 :evaluator
+                                 (fn [thunk form &]
+                                   (def declaration (and (tuple? form) (= :parens (tuple/type form)) (index-of (first form) ['def 'defn 'defmacro])))
+                                   (def next (array ;forms))
+                                   (when declaration
+                                     (assert (symbol? (get form 1)) "persistent definitions require one name")
+                                     (def index (find-index |(= (form 1) ($ 1)) next))
+                                     (when index (array/remove next index))
+                                     (unless (and (= 'def (first form)) (nil? (last form)))
+                                       (array/insert next (or index (length next)) form)))
+                                   (def updated (string/join (map |(string/format "%n" $) next) "\n"))
+                                   (assert (<= (length updated) (limits :source)) "world source byte ceiling")
+                                   (set value (thunk))
+                                   (when declaration
+                                     (request "world/source" [loaded-source updated])
+                                     (set loaded-source updated) (set forms next)
+                                     (when (and (= 'def (first form)) (nil? (last form))) (put env (form 1) nil))))}))
                        {:ok true :value (string output (if (string? value) value (string/format "%n" value)))})
                      ([err fiber]
                        (def failure (schema/failure "EvaluationFailed" err fiber))
                        {:ok false :error (merge failure {:context {:output (string output) :cause (failure :context)}})})))
       (ev/give reply outcome))))
 
-(defn open [source input document public bindings limits]
+(defn open [source input document public bindings limits config]
   (def runtime @{:requests (ev/thread-chan 1) :evaluations (ev/thread-chan 1) :finished (ev/thread-chan 1)})
-  (ev/thread evaluate [source input document public bindings (runtime :requests) (runtime :evaluations) limits] :n (runtime :finished))
+  (ev/thread evaluate [source input document public bindings (runtime :requests) (runtime :evaluations) limits config] :n (runtime :finished))
   runtime)
 
 (defn close [runtime]
@@ -240,13 +251,20 @@
 
 (defn execute [runtime code handler seconds]
   (def reply (ev/thread-chan 1))
-  (ev/with-deadline seconds
-    (ev/give (runtime :evaluations) [code reply])
-    (label done (while true
-                  (def [status channel packet] (ev/select (runtime :requests) reply (runtime :finished)))
-                  (assert (= status :take) "Execution closed")
-                  (cond
-                    (= channel reply) (do (assert (packet :ok) (packet :error)) (return done (packet :value)))
-                    (= channel (runtime :finished)) (error (string "World evaluator stopped: " packet))
-                    (do (def [name args response] packet)
-                      (ev/give response (try {:ok true :value (handler name args)} ([err] {:ok false :error err})))))))))
+  (def pending @[])
+  (defer (each [task done] pending
+           (when (fiber/can-resume? task) (ev/cancel task "evaluation ended"))
+           (ev/take done))
+    (ev/with-deadline seconds
+      (ev/give (runtime :evaluations) [code reply])
+      (label done (while true
+                    (def [status channel packet] (ev/select (runtime :requests) reply (runtime :finished)))
+                    (assert (= status :take) "Execution closed")
+                    (cond
+                      (= channel reply) (do (assert (packet :ok) (packet :error)) (return done (packet :value)))
+                      (= channel (runtime :finished)) (error (string "World evaluator stopped: " packet))
+                      (do (def [name args response] packet)
+                        (def finished (ev/chan))
+                        (array/push pending [(ev/go (fn []
+                                                      (defer (ev/chan-close finished)
+                                                        (ev/give response (try {:ok true :value (handler name args)} ([err] {:ok false :error err})))))) finished]))))))))

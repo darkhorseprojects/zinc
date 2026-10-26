@@ -1,268 +1,190 @@
 # Zinc
 
-Zinc 0.2.0 is a Janet source package for Portable Agents. It owns call-local
-worlds, execution profiles, private history and bounded retrieval. Connector is
-optional; Zinc has no resident service or socket.
+Zinc is a Janet source package for Portable Agents. It owns call-local source,
+SQL outcomes, private history and bounded retrieval. It has no resident service.
+Connector is optional.
 
-## Install
+## Install and build
 
-Extract the matching `zinc-v0.2.0-TARGET.tar.gz` (`.zip` on Windows) as your
-deployment's `runtime` directory: rename the extracted top-level `zinc` folder
-to `runtime`, rather than nesting it under `runtime/zinc`. Linux, macOS and
-Windows each have x86-64 and ARM64 artifacts. The archive contains:
-
-```text
-zinc/
-  zinc.md
-  models.ini
-  models.lock
-  src/
-  lib/
-  data/stopwords-iso.json
-  README.md
-  LICENSE
-  NOTICE
-```
-
-`lib` contains only runtime dependencies: PA's Janet libraries, Remarkable,
-Spork's path/codecs, SQLite and Jurl. There is no Jpm tree, static library, header,
-cache, test suite or application state in the artifact. Install the matching
-schema-1 `agent` separately; Zinc is a source package, not a third executable.
-The normal native executor needs neither Jpm nor an external Janet interpreter
-at runtime. Native extensions still require their linked system libraries,
-including libcurl and, when linked dynamically, SQLite with FTS5. These are
-platform-specific packages, not self-contained executables. On Windows put
-libcurl's runtime DLL directory on `PATH`. World-enabled execution also requires
-Git on `PATH`; merging requires Git's `merge-tree --write-tree` support. HTTPS
-requires the platform's CA trust. Match the Janet ABI used to build native modules.
-
-Select the extracted package directly:
+Extract the matching `zinc-v0.2.0-TARGET.tar.gz` (`.zip` on Windows), rename its
+`zinc` directory to `runtime`, and install the matching schema-1 `agent`.
+Artifacts cover Linux, macOS and Windows on x86-64 and ARM64. They contain
+`zinc.md`, `src`, `lib`, `models.ini`, `models.lock`, stopwords and notices;
+configuration, worlds and databases belong outside the runtime.
 
 ```yaml
+source: runtime
+module: zinc.md
+entry: self
 environment:
-  JANET_PATH: /srv/agents/runtime/lib
-program:
-  sourceDir: runtime
-  entryModule: zinc.md
-  entry: self
+  JANET_PATH: /absolute/deployment/runtime/lib
+transport: {frame-bytes: 16777216, admission-seconds: 10}
 ```
 
-Set `JANET_PATH` before loading Markdown; adding paths inside the module is too
-late for its parser. Normal Janet callers import `portable-agents/markdown`
-first, then import Zinc and call its byte-valued exports normally. Independent
-workers use ordinary `os/spawn`, `ev/` and Zinc's durable call IDs, not PA handles.
+Set `JANET_PATH` before loading Markdown. Ordinary Janet callers first import
+`portable-agents/markdown`, then import Zinc and call its byte-valued exports.
+Native modules must match the Janet ABI. Install libcurl and its runtime DLLs
+on Windows, platform CA trust, and Git on PATH. Merging requires
+`git merge-tree --write-tree`. Artifacts are not self-contained executables.
 
-Keep `ac.yaml`, the world and private databases outside `runtime`. The model
-server preset is always `runtime/models.ini`; packaging does not start servers,
-register commands, change configuration, or migrate state. Connector's `agc`
-materializes its Discord library under the deployment's `.agc/libraries`.
-
-Model weights and the Cygnet index are separately provisioned assets, not
-bundled state. Keep the generated index outside `runtime`, for example
-`data/cygnet.db`. `models.lock` records their provenance. The source checkout's
-`tools/cygnet_index.py SOURCE OUTPUT` verifies the upstream Cygnet database and
-builds the format-1 runtime index; the upstream database is not that index.
-`models.ini` does not enforce every weight revision. Use checksum-verified local
-weights for reproducible deployments. Retrieval requires an index and reranker;
-installing an artifact does not enable or disable it.
-
-## Build
-
-Use Janet 1.42+, Jpm, tar and libcurl development headers/libraries. POSIX
-builds need pkg-config; MSVC needs `CURL_ROOT` and its runtime DLL directory on
-`PATH`.
+Building requires Janet 1.42+, Jpm, tar, a C compiler and libcurl development
+files. POSIX builds need pkg-config; MSVC needs `CURL_ROOT`.
 
 ```sh
 JANET_SYSTEM_SQLITE=0 jpm --local --cflags=-std=c99,-DSQLITE_ENABLE_FTS5 deps
 jpm --local run package
 ```
 
-For MSVC set `JANET_SYSTEM_SQLITE=0` and use
-`--cflags=/nologo,/MD,/DSQLITE_ENABLE_FTS5` instead. `package` reads
-dependencies from Jpm's configured module path and writes
-`dist/zinc-v0.2.0-TARGET.tar.gz` (or `.zip`). Packaging is a native Jpm task
-using its configured tar command; Windows uses the bundled BSD tar for ZIP
-output. Jpm's `jpm_tree` and PA's `janet-toolchain-TARGET` tarball are build
-inputs, not deployment layouts. `declare-source` installs under Jpm's `zinc`
-module prefix; the explicit `package` task instead assembles `build/package/zinc`
-from source plus an allowlist of runtime modules and archives that directory.
-PA's reusable workflow exports the pinned Janet/Jpm toolchain for those builds.
-Neither toolchain nor package creation starts a service. A developer checkout
-can use normal Jpm source installation; release artifacts expose Zinc at their root.
+For MSVC use `--cflags=/nologo,/MD,/DSQLITE_ENABLE_FTS5`.
 
-## Calls and worlds
+Model weights and the Cygnet index are separately provisioned. `models.lock`
+records provenance; `tools/cygnet_index.py SOURCE OUTPUT` verifies the upstream
+Cygnet database and builds the runtime index. The upstream database itself is
+not a runtime index. Use verified local weights for reproducible deployments.
 
-The trusted invoker supplies authenticated `source`, `world`, absolute `store`,
-and input provenance:
+## Execution and durability
+
+The invoker supplies absolute `store`, `source`, `world` and authenticated input:
 
 ```json
-{
-  "text": "Investigate the implementation",
-  "request": "operation-key",
-  "author": "principal-id",
-  "at": "2026-01-01T00:00:00.000Z"
-}
+{"text":"Investigate this","request":"operation-key","author":"principal","at":"2026-01-01T00:00:00.000Z"}
 ```
 
-Use `code` instead of `text` for direct execution. `repl.enabled: true` requires an
-absolute world `file`. Each call owns an editable source snapshot and restricted
-Janet environment. Root calls start at Git HEAD or explicit `revision`.
-The optional `instructions` path supplies additional world instructions.
+Use `code` instead of `text` for direct Janet execution. A `repl` object enables
+evaluation and requires an absolute world `file`; omit it to disable evaluation.
 
 ```janet
-(defn double [x] (* 2 x))
-(defn double [x] (* 3 x))
-(def double nil)
-(await (self {:text "Investigate the earlier decision"}))
+(defmacro twice [x] ~(+ ,x ,x))
+(self {:code "(twice 21)"})
+(self {:text "Investigate the earlier decision"})
 ```
 
-Top-level single-name `def` and `defn` persist source immediately. Redefinition
-replaces the recorded form; `(def name nil)` removes it. Other expressions
-execute without becoming initialization source. Nested definitions and arbitrary
-heap mutations are not source snapshots. Existing closures can retain
-references. World files contain definitions, not general startup programs.
-Initializers run when a branch loads; use `let` for temporary handles and
-effects.
-
-One tool call continues the current environment; multiple calls fork siblings
-from one source/history cut. Child source changes do not merge into the caller.
-`self` returns a handle; `await` returns evaluation text for code children or a
-result map with `:text` for text children. Text uses `agent` when configured;
-otherwise both use the caller profile. Profiles share source/store/world/file
-identity. `:parent 0` defaults to empty history, not empty source.
-
-Only granted `save` commits:
+`self` returns the completed result, not a future: evaluation text for code,
+a map with `:text` for inquiries. Text uses the configured `agent` profile,
+otherwise the caller profile; code uses the caller profile. Profiles share
+source/store/world/file identity. Use native fibers to run children concurrently:
 
 ```janet
-(save "Explain the world change")
+(ev/gather (self {:code "(+ 20 22)"}) (self {:text "Investigate independently"}))
+```
+
+Select `ev/*` to expose the native concurrency bindings. Concurrent waits release
+the parent slot together; children still obey the shared `parallel` limit.
+Join local fibers whose completion matters. Model multi-tool calls also fan out.
+
+Workers own admission and completion in SQL. Spawned workers retain `:d` and
+PA detachment. Losing an observer, Connector, or a local process reference does
+not cancel accepted execution. Executor or machine failure requires recovery;
+no live REPL heap is durable. Supervisors must not kill the containing job/cgroup.
+
+Calls copy source, not live bindings. Root source comes from Git HEAD or
+`:revision`; children copy the caller's current source. Single-name `def`, `defn`
+and `defmacro` update source after successful evaluation; `(def name nil)` removes
+a declaration. Other expressions execute without becoming startup source.
+Initializers run on load: use `let` for temporary values and effects.
+
+`:parent` attaches history; `:memory_range {:start id :end id}` bounds visibility.
+`:parent 0` defaults to empty history, not empty source. Child edits never merge
+automatically. Selected `save` commits source, not heap state:
+
+```janet
+(save "Explain the change")
 (save "Keep an earlier call" {:call 42 :branch "experiment"})
 (save "Integrate" {:merge "refs/heads/self/BRANCH"})
 (save "Publish" {:push true})
 ```
 
-Save uses Git compare-and-swap, preserves dirty canonical files, and restricts
-merges to the world file. Push additionally requires `remote`. Saving an earlier
-call requires its ID; a new call does not silently select earlier edits.
+Save uses Git compare-and-swap, preserves dirty canonical files and restricts
+merges to the world file. Push additionally requires `remote`.
 
-## Authority and lifetime
+`run-seconds` bounds the tree; `seconds` bounds each evaluation including waits.
+Waits release parallel slots. Descendants share work/tool budgets. Cancellation
+fences subsequent operations but does not undo effects. Interrupted code is not
+automatically replayed; uncertain effects require inspection.
 
-`inference` permits model execution; `repl.enabled` permits Janet evaluation.
-`repl.functions` selects the exact callable set, including `self` and `await`.
-`capabilities` supplies documented built-ins or public functions from protected
-absolute Janet library paths; selecting a function still requires its grant.
-`input`, `self/document`, `settings` and `resources` are data-only intrinsics.
-Generated environments receive neither private runtime configuration nor host process access.
-Host calls use plain data with table prototypes removed; functions, fibers,
-channels and native handles cannot cross the boundary.
+`persist: false` keeps payloads in a bounded RAM journal. Descendants remain
+temporary and cannot reattach. Controls/source can reach disk, durable callers
+can retain results, and external effects retain their own behavior. Normal
+cleanup removes temporary source files.
+
+## REPL and named grants
 
 ```yaml
 repl:
-  enabled: true
-  functions: [memory/expand, self, await, fs/list, fs/read, http/request, process/run]
-  values: [world, chat, thinking]
+  bindings: [core/*, ev/*, string/*, math/*, self, memory/*, fs/*, http/*, process/*]
+  values: ["*"]
+  setup: /absolute/world/repl.janet
 fs:
-  workspace: { root: /srv/workspace, read: true, write: false }
+  workspace: {root: /absolute/workspace, write: false}
 http:
-  docs: { url: "https://docs.example.org/api/", methods: [GET] }
+  docs: {url: "https://docs.example.org/api/", methods: [GET]}
 processes:
   status:
-    argv: [/usr/bin/git, -C, /srv/workspace, status, --short]
-    env: {}
+    argv: [/absolute/bin/git, -C, /absolute/workspace, status, --short]
 ```
 
-`(fs/list :workspace ".")`, `(fs/read :workspace "README.md")` and
-`(fs/write :workspace "notes.txt" "text")` require the selected function and the
-root's read/write permission. File contents are bounded UTF-8; paths cannot be
-absolute, traverse parents or follow symlinks. Listing results are bounded by
-`history-records` and `response-bytes`; Janet enumerates the directory before
-checking those limits.
+`bindings` selects actual Janet bindings, including macros/constants, and host
+functions. `core/*` selects unqualified core names; multiplication is selected
+individually as `core/multiply`. Namespaced selectors such as `string/*` and `*`
+expand deterministically; unknown selections fail. Admissions save exact expanded
+sets, so existing calls never acquire newly added bindings through wildcards.
+`values` selects only schema fields marked REPL-visible; `*` exposes all such
+fields, never private runtime configuration.
 
-`(http/request :docs "GET" ["guide" "intro"] nil)` accepts only literal path
-segments, a granted method and optional text body. Redirects and ambient proxies
-are disabled. Responses are bounded UTF-8 `{status body}` values, including HTTP
-error statuses. `(process/run :status)` accepts only a configured name and returns
-`{exit output}` with merged, bounded UTF-8 stdout/stderr. Commands have fixed argv,
-empty stdin and an explicit environment; they do not inherit provider credentials.
-Executable paths must be absolute. Use tool arguments such as `git -C`, not a
-process-global working-directory change.
+Optional trusted `setup` exports `(configure env)`. It can install local bindings
+and return standard `run-context` options: `:parser`, `:read`, `:expander`, and
+`:on-compile-warning`. Input syntax can change while saved declarations remain
+canonical Janet. Host source commits, errors, output capture and deadlines stay
+Zinc-owned. Native restrictions are fixed; syntax customization never bypasses
+named-resource grants.
 
-The application schema declares host functions with `:repl {:functions ...}` and
-safe named-resource fields with `:public`. Only fields annotated
-`:repl {:value true}` may appear in `repl.values`; `(settings)` returns those
-values. `(resources)` and the prompt use the same effective grant projection,
-without process environments or private library configuration. Profiles replace
-whole top-level maps, not recursively merged permissions. Omitting `self` prevents
-that REPL from delegating to the configured agent profile.
+Filesystem, network, subprocess, FFI, module loading, threads and environment
+access remain disabled inside generated evaluators. Named operations run in the
+trusted host, not through a generic capability module:
 
-Native filesystem, network, subprocess, FFI, modules, threads and environment
-access are always disabled in generated evaluators; `forbid` is no longer a setting.
-Definitions update source through the host. Resource roots are logical scopes,
-not OS confinement: path validation cannot prevent concurrent symlink races, and
-named commands retain native OS authority. Running editable scripts or build files
-can grant arbitrary native execution. Isolate hostile filesystem mutation,
-process descendants and network egress at the OS level. Keep private stores,
-credentials, trusted libraries and Git control data outside granted roots.
-PA's protocol output descriptor is private; ordinary stdout cannot forge frames.
+- `(fs/list :workspace ".")` lists bounded names.
+- `(fs/read :workspace "README.md")` reads bounded UTF-8 text.
+- `(fs/write :workspace "notes.txt" "text")` requires root write permission.
+- `(http/request :docs "GET" ["guide"] nil)` permits only configured methods and
+  literal segments; no redirects or ambient proxies. Returns `{:status :body}`.
+- `(process/run :status)` runs only fixed argv/env with empty stdin and bounded
+  merged output. It does not inherit provider credentials.
 
-Provider credentials use `token-env`, resolved only by trusted code. Optional
-provider `models` lists exact provider-local IDs; omission permits all catalogued
-models and `[]` permits none. For OpenRouter, set `token-env: OPENROUTER_API_KEY`
-and provision that variable in the deployment environment. Connector no longer
-owns provider authentication or transports. Credential values are not saved in
-call configuration or rendered into prompts.
+Paths reject traversal, links, and Windows reparse points. These are logical
+scopes, not race-proof OS confinement; hostile filesystem mutation, editable
+executables/build scripts and subprocess descendants require OS isolation.
+Windows CRT path limitations remain; Unix modes are not Windows ACLs. Keep
+stores, credentials, trusted modules and Git metadata outside granted roots.
 
-`run-seconds` bounds the call tree from root admission; `seconds` bounds each
-Janet evaluation, including waits. Calls share work/tool budgets and parallel
-slots. Waits release slots. Tool failures preserve prior output and return
-structured errors to the model. Nonfinal generations continue; only final answer
-content without pending tools completes a run. Tools stay available through the round
-limit. Provider failures, deadlines, cancellation, lease fencing and exhausted
-shared budgets remain terminal. Cancellation does not undo effects; interrupted
-code is not automatically replayed. Saved
-calls are reauthorized against current grants. Changed named-resource or provider
-policies invalidate saved grants; newly added resources/functions are not acquired
-by old calls. Observation survives neither
-executor death nor OS process-scope termination.
+`input`, `self/document`, `settings` and `resources` expose admitted data,
+instructions, selected settings and effective named grants. Host RPC accepts
+plain JSON data, not functions, prototypes or native handles. Ordinary protected
+RPC libraries live in `repl.modules`; Connector supplies its Discord module there.
+Saved execution is reauthorized against current grants and module/setup paths.
 
-`persist: false` uses a bounded RAM journal; descendants remain temporary and
-cannot be reattached. It is not private execution: controls and source files can
-reach disk, and durable callers can record child input and output. Normal cleanup
-removes temporary source files. External effects and retention are unchanged.
+## Models, memory and inspection
 
-`web-search: true` enables OpenRouter's server-side search independently of Janet
-execution and memory `search`. Unsupported providers reject it.
+Provider configuration grants URLs, optional exact model IDs and `token-env`
+credential references. Credentials are resolved in trusted code, never saved in
+configuration or prompts. `web-search` is OpenRouter provider search, independent
+of memory `search`. Unsupported capabilities fail rather than falling back.
 
-## Memory and inspection
+Chronological memory uses balanced summaries with source membership and
+invalidation. Retrieval uses FTS, exact Cygnet expansion and reranking against
+the inquiry; no spelling-correction index is maintained. `score` is the minimum
+reranker score. Search splits available memory space equally; disabling it gives
+chronology the full budget. `memory/expand` pages records and summary children.
+Estimates are `ceil(bytes/4)`; provider usage is stored separately.
 
-Chronological memory covers ordered record membership with balanced summaries.
-Semantic retrieval searches originals with lexical, spelling and Cygnet
-expansion, then reranks against the original inquiry. `score` is the minimum
-accepted relevance score, defaults to `0`, and is provider-scale dependent.
-Search divides available memory space equally between the windows; disabling it
-gives chronology the whole budget. Use `memory/expand id offset` to page
-original records or follow summary child IDs. Token estimates are
-`ceil(bytes / 4)`; provider-reported usage is retained separately.
+Each model round records the exact serialized request, source snapshot and memory
+window coordinates before sending. `views` and `render` read that capture without
+inference or recomputation. Temporary requests are not durably inspectable.
+Other trusted exports include `describe`, `instructions`, `models`, `record`,
+`events`, `pending`, `resume`, `abort`, `task` and `invalidate`. `record` stores
+passive authenticated history, never executable turns.
 
-Each model round includes current branch source and records the exact serialized
-provider request, window text/coordinates, candidates, scores and cutoff before
-sending. Credentials and private transport descriptors are excluded. `views` and
-`render` take `{"event":123}` identifying a model-admission event; they read
-that snapshot without inference, evaluation or recomputation. Scope is enforced
-against current source/world/visibility. Missing exact capture fails explicitly.
-Temporary prompts are not durably inspectable.
-
-The module's `document` value contains its section-oriented prose tree.
-Trusted exports also include `record`, `describe`, `instructions`, `models`,
-`events`, `pending`, `resume`, `abort`, `task` and `invalidate`; they are not
-world bindings. `record` passively stores authenticated context without
-executing it. `inquiry-v1` presentation retains self branches, tool results and
-reasoning visibility while hiding rerank output and summary bookkeeping.
-Committed compaction is presented as source membership, not summarizer model
-output. Background compaction may finish after observation closes; its events
-remain inspectable without a notification service. Presentation is newline-delimited
-application JSON written with `print`; logs use `eprint`, and returned bytes carry
-the final outcome. PA only transports these streams. Accepted workers survive
-caller death and closed observation; executor death requires Zinc recovery.
-Configured ceilings fail explicitly rather than silently truncating. Database schema version is 1;
-incompatible layouts are rejected. Preserve old stores and explicitly provision
-a fresh path.
+Presentation is application NDJSON on stdout; logs use stderr; the final return
+value carries the outcome. PA only transports bytes. Background compaction may
+finish after observation closes. Limits fail explicitly instead of truncating.
+**Zinc database version is 2.** Preserve old stores and provision a fresh path;
+there is no migration or compatibility mode.

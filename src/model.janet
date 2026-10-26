@@ -38,7 +38,7 @@
   (each name (if provider [(keyword provider)] (keys (config :providers)))
     (def response (request config {:provider (string name)} "GET"
                            (if (= :openrouter name) (string "/v1/models?output_modalities=" (if (= role "chat") "text" "rerank")) "/v1/models") nil provider))
-    (assert (and (dictionary? response) (indexed? (response :data))) "invalid model catalogue")
+    (assert (indexed? (response :data)) "invalid model catalogue")
     (def identities @{})
     (def granted (get-in config [:providers name]))
     (each record (response :data)
@@ -93,10 +93,10 @@
         (when (and (= role :chat) (config :web-search)) (assert (= provider "openrouter") "web search is unsupported by this provider"))
         (def selected (merge ref {:context context :output output :control control
                                   :tools (array/concat @[]
-                                           (if (if (= provider "llama")
-                                                 (and (get-in record [:chat_template_caps :supports_tools]) (get-in record [:chat_template_caps :supports_tool_calls]))
-                                                 (index-of "tools" parameters)) [tool] [])
-                                           (if (and (= role :chat) (config :web-search)) [{:type "openrouter:web_search"}] []))
+                                                       (if (if (= provider "llama")
+                                                             (and (get-in record [:chat_template_caps :supports_tools]) (get-in record [:chat_template_caps :supports_tool_calls]))
+                                                             (index-of "tools" parameters)) [tool] [])
+                                                       (if (and (= role :chat) (config :web-search)) [{:type "openrouter:web_search"}] []))
                                   :parallel (if (= provider "llama") (get-in record [:chat_template_caps :supports_parallel_tool_calls])
                                               (not (nil? (index-of "parallel_tool_calls" parameters))))
                                   :images (if (= provider "llama") (get-in record [:modalities :vision])
@@ -119,122 +119,119 @@
   (assert (index-of role ["chat" "rerank"]) "unknown model role")
   (def input (merge {:model (config (if (= "rerank" role) :rerank :chat))} input))
   (def event
-    (or (when pending (first (store/query s "SELECT id,data FROM events WHERE source=? AND parent=? AND kind='model-outcome'" [(s :source) pending])))
-      (do
-      (default selected (profile s (input :model) (keyword role)))
-      (assert (= (selected :reference) (input :model)) "profile does not match admitted model")
-      (def [body size maximum] (if (= role "rerank")
-                                 (do
-                                   (assert (> (length (input :query)) 0) "rerank query must remain nonempty")
-                                   (each passage (input :documents)
-                                     (assert (< (store/estimate (string (input :query) passage)) (selected :context)) "original rerank query/passage exceeds capacity"))
-                                   [{:model (selected :id) :query (input :query) :documents (input :documents) :top_n (length (input :documents))}
-                                    (sum (map |(store/estimate (string (input :query) $)) (input :documents))) 0])
-                                 (do
-                                   (each message (input :messages)
-                                     (each part (if (indexed? (message :content)) (message :content) [])
-                                       (when (= "image_url" (part :type)) (assert (selected :images) "model does not support image input"))))
-                                   (def size (+ (estimate (input :messages)) (if (input :tools) (store/estimate (json/encode (input :tools))) 0)))
-                                   (when (config :context-quota)
-                                     (assert (<= size (config :context-quota)) "model input exceeds context quota"))
-                                   (def requested (get input :output (config :output)))
-                                   (assert (and (int? requested) (>= requested 0)) "invalid requested output limit")
-                                   (def cap
-                                     (cond
-                                       (= requested 0) (config :output)
-                                       (= (config :output) 0) requested
-                                       (min requested (config :output))))
-                                   (def maximum
-                                     (min (or (selected :output) (selected :context))
-                                          (if (= 0 cap) (selected :context) cap)
-                                          (- (selected :context) size)))
-                                   (assert (> maximum 0) "approximate context capacity exhausted")
-                                   (def body @{:model (selected :id) :messages (input :messages) :max_tokens maximum :stream false})
-                                   (when (input :tools)
-                                     (each definition (input :tools) (assert (index-of definition (selected :tools)) "model does not support tool"))
-                                     (put body :tools (input :tools))
-                                     (when (selected :parallel) (put body :parallel_tool_calls true)))
-                                   (unless (= "default" (config :thinking))
-                                     (case (selected :control)
-                                       :reasoning (put body :reasoning (if (= "none" (config :thinking)) {:enabled false} {:effort (config :thinking)}))
-                                       :reasoning_effort (put body :reasoning_effort (config :thinking))))
-                                   (when (= "openrouter" (selected :provider)) (put body :provider {:require_parameters true :allow_fallbacks false}))
-                                   [body size maximum])))
-      (def wire (string (json/encode body)))
-      (def endpoint (if (= role "rerank") "/v1/rerank" "/v1/chat/completions"))
-      (def current (dyn :zinc/call))
-      (def admission (store/transact s
-                                     (store/checkpoint s)
-                                     (store/charge s 1 0)
-                                     (def event (store/append s (current :scope) "model-admission" (selected :reference)
-                                                              {:input (tabseq [[key value] :in (pairs input) :unless (index-of key [:messages :tools :query :documents :views])] key value)
-                                                               :request {:method "POST" :url (string (get-in config [:providers (keyword (selected :provider)) :url]) endpoint) :body wire}
-                                                               :views (input :views) :estimate size :output maximum} nil (current :id)))
-                                     (store/checkpoint s (merge (current :checkpoint) {:request (event :id)})) (event :id)))
-      (def value (request config selected "POST" endpoint wire))
-      (def result (try (do (account s admission selected (value :usage)) (merge
-                                                                           (if (= role "rerank")
-                                                                             (do
-                                                                               (assert (indexed? (value :results)) "invalid rerank results")
-                                                                               (def seen @{})
-                                                                               (each ranked (value :results)
-                                                                                 (assert (and (int? (ranked :index)) (<= 0 (ranked :index) (- (length (input :documents)) 1))
-                                                                                              (not (seen (ranked :index))) (number? (ranked :relevance_score))
-                                                                                              (< (math/abs (ranked :relevance_score)) math/inf)) "invalid rerank result")
-                                                                                 (put seen (ranked :index) true))
-                                                                               (assert (= (length seen) (length (input :documents))) "incomplete rerank results")
-                                                                               {:results (sort (value :results) (fn [a b]
-                                                                                                                  (if (= (a :relevance_score) (b :relevance_score)) (< (a :index) (b :index)) (> (a :relevance_score) (b :relevance_score))))) :status "complete"})
-                                                                             (do
-                                                                               (assert (and (indexed? (value :choices)) (= 1 (length (value :choices)))) "expected one complete assistant message")
-                                                                               (def choice ((value :choices) 0))
-                                                                               (assert (not= "error" (choice :finish_reason)) "provider generation failed")
-                                                                               (def message (choice :message))
-                                                                               (assert (and (dictionary? message) (= "assistant" (message :role))) "invalid assistant message")
-                                                                               (def content (message :content))
-                                                                               (assert (or (nil? content) (string? content) (indexed? content)) "invalid assistant content")
-                                                                               (each text (if (indexed? content) (seq [part :in content :when (= "text" (part :type))] (part :text)) [(if (nil? content) (or (message :refusal) "") content)])
-                                                                                 (assert (and (string? text) (utf8/is-valid? text)) "invalid assistant text"))
-                                                                               (def calls (or (message :tool_calls) []))
-                                                                               (assert (and (indexed? calls) (<= (length calls) (config :tool-calls))) "invalid tool calls")
-                                                                               (def identities @{})
-                                                                               (def tools (map (fn [call]
-                                                                                                 (assert (and (dictionary? call) (string? (call :id)) (> (length (call :id)) 0) (not (identities (call :id)))) "invalid or duplicate tool identity")
-                                                                                                 (put identities (call :id) true)
-                                                                                                 (try (do
-                                                                                                        (assert (index-of (choice :finish_reason) ["stop" "tool_calls"]) "Interrupted tool call; not executed.")
-                                                                                                        (assert (and (= "function" (call :type)) (= "run_janet" (get-in call [:function :name]))
-                                                                                                                     (input :tools) (index-of tool (input :tools))) "unknown or unavailable tool")
-                                                                                                        (def arguments (json/decode (get-in call [:function :arguments]) true true))
-                                                                                                        (assert (and (dictionary? arguments) (= [:code] (tuple/slice (sort (keys arguments))))
-                                                                                                                     (string? (arguments :code)) (> (length (arguments :code)) 0)) "invalid Janet tool source")
-                                                                                                        {:id (call :id) :code (arguments :code)})
-                                                                                                   ([err] {:id (call :id) :error {:code "InvalidToolCall" :message (string err)}}))) calls))
-                                                                               (def tail (if (string? content) {:type "text" :text content} (when (indexed? content) (last content))))
-                                                                               (assert (indexed? (or (message :reasoning_details) [])) "invalid reasoning details")
-                                                                               {:message message :finish-reason (choice :finish_reason) :tools tools
-                                                                                :reasoning-visible (not= "none" (config :thinking))
-                                                                                :status (cond (> (length calls) 0) "tools"
-                                                                                          (and (string? (message :refusal)) (> (length (string/trim (message :refusal))) 0)) "refused"
-                                                                                          (= "content_filter" (choice :finish_reason)) "blocked"
-                                                                                          (and (= "stop" (choice :finish_reason)) (= "text" (get tail :type)) (> (length (string/trim (tail :text))) 0)) "complete" "continue")}))
-                                                                           {:usage (value :usage) :model selected :request admission :role role :turn (get input :turn false)
-                                                                            :visible (and (= role "chat") (not (input :turn)) (not= "summarize" (current :kind)))
-                                                                            :provider-metadata (tabseq [[key item] :in (pairs value) :unless (index-of key [:usage :choices :results])] key item)
-                                                                            :choice-metadata (when (= role "chat") (tabseq [[key item] :in (pairs ((value :choices) 0)) :unless (index-of key [:message :finish_reason])] key item))}))
-                    ([err] (error {:code "InvalidModelResponse" :message (string err) :detail (string (json/encode value)) :context {:request admission}}))))
-      (store/transact s
-                      (assert (first (store/query s "SELECT id FROM main.call_controls WHERE id=? AND source=? AND owner=? AND state IN ('running','waiting','uncertain','cancelled')"
-                                                  [(current :id) (s :source) (current :owner)])) "model completion fenced")
-                      (store/append s (current :scope) "model-outcome" "Model outcome committed." result admission (current :id))))))
-  (merge (json/decode (event :data) true true)
-         {:event (event :id) :text ((first (store/query s "SELECT text FROM memory_records WHERE id=?" [(event :id)])) :text)}))
+    (or (when pending (first (store/query s "SELECT id,data,text FROM events WHERE source=? AND parent=? AND kind='model-outcome'" [(s :source) pending])))
+        (do
+          (default selected (profile s (input :model) (keyword role)))
+          (assert (= (selected :reference) (input :model)) "profile does not match admitted model")
+          (def body @{:model (selected :id)})
+          (var size 0) (var maximum 0)
+          (if (= role "rerank")
+            (do
+              (assert (> (length (input :query)) 0) "rerank query must remain nonempty")
+              (each passage (input :documents)
+                (def cost (store/estimate (string (input :query) passage)))
+                (assert (< cost (selected :context)) "original rerank query/passage exceeds capacity")
+                (+= size cost))
+              (merge-into body {:query (input :query) :documents (input :documents) :top_n (length (input :documents))}))
+            (do
+              (each message (input :messages)
+                (each part (if (indexed? (message :content)) (message :content) [])
+                  (when (= "image_url" (part :type)) (assert (selected :images) "model does not support image input"))))
+              (set size (+ (estimate (input :messages)) (if (input :tools) (store/estimate (json/encode (input :tools))) 0)))
+              (assert (<= size (get config :context-quota math/inf)) "model input exceeds context quota")
+              (def caps (map (fn [cap] (assert (and (int? cap) (>= cap 0)) "invalid output limit") (if (= cap 0) math/inf cap)) [(config :output) (get input :output 0)]))
+              (set maximum (min (or (selected :output) (selected :context)) ;caps (- (selected :context) size)))
+              (assert (> maximum 0) "approximate context capacity exhausted")
+              (merge-into body {:messages (input :messages) :max_tokens maximum :stream false})
+              (when (input :tools)
+                (each definition (input :tools) (assert (index-of definition (selected :tools)) "model does not support tool"))
+                (put body :tools (input :tools))
+                (when (selected :parallel) (put body :parallel_tool_calls true)))
+              (unless (= "default" (config :thinking))
+                (case (selected :control)
+                  :reasoning (put body :reasoning (if (= "none" (config :thinking)) {:enabled false} {:effort (config :thinking)}))
+                  :reasoning_effort (put body :reasoning_effort (config :thinking))))
+              (when (= "openrouter" (selected :provider)) (put body :provider {:require_parameters true :allow_fallbacks false}))))
+          (def wire (string (json/encode body)))
+          (def endpoint (if (= role "rerank") "/v1/rerank" "/v1/chat/completions"))
+          (def current (dyn :zinc/call))
+          (def admission (store/transact s
+                                         (store/checkpoint s)
+                                         (store/charge s 1 0)
+                                         (def event (store/append s (current :scope) "model-admission" (selected :reference)
+                                                                  {:input (tabseq [[key value] :in (pairs input) :unless (index-of key [:messages :tools :query :documents :views])] key value)
+                                                                   :request {:method "POST" :url (string (get-in config [:providers (keyword (selected :provider)) :url]) endpoint) :body wire}
+                                                                   :views (input :views) :estimate size :output maximum} nil (current :id)))
+                                         (store/checkpoint s (merge (current :checkpoint) {:request (event :id)})) (event :id)))
+          (def value (request config selected "POST" endpoint wire))
+          (def result
+            (try
+              (do
+                (account s admission selected (value :usage))
+                (merge
+                  (if (= role "rerank")
+                    (do
+                      (assert (indexed? (value :results)) "invalid rerank results")
+                      (def seen @{})
+                      (each ranked (value :results)
+                        (assert (and (int? (ranked :index)) (<= 0 (ranked :index) (- (length (input :documents)) 1))
+                                     (not (seen (ranked :index))) (number? (ranked :relevance_score))
+                                     (< (math/abs (ranked :relevance_score)) math/inf)) "invalid rerank result")
+                        (put seen (ranked :index) true))
+                      (assert (= (length seen) (length (input :documents))) "incomplete rerank results")
+                      {:results (sort (value :results) (fn [a b]
+                                                         (if (= (a :relevance_score) (b :relevance_score)) (< (a :index) (b :index)) (> (a :relevance_score) (b :relevance_score))))) :status "complete"})
+                    (do
+                      (assert (and (indexed? (value :choices)) (= 1 (length (value :choices)))) "expected one complete assistant message")
+                      (def choice ((value :choices) 0))
+                      (assert (not= "error" (choice :finish_reason)) "provider generation failed")
+                      (def message (choice :message))
+                      (assert (and (dictionary? message) (= "assistant" (message :role))) "invalid assistant message")
+                      (def content (message :content))
+                      (assert (or (nil? content) (string? content) (indexed? content)) "invalid assistant content")
+                      (each text (if (indexed? content) (seq [part :in content :when (= "text" (part :type))] (part :text)) [(if (nil? content) (or (message :refusal) "") content)])
+                        (assert (and (string? text) (utf8/is-valid? text)) "invalid assistant text"))
+                      (def calls (or (message :tool_calls) []))
+                      (assert (and (indexed? calls) (<= (length calls) (config :tool-calls))) "invalid tool calls")
+                      (def identities @{})
+                      (def tools (map (fn [call]
+                                        (assert (and (dictionary? call) (string? (call :id)) (> (length (call :id)) 0) (not (identities (call :id)))) "invalid or duplicate tool identity")
+                                        (put identities (call :id) true)
+                                        (try (do
+                                               (assert (index-of (choice :finish_reason) ["stop" "tool_calls"]) "Interrupted tool call; not executed.")
+                                               (assert (and (= "function" (call :type)) (= "run_janet" (get-in call [:function :name]))
+                                                            (input :tools) (index-of tool (input :tools))) "unknown or unavailable tool")
+                                               (def arguments (json/decode (get-in call [:function :arguments]) true true))
+                                               (assert (and (dictionary? arguments) (= [:code] (tuple/slice (sort (keys arguments))))
+                                                            (string? (arguments :code)) (> (length (arguments :code)) 0)) "invalid Janet tool source")
+                                               {:id (call :id) :code (arguments :code)})
+                                          ([err] {:id (call :id) :error {:code "InvalidToolCall" :message (string err)}}))) calls))
+                      (def tail (if (string? content) {:type "text" :text content} (when (indexed? content) (last content))))
+                      (assert (indexed? (or (message :reasoning_details) [])) "invalid reasoning details")
+                      {:message message :finish-reason (choice :finish_reason) :tools tools
+                       :reasoning-visible (not= "none" (config :thinking))
+                       :status (cond (> (length calls) 0) "tools"
+                                 (and (string? (message :refusal)) (> (length (string/trim (message :refusal))) 0)) "refused"
+                                 (= "content_filter" (choice :finish_reason)) "blocked"
+                                 (and (= "stop" (choice :finish_reason)) (= "text" (get tail :type)) (> (length (string/trim (tail :text))) 0)) "complete" "continue")}))
+                  {:role role :turn (get input :turn false)
+                   :visible (and (= role "chat") (not (input :turn)) (not= "summarize" (current :kind)))}))
+              ([err] (error {:code "InvalidModelResponse" :message (string err) :detail (string (json/encode value)) :context {:request admission}}))))
+          (store/transact s
+                          (assert (first (store/query s "SELECT id FROM main.call_controls WHERE id=? AND source=? AND owner=? AND state IN ('running','waiting','uncertain','cancelled')"
+                                                      [(current :id) (s :source) (current :owner)])) "model completion fenced")
+                          (def content (get-in result [:message :content]))
+                          (store/append s (current :scope) "model-outcome"
+                                        (cond (string? content) content
+                                          (indexed? content) (string/join (seq [part :in content :when (= "text" (part :type))] (part :text)) "\n")
+                                          (get-in result [:message :refusal] "")) result admission (current :id))))))
+  (merge (json/decode (event :data) true true) {:event (event :id) :text (event :text)}))
 
 (defn render [row]
   (def message (if (row :public_message) (json/decode (row :public_message) true true) {}))
   (def reasoning (string/join (distinct (filter |(and (string? $) (> (length (string/trim $)) 0))
-                                              (array/concat @[(message :reasoning_content) (message :reasoning)]
-                                                            (seq [part :in (get message :reasoning_details []) :when (dictionary? part)] (part :text))))) "\n"))
+                                                (array/concat @[(message :reasoning_content) (message :reasoning)]
+                                                              (seq [part :in (get message :reasoning_details []) :when (dictionary? part)] (part :text))))) "\n"))
   (def content (when (indexed? (message :content)) (filter |(not= "text" ($ :type)) (message :content))))
   (def parts (filter identity [(when (> (length reasoning) 0) (string "Reasoning:\n\n" reasoning))
                                (when (> (length (string/trim (row :text))) 0) (row :text))

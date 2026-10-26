@@ -1,9 +1,9 @@
 # Zinc 0.2.0
 
-- Standard Janet processes and fibers replace PA spawn/await handles; imports use `portable-agents/protocol`.
-- Durable completion remains in SQLite; temporary outcomes remain in their owning call.
-- Ordinary stdout carries inquiry-v1 NDJSON presentation; stderr carries logs.
-- Remarkable supplies CommonMark parsing and the module's structured `document` value.
-- The trusted `instructions` entry returns composed instructions without shadowing document data.
-- Runtime archives contain only required Janet sources and native libraries, not PA's worker or host module.
-- Package version is 0.2.0; database and presentation schemas are 1. No migration or compatibility path is included.
+- `self` returns committed outcomes directly; native `ev/gather` supplies concurrency without custom future handles.
+- Workers retain independent lifetime, `:d`, SQL fencing and RAM-only temporary payloads.
+- REPL configuration selects real Janet bindings with `*` and namespace wildcards, trusted reader/expander setup and persisted macros.
+- Named filesystem roots, HTTP methods/bases and fixed process argv remain host-enforced without `capability.janet`.
+- Windows filesystem grants reject reparse points; evaluator native access remains disabled.
+- FTS/Cygnet/reranking replace the spelling-correction subsystem; duplicate model metadata is removed.
+- SQLite schema is 2; provision fresh state explicitly. PA wire and inquiry presentation remain schema 1.

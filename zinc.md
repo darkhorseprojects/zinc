@@ -13,8 +13,6 @@ without a result. Inspect before repeating.
 ```janet
 (import ./src/engine)
 
-(def capability (require "./src/capability"))
-
 (def schema
   {:source {:type :string}
    :world {:type :string :repl {:value true}}
@@ -25,22 +23,24 @@ without a result. Inspect before repeating.
    :snapshot {:type :dictionary :optional true}
    :agent {:type :dictionary :optional true}
    :inference {:type :boolean :default true}
-   :repl {:type :dictionary
-          :default {}
-          :fields {:enabled {:type :boolean :default false}
-                   :functions {:type :array :items :string :default []}
-                   :values {:type :array :items :string :default []}}
+   :repl {:type :dictionary :optional true
+          :fields {:bindings {:type :array :items :string :default ["core/*" "ev/*"]}
+                   :values {:type :array :items :string :default []}
+                   :setup {:type :string :absolute true :optional true}
+                   :modules {:type :dictionary :default {}
+                             :values {:type :dictionary
+                                      :fields {:module {:type :string :absolute true}
+                                               :config {:type :dictionary :default {}}}}}}
           :repl {:functions
                  {"self" {:intrinsic true
-                          :doc `(self request) starts a child without waiting; returns a handle. Supply exactly one of :text (inquiry) or :code (Janet source).
-:text uses :agent when configured, otherwise the caller profile; :code uses the caller profile.
-Children copy current source, not live bindings; edits do not merge automatically. :revision selects a Git commit or branch instead.
-:parent sets the history attachment (default: current end); 0 defaults to empty history, not empty source. :memory_range {:start id :end id} sets inclusive bounds within the caller's view.
-:persist inherits the caller's policy. false uses a RAM payload journal and forbids durable descendants. Controls and source files may reach disk; callers may retain child input/output. External effects are unchanged.
-Keep handles in let, not source definitions. Children share the root deadline and work/tool budgets.`}
-                  "await" {:intrinsic true
-                           :doc `(await handle) waits for a descendant, raising on failure. Code children return printed output then the last value as text; text children return a map with :text.
-Temporary handles belong to their creating call. Waiting releases a slot without extending the deadline.`}}}}
+                          :doc `(self request) runs an independent child and returns its committed outcome, raising on failure. Supply exactly one of :text or :code.
+:text uses :agent when configured; :code uses the caller profile. Code returns evaluation text; text returns a map with :text.
+Children copy current source, not live bindings; edits do not merge automatically. :revision selects a Git revision.
+:parent sets history attachment; :memory_range {:start id :end id} sets inclusive bounds. :parent 0 defaults to empty history, not empty source.
+:persist inherits the caller policy; false uses RAM payloads and forbids durable descendants. Controls/source may reach disk and callers may retain results.
+Children share the root deadline and budgets. Waiting releases a slot. Workers persist independently of observation.`}
+                  "memory/expand" ((require "./src/memory") 'expand)
+                  "save" ((require "./src/repl") 'save)}}}
    :fs {:type :dictionary
         :default {}
         :values {:type :dictionary
@@ -49,9 +49,9 @@ Temporary handles belong to their creating call. Waiting releases a slot without
                           :write {:type :boolean :default false}
                           :description {:type :string :optional true}}}
         :repl {:public [:root :description]
-               :functions {"fs/list" (merge (capability 'list) {:permission :read})
-                           "fs/read" (merge (capability 'read) {:permission :read})
-                           "fs/write" (merge (capability 'write) {:permission :write})}}}
+               :functions {"fs/list" {:permission :read :doc "(fs/list root relative) lists names; use \".\" for the root."}
+                           "fs/read" {:permission :read :doc "(fs/read root relative) reads bounded UTF-8 text."}
+                           "fs/write" {:permission :write :doc "(fs/write root relative text) writes bounded UTF-8 text."}}}}
    :http {:type :dictionary
           :default {}
           :values {:type :dictionary
@@ -60,7 +60,7 @@ Temporary handles belong to their creating call. Waiting releases a slot without
                                       :choices ["GET" "HEAD" "POST" "PUT" "PATCH" "DELETE"]}
                             :description {:type :string :optional true}}}
           :repl {:public [:url :methods :description]
-                 :functions {"http/request" (capability 'request)}}}
+                 :functions {"http/request" {:doc "(http/request root method segments body) requests a named base without redirects; returns {:status :body}."}}}}
    :processes {:type :dictionary
                :default {}
                :values {:type :dictionary
@@ -68,14 +68,7 @@ Temporary handles belong to their creating call. Waiting releases a slot without
                                  :env {:type :dictionary :default {} :values {:type :string}}
                                  :description {:type :string :optional true}}}
                :repl {:public [:argv :description]
-                      :functions {"process/run" (capability 'run)}}}
-   :capabilities {:type :dictionary
-                  :default {:memory/expand {}}
-                  :repl {:builtins {:memory/expand ((require "./src/memory") 'expand)
-                                    :save ((require "./src/repl") 'save)}}
-                  :values {:type :dictionary
-                           :fields {:module {:type :string :absolute true :optional true}
-                                    :config {:type :dictionary :default {}}}}}
+                      :functions {"process/run" {:doc "(process/run name) runs fixed argv/env with empty stdin; returns {:exit :output}."}}}}
    :visibility {:type :array :items :string :default []}
    :providers {:type :dictionary
                :default {}

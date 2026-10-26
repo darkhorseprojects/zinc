@@ -65,26 +65,6 @@
       {:db db :width width})
     ([err] (sql/close db) (error err))))
 
-(defn distance [left right maximum]
-  (def a (peg/match ~(any (capture (* 1 (any (range "\x80\xbf"))))) left))
-  (def b (peg/match ~(any (capture (* 1 (any (range "\x80\xbf"))))) right))
-  (if (> (math/abs (- (length a) (length b))) maximum) (+ maximum 1)
-    (do
-      (var previous (range 0 (+ 1 (length b)))) (var prior @[])
-      (eachp [i x] a
-        (def current @[(+ i 1)])
-        (eachp [j y] b
-          (def amount (min (+ (previous (+ j 1)) 1) (+ (current j) 1) (+ (previous j) (if (= x y) 0 1))))
-          (array/push current (if (and (> i 0) (> j 0) (= x (b (- j 1))) (= (a (- i 1)) y)) (min amount (+ (prior (- j 1)) 1)) amount)))
-        (set prior previous) (set previous current))
-      (last previous))))
-
-(defn tokens [s text ceiling]
-  (store/query s "CREATE VIRTUAL TABLE IF NOT EXISTS temp.tokens USING fts5(text,tokenize='unicode61 remove_diacritics 0'); CREATE VIRTUAL TABLE IF NOT EXISTS temp.words USING fts5vocab(tokens,'instance');")
-  (store/query s "DELETE FROM temp.tokens")
-  (store/query s "INSERT INTO temp.tokens(rowid,text) VALUES(1,?)" [text])
-  (map |($ :term) (store/query s "SELECT term FROM temp.words ORDER BY offset LIMIT ?" [ceiling])))
-
 (defn semantic-window [s view anchor &opt request]
   (if (or (not ((s :config) :search)) (= (view :last) 0)) []
     (let [config (s :config) graph (cygnet config)]
@@ -93,35 +73,21 @@
         (def stops (table ;(catseq [term :in (get (json/decode (slurp (config :stopwords)) true true) (keyword (config :language)))] [term true])))
         (assert (> (length stops) 0) "unsupported stopword language")
         (def ceiling (config :terms))
-        (def lexical (tokens s anchor ceiling))
+        (store/query s "CREATE VIRTUAL TABLE IF NOT EXISTS temp.tokens USING fts5(text,tokenize='unicode61 remove_diacritics 0'); CREATE VIRTUAL TABLE IF NOT EXISTS temp.words USING fts5vocab(tokens,'instance'); DELETE FROM temp.tokens;")
+        (store/query s "INSERT INTO temp.tokens(rowid,text) VALUES(1,?)" [anchor])
+        (def lexical (map |($ :term) (store/query s "SELECT term FROM temp.words ORDER BY offset LIMIT ?" [ceiling])))
         (def literals (peg/match ~(any (choice (* "\"" (capture (some (if-not "\"" 1))) "\"")
                                                (capture (some (set "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789_./:-"))) 1)) anchor))
         (def terms (array/concat @[] (take ceiling (distinct (array/concat @[] literals lexical)))))
-        (def corrected @{})
-        (each seed (filter |(not (stops $)) lexical)
-          (def exact (or (first (sql/eval (graph :db) "SELECT form FROM graph.form_concepts WHERE language=? AND form=? LIMIT 1" [(config :language) seed]))
-                         (first (store/visible s (merge view {:match (string "\"" seed "\"") :columns "e.id"}) :oldest 1))))
-          (var resolved seed)
-          (unless exact
-            (def chars (peg/match ~(any (capture (* 1 (any (range "\x80\xbf"))))) seed))
-            (when (<= 4 (length chars) 32)
-              (def grams (seq [i :range [0 (- (length chars) 2)]] (string "\"" (string/join (slice chars i (+ i 3))) "\"")))
-              (var edits (if (>= (length chars) 8) 3 2))
-              (each row (store/visible s (merge view {:lexical true :match (string/join grams " OR ") :columns "DISTINCT l.term"}) :oldest (config :candidates))
-                (def cost (distance seed (row :term) (- edits 1)))
-                (when (< cost edits) (set resolved (row :term)) (set edits cost)))))
-          (put corrected seed resolved)
-          (when (and (< (length terms) ceiling) (not (index-of resolved terms))) (array/push terms resolved)))
-        (def phrases (map |(get corrected $ $) lexical))
-        (eachp [offset seed] phrases
-          (for width 1 (+ 1 (min (graph :width) (- (length phrases) offset)))
-            (when (and (< (length terms) ceiling) (find |(not (stops $)) (slice phrases offset (+ offset width))))
+        (eachp [offset seed] lexical
+          (for width 1 (+ 1 (min (graph :width) (- (length lexical) offset)))
+            (when (and (< (length terms) ceiling) (find |(not (stops $)) (slice lexical offset (+ offset width))))
               (def expanded (sql/eval (graph :db) `WITH RECURSIVE reachable(concept,depth) AS (
                 SELECT concept,0 FROM graph.form_concepts WHERE language=? AND form=?
                 UNION SELECT e.target,r.depth+1 FROM reachable r JOIN graph.concept_edges e ON e.source=r.concept WHERE r.depth<? LIMIT ?
               ) SELECT f.form,min(r.depth) depth FROM reachable r JOIN graph.form_concepts f ON f.concept=r.concept
               WHERE f.language=? GROUP BY f.form ORDER BY depth,f.form LIMIT ?`
-                                      [(config :language) (string/join (slice phrases offset (+ offset width)) " ") (config :depth) (config :expansion-nodes) (config :language) (- ceiling (length terms))]))
+                                      [(config :language) (string/join (slice lexical offset (+ offset width)) " ") (config :depth) (config :expansion-nodes) (config :language) (- ceiling (length terms))]))
               (each row expanded
                 (unless (or (stops (row :form)) (index-of (row :form) terms)) (array/push terms (row :form)))))))
         (def expression (string/join (map |(string "\"" (string/replace-all "\"" "\"\"" $) "\"") terms) " OR "))

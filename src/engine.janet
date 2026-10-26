@@ -7,6 +7,7 @@
 (import ./memory)
 (import ./schema)
 (import ./repl)
+(import ./http)
 
 (defn make [spec]
   (defn message [event]
@@ -55,15 +56,15 @@
   (defn worker [entry input config]
     (def limits (dyn :pa/limits))
     (def process (os/spawn [(dyn :pa/executable) "run" (string (limits "frameBytes")) (string (limits "admissionSeconds"))]
-                          :d {:in :pipe :out :pipe :err stderr}))
+                           :d {:in :pipe :out :pipe :err stderr}))
     (def exited (ev/chan 1))
     (ev/go (fn [] (os/proc-wait process)) nil exited)
     (try
       (do
         (defer (ev/close (process :in))
           (wire/send (process :in) (wire/request {"version" wire/version "program" (merge (dyn :pa/program) {"entry" entry})
-                                                 "input" (wire/base64 (string (json/encode input)))
-                                                 "config" (wire/base64 (string (json/encode config)))})))
+                                                  "input" (wire/base64 (string (json/encode input)))
+                                                  "config" (wire/base64 (string (json/encode config)))})))
         (def reader (wire/reader (process :out) true))
         (ev/with-deadline (limits "admissionSeconds") (wire/output reader true))
         [process reader exited])
@@ -83,8 +84,13 @@
 
   (defn wait [s id &opt here]
     (def current (dyn :zinc/call))
-    (def parked (when current (store/park s true)))
-    (defer (when (and parked (= "waiting" (get (first (store/query s "SELECT state FROM main.call_controls WHERE id=?" [(current :id)])) :state))) (store/park s false))
+    (when current
+      (when (= 0 (get current :waiters 0)) (store/park s true))
+      (put current :waiters (+ 1 (get current :waiters 0))))
+    (defer (when current
+             (put current :waiters (- (current :waiters) 1))
+             (when (and (= 0 (current :waiters)) (= "waiting" (get (first (store/query s "SELECT state FROM main.call_controls WHERE id=?" [(current :id)])) :state)))
+               (store/park s false)))
       (if (string? id)
         (let [child ((current :children) id)]
           (assert child "temporary self is not owned by this call")
@@ -94,25 +100,25 @@
           (def [ok value] (fiber/last-value worker))
           (if ok value (error value)))
         (label done (while true
-                    (store/recover s)
-                    (when current (store/checkpoint s))
-                    (def row (first (store/query s "SELECT state,kind FROM main.call_controls WHERE id=? AND source=?" [id (s :source)])))
-                    (assert row "call unavailable")
-                    (case (row :state)
-                      "done" (return done (if (= "text" (row :kind)) (result s id)
-                                            ((json/decode ((first (store/query s "SELECT data FROM events WHERE call=? AND kind='call-result' ORDER BY id DESC LIMIT 1" [id])) :data) true true) :value)))
-                      "failed" (error ((json/decode ((first (store/query s "SELECT data FROM events WHERE call=? AND kind='call-result' ORDER BY id DESC LIMIT 1" [id])) :data) true true) :error))
-                      "uncertain" (error (string "Call #" id ": uncertain effects; inspect receipts, do not replay."))
-                      "cancelled" (error "call cancelled")
-                      "queued" (launch s id here))
-                    (ev/sleep 0.1))))))
+                      (store/recover s)
+                      (when current (store/checkpoint s))
+                      (def row (first (store/query s "SELECT state,kind FROM main.call_controls WHERE id=? AND source=?" [id (s :source)])))
+                      (assert row "call unavailable")
+                      (case (row :state)
+                        "done" (return done (if (= "text" (row :kind)) (result s id)
+                                              ((json/decode ((first (store/query s "SELECT data FROM events WHERE call=? AND kind='call-result' ORDER BY id DESC LIMIT 1" [id])) :data) true true) :value)))
+                        "failed" (error ((json/decode ((first (store/query s "SELECT data FROM events WHERE call=? AND kind='call-result' ORDER BY id DESC LIMIT 1" [id])) :data) true true) :error))
+                        "uncertain" (error (string "Call #" id ": uncertain effects; inspect receipts, do not replay."))
+                        "cancelled" (error "call cancelled")
+                        "queued" (launch s id here))
+                      (ev/sleep 0.1))))))
 
   (defn start-child [s view value &opt snapshot]
     (def value (schema/request (postwalk |(if (dictionary? $) (tabseq [[k v] :in (pairs $)] (keyword k) v) $) value)
                                [:text :code :parent :memory_range :persist :revision]))
     (assert (not= (nil? (value :text)) (nil? (value :code))) "self requires text or code")
     (def config (if (value :text) (or ((s :config) :agent) (s :config)) (s :config)))
-    (assert (if (value :text) (config :inference) (get-in config [:repl :enabled])) "child execution is not permitted")
+    (assert (if (value :text) (config :inference) (config :repl)) "child execution is not permitted")
     (def parent (store/call s (view :branch)))
     (put value :author (string "self:" (parent :request) "/" (parent :id)))
     (put value :at (((store/query s "SELECT strftime('%Y-%m-%dT%H:%M:%fZ','now') at") 0) :at))
@@ -150,7 +156,7 @@
 
   (defn run-code [s view bindings code]
     (def config (s :config))
-    (assert (get-in config [:repl :enabled]) "Janet execution is not permitted")
+    (assert (config :repl) "Janet execution is not permitted")
     (assert (<= (length code) (config :source-bytes)) "tool source byte ceiling")
     (store/checkpoint s)
     (def current (dyn :zinc/call))
@@ -160,40 +166,101 @@
       (def public (repl/public config (spec :schema)))
       (put current :runtime (repl/open (string (slurp (current :file))) (current :input)
                                        (repl/instructions config (spec :document) bindings public) public
-                                       (tabseq [[name binding] :in (pairs bindings)] name (binding :doc))
-                                       {:source (config :source-bytes) :output (config :response-bytes)})))
-    (repl/execute (current :runtime) code (fn [name args]
-                                            (store/checkpoint s)
-                                            (def binding (bindings name))
-                                            (assert (or (= name "world/source") binding) "function revoked")
-                                            (when (get binding :intrinsic) (assert (= 1 (length args)) "invalid intrinsic arity"))
-                                            (def args (schema/data args))
-                                            (case name
-                                              "world/source"
-                                              (do (assert (and (= 2 (length args)) (every? (map string? args)) (<= (length (args 1)) (config :source-bytes))) "invalid world source update")
-                                                (assert (= (args 0) (string (slurp (current :file)))) "world source changed; continue in a new self after merging")
-                                                (spit (current :file) (args 1) :wb) nil)
-                                              "await"
-                                              (let [handle (first args)]
-                                                (assert (dictionary? handle) "await requires a self handle")
-                                                (unless (handle :temporary)
-                                                  (assert (and (int? (handle :job)) (not= (current :id) (handle :job))
-                                                               (first (store/query s `WITH RECURSIVE parents(id) AS (SELECT parent FROM main.call_controls WHERE id=? AND source=?
-                  UNION SELECT c.parent FROM main.call_controls c JOIN parents p ON c.id=p.id WHERE c.parent IS NOT NULL)
-                  SELECT id FROM parents WHERE id=?` [(handle :job) (s :source) (current :id)]))) "await requires descendant work"))
-                                                (wait s (or (handle :temporary) (handle :job))))
-                                              (let [admission (store/transact s (store/charge s 1 0)
-                                                                              (store/append s view "call-admission" name {:arguments args} nil ((dyn :zinc/call) :id)))]
-                                                (def value (if (= name "self")
-                                                             (let [handle (with-dyns [:zinc/effect (admission :id)] (start-child s (merge view (store/view s (view :branch))) (first args)))]
-                                                               (when (handle :job) (launch s (handle :job))) handle)
-                                                             (schema/data
-                                                               (with-dyns [:zinc/context [s view] :capability/config (binding :config)
-                                                                           :capability/presentation (filter identity (map message (memory/events s (view :run) 0 (admission :id))))]
-                                                                 (apply (binding :value) args)))))
-                                                (store/transact s (store/checkpoint s)
-                                                                (store/append s view "operation-outcome" name {:value value} (admission :id) ((dyn :zinc/call) :id)))
-                                                value)))
+                                       (tabseq [[name binding] :in (pairs bindings)] name (if (binding :local) binding {:doc (binding :doc)}))
+                                       {:source (config :source-bytes) :output (config :response-bytes)} (config :repl))))
+    (repl/execute (current :runtime) code
+                  (fn [name args]
+                    (store/checkpoint s)
+                    (def binding (bindings name))
+                    (assert (or (= name "world/source") (and binding (not (binding :local)))) "function revoked")
+                    (when (get binding :intrinsic) (assert (= 1 (length args)) "invalid intrinsic arity"))
+                    (def args (schema/data args))
+                    (case name
+                      "world/source"
+                      (do (assert (and (= 2 (length args)) (every? (map string? args)) (<= (length (args 1)) (config :source-bytes))) "invalid world source update")
+                        (assert (= (args 0) (string (slurp (current :file)))) "world source changed; continue in a new self after merging")
+                        (spit (current :file) (args 1) :wb) nil)
+                      (let [admission (store/transact s (store/charge s 1 0)
+                                                      (store/append s view "call-admission" name {:arguments args} nil ((dyn :zinc/call) :id)))]
+                        (def value
+                          (cond
+                            (= name "self")
+                            (let [handle (with-dyns [:zinc/effect (admission :id)] (start-child s (merge view (store/view s (view :branch))) (first args)))]
+                              (when (handle :job) (launch s (handle :job)))
+                              (wait s (or (handle :temporary) (handle :job))))
+                            (index-of name ["fs/list" "fs/read" "fs/write"])
+                            (do
+                              (assert (= (length args) (if (= name "fs/write") 3 2)) "invalid filesystem arity")
+                              (def [root relative text] args)
+                              (def grant (get-in config [:fs (keyword root)]))
+                              (assert (and grant (grant (if (= name "fs/write") :write :read))) "filesystem operation is not granted")
+                              (assert (and (string? relative) (> (length relative) 0) (not (string/find "\0" relative))
+                                           (not (string/find "\\" relative)) (not (string/find ":" relative)) (not (path/abspath? relative))) "invalid relative path")
+                              (var target (os/realpath (grant :root)))
+                              (each part (array/concat @[""] (if (= relative ".") [] (string/split "/" relative)))
+                                (unless (= part "")
+                                  (assert (not (index-of part ["." ".."])) "invalid path component")
+                                  (when (index-of (os/which) [:windows :mingw])
+                                    (assert (and (not (index-of (last part) [32 46]))
+                                                 (not (peg/match ~(* (choice "CON" "PRN" "AUX" "NUL" (* (choice "COM" "LPT") (range "19"))) -1)
+                                                                 (string/ascii-upper (first (string/split "." part)))))) "invalid Windows path component"))
+                                  (set target (path/join target part)))
+                                (assert (if (index-of (os/which) [:windows :mingw])
+                                          (let [attributes (ffi/call (ffi/lookup (ffi/native "kernel32.dll") "GetFileAttributesA") (ffi/signature :default :uint32 :string) target)]
+                                            (or (= attributes 0xffffffff) (= 0 (band attributes 0x400))))
+                                          (not= :link (os/lstat target :mode))) "filesystem links are not permitted"))
+                              (case name
+                                "fs/list" (do (assert (= :directory (os/stat target :mode)) "directory required")
+                                            (def names (os/dir target))
+                                            (assert (and (<= (length names) (config :history-records)) (<= (sum (map length names)) (config :response-bytes))) "directory result exceeds limit")
+                                            (sorted names))
+                                "fs/read" (do (assert (= :file (os/stat target :mode)) "regular file required")
+                                            (with [file (file/open target :rbn)]
+                                              (def bytes (or (file/read file (+ 1 (config :response-bytes))) ""))
+                                              (assert (and (<= (length bytes) (config :response-bytes)) (utf8/is-valid? bytes)) "file exceeds limit or is not UTF-8")
+                                              (string bytes)))
+                                (do (assert (and (string? text) (utf8/is-valid? text) (<= (length text) (config :response-bytes))) "invalid file contents")
+                                  (assert (or (nil? (os/stat target)) (= :file (os/stat target :mode))) "regular file required")
+                                  (spit target text :wb) nil)))
+                            (= name "http/request")
+                            (do
+                              (assert (= 4 (length args)) "invalid HTTP arity")
+                              (def [root method segments body] args)
+                              (def grant (get-in config [:http (keyword root)]))
+                              (assert (and grant (index-of method (grant :methods))) "HTTP operation is not granted")
+                              (assert (and (indexed? segments) (every? (map |(and (string? $) (not (index-of $ ["." ".."]))
+                                                                                  (peg/match ~(* (some (set "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789_-~.")) -1) $)) segments))) "invalid HTTP path")
+                              (assert (or (nil? body) (string? body)) "HTTP body must be text or nil")
+                              (http/request config grant method (string/join segments "/") body))
+                            (= name "process/run")
+                            (do
+                              (assert (= 1 (length args)) "invalid process arity")
+                              (def command (get-in config [:processes (keyword (first args))]))
+                              (assert command "process is not granted")
+                              (def child (os/spawn (command :argv) :e (merge (tabseq [[k v] :in (pairs (command :env))] (string k) v) {:in :pipe :out :pipe :err :out})))
+                              (def exited (ev/chan 1))
+                              (ev/go (fn [] (os/proc-wait child)) nil exited)
+                              (def owner (fiber/current))
+                              (def watcher (ev/go (fn [] (try (while true (store/checkpoint s) (ev/sleep 0.1))
+                                                           ([err] (unless (= err :finished) (ev/cancel owner err)))))))
+                              (defer (do (ev/cancel watcher :finished)
+                                       (when (nil? (child :return-code)) (try (os/proc-kill child) ([err] nil)) (ev/take exited))
+                                       (ev/close (child :out)))
+                                (ev/close (child :in))
+                                (def output @"") (var chunk nil)
+                                (while (set chunk (ev/read (child :out) 4096))
+                                  (assert (<= (+ (length output) (length chunk)) (config :response-bytes)) "process output exceeds limit")
+                                  (buffer/push-string output chunk))
+                                (ev/take exited)
+                                (assert (utf8/is-valid? output) "process output is not UTF-8")
+                                {:exit (child :return-code) :output (string output)}))
+                            (schema/data
+                              (with-dyns [:zinc/context [s view] :capability/config (binding :config)
+                                          :capability/presentation (filter identity (map message (memory/events s (view :run) 0 (admission :id))))]
+                                (apply (binding :value) args)))))
+                        (store/transact s (store/checkpoint s)
+                                        (store/append s view "operation-outcome" name {:value value} (admission :id) ((dyn :zinc/call) :id)))
+                        value)))
                   (min (config :seconds) (max 0.001 (- (view :expires) (os/clock))))))
 
   (defn infer [s call bindings]
@@ -201,7 +268,7 @@
     (def config (s :config))
     (def inherited (store/view s id false))
     (def selected (model/profile s (config :chat) :chat))
-    (def tools (filter |(or (get-in config [:repl :enabled]) (not= "function" ($ :type))) (selected :tools)))
+    (def tools (filter |(or (config :repl) (not= "function" ($ :type))) (selected :tools)))
     (def system (repl/instructions config (spec :document) (when (find |(= "function" ($ :type)) tools) bindings) (repl/public config (spec :schema))))
     (def user (first (store/query s "SELECT * FROM memory_records WHERE task=? AND kind='user'" [id])))
     (def inquiry {:role "user" :content (model/images s (user :id) (memory/render user))})
@@ -220,7 +287,7 @@
                       {:tool-id (tool :tool_id) :response (tool :response) :ok false :uncertain true} (tool :response) id))
       (assert (< (length responses) (config :rounds)) "model round limit exhausted")
       (def view (store/view s id))
-      (def world (when (get-in config [:repl :enabled]) {:role "user" :content (string "## World source\n\n" (slurp (call :file)))}))
+      (def world (when (config :repl) {:role "user" :content (string "## World source\n\n" (slurp (call :file)))}))
       (set space (- capacity (model/estimate (filter identity [{:role "system" :content system} world inquiry])) tool-size 256))
       (assert (> space 256) "question, world source and instructions exhaust context")
       (var context (memory/context s inherited space pool))
@@ -259,8 +326,8 @@
       (each [tool admission handle] work
         (def outcome (try
                        {:ok true :text (if (get handle :error) (error (get handle :error)) (if parallel
-                                         (wait s (or (handle :temporary) (handle :job)))
-                                         (run-code s view bindings (tool :code))))}
+                                                                                             (wait s (or (handle :temporary) (handle :job)))
+                                                                                             (run-code s view bindings (tool :code))))}
                        ([err fiber]
                          (when (= err "deadline expired") (error err))
                          (def failure (schema/failure "ToolFailed" err fiber))
@@ -289,11 +356,11 @@
                                          :checkpoint (json/decode (row :checkpoint) true true)}) :zinc/effect (row :admission)]
         (store/transact s
                         (store/checkpoint s)
-                        (store/append s view "call-attempt" "execution entered" {:attempt (row :attempt)} nil id))
+                        (store/append s view "call-attempt" (if (= "code" (row :kind)) (get-in (dyn :zinc/call) [:input :code]) "execution entered") {:attempt (row :attempt)} nil id))
         (def [value failure]
           (try
             (let [input ((dyn :zinc/call) :input)
-                  bindings (if (and (not= "summarize" (row :kind)) (get-in config [:repl :enabled])) (repl/definitions config (spec :schema)) {})
+                  bindings (if (not= "summarize" (row :kind)) (repl/definitions config (spec :schema)) {})
                   value (case (row :kind) "text" (infer s row bindings)
                           "code" (run-code s view bindings (input :code)) "summarize" (memory/summarize s row input))]
               (when (= "code" (row :kind)) (store/charge s 0 (store/estimate (json/encode value))))
@@ -301,8 +368,8 @@
             ([err fiber]
               (def tokens (keep |(when ($ :token-env) (os/getenv ($ :token-env))) (values (config :providers))))
               [nil {:error (postwalk (fn [value]
-                                      (if (string? value) (reduce (fn [text token] (string/replace-all token "[redacted]" text)) value tokens) value))
-                                    (schema/failure "ExecutionFailed" err fiber))}])))
+                                       (if (string? value) (reduce (fn [text token] (string/replace-all token "[redacted]" text)) value tokens) value))
+                                     (schema/failure "ExecutionFailed" err fiber))}])))
         (when-let [runtime ((dyn :zinc/call) :runtime)] (repl/close runtime))
         (when (first (store/query s "SELECT id FROM main.live_calls WHERE id=? AND owner=?" [id (row :owner)]))
           (each request (keys ((dyn :zinc/call) :children))
@@ -338,7 +405,7 @@
         (do
           (unless (= operation "resume")
             (assert (and (value :author) (value :at) (not= (nil? (value :text)) (nil? (value :code)))) "self requires text or code, authenticated author and occurrence time")
-            (assert (if (value :text) ((s :config) :inference) (get-in (s :config) [:repl :enabled])) "execution is not permitted in this view")
+            (assert (if (value :text) ((s :config) :inference) ((s :config) :repl)) "execution is not permitted in this view")
             (unless (value :request) (put value :request (string/join (map |(string/format "%02x" $) (os/cryptorand 24))))))
           (def call (if (= operation "resume") existing (store/start s value (s :config) nil
                                                                      (unless existing (or (get-in (s :config) [:snapshot :origin]) (repl/source (s :config) nil (value :revision)))))))
@@ -372,7 +439,8 @@
                                    ["describe" []] ["instructions" []] ["models" [:role]] ["views" [:event]] ["render" [:event]] ["events" [:run :after]] ["record" [:records]] ["pending" [:request]] ["abort" [:run :request :reason]] ["invalidate" [:event]]]]
     operation (fn [bytes opaque]
                 (def config (schema/configuration (spec :schema) (json/decode opaque true true) (= operation "describe")))
-                (when (index-of operation ["self" "task" "resume"]) (repl/definitions config (spec :schema)))
+                (when (index-of operation ["self" "task" "resume" "instructions"])
+                  (each profile (filter identity [config (config :agent)]) (repl/definitions profile (spec :schema))))
                 (assert (and (utf8/is-valid? bytes) (<= (length bytes) (config :request-bytes))) "request must be bounded UTF-8")
                 (when (index-of operation ["describe" "instructions"]) (assert (= "" bytes) "operation takes empty input"))
                 (def value (if (and (= "" bytes) (index-of operation ["describe" "instructions" "pending"])) {} (schema/request (json/decode bytes true true) fields)))
