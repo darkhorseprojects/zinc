@@ -3,9 +3,9 @@ Zinc third-party notices
 
 Runtime artifacts bundle Portable Agents' Janet libraries, Remarkable, Spork,
 the Janet SQLite binding and Jurl. Janet modules are pinned in the source repository's
-project.janet. The executors, system libraries, model servers, model weights
-and Cygnet index are separately provisioned. Each component remains subject
-to its own license terms; bundled dependency license texts follow below.
+project.janet. Windows curl DLLs and licenses are included in bin and share.
+Executors, other system libraries, model servers, weights and the Cygnet index
+are separately provisioned. Bundled dependency license texts follow below.
 
 Portable Agents
 ---------------
@@ -41,7 +41,7 @@ License: MIT
 
 Jurl and libcurl
 ----------------
-Source: https://github.com/CosmicToast/jurl
+Source: https://github.com/darkhorseprojects/jurl (fork of CosmicToast/jurl)
 Jurl license: Unlicense
 libcurl license: curl license, https://curl.se/docs/copyright.html
 

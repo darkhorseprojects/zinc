@@ -9,8 +9,8 @@ Connector is optional.
 Extract the matching `zinc-v0.2.0-TARGET.tar.gz` (`.zip` on Windows), rename its
 `zinc` directory to `runtime`, and install the matching schema-1 `agent`.
 Artifacts cover Linux, macOS and Windows on x86-64 and ARM64. They contain
-`zinc.md`, `src`, `lib`, `models.ini`, `models.lock`, stopwords and notices;
-configuration, worlds and databases belong outside the runtime.
+`zinc.md`, `src`, `lib`, `models.ini`, `models.lock`, stopwords, the Cygnet tool and
+notices; configuration, worlds and databases belong outside the runtime.
 
 ```yaml
 source: runtime
@@ -23,9 +23,15 @@ transport: {frame-bytes: 16777216, admission-seconds: 10}
 
 Set `JANET_PATH` before loading Markdown. Ordinary Janet callers first import
 `portable-agents/markdown`, then import Zinc and call its byte-valued exports.
-Native modules must match the Janet ABI. Install libcurl and its runtime DLLs
-on Windows, platform CA trust, and Git on PATH. Merging requires
-`git merge-tree --write-tree`. Artifacts are not self-contained executables.
+Native modules must match the Janet ABI and host library. On Windows, keep PA's
+`janet.dll` and the DLLs from `runtime/bin` beside `agent.exe`; retain their
+`runtime/share` licenses and install the matching Microsoft Visual C++ runtime.
+On Linux install the distribution's libcurl runtime and CA certificates; on macOS
+run `brew install curl`. Install Git on PATH and configure a Git author identity
+before using `save`. Merging requires `git merge-tree --write-tree`.
+
+Native release builds target Ubuntu 24.04/glibc, macOS 15 and Windows 11, on
+x86-64 and ARM64. They are not musl builds or self-contained executables.
 
 Building requires Janet 1.42+, Jpm, tar, a C compiler and libcurl development
 files. POSIX builds need pkg-config; MSVC needs `CURL_ROOT`.
@@ -35,12 +41,16 @@ JANET_SYSTEM_SQLITE=0 jpm --local --cflags=-std=c99,-DSQLITE_ENABLE_FTS5 deps
 jpm --local run package
 ```
 
-For MSVC use `--cflags=/nologo,/MD,/DSQLITE_ENABLE_FTS5`.
+For MSVC use `--cflags=/nologo,/MD,/DSQLITE_ENABLE_FTS5`. Windows release builds
+use the shared Janet toolchain in PA's reusable CI workflow, not interpreter-bound
+native modules from an unrelated Janet installation.
 
 Model weights and the Cygnet index are separately provisioned. `models.lock`
 records provenance; `tools/cygnet_index.py SOURCE OUTPUT` verifies the upstream
-Cygnet database and builds the runtime index. The upstream database itself is
-not a runtime index. Use verified local weights for reproducible deployments.
+Cygnet database and builds the runtime index using Python 3.11+. The upstream
+database itself is not a runtime index. Set `search: false` to run without Cygnet
+or a reranker; missing search resources never trigger an automatic fallback.
+Use verified local weights for reproducible deployments.
 
 ## Execution and durability
 
