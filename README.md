@@ -199,5 +199,5 @@ passive authenticated history, never executable turns.
 Presentation is application NDJSON on stdout; logs use stderr; the final return
 value carries the outcome. PA only transports bytes. Background compaction may
 finish after observation closes. Limits fail explicitly instead of truncating.
-**Zinc database version is 3.** Preserve old stores and provision a fresh path;
+**Zinc database version is 1.** Preserve old stores and provision a fresh path;
 there is no migration or compatibility mode.

@@ -7,5 +7,5 @@
 - Windows filesystem grants reject reparse points; evaluator native access remains disabled.
 - Runtime archives include the Cygnet tool and Windows curl DLLs/licenses; native builds share PA's pinned workflow.
 - One stopword-filtered word pipeline combines exact Cygnet expansion and history-vocabulary trigrams; only the reranker scores relevance.
-- Each schema-3 database binds to one Git world file. Source/world labels and cross-world visibility are removed.
+- Each schema-1 database binds to one Git world file. Source/world labels and cross-world visibility are removed.
 - Presentation identifies world paths and source blobs; deploy matching Connector. PA wire remains schema 1.

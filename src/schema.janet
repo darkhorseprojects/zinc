@@ -166,7 +166,7 @@ CREATE VIEW live_calls AS
     AND c.lease_expires>unixepoch('subsec') AND c.expires>unixepoch('subsec')
     AND r.expires>unixepoch('subsec') AND NOT c.cancelled AND NOT r.cancelled;
 CREATE VIEW running AS SELECT id FROM live_calls WHERE state='running';
-PRAGMA user_version=3;
+PRAGMA user_version=1;
 `) (string/replace-all "$schema." (if temporary "journal." "main.") `
 CREATE TABLE $schema.call_payloads(
   id INTEGER PRIMARY KEY,

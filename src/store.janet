@@ -24,10 +24,10 @@
   (try
     (do
       (query s "PRAGMA foreign_keys=ON; PRAGMA trusted_schema=OFF; PRAGMA busy_timeout=5000; PRAGMA synchronous=FULL; PRAGMA journal_mode=WAL; PRAGMA temp_store=MEMORY;")
-      (unless (= 3 (((query s "PRAGMA user_version") 0) :user_version))
+      (unless (= 1 (((query s "PRAGMA user_version") 0) :user_version))
         (transact s
                   (def version (((query s "PRAGMA user_version") 0) :user_version))
-                  (assert (index-of version [0 3]) "unsupported Zinc database; preserve it and provision a fresh database")
+                  (assert (index-of version [0 1]) "unsupported Zinc database; preserve it and provision a fresh database")
                   (when (= version 0) (query s (schema/database)))))
       (query s "INSERT INTO main.world(id,file) VALUES(1,?) ON CONFLICT(id) DO NOTHING" [(config :world)])
       (assert (= (config :world) (((query s "SELECT file FROM main.world WHERE id=1") 0) :file)) "history database belongs to another world")
