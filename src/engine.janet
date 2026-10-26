@@ -52,22 +52,31 @@
         FROM memory_records e LEFT JOIN usage u ON u.request=e.id WHERE e.source=? AND e.run=? AND e.kind='model-admission'`
                                                                                                                                              [(s :source) (call :run)]))}))
 
+  (defn worker [entry input config]
+    (def limits (dyn :pa/limits))
+    (def process (os/spawn [(dyn :pa/executable) "run" (string (limits "frameBytes")) (string (limits "admissionSeconds"))]
+                          :d {:in :pipe :out :pipe :err stderr}))
+    (def exited (ev/chan 1))
+    (ev/go (fn [] (os/proc-wait process)) nil exited)
+    (try
+      (do
+        (defer (ev/close (process :in))
+          (wire/send (process :in) (wire/request {"version" wire/version "program" (merge (dyn :pa/program) {"entry" entry})
+                                                 "input" (wire/base64 (string (json/encode input)))
+                                                 "config" (wire/base64 (string (json/encode config)))})))
+        (def reader (wire/reader (process :out) true))
+        (ev/with-deadline (limits "admissionSeconds") (wire/output reader true))
+        [process reader exited])
+      ([err] (ev/close (process :out)) (error err))))
+
   (defn launch [s id &opt here]
     (when-let [row (store/claim s id)]
       (try
         (cond here ((dyn :zinc/execute) s row)
           (or (s :temporary) (and (= "summarize" (row :kind)) (not (dyn :zinc/background))))
           (ev/go (fn [] ((dyn :zinc/execute) s row)))
-          (let [limits (dyn :pa/limits)
-                process (os/spawn [(dyn :pa/executable) "run" (string (limits "frameBytes")) (string (limits "admissionSeconds"))]
-                                  :d {:in :pipe :out :pipe :err stderr})]
-            (ev/spawn (os/proc-wait process))
-            (defer (ev/close (process :out))
-              (defer (ev/close (process :in))
-                (wire/send (process :in) (wire/request {"version" wire/version "program" (merge (dyn :pa/program) {"entry" "task"})
-                                                       "input" (wire/base64 (string (json/encode {:task id :owner (row :owner)})))
-                                                       "config" (wire/base64 (string (json/encode (dyn :zinc/config))))})))
-              (ev/with-deadline (limits "admissionSeconds") (wire/output (wire/reader (process :out) true) true)))))
+          (let [[process] (worker "task" {:task id :owner (row :owner)} (dyn :zinc/config))]
+            (ev/close (process :out))))
         ([err] (store/append s (store/view s (if (= "summarize" (row :kind)) (row :parent) id))
                              "launch-uncertain" "Call acceptance could not be confirmed." {:error err} nil id))))
     id)
@@ -122,33 +131,22 @@
         (assert (< (view :depth) (config :task-depth)) "agent recursion ceiling exhausted")
         (def request (string/join (map |(string/format "%02x" $) (os/cryptorand 24))))
         (def entry (get value :parent (view :last)))
-        (def limits (dyn :pa/limits))
-        (def process (os/spawn [(dyn :pa/executable) "run" (string (limits "frameBytes")) (string (limits "admissionSeconds"))]
-                              :d {:in :pipe :out :pipe :err stderr}))
-        (def exited (ev/chan 1))
-        (ev/go (fn [] (os/proc-wait process)) nil exited)
-        (def reader (wire/reader (process :out) true))
-        (var admitted false)
-        (defer (unless admitted (ev/close (process :out)))
-          (defer (ev/close (process :in))
-            (wire/send (process :in) (wire/request {"version" wire/version "program" (merge (dyn :pa/program) {"entry" "self"})
-                                                   "input" (wire/base64 (string (json/encode (merge value {:request request :parent entry
-                                                                                                         :memory_range (get value :memory_range {:start (if (= 0 entry) 0 (view :first)) :end entry})}))))
-                                                   "config" (wire/base64 (string (json/encode (merge config {:snapshot (merge (store/snapshot s view) {:origin origin})}))))})))
-          (ev/with-deadline (limits "admissionSeconds") (wire/output reader true))
-          (def done (ev/chan))
-          (def worker (ev/spawn
-                        (defer (ev/chan-close done)
-                          (try
-                            (defer (ev/close (process :out))
-                              (def output (json/decode (wire/output reader) true true))
-                              (ev/take exited)
-                              (assert (= 0 (process :return-code)) "ProcessFailure")
-                              [true (if (value :code) (output :text) output)])
-                            ([err] [false err])))))
-          (put ((dyn :zinc/call) :children) request [worker done])
-          (set admitted true)
-          {:temporary request}))))
+        (def [process reader exited]
+          (worker "self" (merge value {:request request :parent entry
+                                       :memory_range (get value :memory_range {:start (if (= 0 entry) 0 (view :first)) :end entry})})
+                  (merge config {:snapshot (merge (store/snapshot s view) {:origin origin})})))
+        (def done (ev/chan))
+        (def collector (ev/spawn
+                         (defer (ev/chan-close done)
+                           (try
+                             (defer (ev/close (process :out))
+                               (def output (json/decode (wire/output reader) true true))
+                               (ev/take exited)
+                               (assert (= 0 (process :return-code)) "ProcessFailure")
+                               [true (if (value :code) (output :text) output)])
+                             ([err] [false err])))))
+        (put ((dyn :zinc/call) :children) request [collector done])
+        {:temporary request})))
 
   (defn run-code [s view bindings code]
     (def config (s :config))
@@ -215,7 +213,6 @@
                   (let [pending (when (progress :request) (first (store/query s "SELECT id FROM events WHERE id=? AND json_extract(data,'$.input.role')='rerank'" [(progress :request)])))
                         rows (memory/semantic-window s inherited (user :text) (when pending (pending :id)))]
                     (store/checkpoint s {:semantic rows}) rows)))
-    (var context nil)
     (while (not (first (store/query s "SELECT id FROM memory_records WHERE branch=? AND kind='completed'" [id])))
       (def responses (store/query s "SELECT id FROM memory_records WHERE task=? AND kind='response' ORDER BY id" [id]))
       (each tool (store/query s "SELECT * FROM unresolved_tools WHERE branch=?" [id])
@@ -226,7 +223,7 @@
       (def world (when (get-in config [:repl :enabled]) {:role "user" :content (string "## World source\n\n" (slurp (call :file)))}))
       (set space (- capacity (model/estimate (filter identity [{:role "system" :content system} world inquiry])) tool-size 256))
       (assert (> space 256) "question, world source and instructions exhaust context")
-      (set context (memory/context s inherited space pool))
+      (var context (memory/context s inherited space pool))
       (def messages @[]) (def views @{})
       (while true
         (array/clear messages) (array/push messages {:role "system" :content system})
@@ -293,23 +290,21 @@
         (store/transact s
                         (store/checkpoint s)
                         (store/append s view "call-attempt" "execution entered" {:attempt (row :attempt)} nil id))
-        (var value nil) (var failure nil)
-        (try
-          (do
-            (def input ((dyn :zinc/call) :input))
-            (def bindings (if (and (not= "summarize" (row :kind)) (get-in config [:repl :enabled])) (repl/definitions config (spec :schema)) {}))
-            (set value (case (row :kind) "text" (infer s row bindings)
-                         "code" (run-code s view bindings (input :code)) "summarize" (memory/summarize s row input)))
-            (when (= "code" (row :kind)) (store/charge s 0 (store/estimate (json/encode value)))))
-          ([err fiber]
-            (set value nil)
-            (set failure @{:error (schema/failure "ExecutionFailed" err fiber)})
-            (put failure :error (postwalk (fn [value]
-                                            (if (string? value) (reduce (fn [text provider]
-                                                                          (if-let [token (when (provider :token-env) (os/getenv (provider :token-env)))] (string/replace-all token "[redacted]" text) text)) value (values (config :providers))) value)) (failure :error)))))
+        (def [value failure]
+          (try
+            (let [input ((dyn :zinc/call) :input)
+                  bindings (if (and (not= "summarize" (row :kind)) (get-in config [:repl :enabled])) (repl/definitions config (spec :schema)) {})
+                  value (case (row :kind) "text" (infer s row bindings)
+                          "code" (run-code s view bindings (input :code)) "summarize" (memory/summarize s row input))]
+              (when (= "code" (row :kind)) (store/charge s 0 (store/estimate (json/encode value))))
+              [value nil])
+            ([err fiber]
+              (def tokens (keep |(when ($ :token-env) (os/getenv ($ :token-env))) (values (config :providers))))
+              [nil {:error (postwalk (fn [value]
+                                      (if (string? value) (reduce (fn [text token] (string/replace-all token "[redacted]" text)) value tokens) value))
+                                    (schema/failure "ExecutionFailed" err fiber))}])))
         (when-let [runtime ((dyn :zinc/call) :runtime)] (repl/close runtime))
-        (when (and (> (length ((dyn :zinc/call) :children)) 0)
-                   (first (store/query s "SELECT id FROM main.live_calls WHERE id=? AND owner=?" [id (row :owner)])))
+        (when (first (store/query s "SELECT id FROM main.live_calls WHERE id=? AND owner=?" [id (row :owner)]))
           (each request (keys ((dyn :zinc/call) :children))
             (try (wait s request) ([err] (eprint (json/encode (if (dictionary? err) err {:code "ChildFailed" :message (string err)})))))))
         (store/finish s row value failure)
@@ -377,7 +372,7 @@
                                    ["describe" []] ["instructions" []] ["models" [:role]] ["views" [:event]] ["render" [:event]] ["events" [:run :after]] ["record" [:records]] ["pending" [:request]] ["abort" [:run :request :reason]] ["invalidate" [:event]]]]
     operation (fn [bytes opaque]
                 (def config (schema/configuration (spec :schema) (json/decode opaque true true) (= operation "describe")))
-                (unless (index-of operation ["describe" "instructions" "models"]) (repl/definitions config (spec :schema)))
+                (when (index-of operation ["self" "task" "resume"]) (repl/definitions config (spec :schema)))
                 (assert (and (utf8/is-valid? bytes) (<= (length bytes) (config :request-bytes))) "request must be bounded UTF-8")
                 (when (index-of operation ["describe" "instructions"]) (assert (= "" bytes) "operation takes empty input"))
                 (def value (if (and (= "" bytes) (index-of operation ["describe" "instructions" "pending"])) {} (schema/request (json/decode bytes true true) fields)))

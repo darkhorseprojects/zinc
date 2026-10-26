@@ -118,10 +118,9 @@
   (def role (get input :role "chat"))
   (assert (index-of role ["chat" "rerank"]) "unknown model role")
   (def input (merge {:model (config (if (= "rerank" role) :rerank :chat))} input))
-  (def cached (when pending (first (store/query s
-                                                "SELECT e.id,e.data,m.text FROM events e JOIN memory_records m USING(id) WHERE e.source=? AND e.parent=? AND e.kind='model-outcome'" [(s :source) pending]))))
-  (if cached (merge (json/decode (cached :data) true true) {:event (cached :id) :text (cached :text)})
-    (do
+  (def event
+    (or (when pending (first (store/query s "SELECT id,data FROM events WHERE source=? AND parent=? AND kind='model-outcome'" [(s :source) pending])))
+      (do
       (default selected (profile s (input :model) (keyword role)))
       (assert (= (selected :reference) (input :model)) "profile does not match admitted model")
       (def [body size maximum] (if (= role "rerank")
@@ -193,10 +192,9 @@
                                                                                (def message (choice :message))
                                                                                (assert (and (dictionary? message) (= "assistant" (message :role))) "invalid assistant message")
                                                                                (def content (message :content))
-                                                                               (def text (cond (nil? content) (or (message :refusal) "") (string? content) content
-                                                                                           (indexed? content) (string/join (seq [part :in content :when (= "text" (part :type))] (part :text)) "\n")
-                                                                                           (error "invalid assistant content")))
-                                                                               (assert (and (string? text) (utf8/is-valid? text)) "invalid assistant text")
+                                                                               (assert (or (nil? content) (string? content) (indexed? content)) "invalid assistant content")
+                                                                               (each text (if (indexed? content) (seq [part :in content :when (= "text" (part :type))] (part :text)) [(if (nil? content) (or (message :refusal) "") content)])
+                                                                                 (assert (and (string? text) (utf8/is-valid? text)) "invalid assistant text"))
                                                                                (def calls (or (message :tool_calls) []))
                                                                                (assert (and (indexed? calls) (<= (length calls) (config :tool-calls))) "invalid tool calls")
                                                                                (def identities @{})
@@ -214,20 +212,23 @@
                                                                                                    ([err] {:id (call :id) :error {:code "InvalidToolCall" :message (string err)}}))) calls))
                                                                                (def tail (if (string? content) {:type "text" :text content} (when (indexed? content) (last content))))
                                                                                (assert (indexed? (or (message :reasoning_details) [])) "invalid reasoning details")
-                                                                               {:text text :message message :finish-reason (choice :finish_reason) :tools tools
+                                                                               {:message message :finish-reason (choice :finish_reason) :tools tools
                                                                                 :reasoning-visible (not= "none" (config :thinking))
                                                                                 :status (cond (> (length calls) 0) "tools"
+                                                                                          (and (string? (message :refusal)) (> (length (string/trim (message :refusal))) 0)) "refused"
+                                                                                          (= "content_filter" (choice :finish_reason)) "blocked"
                                                                                           (and (= "stop" (choice :finish_reason)) (= "text" (get tail :type)) (> (length (string/trim (tail :text))) 0)) "complete" "continue")}))
                                                                            {:usage (value :usage) :model selected :request admission :role role :turn (get input :turn false)
                                                                             :visible (and (= role "chat") (not (input :turn)) (not= "summarize" (current :kind)))
                                                                             :provider-metadata (tabseq [[key item] :in (pairs value) :unless (index-of key [:usage :choices :results])] key item)
                                                                             :choice-metadata (when (= role "chat") (tabseq [[key item] :in (pairs ((value :choices) 0)) :unless (index-of key [:message :finish_reason])] key item))}))
                     ([err] (error {:code "InvalidModelResponse" :message (string err) :detail (string (json/encode value)) :context {:request admission}}))))
-      (def event (store/transact s
-                                 (assert (first (store/query s "SELECT id FROM main.call_controls WHERE id=? AND source=? AND owner=? AND state IN ('running','waiting','uncertain','cancelled')"
-                                                             [(current :id) (s :source) (current :owner)])) "model completion fenced")
-                                 (store/append s (current :scope) "model-outcome" "Model outcome committed." (tabseq [[key value] :in (pairs result) :unless (= key :text)] key value) admission (current :id))))
-      (merge result {:event (event :id)}))))
+      (store/transact s
+                      (assert (first (store/query s "SELECT id FROM main.call_controls WHERE id=? AND source=? AND owner=? AND state IN ('running','waiting','uncertain','cancelled')"
+                                                  [(current :id) (s :source) (current :owner)])) "model completion fenced")
+                      (store/append s (current :scope) "model-outcome" "Model outcome committed." result admission (current :id))))))
+  (merge (json/decode (event :data) true true)
+         {:event (event :id) :text ((first (store/query s "SELECT text FROM memory_records WHERE id=?" [(event :id)])) :text)}))
 
 (defn render [row]
   (def message (if (row :public_message) (json/decode (row :public_message) true true) {}))

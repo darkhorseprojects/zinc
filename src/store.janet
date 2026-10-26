@@ -54,11 +54,9 @@
                              (map |(if (and (= name :images) (= $ "bytes")) (buffer (base64/decode (row :bytes))) (get row (keyword $))) columns)))))
         (query s `INSERT INTO journal.lexemes(source,term) SELECT DISTINCT e.source,w.term FROM journal.event_words w JOIN journal.events e ON e.id=w.doc
           WHERE length(CAST(w.term AS BLOB))<=128 AND w.offset<2048 ON CONFLICT DO NOTHING;
-          INSERT INTO journal.event_lexemes(event,lexeme) SELECT DISTINCT w.doc,l.id FROM journal.event_words w JOIN journal.events e ON e.id=w.doc
-          JOIN journal.lexemes l ON l.source=e.source AND l.term=w.term WHERE w.offset<2048 ON CONFLICT DO NOTHING;
           PRAGMA foreign_keys=ON;`)
         (assert (<= (* (((query s "PRAGMA journal.page_count") 0) :page_count) (((query s "PRAGMA journal.page_size") 0) :page_size)) (config :journal-bytes)) "temporary history exceeds RAM journal budget")
-        (each name [:call_payloads :events :images :usage :memory_records :conversation_records :unresolved_tools :invalid_summaries :lexemes :event_lexemes]
+        (each name [:call_payloads :events :images :usage :memory_records :conversation_records :unresolved_tools :invalid_summaries :lexemes]
           (query s (string "CREATE TEMP VIEW " name " AS SELECT * FROM journal." name))))
       (query s (string `CREATE TEMP VIEW calls AS SELECT c.id,c.source,c.world,c.parent,c.root,c.kind,c.temporary,c.expires,c.cancelled,
         c.state,c.attempt,c.owner,c.lease_expires,c.retries,c.key,c.work_used,c.tool_used,c.request request_key,
@@ -99,7 +97,6 @@
                              [(s :source) (or execution (scope :branch)) parent kind text encoded (estimate (string text encoded))
                               (or (scope :author) (if context (string "self:" (context :request) "/" (context :id)) "system:zinc")) (scope :at)]) 0))
             (query s (string "INSERT INTO " (s :journal) ".lexemes(source,term) SELECT DISTINCT ?,term FROM (SELECT term FROM " (s :journal) ".event_words WHERE doc=? ORDER BY offset LIMIT 2048) WHERE length(CAST(term AS BLOB))<=128 ON CONFLICT DO NOTHING") [(s :source) (row :id)])
-            (query s (string "INSERT INTO " (s :journal) ".event_lexemes(event,lexeme) SELECT DISTINCT ?,l.id FROM (SELECT term FROM " (s :journal) ".event_words WHERE doc=? ORDER BY offset LIMIT 2048) w JOIN " (s :journal) ".lexemes l ON l.term=w.term AND l.source=? ON CONFLICT DO NOTHING") [(row :id) (row :id) (s :source)])
             (when (s :temporary)
               (assert (<= (* (((query s "PRAGMA journal.page_count") 0) :page_count) (((query s "PRAGMA journal.page_size") 0) :page_size)) ((s :config) :journal-bytes)) "RAM journal byte ceiling"))
             row))
@@ -123,7 +120,7 @@
     SELECT ?,9007199254740991 UNION ALL SELECT c.parent,min(a.through,c.last) FROM call_payloads c JOIN ancestry a ON c.id=a.id WHERE c.parent IS NOT NULL
   ), members(id) AS (SELECT ? UNION SELECT c.value FROM members m JOIN events n ON n.id=m.id,json_each(n.data,'$.children') c WHERE n.kind='summary')
   SELECT ` (get view :columns "e.*") `,coalesce(b.world,json_extract(e.data,'$.world')) world FROM `
-                   (cond (view :lexical) (string (s :journal) ".lexeme_grams JOIN lexemes l ON l.id=lexeme_grams.rowid JOIN event_lexemes w ON w.lexeme=l.id JOIN memory_records e ON e.id=w.event")
+                   (cond (view :lexical) (string (s :journal) ".lexeme_grams JOIN lexemes l ON l.id=lexeme_grams.rowid JOIN " (s :journal) ".event_words w ON w.term=l.term AND w.offset<2048 JOIN memory_records e ON e.id=w.doc AND e.source=l.source")
                      (view :match) (string (s :journal) ".event_fts JOIN memory_records e ON e.id=event_fts.rowid") "memory_records e")
                    ` LEFT JOIN call_payloads b ON b.id=e.branch WHERE `
                    (when (view :match) (if (view :lexical) "lexeme_grams MATCH ? AND " "event_fts MATCH ? AND "))
@@ -269,22 +266,23 @@
 
 (defn finish [s row value failure]
   (transact s
-            (def owner (first (query s "SELECT state FROM main.call_controls WHERE id=? AND owner=? AND state IN ('running','waiting','uncertain','cancelled')" [(row :id) (row :owner)])))
+            (def owner (first (query s `UPDATE main.call_controls SET state=CASE WHEN state='cancelled' THEN state WHEN ? THEN 'failed' ELSE 'done' END,
+              owner=NULL,lease_expires=NULL WHERE id=? AND owner=? AND state IN ('running','waiting','uncertain','cancelled') RETURNING state`
+                                    [(not (nil? failure)) (row :id) (row :owner)])))
             (assert owner "call completion fenced")
-            (def state (if (= "cancelled" (owner :state)) "cancelled" (if failure "failed" "done")))
+            (def state (owner :state))
             (def outcome (merge {:ok (= state "done") :value value :state state :attempt (row :attempt)} (or failure {})))
             (append s (view s (if (= "summarize" (row :kind)) (row :parent) (row :id))) "call-result" "" outcome nil (row :id))
-            (query s "UPDATE main.call_controls SET state=?,owner=NULL,lease_expires=NULL WHERE id=?" [state (row :id)])
             outcome))
 
 (defn recover [s]
   (transact s
-            (each row (query s `SELECT c.* FROM main.call_controls c JOIN main.call_controls r ON r.id=coalesce(c.root,c.id)
+            (def now (os/clock))
+            (each row (query s `SELECT c.*,min(c.expires,r.expires)<=? expired FROM main.call_controls c JOIN main.call_controls r ON r.id=coalesce(c.root,c.id)
       WHERE c.source=? AND (?=0 OR c.temporary=1) AND
       (c.state IN ('queued','running','waiting') AND min(c.expires,r.expires)<=? OR c.state IN ('running','waiting') AND c.lease_expires<=?) ORDER BY c.id`
-                             [(s :source) (if (s :temporary) 1 0) (os/clock) (os/clock)])
-              (def expired (or (<= (row :expires) (os/clock))
-                               (first (query s "SELECT id FROM main.call_controls WHERE id=? AND expires<=?" [(or (row :root) (row :id)) (os/clock)]))))
+                             [now (s :source) (if (s :temporary) 1 0) now now])
+              (def expired (= 1 (row :expired)))
               (def unstarted (and expired (= 0 (row :attempt))))
               (def retry (and (= 0 (row :temporary)) (not expired) (not= "code" (row :kind)) (> (row :retries) 0)))
               (def state (cond unstarted "cancelled" retry "queued" "uncertain"))

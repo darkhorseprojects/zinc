@@ -368,12 +368,6 @@ CREATE TABLE $schema.lexemes(
   term TEXT NOT NULL,
   UNIQUE(source,term)
 ) STRICT;
-CREATE TABLE $schema.event_lexemes(
-  event INTEGER NOT NULL REFERENCES events(id),
-  lexeme INTEGER NOT NULL REFERENCES lexemes(id),
-  PRIMARY KEY(event,lexeme)
-) WITHOUT ROWID;
-CREATE INDEX $schema.lexeme_events ON event_lexemes(lexeme,event);
 CREATE VIRTUAL TABLE $schema.lexeme_grams USING fts5(
   term,content='lexemes',content_rowid='id',tokenize='trigram',detail='none'
 );
