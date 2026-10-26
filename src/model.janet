@@ -233,7 +233,7 @@
                                                 (array/concat @[(message :reasoning_content) (message :reasoning)]
                                                               (seq [part :in (get message :reasoning_details []) :when (dictionary? part)] (part :text))))) "\n"))
   (def content (when (indexed? (message :content)) (filter |(not= "text" ($ :type)) (message :content))))
-  (def parts (filter identity [(when (> (length reasoning) 0) (string "Reasoning:\n\n" reasoning))
+  (def parts (filter identity [(when (> (length reasoning) 0) (string "> " (string/replace-all "\n" "\n> " reasoning)))
                                (when (> (length (string/trim (row :text))) 0) (row :text))
                                (when (and content (> (length content) 0)) (string "Non-text content:\n\n```json\n" (json/encode content) "\n```"))]))
   (if (> (length parts) 0) (string/join parts "\n\n")
