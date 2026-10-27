@@ -211,9 +211,8 @@ by `kind`; stderr carries logs. Return values are data only: `{:text ...}` for t
 evaluation text for code. Usage and provenance stay in SQL, not a second result envelope.
 PA terminal frames, EOF and process exit establish invocation success. Deploy matching
 Connector. Compaction may outlive observation; limits fail explicitly.
-**Zinc database version is 2.** Stop workers and back up the database before upgrading.
-Version 1 is upgraded in place: history and the latest root draft are preserved,
-obsolete source-file columns are removed, and search projections are rebuilt.
+**Package version is 0.2.0; database schema is 1.** Incompatible databases must be
+preserved and replaced with a fresh database. There is no migration or compatibility mode.
 Remove retired `tool-calls` and `remote` settings from configuration. Source defaults
 to 1 MiB, tool quota to 262,144 estimated tokens and rounds to 128; configured bounds,
 provider capacity and shared deadlines still apply. Memory omits raw reasoning and

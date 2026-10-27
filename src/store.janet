@@ -40,20 +40,12 @@
   (try
     (do
       (query s "PRAGMA foreign_keys=ON; PRAGMA trusted_schema=OFF; PRAGMA busy_timeout=5000; PRAGMA synchronous=FULL; PRAGMA journal_mode=WAL; PRAGMA temp_store=MEMORY;")
-      (unless (= 2 (((query s "PRAGMA user_version") 0) :user_version))
+      (unless (= 1 (((query s "PRAGMA user_version") 0) :user_version))
         (transact s
                   (def version (((query s "PRAGMA user_version") 0) :user_version))
-                  (assert (index-of version [0 1 2]) "unsupported Zinc database")
-                  (case version
-                    0 (query s (schema/database))
-                    1 (do
-                        (assert (not (first (query s "SELECT id FROM main.live_calls LIMIT 1"))) "stop active Zinc workers before upgrading")
-                        (with-dyns [:zinc/config config]
-                          (each row (query s "SELECT DISTINCT json_extract(data,'$.\"world-source\".root') root,json_extract(data,'$.\"world-source\".blob') blob FROM main.events WHERE json_extract(data,'$.\"world-source\".blob') IS NOT NULL")
-                            (git (row :root) ["update-ref" (string "refs/zinc/world/" (row :blob)) (row :blob)])))
-                        (query s "ALTER TABLE world ADD COLUMN origin TEXT NOT NULL DEFAULT '{}' CHECK(json_valid(origin)); DROP VIEW conversation_records; DROP VIEW search_records; DROP VIEW memory_records;")
-                        (query s (schema/views "main."))
-                        (query s "ALTER TABLE call_payloads DROP COLUMN file; UPDATE call_payloads SET config=json_remove(config,'$.\"tool-calls\"','$.remote','$.agent.\"tool-calls\"','$.agent.remote') WHERE config IS NOT NULL; UPDATE world SET origin=coalesce((SELECT origin FROM call_payloads WHERE parent IS NULL AND temporary=0 AND kind<>'summarize' ORDER BY id DESC LIMIT 1),'{}'); INSERT INTO event_fts(event_fts) VALUES('rebuild'); PRAGMA user_version=2;")))))
+                  (assert (index-of version [0 1]) "unsupported Zinc database; preserve it and provision a fresh database")
+                  (when (= version 0) (query s (schema/database)))))
+      (assert (first (query s "SELECT name FROM pragma_table_info('world') WHERE name='origin'")) "incompatible Zinc layout; preserve it and provision a fresh database")
       (query s "INSERT INTO main.world(id,file) VALUES(1,?) ON CONFLICT(id) DO NOTHING" [(config :world)])
       (assert (= (config :world) (((query s "SELECT file FROM main.world WHERE id=1") 0) :file)) "history database belongs to another world")
       (when temporary
