@@ -33,7 +33,7 @@
                    {:total 1 :own (length (store/visible s (merge view {:first id :last id :columns "e.id"})))}))
     (when (and (<= (view :first) (node :first) (node :last) (view :last)) (= (allowed :total) (allowed :own) (node :count)))
       (assert (<= offset (row :total)) "memory offset exceeds the original")
-      (def text (row :text))
+      (def text (if (= offset (row :total)) "" (row :text)))
       (assert (or (= 0 (length text)) (not (<= 0x80 (text 0) 0xbf))) "memory offset splits UTF-8")
       (var end (min bytes (length text)))
       (while (and (< end (length text)) (<= 0x80 (text end) 0xbf)) (++ end))

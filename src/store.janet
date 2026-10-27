@@ -94,8 +94,8 @@
 
 (defn publish [s ok &opt interrupted]
   (def current (or interrupted (dyn :zinc/call)))
-  (when (or interrupted (current :draft))
-    (def row (call s (current :id)))
+  (def row (call s (current :id)))
+  (when (and (or interrupted (current :draft)) (or interrupted (= 0 (row :cancelled))))
     (def origin (json/decode (row :origin) true true))
     (def code (if ok (current :draft) (git (origin :root) ["show" (string (origin :base) ":" (origin :path))])))
     (def blob (string/trim (git (origin :root) ["hash-object" "-w" "--stdin"] code)))
@@ -320,6 +320,8 @@
               (def affected (query s `UPDATE main.call_controls SET state='cancelled' WHERE state IN ('queued','running','waiting','uncertain')
         AND (id=? OR root=? AND (?=0 OR temporary=1)) RETURNING id,kind,attempt`
                                    [(row :id) (or (row :root) (row :id)) (row :temporary)]))
+              (when (and (= 0 (row :temporary)) (row :admission) (= 0 (row :cancelled)))
+                (publish s false row))
               (when (and (= 0 (row :temporary)) (row :admission)
                          (not (first (query s "SELECT id FROM events WHERE call=? AND kind='cancelled'" [(row :id)]))))
                 (append s {:branch (row :id)} "cancelled" "Interrupted. Performed effects are not rolled back; running effects may still finish."

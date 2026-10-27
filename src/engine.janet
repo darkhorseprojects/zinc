@@ -225,11 +225,7 @@
                               (def child (os/spawn (command :argv) :e (merge (tabseq [[k v] :in (pairs (command :env))] (string k) v) {:in :pipe :out :pipe :err :out})))
                               (def exited (ev/chan 1))
                               (ev/go (fn [] (os/proc-wait child)) nil exited)
-                              (def owner (fiber/current))
-                              (def watcher (ev/go (fn [] (try (while true (store/checkpoint s) (ev/sleep 0.1))
-                                                           ([err] (unless (= err :finished) (ev/cancel owner err)))))))
-                              (defer (do (ev/cancel watcher :finished)
-                                       (when (nil? (child :return-code)) (try (os/proc-kill child) ([err] nil)) (ev/take exited))
+                              (defer (do (when (nil? (child :return-code)) (try (os/proc-kill child) ([err] nil)) (ev/take exited))
                                        (ev/close (child :out)))
                                 (ev/close (child :in))
                                 (def output @"") (var chunk nil)
@@ -266,6 +262,7 @@
                         rows (memory/semantic-window s inherited (user :text) (when pending (pending :id)))]
                     (store/checkpoint s {:semantic rows}) rows)))
     (while (not (first (store/query s "SELECT id FROM memory_records WHERE branch=? AND kind='completed'" [id])))
+      (store/checkpoint s)
       (def responses (store/query s "SELECT id FROM memory_records WHERE task=? AND kind='response' ORDER BY id" [id]))
       (each tool (store/query s "SELECT * FROM unresolved_tools WHERE branch=?" [id])
         (store/append s (store/view s id) "tool-ambiguity" "Interrupted evaluation; effects may have happened. Inspect before repeating."
@@ -347,10 +344,14 @@
           (try
             (let [input ((dyn :zinc/call) :input)
                   bindings (if (not= "summarize" (row :kind)) (repl/definitions config (spec :schema)) {})
-                  value (case (row :kind) "text" (infer s row bindings)
-                          "code" (run-code s view bindings (input :code)) "summarize" (memory/summarize s row input))]
-              (when (= "code" (row :kind)) (store/charge s 0 (store/estimate (json/encode value))))
-              [value nil])
+                  owner (fiber/root)
+                  watcher (ev/go (fn [] (try (while true (store/checkpoint s) (ev/sleep 0.1))
+                                            ([err] (unless (= err :finished) (ev/cancel owner err))))))]
+              (defer (ev/cancel watcher :finished)
+                (def value (case (row :kind) "text" (infer s row bindings)
+                            "code" (run-code s view bindings (input :code)) "summarize" (memory/summarize s row input)))
+                (when (= "code" (row :kind)) (store/charge s 0 (store/estimate (json/encode value))))
+                [value nil]))
             ([err fiber]
               (def tokens (keep |(when ($ :token-env) (os/getenv ($ :token-env))) (values (config :providers))))
               [nil {:error (postwalk (fn [value]
