@@ -20,6 +20,7 @@
       (def body (case (event :kind)
                   "user" ""
                   "response" (model/render event)
+                  "model-admission" (when (event :public_message) (model/render event))
                   "completed" (if (event :public_message) (model/render event) (event :text))
                   "model-outcome" (when (and (= "chat" (data :role)) (data :visible)) (model/render event))
                   "interruption" (when (= "uncertain" (data :state)) (event :text))
@@ -30,29 +31,14 @@
                     (if-let [failure (data :error)]
                       (string/trim (string (get-in failure [:context :output] "") "\n" (failure :code) ": " (failure :message))) (event :text)))))
       (when body
-        {:type (if (= "user" (event :kind)) "start" "display") :body body :kind (event :kind) :root (nil? (event :branch_parent))
-         :caller (or (event :branch_parent) :null) :prompt (if (data :turn) (event :parent) :null)
+        {:body (if (and (event :public_message) (data :status) (not (index-of (data :status) ["complete" "tools"]))) (string body "\n\n[" (data :status) "]") body)
+         :kind (event :kind)
+         :caller (or (event :branch_parent) :null) :prompt (cond (= "model-admission" (event :kind)) (event :id) (or (data :turn) (= "model-outcome" (event :kind))) (event :parent) :null)
          :related (if (and (not (data :turn)) (index-of (event :kind) ["tool-result" "tool-ambiguity" "completed"])) (or (event :parent) :null) :null)
-         :status (or (data :status) (case (event :kind) "code-admission" "admitted" "error" "failed" "tool-ambiguity" "uncertain" (if (= false (data :ok)) "failed" "complete")))
-         :language (case (event :kind) "code-admission" "janet" "tool-result" "text" nil)
-         :run (event :run) :branch (event :branch) :execution (string (event :request) "/" (event :branch))
-         :persist durable :event (if durable (event :id) :null)
-         :sequence (event :id) :author (event :author) :at (event :at)
-         :world {:path (origin :path) :blob (or (data :blob) (origin :blob)) :ref (or (data :ref) (origin :ref))
-                 :revision (or (data :after) (origin :base))}})))
-
-  (defn result [s id]
-    (def call (store/call s id))
-    (def final (first (store/query s "SELECT * FROM memory_records WHERE branch=? AND kind='completed'" [id])))
-    (assert final "call has no completion")
-    (merge (tabseq [[key value] :in (pairs (message final)) :unless (index-of key [:body :language])] key value) {:type "result" :final true :text (final :text)
-                                                                                                                  :message (when (final :public_message) (json/decode (final :public_message) true true))
-                                                                                                                  :start (if (= 0 (call :temporary)) (call :admission) :null)
-                                                                                                                  :parent (or (call :entry) 0) :memory_range {:start (call :first) :end (call :last)}
-                                                                                                                  :tool_usage (store/tool-used s (call :run)) :context_unit "token-estimate"
-                                                                                                                  :usage (first (store/query s `SELECT coalesce(sum(u.total),0) reported_total,count(*) FILTER(WHERE u.total IS NULL) unreported
-        FROM memory_records e LEFT JOIN usage u ON u.request=e.id WHERE e.run=? AND e.kind='model-admission'`
-                                                                                                                                             [(call :run)]))}))
+         :status (or (data :status) (case (event :kind) "model-admission" "streaming" "code-admission" "admitted" "error" "failed" "tool-ambiguity" "uncertain" (if (= false (data :ok)) "failed" "complete")))
+         :run (event :run) :branch (event :branch) :request (event :request)
+         :persist durable :sequence (event :id)
+         :world {:path (origin :path) :blob (or (data :blob) (origin :blob)) :ref (or (data :ref) (origin :ref))}})))
 
   (defn worker [entry input config]
     (def limits (dyn :pa/limits))
@@ -106,7 +92,8 @@
                       (def row (first (store/query s "SELECT state,kind FROM main.call_controls WHERE id=?" [id])))
                       (assert row "call unavailable")
                       (case (row :state)
-                        "done" (return done (if (= "text" (row :kind)) (result s id)
+                        "done" (return done (if (= "text" (row :kind))
+                                              {:text (((store/query s "SELECT text FROM memory_records WHERE branch=? AND kind='completed'" [id]) 0) :text)}
                                               ((json/decode ((first (store/query s "SELECT data FROM events WHERE call=? AND kind='call-result' ORDER BY id DESC LIMIT 1" [id])) :data) true true) :value)))
                         "failed" (error ((json/decode ((first (store/query s "SELECT data FROM events WHERE call=? AND kind='call-result' ORDER BY id DESC LIMIT 1" [id])) :data) true true) :error))
                         "uncertain" (error (string "Call #" id ": uncertain effects; inspect receipts, do not replay."))
@@ -150,7 +137,7 @@
                                (def output (json/decode (wire/output reader) true true))
                                (ev/take exited)
                                (assert (= 0 (process :return-code)) "ProcessFailure")
-                               [true (if (value :code) (output :text) output)])
+                               [true output])
                              ([err] [false err])))))
         (put ((dyn :zinc/call) :children) request [collector done])
         {:temporary request})))
@@ -389,6 +376,11 @@
         (when-let [frame (message event)] (print (json/encode frame)))
         (set sequence (event :id)))
       (when (< (length records) 256) (break)))
+    (each event (store/query s `SELECT e.*,json_extract(p.checkpoint,'$.message') preview
+      FROM main.live_calls c JOIN call_payloads p ON p.id=c.id
+      JOIN memory_records e ON e.id=json_extract(p.checkpoint,'$.request') AND e.task=p.id
+      WHERE p.run=? AND c.kind<>'summarize' AND e.kind='model-admission' AND json_type(p.checkpoint,'$.message')='object'` [run])
+      (when-let [frame (message (merge event {:public_message (event :preview) :text ""}))] (print (json/encode frame))))
     sequence)
 
   (defn run [s value operation]
@@ -421,14 +413,14 @@
                                        ([err] (eprint (json/encode {:code "ObservationFailed" :message (string err)})))))))
           (defer (do (ev/cancel emitter "observer detached") (drain s (call :run) sequence))
             (var failure nil)
-            (try (wait s id true) ([err] (set failure err)))
+            (def output (try (wait s id true) ([err] (set failure err))))
             (while true
               (store/recover s)
               (def children (store/query s "SELECT c.id,c.state,p.run FROM main.call_controls c LEFT JOIN call_payloads p ON p.id=c.id WHERE c.root=? AND c.kind<>'summarize' AND c.state IN ('queued','running','waiting') ORDER BY c.id" [(or (call :root) id)]))
               (when (= 0 (length children)) (break))
               (each child children (when (and (= "queued" (child :state)) (= (call :run) (child :run))) (launch s (child :id))))
               (ev/sleep 0.1))
-            (if failure (error failure) (result s id)))))))
+            (if failure (error failure) output))))))
 
   (defn describe [config]
     {:contract "inquiry-v1" :profile {:field "agent" :inference "inference"}
@@ -439,7 +431,7 @@
                      (when (and (= target :config) (= :integer (field :type)) (> (config key) 0)) (put parameter :maximum (config key))) parameter))})
 
   (tabseq [[operation fields] :in [["self" (keys (spec :input))] ["task" [:task :owner]] ["resume" [:run :request :after]]
-                                   ["describe" []] ["instructions" []] ["models" [:role]] ["views" [:event]] ["render" [:event]] ["events" [:run :after]] ["record" [:records]] ["pending" [:request]] ["abort" [:run :request :reason]] ["invalidate" [:event]]]]
+                                   ["describe" []] ["instructions" []] ["models" [:role]] ["views" [:event]] ["render" [:event]] ["record" [:records]] ["abort" [:run :request :reason]] ["invalidate" [:event]]]]
     operation (fn [bytes opaque]
                 (def config (schema/configuration (spec :schema) (json/decode opaque true true) (= operation "describe")))
                 (when (index-of operation ["self" "task" "resume" "instructions"])
@@ -453,7 +445,7 @@
                       (sql/close (memory/cygnet profile)))))
                 (assert (and (utf8/is-valid? bytes) (<= (length bytes) (config :request-bytes))) "request must be bounded UTF-8")
                 (when (index-of operation ["describe" "instructions"]) (assert (= "" bytes) "operation takes empty input"))
-                (def value (if (and (= "" bytes) (index-of operation ["describe" "instructions" "pending"])) {} (schema/request (json/decode bytes true true) fields)))
+                (def value (if (index-of operation ["describe" "instructions"]) {} (schema/request (json/decode bytes true true) fields)))
                 (def s (unless (index-of operation ["describe" "instructions" "models"]) (store/open config (and (= operation "self") (= false (get value :persist true))))))
                 (defer (when s (store/close s))
                   (with-dyns [:zinc/config config]
@@ -480,15 +472,5 @@
                                         (merge report {:views windows}))))
                                   (= operation "invalidate") {:event ((memory/invalidate s (value :event)) :id)}
                                   (= operation "abort") (store/abort s value)
-                                  (= operation "events") (let [records (memory/events s (value :run) (get value :after 0))]
-                                                           {:events (filter identity (map message records)) :after (get (last records) :id (get value :after 0)) :more (= 256 (length records))})
-                                  (= operation "pending") (do (store/recover s)
-                                                            (store/query s `SELECT c.id run,c.request,c.id branch,c.id job,c.state,CASE WHEN c.kind='text' THEN 'agent' ELSE c.kind END kind,c.attempt,
-                (SELECT id FROM events WHERE call=c.id AND kind IN ('user','summary-input')) admission,
-                (SELECT id FROM events WHERE call=c.id AND kind='call-result' ORDER BY id DESC LIMIT 1) outcome,
-                CASE WHEN c.temporary OR c.kind='code' THEN 'manual' ELSE 'retry' END retry_policy,c.expires run_expires,c.lease_expires,c.temporary
-                FROM main.call_controls c WHERE c.request IS NOT NULL AND (? IS NULL OR c.request=?)
-                AND (? IS NOT NULL OR c.state IN ('queued','running','waiting','failed','uncertain','cancelled')) ORDER BY c.id`
-                                                                         [(value :request) (value :request) (value :request)]))
                                   (run s value operation)))
                     (if (= operation "instructions") output (string (json/encode output))))))))

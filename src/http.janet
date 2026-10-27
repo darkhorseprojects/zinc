@@ -2,12 +2,12 @@
 (import spork/utf8 :as utf8)
 (import sqlite3 :as sql)
 
-(defn- transfer [[config endpoint method suffix body current]]
+(defn- transfer [[config endpoint method suffix body current stream]]
   (def db (when current (sql/open (config :store))))
   (when db (sql/eval db "PRAGMA busy_timeout=5000;"))
   (def client (curl/new))
   (def bytes @"")
-  (var next-check 0)
+  (var size 0) (var next-check 0)
   (var permitted true)
   (defer (do (curl/reset client) (when db (sql/close db)))
     (def check (fn [& counts]
@@ -23,11 +23,14 @@
     (def timeout (min (config :http-ms) (if current (max 1 (math/floor (* 1000 (- (current :expires) (os/clock))))) (config :http-ms))))
     (each [key value]
       (pairs {:url (string (endpoint :url) suffix) :customrequest method :postfields body
-              :httpheader (array/concat @["Content-Type: application/json" "Accept: application/json"]
+              :httpheader (array/concat @["Content-Type: application/json" (if stream "Accept: text/event-stream" "Accept: application/json")]
                                        (if token [(string "Authorization: Bearer " token)] []))
               :writefunction (fn [chunk]
-                               (assert (<= (+ (length bytes) (length chunk)) (config :response-bytes)) "HTTP response exceeds byte limit")
-                               (buffer/push-string bytes chunk))
+                               (+= size (length chunk))
+                               (assert (<= size (config :response-bytes)) "HTTP response exceeds byte limit")
+                               (if (and stream (<= 200 (client :response-code) 299))
+                                 (when (> (length chunk) 0) (ev/give-supervisor :stdout (string chunk)))
+                                 (buffer/push-string bytes chunk)))
               :proxy "" :nobody (= method "HEAD") :followlocation false :ssl-verifypeer true :ssl-verifyhost 2
               :timeout-ms timeout :connecttimeout-ms (min 10000 timeout)
               :protocols "http,https" :noprogress false :xferinfofunction check})
@@ -37,13 +40,14 @@
     (assert (utf8/is-valid? bytes) "HTTP response is not UTF-8")
     {:status (client :response-code) :body (string bytes)}))
 
-(defn request [config endpoint method suffix &opt body]
+(defn request [config endpoint method suffix &opt body consume]
   (assert endpoint "HTTP endpoint is not configured")
   (def current (dyn :zinc/call))
-  (def finished (ev/thread-chan 1))
+  (def finished (ev/thread-chan (+ 1 (config :response-bytes))))
   (ev/thread transfer [(tabseq [key :in [:store :response-bytes :http-ms]] key (config key)) endpoint method suffix body
-                       (when current {:id (current :id) :owner (current :owner) :expires (get-in current [:scope :expires])})] :n finished)
+                       (when current {:id (current :id) :owner (current :owner) :expires (get-in current [:scope :expires])}) (not (nil? consume))] :n finished)
   (defer (ev/chan-close finished)
-    (def [status result] (ev/take finished))
-    (assert (= :ok status) result)
-    result))
+    (label done (while true
+                  (def [status result] (ev/take finished))
+                  (if (= :stdout status) (consume result)
+                    (do (assert (= :ok status) result) (return done result)))))))

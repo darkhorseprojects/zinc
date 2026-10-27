@@ -135,7 +135,7 @@
   (assert current "checkpoint requires an executing call")
   (if value
     (let [encoded (string (json/encode value))]
-      (assert (<= (length encoded) ((s :config) :request-bytes)) "stored checkpoint byte ceiling")
+      (assert (<= (length encoded) (+ ((s :config) :request-bytes) ((s :config) :response-bytes))) "stored checkpoint byte ceiling")
       (assert (first (query s (string "UPDATE " (s :journal) ".call_payloads SET checkpoint=? WHERE id IN (SELECT id FROM main.live_calls WHERE id=? AND owner=?) RETURNING id")
                             [encoded (current :id) (current :owner)])) "call lease lost")
       (put current :checkpoint value))
@@ -220,9 +220,6 @@
     (each name [:call_payloads :events :images :usage]
       (put snapshot name (map |(if (= name :images) (merge $ {:bytes (base64/encode (string ($ :bytes)))}) $) (query s (string "SELECT * FROM journal." name))))))
   snapshot)
-
-(defn tool-used [s run]
-  (((query s "SELECT coalesce(sum(estimate),0) estimate FROM memory_records WHERE run=? AND kind IN ('tool-result','code-admission')" [run]) 0) :estimate))
 
 (defn park [s waiting]
   (def current (dyn :zinc/call))

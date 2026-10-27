@@ -196,11 +196,14 @@ window coordinates before sending. `views` and `render` read that capture withou
 inference or recomputation. Temporary requests are not durably inspectable.
 Saved calls using the former `search` setting cannot resume; their history remains readable.
 Other trusted exports include `describe`, `instructions`, `models`, `record`,
-`events`, `pending`, `resume`, `abort`, `task` and `invalidate`. `record` stores
-passive authenticated history, never executable turns.
+`resume`, `abort`, `task` and `invalidate`. `record` stores passive authenticated
+history, never executable turns. Replay uses `self` or `resume` with `after`, not polling exports.
 
-Presentation is application NDJSON on stdout; logs use stderr; the final return
-value carries the outcome. PA only transports bytes. Background compaction may
-finish after observation closes. Limits fail explicitly instead of truncating.
+Chat uses SSE; checkpoints expose provisional text. Tools wait for the complete,
+validated response. Presentation is stdout NDJSON with one record shape identified
+by `kind`; stderr carries logs. Return values are data only: `{:text ...}` for text,
+evaluation text for code. Usage and provenance stay in SQL, not a second result envelope.
+PA terminal frames, EOF and process exit establish invocation success. Deploy matching
+Connector. Compaction may outlive observation; limits fail explicitly.
 **Zinc database version is 1.** Preserve old stores and provision a fresh path;
 there is no migration or compatibility mode.
