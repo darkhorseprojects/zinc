@@ -231,7 +231,7 @@
                       (each text (if (indexed? content) (seq [part :in content :when (= "text" (part :type))] (part :text)) [(if (nil? content) (or (message :refusal) "") content)])
                         (assert (and (string? text) (utf8/is-valid? text)) "invalid assistant text"))
                       (def calls (or (message :tool_calls) []))
-                      (assert (and (indexed? calls) (<= (length calls) (config :tool-calls))) "invalid tool calls")
+                      (assert (indexed? calls) "invalid tool calls")
                       (def identities @{})
                       (def tools (map (fn [call]
                                         (assert (and (dictionary? call) (string? (call :id)) (> (length (call :id)) 0) (not (identities (call :id)))) "invalid or duplicate tool identity")

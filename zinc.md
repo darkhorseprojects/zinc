@@ -17,7 +17,6 @@ without a result. Inspect before repeating.
   {:world {:type :string :absolute true :repl {:value true}}
    :store {:type :string :absolute true}
    :instructions {:type :string :absolute true :optional true}
-   :remote {:type :string :optional true}
    :snapshot {:type :dictionary :optional true}
    :agent {:type :dictionary :optional true}
    :inference {:type :boolean :default true}
@@ -82,31 +81,30 @@ Children share the root deadline and budgets. Waiting releases a slot. Workers p
               :choices ["default" "none" "minimal" "low" "medium" "high" "xhigh" "max"]}
    :web-search {:type :boolean :default false
                 :option "web-search" :description "Permit provider-managed web search"}
-   :output {:type :integer :default 0 :minimum 0 :maximum 1048576}
+   :output {:type :integer :default 0 :minimum 0}
    :context-quota {:type :integer :optional true :minimum 256}
-   :summary-quota {:type :integer :default 512 :minimum 128 :maximum 65536}
-   :tool-quota {:type :integer :default 32768 :minimum 1 :maximum 1048576}
-   :task-quota {:type :integer :default 4096 :minimum 1 :maximum 65536}
-   :rounds {:type :integer :default 32 :minimum 1 :maximum 256
+   :summary-quota {:type :integer :default 512 :minimum 128}
+   :tool-quota {:type :integer :default 262144 :minimum 1}
+   :task-quota {:type :integer :default 4096 :minimum 1}
+   :rounds {:type :integer :default 128 :minimum 1
             :option "rounds" :description "Maximum model rounds"}
-   :tool-calls {:type :integer :default 16 :minimum 1 :maximum 64}
-   :parallel {:type :integer :default 4 :minimum 1 :maximum 32}
-   :task-depth {:type :integer :default 8 :minimum 1 :maximum 32}
-   :seconds {:type :integer :default 120 :minimum 1 :maximum 86400}
-   :run-seconds {:type :integer :default 900 :minimum 1 :maximum 86400}
-   :lease-seconds {:type :integer :default 30 :minimum 3 :maximum 300}
-   :http-ms {:type :integer :default 600000 :minimum 1 :maximum 3600000}
-   :journal-bytes {:type :integer :default 67108864 :minimum 4096 :maximum 1073741824}
-   :source-bytes {:type :integer :default 65536 :minimum 1 :maximum 1048576}
-   :request-bytes {:type :integer :default 8388608 :minimum 4096 :maximum 16777216}
-   :response-bytes {:type :integer :default 8388608 :minimum 4096 :maximum 16777216}
-   :image-bytes {:type :integer :default 4194304 :minimum 1 :maximum 8388608}
-   :history-records {:type :integer :default 1024 :minimum 1 :maximum 4096}
+   :parallel {:type :integer :default 4 :minimum 1}
+   :task-depth {:type :integer :default 8 :minimum 1}
+   :seconds {:type :integer :default 120 :minimum 1}
+   :run-seconds {:type :integer :default 900 :minimum 1}
+   :lease-seconds {:type :integer :default 30 :minimum 3}
+   :http-ms {:type :integer :default 600000 :minimum 1}
+   :journal-bytes {:type :integer :default 67108864 :minimum 4096}
+   :source-bytes {:type :integer :default 1048576 :minimum 1}
+   :request-bytes {:type :integer :default 8388608 :minimum 4096}
+   :response-bytes {:type :integer :default 8388608 :minimum 4096}
+   :image-bytes {:type :integer :default 4194304 :minimum 1}
+   :history-records {:type :integer :default 1024 :minimum 1}
    :memory-retrieval {:type :boolean :default true}
-   :terms {:type :integer :default 64 :minimum 1 :maximum 256}
-   :candidates {:type :integer :default 16 :minimum 1 :maximum 64}
-   :depth {:type :integer :default 1 :minimum 0 :maximum 4}
-   :expansion-nodes {:type :integer :default 2048 :minimum 1 :maximum 8192}
+   :terms {:type :integer :default 64 :minimum 1}
+   :candidates {:type :integer :default 16 :minimum 1}
+   :depth {:type :integer :default 1 :minimum 0}
+   :expansion-nodes {:type :integer :default 2048 :minimum 1}
    :language {:type :string :default "en"}
    :score {:type :number :default 0 :option "score"
            :description "Minimum accepted reranking relevance score"}
@@ -127,8 +125,6 @@ Children share the root deadline and budgets. Waiting releases a slot. Workers p
             :option "parent" :description "History attachment event; 0 defaults to empty history"}
    :persist {:type :boolean :default true
              :option "persist" :description "Use a durable payload journal; false uses RAM"}
-   :revision {:type :string
-              :option "revision" :description "World source commit or branch"}
    :after {:type :integer :minimum 0}})
 
 (each [name entry]

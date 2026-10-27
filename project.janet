@@ -1,7 +1,7 @@
 (declare-project
   :name "zinc"
   :version "0.2.0"
-  :description "A Janet agent with independent source branches and durable memory"
+  :description "A Janet agent with transactional worlds and durable memory"
   :license "AGPL-3.0-only"
   :dependencies
   [{:repo "https://github.com/darkhorseprojects/portable-agents.git" :tag "df0d6590e081698a73842ae5baaa963b21e5a63d"}

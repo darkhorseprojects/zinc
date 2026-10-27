@@ -3,7 +3,6 @@
 (import spork/base64 :as base64)
 (import spork/utf8 :as utf8)
 (import ./schema)
-(import spork/path :as path)
 
 (defn estimate [bytes] (math/ceil (/ (length bytes) 4)))
 (defn query [s statement &opt parameters] (sql/eval (s :db) statement (or parameters [])))
@@ -18,17 +17,43 @@
            (let [result (with-dyns [:zinc/transaction ,db] ,;body)] (,sql/eval ,db "COMMIT") result)
            ([err] (,sql/eval ,db "ROLLBACK") (error err)))))))
 
+(defn git [directory args &opt input environment probe]
+  (def child (os/spawn ["git" "-C" directory "--literal-pathspecs" ;args] :pe
+                       (merge (os/environ) (or environment {}) {:in :pipe :out :pipe :err :out})))
+  (def output @"")
+  (def done (ev/chan 1))
+  (ev/go (fn [] (os/proc-wait child)) nil done)
+  (ev/with-deadline (/ ((dyn :zinc/config) :http-ms) 1000)
+    (defer (do (ev/close (child :in)) (ev/close (child :out)))
+      (ev/go (fn [] (defer (ev/close (child :in)) (when input (ev/write (child :in) input)))))
+      (var chunk nil)
+      (while (set chunk (ev/read (child :out) 4096))
+        (assert (<= (+ (length output) (length chunk)) ((dyn :zinc/config) :response-bytes)) "Git output byte ceiling")
+        (buffer/push-string output chunk))
+      (ev/take done)
+      (assert (or probe (= 0 (child :return-code))) (string "Git " (string/join args " ") ": " output))
+      (when (= 0 (child :return-code)) (string output)))))
+
 (defn open [config &opt temporary]
   (def s @{:db (sql/open (config :store)) :journal (if temporary "journal" "main")
            :config config :temporary temporary :profiles @{}})
   (try
     (do
       (query s "PRAGMA foreign_keys=ON; PRAGMA trusted_schema=OFF; PRAGMA busy_timeout=5000; PRAGMA synchronous=FULL; PRAGMA journal_mode=WAL; PRAGMA temp_store=MEMORY;")
-      (unless (= 1 (((query s "PRAGMA user_version") 0) :user_version))
+      (unless (= 2 (((query s "PRAGMA user_version") 0) :user_version))
         (transact s
                   (def version (((query s "PRAGMA user_version") 0) :user_version))
-                  (assert (index-of version [0 1]) "unsupported Zinc database; preserve it and provision a fresh database")
-                  (when (= version 0) (query s (schema/database)))))
+                  (assert (index-of version [0 1 2]) "unsupported Zinc database")
+                  (case version
+                    0 (query s (schema/database))
+                    1 (do
+                        (assert (not (first (query s "SELECT id FROM main.live_calls LIMIT 1"))) "stop active Zinc workers before upgrading")
+                        (with-dyns [:zinc/config config]
+                          (each row (query s "SELECT DISTINCT json_extract(data,'$.\"world-source\".root') root,json_extract(data,'$.\"world-source\".blob') blob FROM main.events WHERE json_extract(data,'$.\"world-source\".blob') IS NOT NULL")
+                            (git (row :root) ["update-ref" (string "refs/zinc/world/" (row :blob)) (row :blob)])))
+                        (query s "ALTER TABLE world ADD COLUMN origin TEXT NOT NULL DEFAULT '{}' CHECK(json_valid(origin)); DROP VIEW conversation_records; DROP VIEW search_records; DROP VIEW memory_records;")
+                        (query s (schema/views "main."))
+                        (query s "ALTER TABLE call_payloads DROP COLUMN file; UPDATE call_payloads SET config=json_remove(config,'$.\"tool-calls\"','$.remote','$.agent.\"tool-calls\"','$.agent.remote') WHERE config IS NOT NULL; UPDATE world SET origin=coalesce((SELECT origin FROM call_payloads WHERE parent IS NULL AND temporary=0 AND kind<>'summarize' ORDER BY id DESC LIMIT 1),'{}'); INSERT INTO event_fts(event_fts) VALUES('rebuild'); PRAGMA user_version=2;")))))
       (query s "INSERT INTO main.world(id,file) VALUES(1,?) ON CONFLICT(id) DO NOTHING" [(config :world)])
       (assert (= (config :world) (((query s "SELECT file FROM main.world WHERE id=1") 0) :file)) "history database belongs to another world")
       (when temporary
@@ -56,7 +81,7 @@
           (query s (string "CREATE TEMP VIEW " name " AS SELECT * FROM journal." name))))
       (query s (string `CREATE TEMP VIEW calls AS SELECT c.id,c.parent,c.root,c.kind,c.temporary,c.expires,c.cancelled,
         c.state,c.attempt,c.owner,c.lease_expires,c.retries,c.key,c.work_used,c.tool_used,c.request request_key,
-        coalesce(p.run,c.id) run,g.request request,coalesce(p.config,r.config) config,p.entry,p.first,p.last,p.history_last,p.file,p.origin,p.agent,p.depth,p.checkpoint,
+        coalesce(p.run,c.id) run,g.request request,coalesce(p.config,r.config) config,p.entry,p.first,p.last,p.history_last,p.origin,p.agent,p.depth,p.checkpoint,
         a.id admission,json_extract(a.data,'$.input') input FROM main.call_controls c
         LEFT JOIN ` (s :journal) `.call_payloads p ON p.id=c.id LEFT JOIN ` (s :journal) `.call_payloads r ON r.id=p.run
         LEFT JOIN main.call_controls g ON g.id=coalesce(p.run,c.id)
@@ -64,11 +89,7 @@
       s)
     ([err] (sql/close (s :db)) (error err))))
 
-(defn close [s]
-  (when (s :temporary-call)
-    (each row (query s "SELECT file FROM call_payloads WHERE run=? AND file IS NOT NULL" [(s :temporary-call)])
-      (when (os/stat (row :file)) (os/rm (row :file)))))
-  (sql/close (s :db)))
+(defn close [s] (sql/close (s :db)))
 
 (defn charge [s work tokens]
   (assert (first (query s `UPDATE main.call_controls SET work_used=work_used+?,tool_used=tool_used+? WHERE id=?
@@ -79,13 +100,29 @@
   (def row (first (query s "SELECT * FROM calls WHERE id=?" [id])))
   (assert row "call unavailable") row)
 
+(defn publish [s ok &opt interrupted]
+  (def current (or interrupted (dyn :zinc/call)))
+  (when (or interrupted (current :draft))
+    (def row (call s (current :id)))
+    (def origin (json/decode (row :origin) true true))
+    (def code (if ok (current :draft) (git (origin :root) ["show" (string (origin :base) ":" (origin :path))])))
+    (def blob (string/trim (git (origin :root) ["hash-object" "-w" "--stdin"] code)))
+    (def updated (string (json/encode (merge origin {:blob blob}))))
+    (when (and (nil? (row :parent)) (= 0 (row :temporary)))
+      (def changed (query s "UPDATE main.world SET origin=? WHERE id=1 AND json_extract(origin,'$.base')=? AND json_extract(origin,'$.blob')=? AND json_extract(origin,'$.ref')=? RETURNING id"
+                          [updated (origin :base) (origin :blob) (origin :ref)]))
+      (when ok (assert (first changed) "world changed; retry against the current world")))
+    (when (= 0 (row :temporary))
+      (git (origin :root) ["update-ref" (string "refs/zinc/world/" blob) blob]))
+    (query s (string "UPDATE " (s :journal) ".call_payloads SET origin=? WHERE id=?") [updated (row :id)])
+    (unless interrupted (put current :draft code))))
+
 (defn append [s scope kind text &opt data parent execution]
   (transact s
             (assert (and (string? text) (utf8/is-valid? text)) "invalid event text")
             (def context (when (scope :branch) (call s (scope :branch))))
-            (def encoded (string (json/encode (merge (or data {}) {:world-source (when context (json/decode (context :origin) true true))}))))
-            (assert (and (utf8/is-valid? encoded) (<= (+ (length text) (length encoded))
-                                                      ((s :config) (if (index-of kind ["user" "summary-input" "call-admission" "code-admission" "model-admission"]) :request-bytes :response-bytes)))) "stored event must be bounded UTF-8 JSON")
+            (def encoded (string (json/encode (merge (or data {}) {:world-source (json/decode (if context (context :origin) (((query s "SELECT origin FROM main.world WHERE id=1") 0) :origin)) true true)}))))
+            (assert (utf8/is-valid? encoded) "stored event must be UTF-8 JSON")
             (when (= kind "operation-outcome") (charge s 0 (estimate (string text encoded))))
             (def row ((query s (string "INSERT INTO " (s :journal) ".events(call,parent,kind,text,data,estimate,author,at) VALUES(?,?,?,?,?,?,?,coalesce(?,strftime('%Y-%m-%dT%H:%M:%fZ','now'))) RETURNING *")
                              [(or execution (scope :branch)) parent kind text encoded (estimate (string text encoded))
@@ -183,19 +220,12 @@
                                   (if caller (caller :expires) (min (+ (os/clock) (config :run-seconds)) (get-in config [:snapshot :deadline] math/inf))) key]) 0) :id))
                 (unless (s :budget-root) (put s :budget-root (get-in config [:snapshot :budget-root] id)))
                 (def run (if caller (caller :run) id))
-                (when (and (s :temporary) (not caller)) (put s :temporary-call id))
                 (def code (get origin :code ""))
                 (assert (<= (length code) (config :source-bytes)) "world source byte ceiling")
                 (query s (string "INSERT INTO " (s :journal) ".call_payloads(id,parent,run,kind,config,entry,first,last,history_last,origin,temporary,agent,depth) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)")
                        [id (or (when caller (caller :branch)) (get-in config [:snapshot :parent-call])) run (cond summary "summarize" (input :code) "code" "text")
                         (when (and saved (not summary)) (string (json/encode saved))) entry first-id last (if caller (caller :history-last) last)
                         (string (json/encode (tabseq [[k v] :in (pairs (or origin {})) :unless (= k :code)] k v))) temporary (if (and caller (caller :agent)) 1 0) depth])
-                (when (and (not summary) (config :repl))
-                  (def directory (string (config :store) ".worlds"))
-                  (os/mkdir directory) (os/chmod directory 8r700)
-                  (def file (path/join directory (string (string/join (map |(string/format "%02x" $) (os/cryptorand 18))) ".janet")))
-                  (with [out (file/open file :wbn)] (file/write out code)) (os/chmod file 8r600)
-                  (query s (string "UPDATE " (s :journal) ".call_payloads SET file=? WHERE id=?") [file id]))
                 (def input-event (append s {:branch id :author (input :author) :at (input :at)} (if summary "summary-input" "user") (get input :text (get input :code "")) {:input admitted} (when (and entry (> entry 0)) entry) id))
                 (var image-bytes 0)
                 (eachp [position image] (get input :images [])
@@ -275,6 +305,8 @@
               (def unstarted (and expired (= 0 (row :attempt))))
               (def retry (and (= 0 (row :temporary)) (not expired) (not= "code" (row :kind)) (> (row :retries) 0)))
               (def state (cond unstarted "cancelled" retry "queued" "uncertain"))
+              (when (and (not= "summarize" (row :kind)) (not unstarted))
+                (publish s false row))
               (when (= 0 (row :temporary))
                 (append s (view s (if (= "summarize" (row :kind)) (row :parent) (row :id))) "interruption"
                         (if unstarted "Deadline expired before execution." "Interrupted execution; effects may have happened.")

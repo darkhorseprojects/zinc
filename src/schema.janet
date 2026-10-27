@@ -84,7 +84,6 @@
   (each field [:fs :http :processes]
     (each [name grant] (pairs (saved field))
       (assert (deep= grant (get-in current [field name])) "saved resource changed or revoked")))
-  (assert (or (nil? (saved :remote)) (= (saved :remote) (current :remote))) "saved remote changed")
   (each [name module] (pairs (get-in saved [:repl :modules] {}))
     (assert (= (module :module) (get-in current [:repl :modules name :module])) "saved module revoked"))
   (when (saved :agent) (assert (current :agent) "agent execution view revoked"))
@@ -134,9 +133,56 @@
                               {:type (image :type) :bytes (buffer (base64/decode (image :data)))}) (value :images))))
   value)
 
+(defn views [prefix]
+  (string/replace-all "$schema." prefix `
+CREATE VIEW $schema.memory_records AS WITH records AS (
+  SELECT e.id,e.call task,c.run,
+    CASE WHEN c.kind='summarize' THEN c.parent ELSE c.id END branch,
+    CASE WHEN e.kind='call-result' AND c.kind='code' THEN (
+      SELECT id FROM events n WHERE n.call=c.id AND n.kind='call-attempt' ORDER BY id DESC LIMIT 1
+    ) ELSE e.parent END parent,
+    CASE
+      WHEN e.kind='model-outcome' AND json_extract(e.data,'$.turn') THEN
+        CASE WHEN json_extract(e.data,'$.status') IN ('complete','refused','blocked') THEN 'completed' ELSE 'response' END
+      WHEN e.kind='call-result' AND json_type(e.data,'$.error')='object' THEN 'error'
+      WHEN e.kind='call-result' AND c.kind='code' AND json_extract(e.data,'$.state')='done' THEN 'completed'
+      WHEN e.kind='call-attempt' AND c.kind='code' THEN 'code-admission'
+      ELSE e.kind
+    END kind,
+    e.text,e.data,e.estimate,e.author,e.at,e.created,c.kind execution_kind,
+    CASE WHEN json_type(e.data,'$.message')='object' THEN
+      CASE WHEN json_extract(e.data,'$."reasoning-visible"') THEN json_extract(e.data,'$.message')
+        ELSE json_remove(json_extract(e.data,'$.message'),'$.reasoning','$.reasoning_content','$.reasoning_details') END
+    END public_message
+  FROM events e LEFT JOIN call_payloads c ON c.id=e.call
+)
+SELECT e.*,b.temporary branch_temporary,b.parent branch_parent,
+  json_extract(a.data,'$.input.request') request,
+  CASE WHEN b.temporary=1 THEN 'tmp:'||json_extract(a.data,'$.input.request')||'/'||b.id||':'||e.id END label,
+  CASE WHEN e.kind IN ('call-admission','operation-outcome','artifact','model-outcome','call-result')
+    THEN e.text||char(10)||json_remove(e.data,'$."world-source"') ELSE e.text END body,
+  CASE
+    WHEN e.kind IN ('user','context','response','completed','code-admission','tool-result','tool-ambiguity',
+      'call-admission','operation-outcome','cancelled','save-intent','saved') THEN 1
+    WHEN e.kind IN ('error','interruption') THEN e.execution_kind<>'summarize'
+    WHEN e.kind='artifact' THEN json_type(e.data,'$.invalidates') IS NULL ELSE 0
+  END memory
+FROM records e LEFT JOIN call_payloads b ON b.id=e.branch
+LEFT JOIN events a ON a.call=e.run AND a.kind='user';
+CREATE VIEW $schema.conversation_records AS
+  SELECT e.*,CASE WHEN kind='response' THEN json_remove(json_extract(data,'$.message'),'$.reasoning','$.reasoning_content')
+    ELSE json_object('role','tool','tool_call_id',json_extract(data,'$.tool-id'),'content',text) END conversation_message
+  FROM memory_records e
+  WHERE kind='response' OR kind IN ('tool-result','tool-ambiguity') AND NOT EXISTS(
+    SELECT 1 FROM events n WHERE n.call=e.task AND n.id>e.id AND n.kind IN ('tool-result','tool-ambiguity')
+      AND json_extract(n.data,'$.response')=json_extract(e.data,'$.response')
+      AND json_extract(n.data,'$.tool-id')=json_extract(e.data,'$.tool-id'));
+CREATE VIEW $schema.search_records AS SELECT id,body FROM memory_records WHERE memory;
+`))
+
 (defn database [&opt temporary]
   (string (unless temporary `
-CREATE TABLE world(id INTEGER PRIMARY KEY CHECK(id=1),file TEXT NOT NULL) STRICT;
+CREATE TABLE world(id INTEGER PRIMARY KEY CHECK(id=1),file TEXT NOT NULL,origin TEXT NOT NULL DEFAULT '{}' CHECK(json_valid(origin))) STRICT;
 CREATE TABLE call_controls(
   id INTEGER PRIMARY KEY AUTOINCREMENT CHECK(id<=9007199254740991),
   request TEXT,
@@ -166,7 +212,7 @@ CREATE VIEW live_calls AS
     AND c.lease_expires>unixepoch('subsec') AND c.expires>unixepoch('subsec')
     AND r.expires>unixepoch('subsec') AND NOT c.cancelled AND NOT r.cancelled;
 CREATE VIEW running AS SELECT id FROM live_calls WHERE state='running';
-PRAGMA user_version=1;
+PRAGMA user_version=2;
 `) (string/replace-all "$schema." (if temporary "journal." "main.") `
 CREATE TABLE $schema.call_payloads(
   id INTEGER PRIMARY KEY,
@@ -178,7 +224,6 @@ CREATE TABLE $schema.call_payloads(
   first INTEGER NOT NULL,
   last INTEGER NOT NULL,
   history_last INTEGER NOT NULL,
-  file TEXT,
   origin TEXT NOT NULL DEFAULT '{}' CHECK(json_valid(origin)),
   temporary INTEGER NOT NULL,
   agent INTEGER NOT NULL,
@@ -241,75 +286,6 @@ CREATE TRIGGER $schema.event_kind BEFORE INSERT ON events
     'cancelled','artifact','context','save-intent','saved','operation-outcome'
   )
   BEGIN SELECT raise(ABORT,'unsupported event kind'); END;
-CREATE VIEW $schema.memory_records AS WITH records AS (
-  SELECT e.id,e.call task,c.run,
-    CASE WHEN c.kind='summarize' THEN c.parent ELSE c.id END branch,
-    CASE
-      WHEN e.kind='call-result' AND c.kind='code' THEN (
-        SELECT id FROM events n
-        WHERE n.call=c.id AND n.kind='call-attempt'
-        ORDER BY id DESC LIMIT 1
-      )
-      ELSE e.parent
-    END parent,
-    CASE
-      WHEN e.kind='model-outcome' AND json_extract(e.data,'$.turn') THEN
-        CASE
-          WHEN json_extract(e.data,'$.status') IN ('complete','refused','blocked') THEN 'completed'
-          ELSE 'response'
-        END
-      WHEN e.kind='call-result' AND json_type(e.data,'$.error')='object' THEN 'error'
-      WHEN e.kind='call-result' AND c.kind='code' AND json_extract(e.data,'$.state')='done' THEN 'completed'
-      WHEN e.kind='call-attempt' AND c.kind='code' THEN 'code-admission'
-      ELSE e.kind
-    END kind,
-    e.text,e.data,e.estimate,e.author,e.at,e.created,c.kind execution_kind,
-    CASE WHEN json_type(e.data,'$.message')='object' THEN
-      CASE
-        WHEN json_extract(e.data,'$."reasoning-visible"') THEN json_extract(e.data,'$.message')
-        ELSE json_remove(json_extract(e.data,'$.message'),'$.reasoning','$.reasoning_content','$.reasoning_details')
-      END
-    END public_message
-  FROM events e
-  LEFT JOIN call_payloads c ON c.id=e.call
-)
-SELECT e.*,b.temporary branch_temporary,b.parent branch_parent,
-  json_extract(a.data,'$.input.request') request,
-  CASE WHEN b.temporary=1 THEN 'tmp:'||json_extract(a.data,'$.input.request')||'/'||b.id||':'||e.id END label,
-  CASE
-    WHEN e.kind IN ('response','completed','model-outcome') AND json_type(e.data,'$.message')='object'
-      THEN e.public_message||char(10)||json_object('status',json_extract(e.data,'$.status'))
-    WHEN e.kind IN (
-      'call-admission','operation-outcome','tool-result','tool-ambiguity','cancelled','interruption',
-      'save-intent','saved','error','artifact','model-admission','model-outcome','call-result'
-    ) THEN e.text||char(10)||json_remove(e.data,'$."world-source"')
-    ELSE e.text
-  END body,
-  CASE
-    WHEN e.kind IN (
-      'user','context','response','completed','code-admission','tool-result','tool-ambiguity',
-      'call-admission','operation-outcome','cancelled','save-intent','saved'
-    ) THEN 1
-    WHEN e.kind IN ('error','interruption') THEN e.execution_kind<>'summarize'
-    WHEN e.kind='artifact' THEN json_type(e.data,'$.invalidates') IS NULL
-    ELSE 0
-  END memory
-FROM records e
-LEFT JOIN call_payloads b ON b.id=e.branch
-LEFT JOIN events a ON a.call=e.run AND a.kind='user';
-CREATE VIEW $schema.conversation_records AS
-  SELECT e.*,
-    CASE
-      WHEN kind='response' THEN json_extract(data,'$.message')
-      ELSE json_object('role','tool','tool_call_id',json_extract(data,'$.tool-id'),'content',text)
-    END conversation_message
-  FROM memory_records e
-  WHERE kind='response' OR kind IN ('tool-result','tool-ambiguity') AND NOT EXISTS(
-    SELECT 1 FROM events n
-    WHERE n.call=e.task AND n.id>e.id AND n.kind IN ('tool-result','tool-ambiguity')
-      AND json_extract(n.data,'$.response')=json_extract(e.data,'$.response')
-      AND json_extract(n.data,'$.tool-id')=json_extract(e.data,'$.tool-id')
-  );
 CREATE VIEW $schema.unresolved_tools AS
   SELECT r.branch,r.id response,json_extract(c.value,'$.id') tool_id
   FROM memory_records r,json_each(r.data,'$.tools') c
@@ -333,7 +309,6 @@ CREATE INDEX $schema.summary_key ON events(json_extract(data,'$.policy'),json_ex
 CREATE INDEX $schema.summary_start ON events(json_extract(data,'$.first')) WHERE kind='summary';
 CREATE INDEX $schema.summary_invalidations ON events(id)
   WHERE kind='artifact' AND json_type(data,'$.invalidates')='integer';
-CREATE VIEW $schema.search_records AS SELECT id,body FROM memory_records WHERE memory;
 CREATE VIRTUAL TABLE $schema.event_fts USING fts5(
   body,content='search_records',content_rowid='id',tokenize='unicode61 remove_diacritics 0'
 );
@@ -342,4 +317,4 @@ CREATE TRIGGER $schema.event_index AFTER INSERT ON events BEGIN
   INSERT INTO event_fts(rowid,body) SELECT id,body FROM search_records WHERE id=new.id;
 END;
 CREATE UNIQUE INDEX $schema.context_key ON events(json_extract(data,'$.key')) WHERE kind='context';
-`)))
+`) (views (if temporary "journal." "main."))))

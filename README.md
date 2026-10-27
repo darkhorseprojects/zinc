@@ -1,6 +1,6 @@
 # Zinc
 
-Zinc is a Janet source package for Portable Agents. It owns call-local source,
+Zinc is a Janet source package for Portable Agents. It owns the current world,
 SQL outcomes, private history and bounded retrieval. It has no resident service.
 Connector is optional.
 
@@ -28,7 +28,7 @@ Native modules must match the Janet ABI and host library. On Windows, keep PA's
 `runtime/share` licenses and install the matching Microsoft Visual C++ runtime.
 On Linux install the distribution's libcurl runtime and CA certificates; on macOS
 run `brew install curl`. Install Git on PATH and configure a Git author identity
-before using `save`. Merging requires `git merge-tree --write-tree`.
+before saving a world.
 
 Native release builds target Ubuntu 24.04/glibc, macOS 15 and Windows 11, on
 x86-64 and ARM64. They are not musl builds or self-contained executables.
@@ -89,25 +89,32 @@ PA detachment. Losing an observer, Connector, or a local process reference does
 not cancel accepted execution. Executor or machine failure requires recovery;
 no live REPL heap is durable. Supervisors must not kill the containing job/cgroup.
 
-Calls copy source, not live bindings. Root source comes from Git HEAD or
-`:revision`; children copy the caller's current source. Single-name `def`, `defn`
-and `defmacro` add or replace source declarations after successful evaluation;
-a definition evaluating to nil removes its declaration. Other expressions execute without becoming startup source.
-Initializers run on load: use `let` for temporary values and effects.
+Each database has one current world: a selected Git commit and a draft source blob.
+Successful root evaluations publish declarations atomically with their outcomes;
+new inquiries inherit that draft. `def`, `defn` and `defmacro` replace declarations
+by name. Nil is an ordinary persistent value, not deletion.
+
+Every evaluation loads a fresh environment from source. Initializers run again;
+use `(let [name value] ...)` for temporary values and effects. Failed evaluations
+restore the last saved commit, discarding all unsaved source and live bindings.
+Completed external effects are not rolled back. Concurrent stale writers fail
+rather than overwrite a newer world. Children copy source but never merge edits.
+
+`world` accepts `{:action "view"}`, optionally `:point EVENT`, and returns source,
+commit, blob, ref and dirty status without evaluation. Other actions are `"save"`
+with `:message`, `"discard"`, and `"switch"` with `:commit`. Controls operate on
+the current world, never a call ID, and reject active execution. Switch requires
+a clean draft. Saving after a rewind creates a `world/...` branch from that commit,
+preserving the original future. Switching alone creates no branch. History is
+not deleted or rewound. Historical source blobs are pinned against Git GC.
+
+When granted, `(save "Explain the change")` commits the executing durable root's
+draft. Other saves use the `world` entry or Connector's `/world save`. Save uses
+Git compare-and-swap and preserves dirty canonical files. Use ordinary Git for
+merging and pushing; per-call save options and the `remote` setting are removed.
 
 `:parent` attaches history; `:memory_range {:start id :end id}` bounds visibility.
-`:parent 0` defaults to empty history, not empty source. Child edits never merge
-automatically. Selected `save` commits source, not heap state:
-
-```janet
-(save "Explain the change")
-(save "Keep an earlier call" {:call 42 :branch "experiment"})
-(save "Integrate" {:merge "refs/heads/self/BRANCH"})
-(save "Publish" {:push true})
-```
-
-Source snapshots carry Git blob IDs. Save uses Git compare-and-swap, preserves
-dirty canonical files and restricts merges to the world file. Push requires `remote`.
+`:parent 0` defaults to empty history, not empty source.
 
 `run-seconds` bounds the tree; `seconds` bounds each evaluation including waits.
 Waits release parallel slots. Descendants share work/tool budgets. Cancellation
@@ -116,8 +123,8 @@ automatically replayed; uncertain effects require inspection.
 
 `persist: false` keeps payloads in a bounded RAM journal. Descendants remain
 temporary and cannot reattach. Controls/source can reach disk, durable callers
-can retain results, and external effects retain their own behavior. Normal
-cleanup removes temporary source files.
+can retain results, and external effects retain their own behavior. Temporary
+execution never changes the durable current world. There are no per-call source files.
 
 ## REPL and named grants
 
@@ -144,11 +151,10 @@ sets, so existing calls never acquire newly added bindings through wildcards.
 fields, never private runtime configuration.
 
 Optional trusted `setup` exports `(configure env)`. It can install local bindings
-and return standard `run-context` options: `:parser`, `:read`, `:expander`, and
-`:on-compile-warning`. Input syntax can change while saved declarations remain
-canonical Janet. Host source commits, errors, output capture and deadlines stay
-Zinc-owned. Native restrictions are fixed; syntax customization never bypasses
-named-resource grants.
+and return standard `dofile` options: `:parser`, `:read` and `:expander`.
+Janet owns parse/compile error propagation; output includes compilation warnings.
+Saved declarations remain canonical Janet. Native restrictions are fixed; syntax
+customization never bypasses named-resource grants.
 
 Filesystem, network, subprocess, FFI, module loading, threads and environment
 access remain disabled inside generated evaluators. Named operations run in the
@@ -196,7 +202,7 @@ window coordinates before sending. `views` and `render` read that capture withou
 inference or recomputation. Temporary requests are not durably inspectable.
 Saved calls using the former `search` setting cannot resume; their history remains readable.
 Other trusted exports include `describe`, `instructions`, `models`, `record`,
-`resume`, `abort`, `task` and `invalidate`. `record` stores passive authenticated
+`world`, `resume`, `abort`, `task` and `invalidate`. `record` stores passive authenticated
 history, never executable turns. Replay uses `self` or `resume` with `after`, not polling exports.
 
 Chat uses SSE; checkpoints expose provisional text. Tools wait for the complete,
@@ -205,5 +211,10 @@ by `kind`; stderr carries logs. Return values are data only: `{:text ...}` for t
 evaluation text for code. Usage and provenance stay in SQL, not a second result envelope.
 PA terminal frames, EOF and process exit establish invocation success. Deploy matching
 Connector. Compaction may outlive observation; limits fail explicitly.
-**Zinc database version is 1.** Preserve old stores and provision a fresh path;
-there is no migration or compatibility mode.
+**Zinc database version is 2.** Stop workers and back up the database before upgrading.
+Version 1 is upgraded in place: history and the latest root draft are preserved,
+obsolete source-file columns are removed, and search projections are rebuilt.
+Remove retired `tool-calls` and `remote` settings from configuration. Source defaults
+to 1 MiB, tool quota to 262,144 estimated tokens and rounds to 128; configured bounds,
+provider capacity and shared deadlines still apply. Memory omits raw reasoning and
+duplicate result envelopes; exact provider requests and raw outcomes remain retained.
