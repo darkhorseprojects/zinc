@@ -51,7 +51,7 @@
     (put repl :values (select (seq [[key field] :in (pairs schema) :when (get-in field [:repl :value])] (string key)) (repl :values)))
     (each name (keys (repl :modules))
       (assert (and (peg/match ~(* (some (set "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789_-")) -1) (string name))
-                   (not (index-of name [:core :self :pa :fs :http :process :memory]))) "invalid module namespace")))
+                   (not (index-of name [:core :self :pa :fs :http :process :memory :world :zinc]))) "invalid module namespace")))
   (each field [:fs :http :processes]
     (each name (keys (config field))
       (assert (peg/match ~(* (some (set "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789_-")) -1) (string name)) "invalid resource name")))
@@ -72,7 +72,7 @@
 
 (defn authorize [schema current saved]
   (each key (keys saved) (assert (has-key? schema key) "unsupported saved configuration"))
-  (each key [:store :world :instructions]
+  (each key [:store :world :instructions :identity :ephemeral]
     (assert (= (current key) (saved key)) "saved identity/location differs"))
   (each key [:inference :web-search]
     (assert (or (not (saved key)) (current key)) (string "saved permission revoked: " key)))
@@ -85,7 +85,8 @@
     (each [name grant] (pairs (saved field))
       (assert (deep= grant (get-in current [field name])) "saved resource changed or revoked")))
   (each [name module] (pairs (get-in saved [:repl :modules] {}))
-    (assert (= (module :module) (get-in current [:repl :modules name :module])) "saved module revoked"))
+    (each key [:module :export]
+      (assert (= (module key) (get-in current [:repl :modules name key])) "saved module revoked")))
   (when (saved :agent) (assert (current :agent) "agent execution view revoked"))
   (each [name provider] (pairs (saved :providers))
     (def granted (get-in current [:providers name]))
@@ -100,7 +101,7 @@
   (each [key field] (pairs schema)
     (when (and (= :integer (field :type)) (or (saved key) (current key)))
       (put config key
-           (if (and (= key :output) (= 0 (min (saved key) (current key))))
+           (if (and (field :unlimited) (= 0 (min (get saved key math/inf) (get current key math/inf))))
              (max (saved key) (current key))
              (min (get saved key math/inf) (get current key math/inf))))))
   config)
@@ -143,7 +144,7 @@ CREATE TABLE call_controls(
   root INTEGER REFERENCES call_controls(id),
   kind TEXT NOT NULL CHECK(kind IN ('text','code','summarize')),
   temporary INTEGER NOT NULL CHECK(temporary IN (0,1)),
-  expires REAL NOT NULL,
+  expires REAL,
   cancelled INTEGER NOT NULL DEFAULT 0 CHECK(cancelled IN (0,1)),
   state TEXT NOT NULL DEFAULT 'queued' CHECK(state IN ('queued','running','waiting','done','failed','cancelled','uncertain')),
   attempt INTEGER NOT NULL DEFAULT 0,
@@ -162,8 +163,8 @@ CREATE VIEW live_calls AS
   SELECT c.*
   FROM call_controls c JOIN call_controls r ON r.id=coalesce(c.root,c.id)
   WHERE c.state IN ('running','waiting')
-    AND c.lease_expires>unixepoch('subsec') AND c.expires>unixepoch('subsec')
-    AND r.expires>unixepoch('subsec') AND NOT c.cancelled AND NOT r.cancelled;
+    AND c.lease_expires>unixepoch('subsec') AND (c.expires IS NULL OR c.expires>unixepoch('subsec'))
+    AND (r.expires IS NULL OR r.expires>unixepoch('subsec')) AND NOT c.cancelled AND NOT r.cancelled;
 CREATE VIEW running AS SELECT id FROM live_calls WHERE state='running';
 PRAGMA user_version=1;
 `) (string/replace-all "$schema." (if temporary "journal." "main.") `
@@ -295,7 +296,7 @@ SELECT e.*,b.temporary branch_temporary,b.parent branch_parent,
   json_extract(a.data,'$.input.request') request,
   CASE WHEN b.temporary=1 THEN 'tmp:'||json_extract(a.data,'$.input.request')||'/'||b.id||':'||e.id END label,
   CASE WHEN e.kind IN ('call-admission','operation-outcome','artifact','model-outcome','call-result')
-    THEN e.text||char(10)||json_remove(e.data,'$."world-source"') ELSE e.text END body,
+    THEN e.text||char(10)||json_remove(e.data,'$.world') ELSE e.text END body,
   CASE
     WHEN e.kind IN ('user','context','response','completed','code-admission','tool-result','tool-ambiguity',
       'call-admission','operation-outcome','cancelled','save-intent','saved') THEN 1

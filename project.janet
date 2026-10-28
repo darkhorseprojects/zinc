@@ -4,16 +4,18 @@
   :description "A Janet agent with transactional worlds and durable memory"
   :license "AGPL-3.0-only"
   :dependencies
-  [{:repo "https://github.com/darkhorseprojects/portable-agents.git" :tag "df0d6590e081698a73842ae5baaa963b21e5a63d"}
+  [{:repo "https://github.com/darkhorseprojects/portable-agents.git" :tag "e8ca149c5ff86fc599b50b79e08e88601a2f14b1"}
    {:repo "https://github.com/janet-lang/sqlite3.git" :tag "9126fe46ff1c7e42ca3d7bb9c8aed95a8236a32c"}
    {:repo "https://github.com/darkhorseprojects/jurl.git" :tag "0a1aa237e4e1941cd6d15018a81d03052050ecef"}
    {:repo "https://github.com/janet-lang/spork.git" :tag "8a87c5ae1cbbf3a0037eeac7f172bd45da4d9910"}])
 
-(declare-source :source ["src" "zinc.md" "models.ini" "models.lock"] :prefix "zinc")
-(declare-source :source ["data/stopwords-iso.json"] :prefix "zinc/data")
-(declare-source :source ["tools/cygnet_index.py"] :prefix "zinc/tools")
+(declare-source :source ["src" "zinc.md" "design.md" "models.ini" "models.lock"] :prefix "zinc")
+(declare-source :source ["build/assets"] :prefix "zinc")
 
-(task "package" ["build"]
+(task "assets" [] (os/execute [(or (os/getenv "PYTHON") "python3") "tools/assets.py"] :px))
+(add-dep "install" "assets")
+
+(task "package" ["build" "assets"]
       (def system (get {:linux "linux" :macos "macos" :windows "windows"} (os/which)))
       (def architecture (get {:x64 "x86_64" :aarch64 "aarch64"} (os/arch)))
       (assert (and system architecture) "unsupported runtime target")
@@ -24,11 +26,12 @@
       (def directory (string (find-build-dir) "package"))
       (def staging (string directory "/zinc"))
       (rm staging)
-      (each name ["zinc.md" "models.ini" "models.lock" "README.md" "LICENSE" "NOTICE" "data/stopwords-iso.json" "tools/cygnet_index.py"]
+      (each name ["zinc.md" "design.md" "models.ini" "models.lock" "README.md" "LICENSE" "NOTICE"]
         (def destination (string staging "/" name))
         (create-dirs destination)
         (copyfile name destination))
       (copy "src" staging)
+      (copy "build/assets" staging)
       (each name (array/concat @["portable-agents/markdown.janet" "portable-agents/protocol.janet" "spork/path.janet"]
                                (map |(string $ (dyn :modext)) ["spork/base64" "spork/json" "spork/utf8" "sqlite3" "jurl/native"]))
         (def destination (string staging "/lib/" name))

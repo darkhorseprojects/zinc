@@ -4,8 +4,8 @@ Zinc third-party notices
 Runtime artifacts bundle Portable Agents' Janet libraries, Remarkable, Spork,
 the Janet SQLite binding and Jurl. Janet modules are pinned in the source repository's
 project.janet. Windows curl DLLs and licenses are included in bin and share.
-Executors, other system libraries, model servers, weights and the Cygnet index
-are separately provisioned. Bundled dependency license texts follow below.
+Executors, other system libraries, model servers and weights are separately
+provisioned. The generated Cygnet index and verified stopwords are shared assets. Bundled dependency license texts follow below.
 
 Portable Agents
 ---------------
@@ -54,7 +54,9 @@ information supplied by Cygnet when redistributing the database.
 Source: https://github.com/omwn/cygnet/releases/tag/2026.05.12
 Software license: MIT
 Aggregate data license: LicenseRef-Cygnet-Aggregate
-Resource provenance and licenses: https://github.com/omwn/cygnet
+Resource provenance and licenses: assets/cygnet.NOTICE.json and the index's
+resources table preserve the upstream resource metadata, citations and licences.
+Upstream: https://github.com/omwn/cygnet
 Citation: Rowan Hall Maudslay and Francis Bond (2026), "Cygnet: Refactoring the
 Open Multilingual Wordnet," LREC 2026.
 

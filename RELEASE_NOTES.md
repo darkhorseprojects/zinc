@@ -1,12 +1,10 @@
 # Zinc 0.2.0
 
-- One persisted current world replaces per-call source files. Successful declarations publish atomically; nil persists normally.
-- Failed evaluation restores the last saved commit. Janet's standard evaluator propagates parse/compile errors and captures warnings.
-- `/world view`, `save`, `discard` and `switch` operate without call IDs. Saving after rewind forks automatically.
-- Each evaluation starts from source, not an inherited heap. Children remain isolated; external effects are never rolled back.
-- Package version remains 0.2.0 and the revised database layout is schema 1. Preserve incompatible databases and provision a fresh store; there is no migration.
-- Historical source blobs survive Git GC. Concurrent stale writers cannot overwrite the current world.
-- Memory excludes raw reasoning and duplicate result envelopes; exact requests and raw outcomes remain inspectable.
-- Source defaults to 1 MiB, tool quota to 262,144 and rounds to 128. Arbitrary schema maxima and the per-response tool cap are removed.
-- Per-call save options, `remote`, `tool-calls`, persistent evaluator sessions and custom compile-warning callbacks are removed.
-- Named grants, SQL fencing, detached workers and RAM-only temporary payloads remain. Deploy matching Connector.
+- Native binding images replace declaration replay. Vars, closures, mutations, aliases and cycles persist without rerunning initializers.
+- Publication is success-only. Failed/cancelled work never erases earlier successful working changes.
+- Durable roots own instance worlds; queued roots refresh on execution. Parallel children remain isolated.
+- External and code world operations share execution/publication. Save intents precede Git ref mutation; reconciliation never replays code.
+- Standard Janet, native docs, entropy-seeded randomness, evaluator-local deadlines and explicit unlimited limits.
+- Importable design documentation and shared verified lexical assets with resource attribution.
+- Inquiry-v1 coordinates retain agent/caller identity. Observe reattaches without replay; init/join support owned instances.
+- Package version remains 0.2.0 and schema 1. Preserve incompatible databases, ledgers and source-world repositories and initialize fresh stores; no silent migration. Deploy matching Connector 0.2.0.

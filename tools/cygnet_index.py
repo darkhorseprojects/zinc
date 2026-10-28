@@ -22,6 +22,8 @@ try:
     CREATE TABLE concept_edges(source INTEGER NOT NULL,target INTEGER NOT NULL,PRIMARY KEY(source,target)) WITHOUT ROWID;
     CREATE TABLE form_concepts(language TEXT NOT NULL,form TEXT NOT NULL,concept INTEGER NOT NULL,PRIMARY KEY(language,form,concept)) WITHOUT ROWID;
     CREATE TABLE relations(name TEXT PRIMARY KEY);
+    CREATE TABLE resources AS SELECT r.*,l.code language FROM cygnet.resources r
+      LEFT JOIN cygnet.languages l ON l.rowid=r.language_rowid;
     """)
     db.executemany("INSERT INTO relations VALUES(?)", ((name,) for name in relations))
     db.executescript("""
@@ -46,7 +48,7 @@ try:
     """)
     count = db.execute("SELECT count(*) FROM cygnet.synsets WHERE pos IN ('NOUN','VERB','ADJ','ADV')").fetchone()[0]
     assert count > 0
-    db.executemany("INSERT INTO metadata VALUES(?,?)", [("format_version", "1"), ("source_identity", identity), ("concepts", str(count))])
+    db.executemany("INSERT INTO metadata VALUES(?,?)", [("format_version", "1"), ("source_identity", identity), ("recipe_identity", hashlib.sha256(pathlib.Path(__file__).read_bytes()).hexdigest()), ("concepts", str(count))])
     db.execute("PRAGMA application_id=1514751817")
     db.execute("PRAGMA user_version=1")
     db.commit()

@@ -8,5 +8,5 @@ on:
 permissions: { contents: write }
 jobs:
   build:
-    uses: darkhorseprojects/portable-agents/.github/workflows/ci.yml@df0d6590e081698a73842ae5baaa963b21e5a63d
-    with: { pa: "df0d6590e081698a73842ae5baaa963b21e5a63d" }
+    uses: darkhorseprojects/portable-agents/.github/workflows/ci.yml@e8ca149c5ff86fc599b50b79e08e88601a2f14b1
+    with: { pa: "e8ca149c5ff86fc599b50b79e08e88601a2f14b1" }

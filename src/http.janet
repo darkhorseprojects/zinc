@@ -20,7 +20,9 @@
     (assert (check) "HTTP job fenced")
     (def token (when (endpoint :token-env) (os/getenv (endpoint :token-env))))
     (when (endpoint :token-env) (assert token "provider credential is not configured"))
-    (def timeout (min (config :http-ms) (if current (max 1 (math/floor (* 1000 (- (current :expires) (os/clock))))) (config :http-ms))))
+    (def bound (min (if (= 0 (config :http-ms)) math/inf (config :http-ms))
+                    (if (get current :expires) (max 1 (math/floor (* 1000 (- (current :expires) (os/clock))))) math/inf)))
+    (def timeout (if (= bound math/inf) 0 bound))
     (each [key value]
       (pairs {:url (string (endpoint :url) suffix) :customrequest method :postfields body
               :httpheader (array/concat @["Content-Type: application/json" (if stream "Accept: text/event-stream" "Accept: application/json")]
@@ -32,7 +34,7 @@
                                  (when (> (length chunk) 0) (ev/give-supervisor :stdout (string chunk)))
                                  (buffer/push-string bytes chunk)))
               :proxy "" :nobody (= method "HEAD") :followlocation false :ssl-verifypeer true :ssl-verifyhost 2
-              :timeout-ms timeout :connecttimeout-ms (min 10000 timeout)
+              :timeout-ms timeout :connecttimeout-ms 10000
               :protocols "http,https" :noprogress false :xferinfofunction check})
       (unless (nil? value) (put client key value)))
     (def status (:perform client))

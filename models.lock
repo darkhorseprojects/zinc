@@ -6,8 +6,16 @@ version = "2026.05.12"
 source = "https://github.com/omwn/cygnet/releases/download/2026.05.12/cygnet.db.gz"
 sha256 = "65e93f3620d7cc5444350d9e204259e961096138767d9ea73403ade38964cc48"
 database_sha256 = "aae2cdb1418c1435558584a91181e1cb94459f2506c16f2be4b00e81428deaff"
-expected = "provision a generated Cygnet format-1 graph index separately; this upstream artifact is not the runtime index"
+generated_format = 1
+expected = "assets/cygnet.db; generated graph index with resource attribution"
 license = "LicenseRef-Cygnet-Aggregate"
+
+[[dependency]]
+name = "stopwords-iso"
+source = "https://github.com/stopwords-iso/stopwords-iso"
+sha256 = "337af4d57d5fa1fecc2ffcae532e9b9f05db51c74ff18d3dde9572185a3cdae4"
+license = "MIT"
+expected = "assets/stopwords.json; verified data/stopwords-iso.json"
 
 [[dependency]]
 name = "llama.cpp-prism"
