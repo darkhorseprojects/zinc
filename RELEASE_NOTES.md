@@ -8,4 +8,7 @@
 - Standard Janet, native docs, entropy-seeded randomness, evaluator-local deadlines and explicit unlimited limits.
 - Importable design documentation and shared verified lexical assets with resource attribution.
 - Inquiry-v1 coordinates retain agent/caller identity. Observe reattaches without replay; init/join support owned instances.
+- RAM journals overlay immutable archived history; child snapshots carry only temporary additions. Call controls alone own parent/kind/persistence metadata.
+- Streaming previews retain deltas outside execution checkpoints. Binding inventories load from images on demand; usage projections derive from the raw report.
+- Asset generation has one owner, verifies the source once, and hard-links the generated graph into local assets.
 - Package version remains 0.2.0 and schema 1. Preserve incompatible databases, ledgers and source-world repositories and initialize fresh stores; no silent migration. Deploy matching Connector 0.2.0.

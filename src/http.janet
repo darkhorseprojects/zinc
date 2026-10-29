@@ -1,6 +1,7 @@
 (import jurl/native :as curl)
 (import spork/utf8 :as utf8)
 (import sqlite3 :as sql)
+(import ./store)
 
 (defn- transfer [[config endpoint method suffix body current stream]]
   (def db (when current (sql/open (config :store))))
@@ -12,7 +13,7 @@
   (defer (do (curl/reset client) (when db (sql/close db)))
     (def check (fn [& counts]
                  (when (and current (>= (os/clock) next-check))
-                   (set next-check (+ (os/clock) 0.1))
+                   (set next-check (+ (os/clock) store/interval))
                    (set permitted (not (nil? (first
                      (sql/eval db "SELECT id FROM live_calls WHERE id=? AND owner=?"
                                [(current :id) (current :owner)]))))))

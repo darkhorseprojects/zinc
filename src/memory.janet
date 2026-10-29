@@ -52,8 +52,6 @@
       (assert (and (= 1 (((sql/eval db "PRAGMA graph.user_version") 0) :user_version))
                    (= 1514751817 (((sql/eval db "PRAGMA graph.application_id") 0) :application_id))
                    (= "1" (metadata :format_version)) (= (config :cygnet-source) (metadata :source_identity))) "incompatible Cygnet index")
-      (each [name columns] [["form_concepts" ["language" "form" "concept"]] ["concept_edges" ["source" "target"]] ["metadata" ["key" "value"]]]
-        (assert (= columns (tuple/slice (map |($ :name) (sql/eval db (string "PRAGMA graph.table_info(" name ")"))))) "Cygnet schema mismatch"))
       (assert (first (sql/eval db "SELECT name FROM graph.sqlite_schema WHERE name='form_concepts_by_concept'")) "Cygnet graph index missing")
       db)
     ([err] (sql/close db) (error err))))

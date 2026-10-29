@@ -35,7 +35,8 @@ jpm --local run package
 MSVC flags are `/nologo,/MD,/DSQLITE_ENABLE_FTS5`; PYTHON selects the interpreter.
 The assets task verifies pinned inputs, downloads Cygnet, builds a format-1 graph,
 and preserves resource citations/licences. Cache identity includes source checksum,
-indexer checksum and format; cached schema, integrity and provenance are verified.
+asset-builder checksum and format; cached schema, integrity and provenance are verified. The builder verifies the source
+once and publishes the immutable generated graph through a hard link rather than copying it into assets.
 Models remain separately provisioned; models.lock records their provenance.
 
 ## Worlds and calls
@@ -79,8 +80,9 @@ multi-tool calls retain concurrent execution. Join local fibers that matter.
 Parent and memory_range bound history, not world state. Parent 0 defaults to empty
 history. Revoked grants or changed module/setup paths prevent saved execution.
 
-Persist false keeps call payloads in a bounded RAM journal within the existing
-instance; descendants stay temporary and cannot reattach. Controls/images may
+Persist false keeps new call payloads in a bounded RAM journal over an immutable
+archive prefix; nested children carry only the RAM additions, not copies of archived
+history or images. Descendants stay temporary and cannot reattach. Controls/images may
 reach disk and callers may retain results. This is not a temporary agent instance.
 Accepted workers survive lost observers; interrupted code is never automatically
 replayed. Supervisors must not kill their job/cgroup. `observe` reattaches without
@@ -129,8 +131,11 @@ model IDs and token-env references; credentials resolve only in trusted code.
 Views returns recorded memory windows; render returns the exact model request,
 without inference or recomputation. Submitted source remains inspectable history,
 not executable persistence. Visible reasoning, SSE streaming and parallel tools
-remain. Presentation records identify agent/request/run/branch/caller; PA still
-uses its existing wire protocol. Other entries include describe, instructions,
+remain. Streaming previews store deltas separately from execution checkpoints;
+observers fold only new deltas and skip unchanged previews. Binding inventories are
+read from native images on demand rather than copied into every event descriptor.
+Presentation records identify agent/request/run/branch/caller; PA still uses its
+existing wire protocol. Other entries include describe, instructions,
 models, record, world, task, observe, resume, abort, invalidate and join.
 
 Import `zinc/design` inside the evaluator and read design/document for architecture.
@@ -141,5 +146,6 @@ help; describe is a value representation, not usage documentation.
 settle/cancel old work before upgrading. Preserve the old database, Connector ledger
 and source-world repository, then explicitly initialize fresh image-based state.
 Do not overwrite old source snapshots or replay historical code for conversion.
-There is no migration or compatibility layer. Verification uses compilation,
+Older schema-1 layouts are rejected; there is no migration or compatibility layer.
+Verification uses compilation,
 formatting, linting, type checking and artifact inspection; no tests are required.

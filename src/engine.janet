@@ -1,5 +1,4 @@
 (import spork/json :as json)
-(import sqlite3 :as sql)
 (import spork/path :as path)
 (import spork/utf8 :as utf8)
 (import portable-agents/protocol :as wire)
@@ -83,24 +82,35 @@
         (let [child ((current :children) id)]
           (assert child "temporary self is not owned by this call")
           (def [worker done] child)
-          (ev/take done)
-          (unless (= :dead (fiber/status worker)) (error (fiber/last-value worker)))
-          (def [ok value] (fiber/last-value worker))
-          (if ok value (error value)))
+          (unless (index-of (fiber/status worker) [:dead :error]) (ev/take done))
+          (put (current :children) id nil)
+          (unless (= :dead (fiber/status worker)) (propagate (fiber/last-value worker) worker))
+          (fiber/last-value worker))
         (label done (while true
-                      (store/recover s)
+                      (store/recover s (and (dictionary? id) (not (id :root))))
                       (when current (store/checkpoint s))
-                      (def row (first (store/query s "SELECT state,kind FROM main.call_controls WHERE id=?" [id])))
-                      (assert row "call unavailable")
-                      (case (row :state)
-                        "done" (return done (if (= "text" (row :kind))
-                                              {:text (((store/query s "SELECT text FROM memory_records WHERE branch=? AND kind='completed'" [id]) 0) :text)}
-                                              ((json/decode ((first (store/query s "SELECT data FROM events WHERE call=? AND kind='call-result' ORDER BY id DESC LIMIT 1" [id])) :data) true true) :value)))
-                        "failed" (error ((json/decode ((first (store/query s "SELECT data FROM events WHERE call=? AND kind='call-result' ORDER BY id DESC LIMIT 1" [id])) :data) true true) :error))
-                        "uncertain" (error (string "Call #" id ": uncertain effects; inspect receipts, do not replay."))
-                        "cancelled" (error "call cancelled")
-                        "queued" (launch s id here))
-                      (ev/sleep 0.1))))))
+                      (if (dictionary? id)
+                        (let [root (id :root)
+                              pending (store/query s `SELECT c.id,c.state,c.owner,c.lease_expires,p.run FROM main.call_controls c
+                                LEFT JOIN call_payloads p ON p.id=c.id
+                                WHERE (? IS NULL OR c.root=? AND c.kind<>'summarize')
+                                AND (c.state IN ('queued','running','waiting') OR (? IS NULL AND (c.state='uncertain' OR c.owner IS NOT NULL))) ORDER BY c.id` [root root root])]
+                          (unless root
+                            (each row pending (assert (and (not= "uncertain" (row :state))
+                              (or (nil? (row :owner)) (> (row :lease_expires) (os/clock)))) "instance has unsettled effects; preserve it for inspection")))
+                          (when (= 0 (length pending)) (return done {:settled true}))
+                          (each row pending (when (and (= "queued" (row :state)) (or (nil? (id :run)) (= (id :run) (row :run)))) (launch s (row :id)))))
+                        (let [row (first (store/query s "SELECT state,kind FROM main.call_controls WHERE id=?" [id]))]
+                          (assert row "call unavailable")
+                          (case (row :state)
+                            "done" (return done (if (= "text" (row :kind))
+                              {:text (((store/query s "SELECT text FROM memory_records WHERE branch=? AND kind='completed'" [id]) 0) :text)}
+                              ((json/decode ((first (store/query s "SELECT data FROM events WHERE call=? AND kind='call-result' ORDER BY id DESC LIMIT 1" [id])) :data) true true) :value)))
+                            "failed" (error ((json/decode ((first (store/query s "SELECT data FROM events WHERE call=? AND kind='call-result' ORDER BY id DESC LIMIT 1" [id])) :data) true true) :error))
+                            "uncertain" (error (string "Call #" id ": uncertain effects; inspect receipts, do not replay."))
+                            "cancelled" (error "call cancelled")
+                            "queued" (launch s id here))))
+                      (ev/sleep store/interval))))))
 
   (defn start-child [s view value &opt snapshot]
     (def value (schema/request (postwalk |(if (dictionary? $) (tabseq [[k v] :in (pairs $)] (keyword k) v) $) value)
@@ -129,16 +139,13 @@
           (worker "self" (merge value {:request request :parent entry
                                        :memory_range (get value :memory_range {:start (if (= 0 entry) 0 (view :first)) :end entry})})
                   (merge config {:snapshot (merge (store/snapshot s view) {:origin origin})})))
-        (def done (ev/chan))
-        (def collector (ev/spawn
-                         (defer (ev/chan-close done)
-                           (try
-                             (defer (ev/close (process :out))
-                               (def output (json/decode (wire/output reader) true true))
-                               (ev/take exited)
-                               (assert (= 0 (process :return-code)) "ProcessFailure")
-                               [true output])
-                             ([err] [false err])))))
+        (def done (ev/chan 1))
+        (def collector (ev/go (fn []
+          (defer (ev/close (process :out))
+            (def output (json/decode (wire/output reader) true true))
+            (ev/take exited)
+            (assert (= 0 (process :return-code)) "ProcessFailure")
+            output)) nil done))
         (put ((dyn :zinc/call) :children) request [collector done])
         {:temporary request})))
 
@@ -160,7 +167,7 @@
                     (def binding (bindings name))
                     (assert (and binding (not (binding :local))) "function revoked")
                     (when snapshot
-                      (put current :candidate (store/image s (json/decode ((store/call s (current :id)) :origin) true true) (snapshot :image) (snapshot :bindings))))
+                      (put current :candidate (store/image s (json/decode ((store/call s (current :id)) :origin) true true) (snapshot :image))))
                     (when (get binding :intrinsic) (assert (= 1 (length args)) "invalid intrinsic arity"))
                     (def args (schema/data args))
                     (let [admission (store/transact s (store/charge s 1 0)
@@ -255,7 +262,7 @@
                         seconds (min (if (= 0 (config :seconds)) math/inf (config :seconds)) run)]
                     (if (= seconds math/inf) 0 seconds))))
     (put current :candidate (or (outcome :replacement)
-                               (store/image s (json/decode ((store/call s (current :id)) :origin) true true) (outcome :image) (outcome :bindings))))
+                               (store/image s (json/decode ((store/call s (current :id)) :origin) true true) (outcome :image))))
     (outcome :value))
 
   (defn infer [s call bindings]
@@ -359,7 +366,7 @@
             (let [input ((dyn :zinc/call) :input)
                   bindings (if (not= "summarize" (row :kind)) (repl/definitions config (spec :bindings)) {})
                   owner (fiber/root)
-                  watcher (ev/go (fn [] (try (while true (store/checkpoint s) (ev/sleep 0.1))
+                  watcher (ev/go (fn [] (try (while true (store/checkpoint s) (ev/sleep store/interval))
                                             ([err] (unless (= err :finished) (ev/cancel owner err))))))]
               (defer (ev/cancel watcher :finished)
                 (def value (case (row :kind) "text" (infer s row bindings)
@@ -384,7 +391,7 @@
         (each pending (store/query s "SELECT c.id FROM main.call_controls c JOIN call_payloads p ON p.id=c.id WHERE p.run=? AND c.state='queued' AND (c.expires IS NULL OR c.expires>?) ORDER BY c.id LIMIT ?"
                                    [(row :run) (os/clock) (config :parallel)]) (launch s (pending :id))))))
 
-  (defn drain [s run after]
+  (defn drain [s run after previews]
     (var sequence after)
     (while true
       (def records (memory/events s run sequence))
@@ -392,11 +399,20 @@
         (when-let [frame (message event)] (print (json/encode frame)))
         (set sequence (event :id)))
       (when (< (length records) 256) (break)))
-    (each event (store/query s `SELECT e.*,json_extract(p.checkpoint,'$.message') preview
-      FROM main.live_calls c JOIN call_payloads p ON p.id=c.id
+    (def active @{})
+    (each event (store/query s `SELECT e.* FROM main.live_calls c JOIN call_payloads p ON p.id=c.id
       JOIN memory_records e ON e.id=json_extract(p.checkpoint,'$.request') AND e.task=p.id
-      WHERE p.run=? AND c.kind<>'summarize' AND e.kind='model-admission' AND json_type(p.checkpoint,'$.message')='object'` [run])
-      (when-let [frame (message (merge event {:public_message (event :preview) :text ""}))] (print (json/encode frame))))
+      WHERE p.run=? AND c.kind<>'summarize' AND e.kind='model-admission'` [run])
+      (put active (event :id) true)
+      (def progress (get previews (event :id) @{:after 0 :message @{}}))
+      (put previews (event :id) progress)
+      (def updates (store/query s (string "SELECT id,delta FROM " (s :journal) ".previews WHERE request=? AND id>? ORDER BY id") [(event :id) (progress :after)]))
+      (each update updates
+        (model/delta (progress :message) (json/decode (update :delta) true true))
+        (put progress :after (update :id)))
+      (when (> (length updates) 0)
+        (when-let [frame (message (merge event {:public_message (string (json/encode (progress :message))) :text ""}))] (print (json/encode frame)))))
+    (each id (keys previews) (unless (active id) (put previews id nil)))
     sequence)
 
   (defn run [s value operation]
@@ -434,17 +450,13 @@
                   (set claimed (store/claim s id))
                   (unless claimed (error {:code "AgentBusy" :message "Target cannot resume immediately."}))))))
           (var sequence (get value :after 0))
-          (def emitter (ev/go (fn [] (try (while true (set sequence (drain s (call :run) sequence)) (ev/sleep 0.1))
+          (def previews @{})
+          (def emitter (ev/go (fn [] (try (while true (set sequence (drain s (call :run) sequence previews)) (ev/sleep store/interval))
                                        ([err] (eprint (json/encode {:code "ObservationFailed" :message (string err)})))))))
-          (defer (do (ev/cancel emitter "observer detached") (drain s (call :run) sequence))
+          (defer (do (ev/cancel emitter "observer detached") (drain s (call :run) sequence previews))
             (var failure nil)
             (def output (try (do (when claimed (execute s claimed)) (wait s id true)) ([err] (set failure err))))
-            (while true
-              (store/recover s)
-              (def children (store/query s "SELECT c.id,c.state,p.run FROM main.call_controls c LEFT JOIN call_payloads p ON p.id=c.id WHERE c.root=? AND c.kind<>'summarize' AND c.state IN ('queued','running','waiting') ORDER BY c.id" [(or (call :root) id)]))
-              (when (= 0 (length children)) (break))
-              (each child children (when (and (= "queued" (child :state)) (= (call :run) (child :run))) (launch s (child :id))))
-              (ev/sleep 0.1))
+            (wait s {:root (or (call :root) id) :run (call :run)})
             (if failure (error failure) output))))))
 
   (defn describe [config]
@@ -459,15 +471,8 @@
                                    ["describe" []] ["init" []] ["join" []] ["instructions" []] ["models" [:role]] ["world" [:action :point :message :commit :name]] ["views" [:event]] ["render" [:event]] ["record" [:records]] ["abort" [:run :request :reason]] ["invalidate" [:event]]]]
     operation (fn [bytes opaque]
                 (def config (schema/configuration (spec :schema) (json/decode opaque true true) (index-of operation ["describe" "init"])))
-                (when (index-of operation ["self" "task" "resume" "observe" "instructions"])
-                  (each profile (filter identity [config (config :agent)])
-                    (repl/definitions profile (spec :bindings))
-                    (when (and (profile :inference) (profile :memory-retrieval))
-                      (each key [:stopwords :cygnet]
-                        (assert (and (profile key) (= :file (os/stat (profile key) :mode))) (string key " file required for memory-retrieval")))
-                      (def stops (get (json/decode (slurp (profile :stopwords)) true true) (keyword (profile :language))))
-                      (assert (and (indexed? stops) (> (length stops) 0)) "unsupported stopword language")
-                      (sql/close (memory/cygnet profile)))))
+                (when (index-of operation ["self" "task" "resume" "observe"])
+                  (each profile (filter identity [config (config :agent)]) (repl/definitions profile (spec :bindings))))
                 (assert (and (utf8/is-valid? bytes) (<= (length bytes) (config :request-bytes))) "request must be bounded UTF-8")
                 (when (index-of operation ["describe" "instructions"]) (assert (= "" bytes) "operation takes empty input"))
                 (def value (if (index-of operation ["describe" "instructions"]) {} (schema/request (json/decode bytes true true) fields)))
@@ -495,15 +500,7 @@
                                   (= operation "describe") (describe config)
                                   (= operation "init") {:world (repl/world s {:action "view"})}
                                   (= operation "join")
-                                  (with-dyns [:zinc/execute execute]
-                                    (while true
-                                      (store/recover s)
-                                      (assert (not (first (store/query s "SELECT id FROM main.call_controls WHERE state='uncertain' OR owner IS NOT NULL AND lease_expires<=?" [(os/clock)]))) "instance has unsettled effects; preserve it for inspection")
-                                      (def pending (store/query s "SELECT id,state FROM main.call_controls WHERE state IN ('queued','running','waiting') OR owner IS NOT NULL"))
-                                      (when (= 0 (length pending)) (break))
-                                      (each row pending (when (= "queued" (row :state)) (launch s (row :id))))
-                                      (ev/sleep 0.1))
-                                    {:settled true})
+                                  (with-dyns [:zinc/execute execute] (wait s {}))
                                   (= operation "instructions")
                                   (let [bindings (repl/definitions config (spec :bindings))]
                                     (repl/instructions config (spec :document) bindings (repl/public config (spec :schema) bindings)))

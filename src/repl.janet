@@ -22,11 +22,7 @@
           ref (store/git root (if revision ["rev-parse" "--symbolic-full-name" "--verify" "--end-of-options" revision] ["symbolic-ref" "-q" "HEAD"]) nil nil true)]
       {:root root :path relative :blob blob :base base
        :ref (if (and ref (string/has-prefix? "refs/heads/" (string/trim ref))) (string/trim ref) "HEAD")})))
-  (if (origin :bindings) origin
-    (let [bytes (store/git (origin :root) ["cat-file" "blob" (origin :blob)])
-          metadata (do (assert (<= (length bytes) (config :world-bytes)) "world image byte ceiling") (unmarshal bytes @{}))]
-      (assert (and (tuple? metadata) (= 6 (length metadata)) (= 1 (metadata 0)) (indexed? (metadata 4))) "incompatible world image")
-      (merge origin {:bindings (metadata 4)}))))
+  origin)
 
 (defn- evaluate [[bytes input document public bindings requests code limits config seconds]]
   (when (> seconds 0) (ev/deadline seconds nil nil true))
@@ -45,7 +41,7 @@
                        {:name (string name) :type (string (type (module/value env name true)))}))
     (def image (marshal [1 janet/version janet/build janet/config-bits bindings (marshal env reverse)] @{}))
     (assert (<= (length image) (limits :world)) "world image byte ceiling")
-    {:image image :bindings bindings})
+    {:image image})
   (defn request [name args]
     (def reply (ev/thread-chan 1))
     (ev/give requests [name args (when (index-of name ["self" "save" "world/save" "world/view"]) (snapshot)) reply])
@@ -134,7 +130,11 @@
                      ((json/decode ((store/event s (or (get current :scope) {:first 1 :last 9007199254740991}) (value :point)) :data) true true) :world)) origin))
   (assert (selected :base) "event has no world image")
   (def clean (string/trim (store/git (selected :root) ["rev-parse" "--verify" "--end-of-options" (string (selected :base) ":" (selected :path))])))
-  (if (= action "view") (merge (image config selected) {:dirty (not= clean (selected :blob))})
+  (if (= action "view")
+    (let [bytes (store/git (selected :root) ["cat-file" "blob" (selected :blob)])
+          metadata (do (assert (<= (length bytes) (config :world-bytes)) "world image byte ceiling") (unmarshal bytes @{}))]
+      (assert (and (tuple? metadata) (= 6 (length metadata)) (= 1 (metadata 0)) (indexed? (metadata 4))) "incompatible world image")
+      (merge selected {:bindings (metadata 4) :dirty (not= clean (selected :blob))}))
     (do
       (assert (config :repl) "world editing is not permitted")
       (assert current "world edits require an executing root")

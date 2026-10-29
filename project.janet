@@ -4,7 +4,7 @@
   :description "A Janet agent with transactional worlds and durable memory"
   :license "AGPL-3.0-only"
   :dependencies
-  [{:repo "https://github.com/darkhorseprojects/portable-agents.git" :tag "e8ca149c5ff86fc599b50b79e08e88601a2f14b1"}
+  [{:repo "https://github.com/darkhorseprojects/portable-agents.git" :tag "cf8929befcebeea17132a21dfb463b37be604616"}
    {:repo "https://github.com/janet-lang/sqlite3.git" :tag "9126fe46ff1c7e42ca3d7bb9c8aed95a8236a32c"}
    {:repo "https://github.com/darkhorseprojects/jurl.git" :tag "0a1aa237e4e1941cd6d15018a81d03052050ecef"}
    {:repo "https://github.com/janet-lang/spork.git" :tag "8a87c5ae1cbbf3a0037eeac7f172bd45da4d9910"}])

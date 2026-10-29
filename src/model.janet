@@ -20,7 +20,7 @@
                                                                          {:type "image_url" :image_url "[image bytes accounted separately]"} $) (message :content))})
                                         message)) messages))))
 
-(defn- delta [previous value &opt field]
+(defn delta [previous value &opt field]
   (cond
     (dictionary? value) (let [result (or previous @{})]
                          (each [key item] (pairs value)
@@ -30,7 +30,7 @@
                         (def index (get item :index position))
                         (assert (and (int? index) (<= 0 index (length result))) "invalid streamed index")
                         (put result index (delta (get result index) item field))) result)
-    (and (string? value) (index-of field [:content :refusal :reasoning :reasoning_content :text :data :summary :name :arguments])) (string (or previous "") value)
+    (and (string? value) (index-of field [:content :refusal :reasoning :reasoning_content :text :data :summary :name :arguments])) (buffer/push-string (or previous @"") value)
     value))
 
 (defn request [config reference path &opt body s]
@@ -46,6 +46,7 @@
       (when streaming
         (fn [chunk]
           (set pending (string/replace-all "\r\n" "\n" (string pending chunk)))
+          (def updates @[])
           (var boundary nil)
           (while (set boundary (string/find "\n\n" pending))
             (def data (string/trim (string/join (seq [line :in (string/split "\n" (string/slice pending 0 boundary)) :when (string/has-prefix? "data:" line)] (string/slice line 5)) "\n")))
@@ -59,14 +60,18 @@
                   (each choice (get part :choices [])
                     (assert (= 0 (choice :index)) "expected one assistant stream")
                     (when (choice :finish_reason) (put value :finish-reason (choice :finish_reason)))
-                    (delta (value :message) (choice :delta)))))))
-          (when (and s (not= "summarize" ((dyn :zinc/call) :kind)))
-            (store/checkpoint s (merge ((dyn :zinc/call) :checkpoint)
-                                       {:message (tabseq [[key item] :in (pairs (value :message))
-                                                        :unless (and (= "none" (config :thinking)) (index-of key [:reasoning :reasoning_content :reasoning_details]))] key item)})))))))
+                    (delta (value :message) (choice :delta))
+                    (array/push updates (tabseq [[key item] :in (pairs (or (choice :delta) {}))
+                      :unless (and (= "none" (config :thinking)) (index-of key [:reasoning :reasoning_content :reasoning_details]))] key item)))))))
+          (when (and s (> (length updates) 0) (not= "summarize" ((dyn :zinc/call) :kind)))
+            (def current (dyn :zinc/call))
+            (assert (first (store/query s (string "INSERT INTO " (s :journal) ".previews(request,delta)
+              SELECT ?,value FROM json_each(?) WHERE EXISTS(SELECT 1 FROM main.live_calls WHERE id=? AND owner=?) RETURNING id")
+              [(get-in current [:checkpoint :request]) (string (json/encode updates)) (current :id) (current :owner)])) "model preview fenced"))))))
   (assert (<= 200 (response :status) 299) (string "model HTTP " (response :status) ": " (response :body)))
   (def value (if streaming
-              (do (assert (and done (= "" pending) (value :finish-reason)) "incomplete model stream") value)
+              (do (assert (and done (= "" pending) (value :finish-reason)) "incomplete model stream")
+                  (postwalk |(if (buffer? $) (string $) $) value))
               (json/decode (response :body) true true)))
   (assert (dictionary? value) "model response must be an object")
   (when-let [failure (value :error)]
@@ -148,10 +153,8 @@
   (assert (dictionary? raw) "invalid usage report")
   (each field [:prompt_tokens :completion_tokens :total_tokens]
     (when (has-key? raw field) (assert (and (int? (raw field)) (>= (raw field) 0)) "invalid reported usage")))
-  (store/query s (string "INSERT INTO " (s :journal) ".usage(request,provider,model,input,output,total,reasoning,cached,raw) VALUES(?,?,?,?,?,?,?,?,?)")
-               [request (selected :provider) (selected :id) (raw :prompt_tokens) (raw :completion_tokens) (raw :total_tokens)
-                (get-in raw [:completion_tokens_details :reasoning_tokens]) (get-in raw [:prompt_tokens_details :cached_tokens])
-                (string (json/encode raw))]))
+  (store/query s (string "INSERT INTO " (s :journal) ".usage(request,provider,model,raw) VALUES(?,?,?,?)")
+               [request (selected :provider) (selected :id) (string (json/encode raw))]))
 
 (defn call [s input &opt pending selected]
   (def config (s :config))
@@ -202,7 +205,7 @@
                                                                   {:input (tabseq [[key value] :in (pairs input) :unless (index-of key [:messages :tools :query :documents :views])] key value)
                                                                    :request {:method "POST" :url (string (get-in config [:providers (keyword (selected :provider)) :url]) endpoint) :body wire}
                                                                    :views (input :views) :estimate size :output maximum} nil (current :id)))
-                                         (store/checkpoint s (merge (current :checkpoint) {:request (event :id) :message nil})) (event :id)))
+                                         (store/checkpoint s (merge (current :checkpoint) {:request (event :id)})) (event :id)))
           (def value (request config selected endpoint wire s))
           (def result
             (try
@@ -259,8 +262,7 @@
           (store/transact s
                           (assert (first (store/query s "SELECT id FROM main.call_controls WHERE id=? AND owner=? AND state IN ('running','waiting','uncertain','cancelled')"
                                                       [(current :id) (current :owner)])) "model completion fenced")
-                          (put (current :checkpoint) :message nil)
-                          (store/query s (string "UPDATE " (s :journal) ".call_payloads SET checkpoint=? WHERE id=?") [(string (json/encode (current :checkpoint))) (current :id)])
+                          (store/query s (string "DELETE FROM " (s :journal) ".previews WHERE request=?") [admission])
                           (def content (get-in result [:message :content]))
                           (store/append s (current :scope) "model-outcome"
                                         (cond (string? content) content
