@@ -23,7 +23,7 @@
                   "completed" (if (event :public_message) (model/render event) (event :text))
                   "model-outcome" (when (and (= "chat" (data :role)) (data :visible)) (model/render event))
                   "interruption" (when (= "uncertain" (data :state)) (event :text))
-                  "saved" (string "Saved " (data :ref) " @ " (string/slice (data :after) 0 7) (when (data :pushed) " · pushed") "\n" (event :text))
+                  "saved" (string "Saved " (data :ref) " @ " (string/slice (data :base) 0 7) (when (data :pushed) " · pushed") "\n" (event :text))
                   "summary" (string "summary " coordinate (event :id) " · " (data :count)
                                     " records · source range " coordinate (data :first) "–" (data :last))
                   (when (and (not= false (data :display)) (index-of (event :kind) ["code-admission" "tool-result" "tool-ambiguity" "error"]))
@@ -290,7 +290,7 @@
                       {:tool-id (tool :tool_id) :response (tool :response) :ok false :uncertain true} (tool :response) id))
       (assert (< (length responses) (config :rounds)) "model round limit exhausted")
       (def view (store/view s id))
-      (def world (when (config :repl) {:role "user" :content (string "## World bindings\n\n" (json/encode (repl/world s {:action "view"})))}))
+      (def world (when (config :repl) {:role "user" :content (string "## World binding inventory\n\n```janet\n" ((repl/world s {:action "view"}) :text) "\n```")}))
       (set space (- capacity (model/estimate (filter identity [{:role "system" :content system} world inquiry])) tool-size 256))
       (assert (> space 256) "question, world bindings and instructions exhaust context")
       (var context (memory/context s inherited space pool))
@@ -510,6 +510,9 @@
                                   (if (= "view" (value :action)) (repl/world s value)
                                     (do
                                       (assert (index-of (value :action) ["save" "discard" "switch" "remove"]) "unknown world action")
+                                      (def name (string "world/" (value :action)))
+                                      (assert ((repl/definitions config (spec :bindings)) name)
+                                              {:code "WorldBindingNotGranted" :message (string name " is not granted; add it to the executing profile's repl.bindings.")})
                                       (run s {:code (string "(world/" (value :action)
                                                             (case (value :action)
                                                               "save" (string " " (string/format "%q" (value :message)))
@@ -528,12 +531,29 @@
                                     (def call (store/call s (row :task)))
                                     (def report {:event (row :id) :run (row :run) :branch (row :branch) :author (row :author) :at (row :at)
                                                  :world (data :world) :memory_range {:start (call :first) :end (call :last)}})
-                                    (if (= operation "render") (merge report {:request (data :request)})
-                                      (let [body (json/decode (get-in data [:request :body]) true true) windows (data :views)]
+                                    (def body (json/decode (get-in data [:request :body]) true true))
+                                    (if (= operation "render")
+                                      (merge report {:request (data :request)
+                                                     :text (string "# Prompt #" (row :id) "\n\n" (get-in data [:request :method]) " " (get-in data [:request :url])
+                                                       "\n\n## Request parameters\n\n```json\n" (json/encode (tabseq [[k v] :pairs body :unless (= k :messages)] k v) "  " "\n") "\n```"
+                                                       (when-let [messages (body :messages)]
+                                                         (string/join (seq [[index message] :pairs messages]
+                                                           (def metadata (tabseq [[k v] :pairs message :unless (index-of k [:role :content])] k v))
+                                                           (def content (message :content))
+                                                           (string "\n\n## Message " index " · " (message :role) "\n\n"
+                                                             (when (> (length metadata) 0) (string "```json\n" (json/encode metadata "  " "\n") "\n```\n\n"))
+                                                             (if (indexed? content)
+                                                               (string/join (map |(if (= "text" ($ :type)) ($ :text) (string "```json\n" (json/encode $ "  " "\n") "\n```")) content) "\n\n")
+                                                               content))))))})
+                                      (let [windows (data :views)]
                                         (assert windows "this request has no chronological or semantic windows")
                                         (each key [:chronological :semantic]
                                           (put (windows key) :text (if-let [index (get-in windows [key :message])] (get-in body [:messages index :content]) "")))
-                                        (merge report {:views windows}))))
+                                        (merge report {:views windows
+                                                       :text (string "# Memory views · prompt #" (row :id) "\n\nThrough #" (windows :through)
+                                                         "\n\n## Chronological · " (length (get-in windows [:chronological :records])) " records\n\n" (get-in windows [:chronological :text])
+                                                         "\n\n## Retrieved · " (length (get-in windows [:semantic :records])) " records\n\n"
+                                                         (length (get-in windows [:semantic :candidates])) " candidates · cutoff " (get-in windows [:semantic :cutoff]) "\n\n" (get-in windows [:semantic :text]))}))))
                                   (= operation "invalidate") {:event ((memory/invalidate s (value :event)) :id)}
                                   (= operation "abort") (store/abort s value)
                                   (run s value operation)))

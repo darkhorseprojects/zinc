@@ -134,7 +134,8 @@
     (let [bytes (store/git (selected :root) ["cat-file" "blob" (selected :blob)])
           metadata (do (assert (<= (length bytes) (config :world-bytes)) "world image byte ceiling") (unmarshal bytes @{}))]
       (assert (and (tuple? metadata) (= 6 (length metadata)) (= 1 (metadata 0)) (indexed? (metadata 4))) "incompatible world image")
-      (merge selected {:bindings (metadata 4) :dirty (not= clean (selected :blob))}))
+      (merge selected {:bindings (metadata 4) :dirty (not= clean (selected :blob))
+                       :text (string/format "%80m" (tabseq [binding :in (metadata 4)] (symbol (binding :name)) (keyword (binding :type))))}))
     (do
       (assert (config :repl) "world editing is not permitted")
       (assert current "world edits require an executing root")
