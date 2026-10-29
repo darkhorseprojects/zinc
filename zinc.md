@@ -13,8 +13,32 @@ without a result. Inspect before repeating.
 ```janet
 (import ./src/engine)
 
+(def bindings
+  (merge
+    {"self" {:intrinsic true
+             :doc `(self request) runs an independent child and returns its committed outcome, raising on failure. Supply exactly one of :text or :code.
+:text uses :agent when configured; :code uses the caller profile. Code returns evaluation text; text returns a map with :text.
+Children snapshot current live bindings; edits do not merge automatically. :revision selects a Git revision.
+:parent sets history attachment; :memory_range {:start id :end id} sets inclusive bounds. :parent 0 defaults to empty history, not an empty world.
+:persist inherits the caller policy; false uses RAM payloads and forbids durable descendants. Controls/images may reach disk and callers may retain results.
+Children share the root deadline and budgets. Waiting releases a slot. Workers persist independently of observation.`}
+     "memory/expand" ((require "./src/memory") 'expand)
+     "save" {:doc "(save message) is world/save."}
+     "fs/list" {:resource :fs :permission :read :doc "(fs/list root relative) lists names; use \".\" for the root."}
+     "fs/read" {:resource :fs :permission :read :doc "(fs/read root relative) reads bounded UTF-8 text."}
+     "fs/write" {:resource :fs :permission :write :doc "(fs/write root relative text) writes bounded UTF-8 text."}
+     "http/request" {:resource :http :doc "(http/request root method segments body) requests a named base without redirects; returns {:status :body}."}
+     "process/run" {:resource :processes :doc "(process/run name) runs fixed argv/env with empty stdin; returns {:exit :output}."}}
+    (tabseq [[action help] :pairs
+             {"view" "(world/view &opt point) returns image identity, checkpoint, dirty status and bounded binding inventory."
+              "save" "(world/save message) saves the current bindings to Git. Durable root only."
+              "discard" "(world/discard) restores the saved checkpoint and ends this evaluation. Durable root only."
+              "switch" "(world/switch commit) selects a revision and ends this evaluation. Save or discard first."
+              "remove" "(world/remove name) deletes a local binding, unlike setting its value to nil."}]
+      (string "world/" action) {:doc help})))
+
 (def schema
-  {:world {:type :string :absolute true :repl {:value true}}
+  {:world {:type :string :absolute true :visible true}
    :store {:type :string :absolute true}
    :instructions {:type :string :absolute true :optional true}
    :snapshot {:type :dictionary :optional true}
@@ -31,62 +55,35 @@ without a result. Inspect before repeating.
                              :values {:type :dictionary
                                       :fields {:module {:type :string :absolute true}
                                                :export {:type :string :optional true}
-                                               :config {:type :dictionary :default {}}}}}}
-          :repl {:functions
-                 (merge {"self" {:intrinsic true
-                          :doc `(self request) runs an independent child and returns its committed outcome, raising on failure. Supply exactly one of :text or :code.
-:text uses :agent when configured; :code uses the caller profile. Code returns evaluation text; text returns a map with :text.
-Children snapshot current live bindings; edits do not merge automatically. :revision selects a Git revision.
-:parent sets history attachment; :memory_range {:start id :end id} sets inclusive bounds. :parent 0 defaults to empty history, not empty source.
-:persist inherits the caller policy; false uses RAM payloads and forbids durable descendants. Controls/images may reach disk and callers may retain results.
-Children share the root deadline and budgets. Waiting releases a slot. Workers persist independently of observation.`}
-                  "memory/expand" ((require "./src/memory") 'expand)
-                  "save" {:doc "(save message) is world/save."}}
-                  (tabseq [action :in ["view" "save" "discard" "switch" "remove"]]
-                     (string "world/" action) {:doc (get {"view" "(world/view &opt point) returns image identity, checkpoint, dirty status and bounded binding inventory."
-                                                        "save" "(world/save message) saves the current bindings to Git. Durable root only."
-                                                        "discard" "(world/discard) restores the saved checkpoint and ends this evaluation. Durable root only."
-                                                        "switch" "(world/switch commit) selects a revision and ends this evaluation. Save or discard first."
-                                                        "remove" "(world/remove name) deletes a local binding, unlike setting its value to nil."} action)}))}}
-   :fs {:type :dictionary
-        :default {}
+                                               :config {:type :dictionary :default {}}}}}}}
+   :fs {:type :dictionary :default {} :public [:root :description]
         :values {:type :dictionary
                  :fields {:root {:type :string :absolute true}
                           :read {:type :boolean :default true}
                           :write {:type :boolean :default false}
-                          :description {:type :string :optional true}}}
-        :repl {:public [:root :description]
-               :functions {"fs/list" {:permission :read :doc "(fs/list root relative) lists names; use \".\" for the root."}
-                           "fs/read" {:permission :read :doc "(fs/read root relative) reads bounded UTF-8 text."}
-                           "fs/write" {:permission :write :doc "(fs/write root relative text) writes bounded UTF-8 text."}}}}
-   :http {:type :dictionary
-          :default {}
+                          :description {:type :string :optional true}}}}
+   :http {:type :dictionary :default {} :public [:url :methods :description]
           :values {:type :dictionary
                    :fields {:url {:type :string}
                             :methods {:type :array :items :string :default ["GET"]
                                       :choices ["GET" "HEAD" "POST" "PUT" "PATCH" "DELETE"]}
-                            :description {:type :string :optional true}}}
-          :repl {:public [:url :methods :description]
-                 :functions {"http/request" {:doc "(http/request root method segments body) requests a named base without redirects; returns {:status :body}."}}}}
-   :processes {:type :dictionary
-               :default {}
+                            :description {:type :string :optional true}}}}
+   :processes {:type :dictionary :default {} :public [:argv :description]
                :values {:type :dictionary
                         :fields {:argv {:type :array :items :string :minimum 1}
                                  :env {:type :dictionary :default {} :values {:type :string}}
-                                 :description {:type :string :optional true}}}
-               :repl {:public [:argv :description]
-                      :functions {"process/run" {:doc "(process/run name) runs fixed argv/env with empty stdin; returns {:exit :output}."}}}}
+                                 :description {:type :string :optional true}}}}
    :providers {:type :dictionary
                :default {}
                :values {:type :dictionary
                         :fields {:url {:type :string}
                                  :token-env {:type :string :optional true}
                                  :models {:type :array :items :string :optional true}}}}
-   :chat {:type :string :default "llama:chat" :repl {:value true}
+   :chat {:type :string :default "llama:chat" :visible true
           :option "chat" :autocomplete "chat" :description "Chat model"}
    :rerank {:type :string :default "llama:rerank"
             :option "rerank" :autocomplete "rerank" :description "Rerank model"}
-   :thinking {:type :string :default "default" :repl {:value true}
+   :thinking {:type :string :default "default" :visible true
               :option "thinking" :description "Reasoning effort"
               :choices ["default" "none" "minimal" "low" "medium" "high" "xhigh" "max"]}
    :web-search {:type :boolean :default false
@@ -127,6 +124,7 @@ Children share the root deadline and budgets. Waiting releases a slot. Workers p
 (def inputs
   {:text {:type :string}
    :code {:type :string}
+   :queue {:type :boolean :default true}
    :author {:type :string}
    :at {:type :string}
    :memory_range {:type :dictionary}
@@ -140,6 +138,6 @@ Children share the root deadline and budgets. Waiting releases a slot. Workers p
    :after {:type :integer :minimum 0}})
 
 (each [name entry]
-  (pairs (engine/make {:schema schema :input inputs :document document}))
+  (pairs (engine/make {:schema schema :bindings bindings :input inputs :document document}))
   (put (curenv) (symbol name) @{:value entry}))
 ```

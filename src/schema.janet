@@ -48,7 +48,7 @@
     (each key [:store :world]
       (assert (= (config key) (get-in config [:agent key])) "agent view changes world identity/location")))
   (when-let [repl (config :repl)]
-    (put repl :values (select (seq [[key field] :in (pairs schema) :when (get-in field [:repl :value])] (string key)) (repl :values)))
+    (put repl :values (select (seq [[key field] :in (pairs schema) :when (field :visible)] (string key)) (repl :values)))
     (each name (keys (repl :modules))
       (assert (and (peg/match ~(* (some (set "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789_-")) -1) (string name))
                    (not (index-of name [:core :self :pa :fs :http :process :memory :world :zinc]))) "invalid module namespace")))
@@ -125,7 +125,8 @@
   (each key [:request :author :at :owner :revision]
     (when (has-key? value key)
       (assert (and (string? (value key)) (<= 1 (length (value key)) 256) (not (string/find "\0" (value key)))) "invalid request name")))
-  (when (has-key? value :persist) (assert (boolean? (value :persist)) "invalid persistence flag"))
+  (each key [:persist :queue]
+    (when (has-key? value key) (assert (boolean? (value key)) (string "invalid " key " flag"))))
   (when (has-key? value :images)
     (assert (and (indexed? (value :images)) (<= (length (value :images)) 4)) "invalid images")
     (put value :images (map (fn [image]

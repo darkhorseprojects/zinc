@@ -86,6 +86,11 @@ Accepted workers survive lost observers; interrupted code is never automatically
 replayed. Supervisors must not kill their job/cgroup. `observe` reattaches without
 rerunning code; `resume` explicitly reconciles resumable text work.
 
+Root input `queue: false` atomically claims execution or records a terminal
+`AgentBusy` outcome. It never commits queued work or retries automatically; explicit
+resume must also claim immediately. Duplicate starts observe existing work without
+receiving its execution lease. Connector uses this policy for synchronous peers.
+
 ## Language, grants and limits
 
 Ordinary Janet bindings are available by default. Explicit selectors remain an
@@ -93,6 +98,9 @@ advanced restriction: core/* selects unqualified names, core/multiply selects *,
 and namespaced selectors expand deterministically. Saved calls retain exact sets.
 Native filesystem, network, subprocess, FFI, module loading, threads and environment
 access remain sandboxed. Trusted setup may return parser/read/expander options.
+Host operations live in a flat binding catalogue, not nested REPL schema metadata.
+Schema `visible` settings and `public` resource fields are exposed through the
+selected catalogue; host-side grant checks still enforce authority.
 
 Named host grants remain: fs/list/read/write, http/request and process/run. Paths
 reject traversal and links; HTTP permits configured bases/methods without redirects

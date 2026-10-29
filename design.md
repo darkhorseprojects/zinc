@@ -49,13 +49,20 @@ Direct user code and tool code use identical publication rules and language
 bindings. Named filesystem, HTTP, process and trusted module grants are checked by
 the host on every invocation. Native syntax is not unrestricted host authority.
 Use `self` for independent child work. Children share budgets and deadlines.
-Waiting releases execution capacity, not world ownership.
+Waiting releases execution capacity, not world ownership. Runtime `repl` settings
+select bindings/modules; a separate flat host catalogue defines operations and
+resource permissions. Schema `visible`/`public` annotations expose only selected
+settings and granted resource metadata.
 
 Configured peer aliases are callable bindings, for example `(research request)`.
 They invoke the target's public self entry under the target's own configuration,
 database, world and credentials. Peer access requires reciprocal explicit trust;
 source code cannot choose arbitrary directories or override target grants.
-Cross-agent coordinates retain caller identity. Synchronous cycles are rejected.
+Cross-agent coordinates retain caller identity. Synchronous peers use `queue: false`:
+start and claim share one transaction, or the request finishes with `AgentBusy`.
+Rejected IDs cannot execute later. Nonqueued work never retries automatically;
+explicit resume must also acquire ownership immediately. No peer waits for another
+root's world ownership, so no distributed wait graph or ancestry list is needed.
 Persistent targets render through their own bots; temporary computational agents
 can render under the owning bot with a temporary identity.
 

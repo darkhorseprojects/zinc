@@ -170,14 +170,13 @@
       (when (= action "save") (put current :candidate updated))
       updated)))
 
-(defn definitions [config fields]
+(defn definitions [config supplied]
   (if-not (config :repl) {}
     (do
       (def base (make-env))
       (def available (tabseq [name :in (all-bindings base) :unless (get (base name) :private)]
                        (cond (= name '*) "core/multiply" (string/find "/" (string name)) (string name) (string "core/" name)) {:local name}))
-      (each [key field] (pairs fields)
-        (each [name binding] (pairs (get-in field [:repl :functions] {})) (put available name binding)))
+      (merge-into available supplied)
       (each [namespace module] (pairs (get-in config [:repl :modules]))
         (each [name binding] (pairs (require (module :module)))
           (when (and (symbol? name) (not (binding :private)) (not (binding :macro)) (index-of (type (binding :value)) [:function :cfunction])
@@ -190,15 +189,15 @@
       (put (config :repl) :bindings selected)
       (tabseq [name :in selected] name (available name)))))
 
-(defn public [config fields]
+(defn public [config fields bindings]
   {:settings (tabseq [name :in (get-in config [:repl :values] [])] (keyword name) (config (keyword name)))
-   :resources (tabseq [[key field] :in (pairs fields) :let [access (get field :repl {})] :when (and (config :repl) (access :public))
-                       :let [grants (tabseq [[name grant] :in (pairs (config key))
-                                             :let [functions (sorted (seq [[function binding] :in (pairs (access :functions))
-                                                                           :when (and (index-of function (get-in config [:repl :bindings]))
-                                                                                      (or (not (binding :permission)) (grant (binding :permission))))] function))]
+   :resources (tabseq [[key field] :pairs fields :when (and (config :repl) (field :public))
+                       :let [grants (tabseq [[name grant] :pairs (config key)
+                                             :let [functions (sorted (seq [[function binding] :pairs bindings
+                                                                           :when (= key (binding :resource))
+                                                                           :when (or (not (binding :permission)) (grant (binding :permission)))] function))]
                                              :when (> (length functions) 0)]
-                                      name (merge (tabseq [field :in (access :public) :when (has-key? grant field)] field (grant field)) {:functions functions}))]
+                                      name (merge (tabseq [field :in (field :public) :when (has-key? grant field)] field (grant field)) {:functions functions}))]
                        :when (> (length grants) 0)] key grants)})
 
 (defn instructions [config document-tree available public]

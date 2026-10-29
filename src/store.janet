@@ -173,63 +173,6 @@
   (query s (string "UPDATE " (s :journal) ".call_payloads SET origin=? WHERE id=?") [updated (row :id)])
   (put (dyn :zinc/call) :candidate nil))
 
-(defn start [s input config &opt caller origin key]
-  (def summary (has-key? input :children))
-  (def admitted (tabseq [[k v] :in (pairs input) :unless (index-of k [:after :images])] k v))
-  (default key (when caller (string (json/encode ["child" (caller :branch) (caller :event)]))))
-  (transact s
-            (when (dyn :zinc/call) (checkpoint s))
-            (def previous (first (query s "SELECT * FROM calls WHERE (? IS NOT NULL AND request_key=?) OR (? IS NOT NULL AND key=?)"
-                                        [(input :request) (input :request) key key])))
-            (if previous
-              (do
-                (assert (= 0 (previous :cancelled)) "call cancelled")
-                (assert (deep= admitted (json/decode (previous :input) true true)) "request ID reused with different work")
-                (assert (deep= (query s "SELECT mime AS type,bytes FROM images WHERE event=? ORDER BY position" [(previous :admission)]) (get input :images @[])) "request ID reused with different images")
-                previous)
-              (do
-                (def latest (first (query s "SELECT e.id FROM memory_records e LEFT JOIN call_payloads c ON c.id=e.branch WHERE e.kind='context' OR c.temporary=0 ORDER BY e.id DESC LIMIT 1")))
-                (def entry (unless summary (get input :parent (if caller (caller :last) (get latest :id 0)))))
-                (def last (if summary (caller :last) (get-in input [:memory_range :end] entry)))
-                (def earliest (first (query s "SELECT min(id) id FROM memory_records WHERE id<=? AND (kind='context' OR branch IN (SELECT id FROM call_payloads WHERE temporary=0) AND kind IN ('user','response','completed','tool-result'))" [last])))
-                (def first-id (if summary (caller :first) (get-in input [:memory_range :start] (if (= last 0) 0 (if caller (caller :first) (or (earliest :id) last))))))
-                (def allowed (or caller {:first 1 :last 9007199254740991}))
-                (assert (and (<= 0 first-id last) (= (= first-id 0) (= last 0))) "invalid history range")
-                (each id (if summary [] [entry first-id last]) (when (> id 0) (event s allowed id)))
-                (when caller
-                  (assert (or (= last 0) (<= (caller :first) first-id last (caller :last))) "child history exceeds caller view"))
-                (def saved (unless caller (merge config)))
-                (when saved
-                  (when (saved :agent) (put saved :agent (merge (saved :agent))))
-                  (each profile (filter identity [saved (saved :agent)])
-                    (put profile :snapshot nil)
-                    (when-let [repl (profile :repl)]
-                      (put profile :repl (merge repl {:modules (tabseq [[name module] :in (pairs (repl :modules))] name {:module (module :module) :export (module :export)})})))))
-                (def temporary (if (s :temporary) 1 0))
-                (when caller (assert (or (= temporary 1) (= 0 ((call s (caller :branch)) :temporary))) "temporary calls cannot create durable descendants"))
-                (def depth (if summary (caller :depth) (if caller (+ 1 (caller :depth)) (get-in config [:snapshot :depth] 0))))
-                (assert (<= depth (config :task-depth)) "agent recursion ceiling exhausted")
-                (def id (((query s "INSERT INTO main.call_controls(request,parent,root,kind,temporary,expires,key) VALUES(?,?,?,?,?,?,?) RETURNING id"
-                                 [(input :request) (or (get-in (dyn :zinc/call) [:id]) (when caller (caller :branch)) (get-in config [:snapshot :parent-call]))
-                                  (or (s :budget-root) (get-in config [:snapshot :budget-root])) (cond summary "summarize" (input :code) "code" "text") temporary
-                                  (if caller (caller :expires)
-                                    (let [deadline (min (if (= 0 (config :run-seconds)) math/inf (+ (os/clock) (config :run-seconds))) (or (get-in config [:snapshot :deadline]) math/inf))]
-                                      (unless (= deadline math/inf) deadline))) key]) 0) :id))
-                (unless (s :budget-root) (put s :budget-root (get-in config [:snapshot :budget-root] id)))
-                (def run (if caller (caller :run) id))
-                (query s (string "INSERT INTO " (s :journal) ".call_payloads(id,parent,run,kind,config,entry,first,last,history_last,origin,temporary,agent,depth) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)")
-                       [id (or (when caller (caller :branch)) (get-in config [:snapshot :parent-call])) run (cond summary "summarize" (input :code) "code" "text")
-                        (when (and saved (not summary)) (string (json/encode saved))) entry first-id last (if caller (caller :history-last) last)
-                        (string (json/encode (or origin {}))) temporary (if (and caller (caller :agent)) 1 0) depth])
-                (def input-event (append s {:branch id :author (input :author) :at (input :at)} (if summary "summary-input" "user") (get input :text (get input :code "")) {:input admitted} (when (and entry (> entry 0)) entry) id))
-                (var image-bytes 0)
-                (eachp [position image] (get input :images [])
-                  (def bytes (image :bytes)) (+= image-bytes (length bytes))
-                  (assert (<= image-bytes (config :image-bytes)) "stored image byte ceiling")
-                  (query s (string "INSERT INTO " (s :journal) ".images(event,position,mime,bytes) VALUES(?,?,?,?)") [(input-event :id) position (image :type) (buffer bytes)]))
-                (charge s 1 (if (input :code) (estimate (input :code)) 0))
-                (call s id)))))
-
 (defn view [s id &opt active]
   (default active true)
   (def c (call s id))
@@ -287,14 +230,74 @@
 (defn finish [s row value failure]
   (transact s
             (def owner (first (query s `UPDATE main.call_controls SET state=CASE WHEN state='cancelled' THEN state WHEN ? THEN 'failed' ELSE 'done' END,
-              owner=NULL,lease_expires=NULL WHERE id=? AND owner=? AND state IN ('running','waiting','uncertain','cancelled') RETURNING state`
-                                     [(not (nil? failure)) (row :id) (row :owner)])))
+              owner=NULL,lease_expires=NULL WHERE id=? AND owner IS ?
+              AND (state IN ('running','waiting','uncertain','cancelled') OR (? AND state='queued' AND attempt=0)) RETURNING state`
+                                     [(not (nil? failure)) (row :id) (row :owner) (not (nil? failure))])))
             (assert owner "call completion fenced")
             (def state (owner :state))
             (def outcome (merge {:ok (= state "done") :value value :state state :attempt (row :attempt)} (or failure {})))
             (append s (view s (if (= "summarize" (row :kind)) (row :parent) (row :id))) "call-result"
                     (if failure (get-in failure [:error :message]) (if (string? value) value "")) outcome nil (row :id))
             outcome))
+
+(defn start [s input config &opt caller origin key]
+  (def summary (has-key? input :children))
+  (def admitted (tabseq [[k v] :pairs input :unless (index-of k [:after :images])] k v))
+  (default key (when caller (string (json/encode ["child" (caller :branch) (caller :event)]))))
+  (transact s
+    (when (dyn :zinc/call) (checkpoint s))
+    (def previous (first (query s "SELECT * FROM calls WHERE (? IS NOT NULL AND request_key=?) OR (? IS NOT NULL AND key=?)"
+                               [(input :request) (input :request) key key])))
+    (if previous
+      (do
+        (assert (= 0 (previous :cancelled)) "call cancelled")
+        (assert (deep= admitted (json/decode (previous :input) true true)) "request ID reused with different work")
+        (assert (deep= (query s "SELECT mime AS type,bytes FROM images WHERE event=? ORDER BY position" [(previous :admission)]) (get input :images @[])) "request ID reused with different images")
+        (merge previous {:owner nil}))
+      (do
+        (def latest (first (query s "SELECT e.id FROM memory_records e LEFT JOIN call_payloads c ON c.id=e.branch WHERE e.kind='context' OR c.temporary=0 ORDER BY e.id DESC LIMIT 1")))
+        (def entry (unless summary (get input :parent (if caller (caller :last) (get latest :id 0)))))
+        (def last (if summary (caller :last) (get-in input [:memory_range :end] entry)))
+        (def earliest (first (query s "SELECT min(id) id FROM memory_records WHERE id<=? AND (kind='context' OR branch IN (SELECT id FROM call_payloads WHERE temporary=0) AND kind IN ('user','response','completed','tool-result'))" [last])))
+        (def first-id (if summary (caller :first) (get-in input [:memory_range :start] (if (= last 0) 0 (if caller (caller :first) (or (earliest :id) last))))))
+        (def allowed (or caller {:first 1 :last 9007199254740991}))
+        (assert (and (<= 0 first-id last) (= (= first-id 0) (= last 0))) "invalid history range")
+        (each id (if summary [] [entry first-id last]) (when (> id 0) (event s allowed id)))
+        (when caller (assert (or (= last 0) (<= (caller :first) first-id last (caller :last))) "child history exceeds caller view"))
+        (def saved (unless caller (merge config)))
+        (when saved
+          (when (saved :agent) (put saved :agent (merge (saved :agent))))
+          (each profile (filter identity [saved (saved :agent)])
+            (put profile :snapshot nil)
+            (when-let [repl (profile :repl)]
+              (put profile :repl (merge repl {:modules (tabseq [[name module] :pairs (repl :modules)] name {:module (module :module) :export (module :export)})})))))
+        (def temporary (if (s :temporary) 1 0))
+        (when caller (assert (or (= temporary 1) (= 0 ((call s (caller :branch)) :temporary))) "temporary calls cannot create durable descendants"))
+        (def depth (if summary (caller :depth) (if caller (+ 1 (caller :depth)) (get-in config [:snapshot :depth] 0))))
+        (assert (<= depth (config :task-depth)) "agent recursion ceiling exhausted")
+        (def id (((query s "INSERT INTO main.call_controls(request,parent,root,kind,temporary,expires,key,retries) VALUES(?,?,?,?,?,?,?,?) RETURNING id"
+                         [(input :request) (or (get-in (dyn :zinc/call) [:id]) (when caller (caller :branch)) (get-in config [:snapshot :parent-call]))
+                          (or (s :budget-root) (get-in config [:snapshot :budget-root])) (cond summary "summarize" (input :code) "code" "text") temporary
+                          (if caller (caller :expires)
+                            (let [deadline (min (if (= 0 (config :run-seconds)) math/inf (+ (os/clock) (config :run-seconds))) (or (get-in config [:snapshot :deadline]) math/inf))]
+                              (unless (= deadline math/inf) deadline))) key (if (= false (input :queue)) 0 1)]) 0) :id))
+        (unless (s :budget-root) (put s :budget-root (get-in config [:snapshot :budget-root] id)))
+        (def run (if caller (caller :run) id))
+        (query s (string "INSERT INTO " (s :journal) ".call_payloads(id,parent,run,kind,config,entry,first,last,history_last,origin,temporary,agent,depth) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)")
+               [id (or (when caller (caller :branch)) (get-in config [:snapshot :parent-call])) run (cond summary "summarize" (input :code) "code" "text")
+                (when (and saved (not summary)) (string (json/encode saved))) entry first-id last (if caller (caller :history-last) last)
+                (string (json/encode (or origin {}))) temporary (if (and caller (caller :agent)) 1 0) depth])
+        (def input-event (append s {:branch id :author (input :author) :at (input :at)} (if summary "summary-input" "user") (get input :text (get input :code "")) {:input admitted} (when (and entry (> entry 0)) entry) id))
+        (var image-bytes 0)
+        (eachp [position image] (get input :images [])
+          (def bytes (image :bytes)) (+= image-bytes (length bytes))
+          (assert (<= image-bytes (config :image-bytes)) "stored image byte ceiling")
+          (query s (string "INSERT INTO " (s :journal) ".images(event,position,mime,bytes) VALUES(?,?,?,?)") [(input-event :id) position (image :type) (buffer bytes)]))
+        (charge s 1 (if (input :code) (estimate (input :code)) 0))
+        (if (= false (input :queue))
+          (or (claim s id)
+              (do (finish s (call s id) nil {:error {:code "AgentBusy" :message "Target cannot start immediately."}}) (call s id)))
+          (call s id))))))
 
 (defn recover [s]
   (each intent (if (s :temporary) [] (query s `SELECT e.* FROM events e WHERE e.kind='save-intent'

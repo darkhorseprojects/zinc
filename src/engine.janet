@@ -151,7 +151,7 @@
     (os/cd (path/dirname (config :world)))
     (def origin (repl/image config (json/decode ((store/call s (current :id)) :origin) true true)))
     (put current :candidate nil)
-    (def public (repl/public config (spec :schema)))
+    (def public (repl/public config (spec :schema) bindings))
     (def outcome (repl/execute (store/git (origin :root) ["cat-file" "blob" (origin :blob)]) (current :input) (repl/instructions config (spec :document) bindings public) public
                   (tabseq [[name binding] :in (pairs bindings)] name (if (binding :local) binding {:doc (binding :doc)}))
                   code {:world (config :world-bytes) :output (config :response-bytes)} (config :repl)
@@ -264,7 +264,7 @@
     (def inherited (store/view s id false))
     (def selected (model/profile s (config :chat) :chat))
     (def tools (filter |(or (config :repl) (not= "function" ($ :type))) (selected :tools)))
-    (def system (repl/instructions config (spec :document) (when (find |(= "function" ($ :type)) tools) bindings) (repl/public config (spec :schema))))
+    (def system (repl/instructions config (spec :document) (when (find |(= "function" ($ :type)) tools) bindings) (repl/public config (spec :schema) bindings)))
     (def user (first (store/query s "SELECT * FROM memory_records WHERE task=? AND kind='user'" [id])))
     (def inquiry {:role "user" :content (model/images s (user :id) (memory/render user))})
     (def tool-size (if (> (length tools) 0) (store/estimate (json/encode tools)) 0))
@@ -357,7 +357,7 @@
         (def [value failure]
           (try
             (let [input ((dyn :zinc/call) :input)
-                  bindings (if (not= "summarize" (row :kind)) (repl/definitions config (spec :schema)) {})
+                  bindings (if (not= "summarize" (row :kind)) (repl/definitions config (spec :bindings)) {})
                   owner (fiber/root)
                   watcher (ev/go (fn [] (try (while true (store/checkpoint s) (ev/sleep 0.1))
                                             ([err] (unless (= err :finished) (ev/cancel owner err))))))]
@@ -419,19 +419,26 @@
             (assert (and (value :author) (value :at) (not= (nil? (value :text)) (nil? (value :code)))) "self requires text or code, authenticated author and occurrence time")
             (assert (if (value :text) ((s :config) :inference) ((s :config) :repl)) "execution is not permitted in this view")
             (unless (value :request) (put value :request (string/join (map |(string/format "%02x" $) (os/cryptorand 24))))))
-          (def call (if (index-of operation ["resume" "observe"]) existing (store/start s value (s :config) nil
-                                                                     (unless existing (or (get-in (s :config) [:snapshot :origin])
-                                                                                          (repl/image (s :config) (json/decode (((store/query s "SELECT origin FROM main.world WHERE id=1") 0) :origin) true true) (value :revision)))))))
+          (def call (if (index-of operation ["resume" "observe"]) existing
+                      (store/start s value (s :config) nil
+                        (unless existing (or (get-in (s :config) [:snapshot :origin])
+                                             (repl/image (s :config) (json/decode (((store/query s "SELECT origin FROM main.world WHERE id=1") 0) :origin) true true) (value :revision)))))))
+          (var claimed (when (and (= operation "self") (call :owner)) call))
           (def id (call :id))
-          (var sequence (drain s (call :run) (get value :after 0)))
           (when (= operation "resume")
             (assert (and (= "text" (call :kind)) (or (nil? (call :expires)) (> (call :expires) (os/clock)))) "call requires reconciliation or its deadline expired")
-            (store/query s "UPDATE main.call_controls SET state='queued',retries=1,owner=NULL,lease_expires=NULL WHERE id=? AND state IN ('failed','uncertain')" [id]))
+            (def queued (not= false ((json/decode (call :input) true true) :queue)))
+            (store/transact s
+              (when (first (store/query s "UPDATE main.call_controls SET state='queued',retries=?,owner=NULL,lease_expires=NULL WHERE id=? AND state IN ('failed','uncertain') RETURNING id" [(if queued 1 0) id]))
+                (unless queued
+                  (set claimed (store/claim s id))
+                  (unless claimed (error {:code "AgentBusy" :message "Target cannot resume immediately."}))))))
+          (var sequence (get value :after 0))
           (def emitter (ev/go (fn [] (try (while true (set sequence (drain s (call :run) sequence)) (ev/sleep 0.1))
                                        ([err] (eprint (json/encode {:code "ObservationFailed" :message (string err)})))))))
           (defer (do (ev/cancel emitter "observer detached") (drain s (call :run) sequence))
             (var failure nil)
-            (def output (try (wait s id true) ([err] (set failure err))))
+            (def output (try (do (when claimed (execute s claimed)) (wait s id true)) ([err] (set failure err))))
             (while true
               (store/recover s)
               (def children (store/query s "SELECT c.id,c.state,p.run FROM main.call_controls c LEFT JOIN call_payloads p ON p.id=c.id WHERE c.root=? AND c.kind<>'summarize' AND c.state IN ('queued','running','waiting') ORDER BY c.id" [(or (call :root) id)]))
@@ -444,7 +451,7 @@
     {:contract "inquiry-v1" :initialize "init" :settle "join" :profile {:field "agent" :inference "inference"}
      :parameters (catseq [[target fields] :in [[:config (spec :schema)] [:input (spec :input)]]]
                    (seq [[key field] :in (sorted (pairs fields)) :when (field :option)]
-                     (def parameter (merge (tabseq [[k v] :in (pairs field) :unless (index-of k [:optional :option :repl :unlimited])] k v)
+                     (def parameter (merge (tabseq [[k v] :in (pairs field) :unless (index-of k [:optional :option :visible :public :unlimited])] k v)
                                            {:name (field :option) :path (string target "." key) :type (string (field :type)) :default (get config key (get field :default "automatic"))}))
                      (when (and (= target :config) (= :integer (field :type)) (> (config key) 0)) (put parameter :maximum (config key))) parameter))})
 
@@ -454,7 +461,7 @@
                 (def config (schema/configuration (spec :schema) (json/decode opaque true true) (index-of operation ["describe" "init"])))
                 (when (index-of operation ["self" "task" "resume" "observe" "instructions"])
                   (each profile (filter identity [config (config :agent)])
-                    (repl/definitions profile (spec :schema))
+                    (repl/definitions profile (spec :bindings))
                     (when (and (profile :inference) (profile :memory-retrieval))
                       (each key [:stopwords :cygnet]
                         (assert (and (profile key) (= :file (os/stat (profile key) :mode))) (string key " file required for memory-retrieval")))
@@ -497,7 +504,9 @@
                                       (each row pending (when (= "queued" (row :state)) (launch s (row :id))))
                                       (ev/sleep 0.1))
                                     {:settled true})
-                                  (= operation "instructions") (repl/instructions config (spec :document) (repl/definitions config (spec :schema)) (repl/public config (spec :schema)))
+                                  (= operation "instructions")
+                                  (let [bindings (repl/definitions config (spec :bindings))]
+                                    (repl/instructions config (spec :document) bindings (repl/public config (spec :schema) bindings)))
                                   (= operation "models") (map |{:ref ($ :ref) :name ($ :name)} (model/catalogue config (get value :role "chat")))
                                   (= operation "record") {:events (store/record s (value :records))}
                                   (= operation "world")
