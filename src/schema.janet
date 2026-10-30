@@ -2,6 +2,9 @@
 (import spork/base64 :as base64)
 (import spork/json :as json)
 
+(defn project [value fields &opt omit]
+  (tabseq [[key item] :pairs value :when (if omit (nil? (index-of key fields)) (index-of key fields))] key item))
+
 (defn validate [schema supplied &opt discovery]
   (assert (dictionary? supplied) "configuration must be an object")
   (def config @{})
@@ -105,13 +108,6 @@
              (max (saved key) (current key))
              (min (get saved key math/inf) (get current key math/inf))))))
   config)
-
-(defn failure [code err fiber]
-  (def trace @"")
-  (with-dyns [:err (fn [bytes] (buffer/push-string trace bytes))] (debug/stacktrace fiber))
-  (def value (if (and (dictionary? err) (string? (err :code)) (string? (err :message))) err
-               {:code code :message (if (string? err) err (string/format "%n" err))}))
-  (merge value {:detail (string (or (value :detail) "") "\n" trace)}))
 
 (defn data [value]
   (json/encode value)

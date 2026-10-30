@@ -18,24 +18,26 @@
            (let [result (with-dyns [:zinc/transaction ,db] ,;body)] (,sql/eval ,db "COMMIT") result)
            ([err] (,sql/eval ,db "ROLLBACK") (error err)))))))
 
+(defn process [argv environment input limit seconds]
+  (def child (os/spawn argv :pe (merge environment {:in :pipe :out :pipe :err :out})))
+  (defer (do (when (nil? (get child :return-code)) (try (os/proc-kill child) ([err] nil))) (os/proc-close child))
+    (def output @"")
+    (def [_ _ status] (ev/with-deadline (if (= seconds 0) math/inf seconds)
+      (ev/gather
+        (defer (ev/close (child :in)) (when input (ev/write (child :in) input)))
+        (do (var chunk nil)
+          (while (set chunk (ev/read (child :out) 4096))
+            (assert (<= (+ (length output) (length chunk)) limit) "process output byte ceiling")
+            (buffer/push-string output chunk)))
+        (os/proc-wait child))))
+    {:exit status :output (string output)}))
+
 (defn git [directory args &opt input environment probe]
-  (def child (os/spawn ["git" "-C" directory "--literal-pathspecs" ;args] :pe
-                       (merge (os/environ) (or environment {}) {:in :pipe :out :pipe :err :out})))
-  (def output @"")
-  (def done (ev/chan 1))
-  (ev/go (fn [] (os/proc-wait child)) nil done)
-  (def operation (fiber/new (fn []
-    (defer (do (ev/close (child :in)) (ev/close (child :out)))
-      (ev/go (fn [] (defer (ev/close (child :in)) (when input (ev/write (child :in) input)))))
-      (var chunk nil)
-      (while (set chunk (ev/read (child :out) 4096))
-        (assert (<= (+ (length output) (length chunk)) (max ((dyn :zinc/config) :world-bytes) ((dyn :zinc/config) :response-bytes))) "Git output byte ceiling")
-        (buffer/push-string output chunk))
-      (ev/take done)
-      (assert (or probe (= 0 (child :return-code))) (string "Git " (string/join args " ") ": " output))
-      (when (= 0 (child :return-code)) (string output)))) :i))
-  (when (> ((dyn :zinc/config) :http-ms) 0) (ev/deadline (/ ((dyn :zinc/config) :http-ms) 1000) nil operation))
-  (resume operation))
+  (def config (dyn :zinc/config))
+  (def result (process ["git" "-C" directory "--literal-pathspecs" ;args] (merge (os/environ) (or environment {})) input
+                      (max (config :world-bytes) (config :response-bytes)) (/ (config :http-ms) 1000)))
+  (assert (or probe (= 0 (result :exit))) (string "Git " (string/join args " ") ": " (result :output)))
+  (when (= 0 (result :exit)) (result :output)))
 
 (defn open [config &opt temporary]
   (def s @{:db (sql/open (config :store)) :journal (if temporary "journal" "main")
@@ -94,6 +96,9 @@
 (defn call [s id]
   (def row (first (query s "SELECT * FROM calls WHERE id=?" [id])))
   (assert row "call unavailable") row)
+
+(defn origin [s &opt id]
+  (json/decode (if id ((call s id) :origin) (((query s "SELECT origin FROM main.world WHERE id=1") 0) :origin)) true true))
 
 (defn image [s origin bytes]
   (assert (<= (length bytes) ((s :config) :world-bytes)) "world image byte ceiling")
@@ -258,7 +263,7 @@
 
 (defn start [s input config &opt caller origin key]
   (def summary (has-key? input :children))
-  (def admitted (tabseq [[k v] :pairs input :unless (index-of k [:after :images])] k v))
+  (def admitted (schema/project input [:after :images] true))
   (default key (when caller (string (json/encode ["child" (caller :branch) (caller :event)]))))
   (transact s
     (when (dyn :zinc/call) (checkpoint s))
@@ -354,7 +359,7 @@
               (query s "UPDATE main.call_controls SET state=?,retries=retries-?,owner=CASE WHEN ? THEN NULL ELSE owner END,lease_expires=CASE WHEN ? THEN NULL ELSE lease_expires END WHERE id=?"
                      [state (if retry 1 0) (or retry unstarted) (or retry unstarted) (row :id)])))
   (unless (s :temporary)
-    (def origin (json/decode (((query s "SELECT origin FROM main.world WHERE id=1") 0) :origin) true true))
+    (def origin (origin s))
     (unless (= (origin :base) (s :checkpoint-base))
       (def bytes (git (origin :root) ["show" (string (origin :base) ":" (origin :path))]))
       (unless (= bytes (string (slurp ((s :config) :world)))) (spit ((s :config) :world) bytes :wb))

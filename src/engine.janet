@@ -2,6 +2,7 @@
 (import spork/path :as path)
 (import spork/utf8 :as utf8)
 (import portable-agents/protocol :as wire)
+(import portable-agents/markdown :as markdown)
 (import ./store)
 (import ./model)
 (import ./memory)
@@ -123,7 +124,7 @@
     (put value :at (((store/query s "SELECT strftime('%Y-%m-%dT%H:%M:%fZ','now') at") 0) :at))
     (put value :persist (get value :persist (= 0 (parent :temporary))))
     (when (= 1 (parent :temporary)) (assert (not (value :persist)) "temporary calls cannot create durable descendants"))
-    (def origin (or snapshot (repl/image config (or ((dyn :zinc/call) :candidate) (json/decode (parent :origin) true true)) (value :revision))))
+    (def origin (or snapshot (repl/image config (or ((dyn :zinc/call) :candidate) (store/origin s (parent :id))) (value :revision))))
     (if (value :persist)
       (do
         (store/git (origin :root) ["update-ref" (string "refs/zinc/world/" (origin :blob)) (origin :blob)])
@@ -156,7 +157,7 @@
     (store/checkpoint s)
     (def current (dyn :zinc/call))
     (os/cd (path/dirname (config :world)))
-    (def origin (repl/image config (json/decode ((store/call s (current :id)) :origin) true true)))
+    (def origin (repl/image config (store/origin s (current :id))))
     (put current :candidate nil)
     (def public (repl/public config (spec :schema) bindings))
     (def outcome (repl/execute (store/git (origin :root) ["cat-file" "blob" (origin :blob)]) (current :input) (repl/instructions config (spec :document) bindings public) public
@@ -167,7 +168,7 @@
                     (def binding (bindings name))
                     (assert (and binding (not (binding :local))) "function revoked")
                     (when snapshot
-                      (put current :candidate (store/image s (json/decode ((store/call s (current :id)) :origin) true true) (snapshot :image))))
+                      (put current :candidate (store/image s (store/origin s (current :id)) (snapshot :image))))
                     (when (get binding :intrinsic) (assert (= 1 (length args)) "invalid intrinsic arity"))
                     (def args (schema/data args))
                     (let [admission (store/transact s (store/charge s 1 0)
@@ -234,19 +235,9 @@
                               (assert (= 1 (length args)) "invalid process arity")
                               (def command (get-in config [:processes (keyword (first args))]))
                               (assert command "process is not granted")
-                              (def child (os/spawn (command :argv) :e (merge (tabseq [[k v] :in (pairs (command :env))] (string k) v) {:in :pipe :out :pipe :err :out})))
-                              (def exited (ev/chan 1))
-                              (ev/go (fn [] (os/proc-wait child)) nil exited)
-                              (defer (do (when (nil? (child :return-code)) (try (os/proc-kill child) ([err] nil)) (ev/take exited))
-                                       (ev/close (child :out)))
-                                (ev/close (child :in))
-                                (def output @"") (var chunk nil)
-                                (while (set chunk (ev/read (child :out) 4096))
-                                  (assert (<= (+ (length output) (length chunk)) (config :response-bytes)) "process output exceeds limit")
-                                  (buffer/push-string output chunk))
-                                (ev/take exited)
-                                (assert (utf8/is-valid? output) "process output is not UTF-8")
-                                {:exit (child :return-code) :output (string output)}))
+                              (def result (store/process (command :argv) (tabseq [[k v] :pairs (command :env)] (string k) v) nil (config :response-bytes) 0))
+                              (assert (utf8/is-valid? (result :output)) "process output is not UTF-8")
+                              result)
                             (schema/data
                               (with-dyns [:zinc/context [s view] :capability/config (binding :config)
                                           :capability/operation (string (view :run) "/" (view :branch) "/" (admission :id))
@@ -262,7 +253,7 @@
                         seconds (min (if (= 0 (config :seconds)) math/inf (config :seconds)) run)]
                     (if (= seconds math/inf) 0 seconds))))
     (put current :candidate (or (outcome :replacement)
-                               (store/image s (json/decode ((store/call s (current :id)) :origin) true true) (outcome :image))))
+                               (store/image s (store/origin s (current :id)) (outcome :image))))
     (outcome :value))
 
   (defn infer [s call bindings]
@@ -290,7 +281,7 @@
                       {:tool-id (tool :tool_id) :response (tool :response) :ok false :uncertain true} (tool :response) id))
       (assert (< (length responses) (config :rounds)) "model round limit exhausted")
       (def view (store/view s id))
-      (def world (when (config :repl) {:role "user" :content (string "## World binding inventory\n\n```janet\n" ((repl/world s {:action "view"}) :text) "\n```")}))
+      (def world (when (config :repl) {:role "user" :content (markdown/render {:name "World source" :level 2 :content [{:language "janet" :text ((repl/world s {:action "view"}) :text)}]})}))
       (set space (- capacity (model/estimate (filter identity [{:role "system" :content system} world inquiry])) tool-size 256))
       (assert (> space 256) "question, world bindings and instructions exhaust context")
       (var context (memory/context s inherited space pool))
@@ -302,7 +293,7 @@
         (each [key title rows] [[:chronological "Chronological memory" (context :nodes)] [:semantic "Retrieved excerpts" (context :evidence)]]
           (def text (string/join (map |($ :rendered) rows)))
           (put views key @{:message (when (> (length text) 0) (length messages))
-                           :records (seq [row :in rows] (tabseq [field :in [:id :label :first :last :children :offset :next :total :score] :when (has-key? row field)] field (row field)))})
+                           :records (seq [row :in rows] (schema/project row [:id :label :first :last :children :offset :next :total :score]))})
           (when (> (length text) 0) (array/push messages {:role "user" :content (string "## " title "\n\n" text)})))
         (put (views :semantic) :cutoff (config :score))
         (put (views :semantic) :candidates (seq [row :in pool] {:id (row :id) :score (row :score) :rerank (row :rerank)}))
@@ -319,12 +310,12 @@
                                 (when (and pending (not (first (store/query s "SELECT id FROM events WHERE parent=? AND kind='model-outcome'" [pending])))) pending) selected))
       (def parallel (> (length (response :tools)) 1))
       (def fork (store/view s id))
-      (def origin (when parallel (repl/image config (json/decode ((store/call s id) :origin) true true))))
+      (def origin (when parallel (repl/image config (store/origin s id))))
       (def work (seq [tool :in (response :tools)]
                   (def admission (store/transact s (store/checkpoint s) (store/charge s 1 (if (or parallel (tool :error)) 0 (store/estimate (tool :code))))
                                                  (store/append s view (if (or parallel (tool :error)) "call-admission" "code-admission") (cond (tool :error) "run_janet" parallel "self" (tool :code))
                                                                {:tool-id (tool :id) :response (response :event)} nil id)))
-                  [tool admission (if (tool :error) tool (when parallel (try (with-dyns [:zinc/effect (admission :id)] (start-child s fork {:code (tool :code)} origin)) ([err fiber] {:error (schema/failure "ToolFailed" err fiber)}))))]))
+                  [tool admission (if (tool :error) tool (when parallel (try (with-dyns [:zinc/effect (admission :id)] (start-child s fork {:code (tool :code)} origin)) ([err fiber] {:error (wire/diagnostic "ToolFailed" err fiber)}))))]))
       (each [_ _ handle] work (when-let [job (get handle :job)] (launch s job)))
       (each [tool admission handle] work
         (def outcome (try
@@ -333,7 +324,7 @@
                                                                                              (run-code s view bindings (tool :code))))}
                        ([err fiber]
                          (put (dyn :zinc/call) :candidate nil)
-                         (def failure (schema/failure "ToolFailed" err fiber))
+                         (def failure (wire/diagnostic "ToolFailed" err fiber))
                          {:ok false :text (string (failure :code) ": " (failure :message)) :error failure})))
         (store/transact s (store/checkpoint s)
                         (store/charge s 0 (store/estimate (outcome :text)))
@@ -377,7 +368,7 @@
               (def tokens (keep |(when ($ :token-env) (os/getenv ($ :token-env))) (values (config :providers))))
               [nil {:error (postwalk (fn [value]
                                        (if (string? value) (reduce (fn [text token] (string/replace-all token "[redacted]" text)) value tokens) value))
-                                     (schema/failure "ExecutionFailed" err fiber))}])))
+                                     (wire/diagnostic "ExecutionFailed" err fiber))}])))
         (when (first (store/query s "SELECT id FROM main.live_calls WHERE id=? AND owner=?" [id (row :owner)]))
           (each request (keys ((dyn :zinc/call) :children))
             (try (wait s request) ([err] (eprint (json/encode (if (dictionary? err) err {:code "ChildFailed" :message (string err)})))))))
@@ -387,7 +378,7 @@
                           (when (and (nil? failure) (= "code" (row :kind))) (store/publish s ((dyn :zinc/call) :candidate)))
                           (store/finish s row value failure))
           ([err fiber]
-            (store/finish s row nil {:error (schema/failure "CommitFailed" err fiber)})))
+            (store/finish s row nil {:error (wire/diagnostic "CommitFailed" err fiber)})))
         (each pending (store/query s "SELECT c.id FROM main.call_controls c JOIN call_payloads p ON p.id=c.id WHERE p.run=? AND c.state='queued' AND (c.expires IS NULL OR c.expires>?) ORDER BY c.id LIMIT ?"
                                    [(row :run) (os/clock) (config :parallel)]) (launch s (pending :id))))))
 
@@ -438,7 +429,7 @@
           (def call (if (index-of operation ["resume" "observe"]) existing
                       (store/start s value (s :config) nil
                         (unless existing (or (get-in (s :config) [:snapshot :origin])
-                                             (repl/image (s :config) (json/decode (((store/query s "SELECT origin FROM main.world WHERE id=1") 0) :origin) true true) (value :revision)))))))
+                                             (repl/image (s :config) (store/origin s) (value :revision)))))))
           (var claimed (when (and (= operation "self") (call :owner)) call))
           (def id (call :id))
           (when (= operation "resume")
@@ -463,7 +454,7 @@
     {:contract "inquiry-v1" :initialize "init" :settle "join" :profile {:field "agent" :inference "inference"}
      :parameters (catseq [[target fields] :in [[:config (spec :schema)] [:input (spec :input)]]]
                    (seq [[key field] :in (sorted (pairs fields)) :when (field :option)]
-                     (def parameter (merge (tabseq [[k v] :in (pairs field) :unless (index-of k [:optional :option :visible :public :unlimited])] k v)
+                     (def parameter (merge (schema/project field [:optional :option :visible :public :unlimited] true)
                                            {:name (field :option) :path (string target "." key) :type (string (field :type)) :default (get config key (get field :default "automatic"))}))
                      (when (and (= target :config) (= :integer (field :type)) (> (config key) 0)) (put parameter :maximum (config key))) parameter))})
 
@@ -510,17 +501,18 @@
                                   (if (= "view" (value :action)) (repl/world s value)
                                     (do
                                       (assert (index-of (value :action) ["save" "discard" "switch" "remove"]) "unknown world action")
+                                      (put config :agent nil)
                                       (def name (string "world/" (value :action)))
                                       (assert ((repl/definitions config (spec :bindings)) name)
                                               {:code "WorldBindingNotGranted" :message (string name " is not granted; add it to the executing profile's repl.bindings.")})
-                                      (run s {:code (string "(world/" (value :action)
+                                      (run s @{:code (string "(world/" (value :action)
                                                             (case (value :action)
                                                               "save" (string " " (string/format "%q" (value :message)))
                                                               "switch" (string " " (string/format "%q" (value :commit)))
                                                               "remove" (do (assert (string? (value :name)) "binding name required") (string " (symbol " (string/format "%q" (value :name)) ")")) "") ")")
                                               :author (string "system:" (config :identity))
                                               :at (((store/query s "SELECT strftime('%Y-%m-%dT%H:%M:%fZ','now') at") 0) :at)} "self")
-                                      (repl/world s {:action "view"})))
+                                      (repl/world s {:action "view"} true)))
                                   (index-of operation ["views" "render"])
                                   (do
                                     (assert (and (int? (value :event)) (> (value :event) 0)) "choose a model-admission event")
@@ -533,27 +525,29 @@
                                                  :world (data :world) :memory_range {:start (call :first) :end (call :last)}})
                                     (def body (json/decode (get-in data [:request :body]) true true))
                                     (if (= operation "render")
-                                      (merge report {:request (data :request)
-                                                     :text (string "# Prompt #" (row :id) "\n\n" (get-in data [:request :method]) " " (get-in data [:request :url])
-                                                       "\n\n## Request parameters\n\n```json\n" (json/encode (tabseq [[k v] :pairs body :unless (= k :messages)] k v) "  " "\n") "\n```"
-                                                       (when-let [messages (body :messages)]
-                                                         (string/join (seq [[index message] :pairs messages]
-                                                           (def metadata (tabseq [[k v] :pairs message :unless (index-of k [:role :content])] k v))
-                                                           (def content (message :content))
-                                                           (string "\n\n## Message " index " · " (message :role) "\n\n"
-                                                             (when (> (length metadata) 0) (string "```json\n" (json/encode metadata "  " "\n") "\n```\n\n"))
-                                                             (if (indexed? content)
-                                                               (string/join (map |(if (= "text" ($ :type)) ($ :text) (string "```json\n" (json/encode $ "  " "\n") "\n```")) content) "\n\n")
-                                                               content))))))})
+                                      (merge report {:summary (string "Prompt #" (row :id) " · call " (row :branch)) :request (data :request)
+                                                     :text (markdown/render
+                                                       {:name (string "Prompt #" (row :id)) :level 1
+                                                        :content [(string (get-in data [:request :method]) " " (get-in data [:request :url]))
+                                                          {:name "Request parameters" :level 2 :content [(schema/project body [:messages] true)]}
+                                                          (seq [[index message] :pairs (body :messages)]
+                                                            (def metadata (schema/project message [:role :content] true))
+                                                            {:name (string "Message " index " · " (message :role)) :level 2
+                                                             :content [(when (> (length metadata) 0) metadata) (message :content)]})]})})
                                       (let [windows (data :views)]
                                         (assert windows "this request has no chronological or semantic windows")
                                         (each key [:chronological :semantic]
                                           (put (windows key) :text (if-let [index (get-in windows [key :message])] (get-in body [:messages index :content]) "")))
-                                        (merge report {:views windows
-                                                       :text (string "# Memory views · prompt #" (row :id) "\n\nThrough #" (windows :through)
-                                                         "\n\n## Chronological · " (length (get-in windows [:chronological :records])) " records\n\n" (get-in windows [:chronological :text])
-                                                         "\n\n## Retrieved · " (length (get-in windows [:semantic :records])) " records\n\n"
-                                                         (length (get-in windows [:semantic :candidates])) " candidates · cutoff " (get-in windows [:semantic :cutoff]) "\n\n" (get-in windows [:semantic :text]))}))))
+                                        (def summary (string "Prompt #" (row :id) " · " (length (get-in windows [:chronological :records])) " chronological · "
+                                                             (length (get-in windows [:semantic :records])) " retrieved"))
+                                        (merge report {:summary summary :views windows
+                                                       :text (string "# Memory views · prompt #" (row :id) "\n\nCall " (row :branch) " · Through #" (windows :through)
+                                                         "\n\n" summary "\n\n" (get-in windows [:chronological :text]) "\n\n" (get-in windows [:semantic :text])
+                                                         "\n\n## Retrieval candidates\n\n" (length (get-in windows [:semantic :candidates])) " candidates · Cutoff: " (get-in windows [:semantic :cutoff])
+                                                         "\n\n| Record | Score | Rerank request | Included |\n| --- | ---: | --- | --- |\n"
+                                                         (string/join (seq [candidate :in (get-in windows [:semantic :candidates])]
+                                                           (string "| #" (candidate :id) " | " (candidate :score) " | #" (candidate :rerank) " | "
+                                                             (if (find |(= ($ :id) (candidate :id)) (get-in windows [:semantic :records])) "yes" "no") " |")) "\n"))}))))
                                   (= operation "invalidate") {:event ((memory/invalidate s (value :event)) :id)}
                                   (= operation "abort") (store/abort s value)
                                   (run s value operation)))

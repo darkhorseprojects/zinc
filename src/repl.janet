@@ -1,17 +1,10 @@
 (import spork/json :as json)
 (import spork/path :as path)
 (import portable-agents/markdown :as markdown)
+(import portable-agents/protocol :as wire)
 (import ./store)
 (import ./schema)
 (def- design (module/value (markdown/load (path/join (path/dirname (dyn :source)) "../design.md") []) 'document))
-
-(defn- document [node]
-  (cond
-    (string? node) node
-    (dictionary? node) (if (has-key? node :content)
-                         (string (when (node :name) (string (string/repeat "#" (node :level)) " " (node :name) "\n\n")) (string/join (map document (node :content)) "\n\n"))
-                         (or (node :text) (string (json/encode node))))
-    (indexed? node) (string/join (map document node) "\n") ""))
 
 (defn image [config &opt inherited revision]
   (def origin (if (and inherited (not revision)) inherited
@@ -36,9 +29,18 @@
   (def reverse (merge make-image-dict {emit 'zinc/output}))
   (def forward (merge load-image-dict {'zinc/output emit}))
   (var env nil)
+  (def sources @{})
+  (def known @{})
+  (var form nil)
+  (defn capture []
+    (each name (all-bindings env true)
+      (def binding (env name))
+      (when (and form (not= binding (known name))) (put sources name (string/format "%j" form)))
+      (put known name binding)))
   (defn snapshot []
-    (def bindings (seq [name :in (take 128 (all-bindings env true)) :when (<= (length (string name)) 128)]
-                       {:name (string name) :type (string (type (module/value env name true)))}))
+    (capture)
+    (def bindings (seq [name :in (sorted (all-bindings env true))]
+                       {:name (string name) :type (string (type (module/value env name true))) :source (sources name)}))
     (def image (marshal [1 janet/version janet/build janet/config-bits bindings (marshal env reverse)] @{}))
     (assert (<= (length image) (limits :world)) "world image byte ceiling")
     {:image image})
@@ -73,12 +75,14 @@
   (when loaded (assert (and (tuple? loaded) (= 6 (length loaded)) (= 1 (loaded 0)) (= janet/version (loaded 1)) (= janet/build (loaded 2)) (= janet/config-bits (loaded 3))) "incompatible world image; provision a matching runtime"))
   (set env (if loaded (unmarshal (loaded 5) forward) (make-env base)))
   (assert (and (table? env) (= base (table/getproto env))) "invalid world environment")
+  (when loaded (each binding (loaded 4) (put sources (symbol (binding :name)) (binding :source))))
   (def options (if (config :setup) ((module/value (require (config :setup)) 'configure) env) {}))
   (each key (keys options) (assert (index-of key [:parser :read :expander]) "unsupported evaluator option"))
   (def documentation @{'document @{:value design}})
   (table/clear module/cache)
   (put module/cache "zinc/design" documentation)
   (put env :redef true)
+  (merge-into known env)
   (with [file (file/temp)]
     (file/write file code) (file/seek file :set 0)
     (sandbox :fs :net :subprocess :ffi :modules :threads :env :asm :unmarshal :exit :locale :signal :chroot :sandbox)
@@ -87,13 +91,13 @@
           (let [replacement (prompt :zinc/replace
                               (var value nil)
                               (dofile file :env env :source :world :parser (options :parser) :read (options :read) :expander (options :expander)
-                                :evaluator (fn [thunk &] (set value (thunk))))
+                                :evaluator (fn [thunk source &] (set form source) (set value (thunk)) (capture)))
                               (def text (string output (if (string? value) value (string/format "%n" value))))
                               (assert (<= (length text) (limits :output)) "execution result byte ceiling")
                               (merge {:ok true :value text} (snapshot)))]
             (if (replacement :ok) replacement {:ok true :value (string output) :replacement replacement}))
           ([err fiber]
-            (def failure (schema/failure "EvaluationFailed" err fiber))
+            (def failure (wire/diagnostic "EvaluationFailed" err fiber))
             {:ok false :error (merge failure {:context {:output (string output) :cause (failure :context)}})})))))
 
 (defn execute [bytes input document public bindings code limits config handler seconds]
@@ -118,13 +122,13 @@
           (array/push pending [(ev/go (fn [] (defer (ev/chan-close joined)
                                               (ev/give response (try {:ok true :value (handler name args snapshot)} ([err] {:ok false :error err})))))) joined])))))))
 
-(defn world [s value]
+(defn world [s value &opt status-only]
   (def config (s :config))
   (def current (dyn :zinc/call))
   (def action (value :action))
   (assert (index-of action ["view" "save" "discard" "switch"]) "unknown world action")
-  (def origin (if current (or (when (index-of action ["view" "save"]) (current :candidate)) (json/decode ((store/call s (current :id)) :origin) true true))
-                 (json/decode (((store/query s "SELECT origin FROM main.world WHERE id=1") 0) :origin) true true)))
+  (def origin (if current (or (when (index-of action ["view" "save"]) (current :candidate)) (store/origin s (current :id)))
+                 (store/origin s)))
   (def selected (if (value :point)
                    (do (assert (= action "view") "only view accepts a historical point")
                      ((json/decode ((store/event s (or (get current :scope) {:first 1 :last 9007199254740991}) (value :point)) :data) true true) :world)) origin))
@@ -135,7 +139,11 @@
           metadata (do (assert (<= (length bytes) (config :world-bytes)) "world image byte ceiling") (unmarshal bytes @{}))]
       (assert (and (tuple? metadata) (= 6 (length metadata)) (= 1 (metadata 0)) (indexed? (metadata 4))) "incompatible world image")
       (merge selected {:bindings (metadata 4) :dirty (not= clean (selected :blob))
-                       :text (string/format "%80m" (tabseq [binding :in (metadata 4)] (symbol (binding :name)) (keyword (binding :type))))}))
+                       :summary (string "World · " (selected :ref) " @ " (string/slice (selected :base) 0 7)
+                                        (when (not= clean (selected :blob)) " · unsaved changes"))
+                       :text (if status-only "" (string/join (distinct (seq [binding :in (metadata 4)]
+                         (assert (string? (binding :source)) (string "source was not recorded for " (binding :name)))
+                         (binding :source))) "\n\n"))}))
     (do
       (assert (config :repl) "world editing is not permitted")
       (assert current "world edits require an executing root")
@@ -191,18 +199,18 @@
       (tabseq [name :in selected] name (available name)))))
 
 (defn public [config fields bindings]
-  {:settings (tabseq [name :in (get-in config [:repl :values] [])] (keyword name) (config (keyword name)))
+  {:settings (schema/project config (map keyword (get-in config [:repl :values] [])))
    :resources (tabseq [[key field] :pairs fields :when (and (config :repl) (field :public))
                        :let [grants (tabseq [[name grant] :pairs (config key)
                                              :let [functions (sorted (seq [[function binding] :pairs bindings
                                                                            :when (= key (binding :resource))
                                                                            :when (or (not (binding :permission)) (grant (binding :permission)))] function))]
                                              :when (> (length functions) 0)]
-                                      name (merge (tabseq [field :in (field :public) :when (has-key? grant field)] field (grant field)) {:functions functions}))]
+                                      name (merge (schema/project grant (field :public)) {:functions functions}))]
                        :when (> (length grants) 0)] key grants)})
 
 (defn instructions [config document-tree available public]
-  (string (document document-tree)
+  (string (markdown/render document-tree)
           (when (config :instructions) (string "\n\n## World instructions\n\n" (slurp (config :instructions))))
           (when (and (config :repl) available)
             (string "\n\n## Janet\n\nSuccessful bindings, mutations and closures persist as a native image. Initializers never replay. Errors leave the previous image intact; external effects are not undone. Parallel children fork without merging. Use `(doc name)`, `(doc \"string/\")`, and `(doc-of string/join)` for native documentation. `(import zinc/design :as design)` exposes `design/document`.\n`(input)`, `(self/document)`, `(settings)` and `(resources)` expose invocation data."

@@ -3,6 +3,7 @@
 (import spork/base64 :as base64)
 (import ./store)
 (import ./http)
+(import ./schema)
 
 (def- tool
   {:type "function"
@@ -12,6 +13,13 @@
                            :additionalProperties false
                            :required ["code"]
                            :properties {:code {:type "string"}}}}})
+
+(defn text [message]
+  (def content (message :content))
+  (assert (or (nil? content) (string? content) (indexed? content)) "invalid assistant content")
+  (string/join (map (fn [text] (assert (and (string? text) (utf8/is-valid? text)) "invalid assistant text") text)
+                   (if (indexed? content) (seq [part :in content :when (= "text" (part :type))] (part :text))
+                     [(if (or (nil? content) (= "" content)) (or (message :refusal) "") content)])) "\n"))
 
 (defn estimate [messages]
   (store/estimate (json/encode (map (fn [message]
@@ -202,7 +210,7 @@
                                          (store/checkpoint s)
                                          (store/charge s 1 0)
                                          (def event (store/append s (current :scope) "model-admission" (selected :reference)
-                                                                  {:input (tabseq [[key value] :in (pairs input) :unless (index-of key [:messages :tools :query :documents :views])] key value)
+                                                                  {:input (schema/project input [:messages :tools :query :documents :views] true)
                                                                    :request {:method "POST" :url (string (get-in config [:providers (keyword (selected :provider)) :url]) endpoint) :body wire}
                                                                    :views (input :views) :estimate size :output maximum} nil (current :id)))
                                          (store/checkpoint s (merge (current :checkpoint) {:request (event :id)})) (event :id)))
@@ -230,9 +238,7 @@
                       (def message (value :message))
                       (assert (and (dictionary? message) (= "assistant" (message :role))) "invalid assistant message")
                       (def content (message :content))
-                      (assert (or (nil? content) (string? content) (indexed? content)) "invalid assistant content")
-                      (each text (if (indexed? content) (seq [part :in content :when (= "text" (part :type))] (part :text)) [(if (nil? content) (or (message :refusal) "") content)])
-                        (assert (and (string? text) (utf8/is-valid? text)) "invalid assistant text"))
+                      (text message)
                       (def calls (or (message :tool_calls) []))
                       (assert (indexed? calls) "invalid tool calls")
                       (def identities @{})
@@ -243,9 +249,8 @@
                                                (assert (index-of finish ["stop" "tool_calls"]) "Interrupted tool call; not executed.")
                                                (assert (and (= "function" (call :type)) (= "run_janet" (get-in call [:function :name]))
                                                             (input :tools) (index-of tool (input :tools))) "unknown or unavailable tool")
-                                               (def arguments (json/decode (get-in call [:function :arguments]) true true))
-                                               (assert (and (dictionary? arguments) (= [:code] (tuple/slice (sort (keys arguments))))
-                                                            (string? (arguments :code)) (> (length (arguments :code)) 0)) "invalid Janet tool source")
+                                               (def arguments (schema/request (json/decode (get-in call [:function :arguments]) true true) [:code]))
+                                               (assert (arguments :code) "missing Janet tool source")
                                                {:id (call :id) :code (arguments :code)})
                                           ([err] {:id (call :id) :error {:code "InvalidToolCall" :message (string err)}}))) calls))
                       (def tail (if (string? content) {:type "text" :text content} (when (indexed? content) (last content))))
@@ -263,11 +268,7 @@
                           (assert (first (store/query s "SELECT id FROM main.call_controls WHERE id=? AND owner=? AND state IN ('running','waiting','uncertain','cancelled')"
                                                       [(current :id) (current :owner)])) "model completion fenced")
                           (store/query s (string "DELETE FROM " (s :journal) ".previews WHERE request=?") [admission])
-                          (def content (get-in result [:message :content]))
-                          (store/append s (current :scope) "model-outcome"
-                                        (cond (string? content) content
-                                          (indexed? content) (string/join (seq [part :in content :when (= "text" (part :type))] (part :text)) "\n")
-                                          (get-in result [:message :refusal] "")) result admission (current :id))))))
+                          (store/append s (current :scope) "model-outcome" (if (= role "chat") (text (result :message)) "") result admission (current :id))))))
   (merge (json/decode (event :data) true true) {:event (event :id) :text (event :text)}))
 
 (defn render [row]
@@ -275,8 +276,7 @@
   (def reasoning (or (message :reasoning_content) (message :reasoning)
                      (string/join (seq [part :in (get message :reasoning_details []) :when (and (dictionary? part) (string? (part :text)))] (part :text)) "\n")))
   (def content (message :content))
-  (def text (cond (string? content) (if (= "" content) (get message :refusal "") content)
-                 (indexed? content) (string/join (seq [part :in content :when (= "text" (part :type))] (part :text)) "\n") (or (message :refusal) (row :text))))
+  (def text (if (row :public_message) (text message) (row :text)))
   (def content (when (and (not= "model-admission" (row :kind)) (indexed? content)) (filter |(not= "text" ($ :type)) content)))
   (def parts (filter identity [(when (> (length reasoning) 0) (string "> " (string/replace-all "\n" "\n> " reasoning)))
                                (when (> (length (string/trim text)) 0) text)

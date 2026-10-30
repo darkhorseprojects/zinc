@@ -1,6 +1,7 @@
 (import sqlite3 :as sql)
 (import spork/json :as json)
 (import spork/utf8 :as utf8)
+(import portable-agents/markdown :as markdown)
 (import ./store)
 (import ./model)
 
@@ -15,9 +16,19 @@
                [(if (s :temporary) (s :budget-root) run) after through through (if through -1 256)]))
 
 (defn render [row]
-  (string "[" (or (row :label) (string "#" (row :id))) " author=" (json/encode (row :author)) (if (= "summary" (row :kind)) " created=" " at=") (row :at) " " (row :kind)
-          (when (= "summary" (row :kind)) (string " sources=" (row :count) " period=[" (row :from) "," (row :to) "]"))
-          (when (and (row :total) (or (> (row :offset) 0) (< (row :next) (row :total)))) (string " bytes=[" (row :offset) "," (row :next) ")/" (row :total))) "]\n" (row :text) "\n"))
+  (def text (row :text))
+  (def body (cond
+    (index-of (row :kind) ["code-admission" "tool-result" "tool-ambiguity" "error"])
+    (markdown/render {:language (if (= "code-admission" (row :kind)) "janet" "text") :text text})
+    (and (row :total) (= 0 (row :offset)) (= (row :next) (row :total))
+         (index-of (row :kind) ["call-admission" "operation-outcome" "artifact" "model-outcome" "call-result"]))
+    (let [split (last (string/find-all "\n" text))]
+      (markdown/render [(string/slice text 0 split) (json/decode (string/slice text (+ split 1)))])) text))
+  (string "### " (or (row :label) (string "#" (row :id))) " · " (row :kind)
+          "\n\nAuthor: " (json/encode (row :author)) " · " (if (= "summary" (row :kind)) "Created: " "Occurred: ") (row :at)
+          (when (= "summary" (row :kind)) (string "\n\nSources: " (row :count) " · Period: " (row :from) " – " (row :to)))
+          (when (and (row :total) (or (> (row :offset) 0) (< (row :next) (row :total)))) (string "\n\nExcerpt: bytes " (row :offset) "–" (row :next) " of " (row :total)))
+          "\n\n" body "\n\n"))
 
 (defn- record [s view id &opt offset bytes]
   (default offset 0) (default bytes (min 65536 (math/floor (/ ((s :config) :response-bytes) 4))))

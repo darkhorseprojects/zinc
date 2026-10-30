@@ -32,7 +32,10 @@ external effects. A save is an explicit Git checkpoint, not a prerequisite for
 retaining successful work. SQLite's descriptor is authoritative; Git holds pinned
 immutable image blobs. The worktree image is a checkpoint artifact, not another head.
 
-`world/view` reports bounded bindings, image identity, checkpoint and dirty status.
+`world/view` reports Janet definition forms for live bindings, image identity,
+checkpoint and dirty status. Source is provenance, never executable persistence;
+initializers do not replay. Images without
+recorded source require explicit annotation, not decompilation or guessed code.
 `world/save` commits. `world/discard` and `world/switch` replace the environment and
 end the evaluation. `world/remove` deletes a binding; assigning nil does not.
 The external world entry uses the same operations as evaluated Janet.

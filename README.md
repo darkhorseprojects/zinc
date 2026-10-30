@@ -66,7 +66,11 @@ and do not replace the instance head.
 
 The external world entry uses the same operations: view, save with message, discard,
 switch with commit, and remove with name. View accepts a historical event point and
-returns bounded bindings, image identity, checkpoint and dirty status, not source.
+returns Janet definition forms for live bindings, image identity, checkpoint and
+dirty status. Forms are serialized as Janet code, not reconstructed initializers;
+they describe provenance, not current mutable values, and never replay.
+Images without recorded source require explicit, audited annotation from history;
+Zinc does not decompile native functions or invent definitions.
 Discard/switch end the current evaluation. Save/switch/discard require the durable
 instance root; switch requires saved/discarded changes. Saving after a rewind forks
 Git history. Save intent is durable before Git ref mutation; recovery reconciles
@@ -128,11 +132,12 @@ Score is the reranker cutoff; memory/expand pages originals and summary children
 Usage remains separate from ceil(bytes/4) estimates. Provider grants select URLs,
 model IDs and token-env references; credentials resolve only in trusted code.
 
-Views returns recorded memory windows; render returns the exact model request,
+Views returns recorded memory windows with readable record headings, counts and a
+retrieval-candidate table; render returns the exact model request,
 without inference or recomputation. Submitted source remains inspectable history,
 not executable persistence. Visible reasoning, SSE streaming and parallel tools
 remain. Streaming previews store deltas separately from execution checkpoints;
-observers fold only new deltas and skip unchanged previews. Binding inventories are
+observers fold only new deltas and skip unchanged previews. Binding source metadata is
 read from native images on demand rather than copied into every event descriptor.
 Presentation records identify agent/request/run/branch/caller; PA still uses its
 existing wire protocol. Other entries include describe, instructions,

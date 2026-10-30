@@ -30,7 +30,7 @@ Children share the root deadline and budgets. Waiting releases a slot. Workers p
      "http/request" {:resource :http :doc "(http/request root method segments body) requests a named base without redirects; returns {:status :body}."}
      "process/run" {:resource :processes :doc "(process/run name) runs fixed argv/env with empty stdin; returns {:exit :output}."}}
     (tabseq [[action help] :pairs
-             {"view" "(world/view &opt point) returns image identity, checkpoint, dirty status and bounded binding inventory."
+             {"view" "(world/view &opt point) returns image identity, checkpoint, dirty status and Janet definition forms for live bindings; source is provenance, never replayed state."
               "save" "(world/save message) saves the current bindings to Git. Durable root only."
               "discard" "(world/discard) restores the saved checkpoint and ends this evaluation. Durable root only."
               "switch" "(world/switch commit) selects a revision and ends this evaluation. Save or discard first."
