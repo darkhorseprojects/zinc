@@ -323,9 +323,11 @@
 (defn recover [s &opt force]
   (when (and (not force) (< (os/clock) ((s :recovery) 0))) (break))
   (put (s :recovery) 0 (+ (os/clock) interval))
-  (query s (string "DELETE FROM " (s :journal) ".previews WHERE request NOT IN
+  (def orphaned-previews (string (s :journal) ".previews WHERE request NOT IN
     (SELECT json_extract(p.checkpoint,'$.request') FROM main.live_calls c JOIN call_payloads p ON p.id=c.id
       WHERE json_type(p.checkpoint,'$.request')='integer')"))
+  (when (first (query s (string "SELECT 1 FROM " orphaned-previews " LIMIT 1")))
+    (query s (string "DELETE FROM " orphaned-previews)))
   (each intent (if (s :temporary) [] (query s `SELECT e.* FROM events e WHERE e.kind='save-intent'
     AND NOT EXISTS(SELECT 1 FROM events n WHERE n.parent=e.id AND n.kind IN ('saved','artifact'))
     AND NOT EXISTS(SELECT 1 FROM main.live_calls c WHERE c.id=json_extract(e.data,'$.call'))`))
@@ -343,22 +345,24 @@
             (query s "UPDATE main.call_payloads SET origin=? WHERE id=? AND origin=?" [(string (json/encode (data :next))) (data :call) (data :origin)])
             (append s {:branch (data :call)} "saved" (intent :text) (data :next) (intent :id)))
           (append s {:branch (data :call)} "artifact" "Save did not advance Git." {:save (intent :id)} (intent :id))))))
-  (transact s
-            (def now (os/clock))
-            (each row (query s `SELECT c.*,min(coalesce(c.expires,1e999),coalesce(r.expires,1e999))<=? expired FROM main.call_controls c JOIN main.call_controls r ON r.id=coalesce(c.root,c.id)
-      WHERE (?=0 OR c.temporary=1) AND
-      (c.state IN ('queued','running','waiting') AND min(coalesce(c.expires,1e999),coalesce(r.expires,1e999))<=? OR c.state IN ('running','waiting') AND c.lease_expires<=?) ORDER BY c.id`
-                             [now (if (s :temporary) 1 0) now now])
-              (def expired (= 1 (row :expired)))
-              (def unstarted (and expired (= 0 (row :attempt))))
-              (def retry (and (= 0 (row :temporary)) (not expired) (not= "code" (row :kind)) (> (row :retries) 0)))
-              (def state (cond unstarted "cancelled" retry "queued" "uncertain"))
-              (when (= 0 (row :temporary))
-                (append s (view s (if (= "summarize" (row :kind)) (row :parent) (row :id))) "interruption"
-                        (if unstarted "Deadline expired before execution." "Interrupted execution; effects may have happened.")
-                        {:state state :attempt (row :attempt)} nil (row :id)))
-              (query s "UPDATE main.call_controls SET state=?,retries=retries-?,owner=CASE WHEN ? THEN NULL ELSE owner END,lease_expires=CASE WHEN ? THEN NULL ELSE lease_expires END WHERE id=?"
-                     [state (if retry 1 0) (or retry unstarted) (or retry unstarted) (row :id)])))
+  (def now (os/clock))
+  (def recovery-query `SELECT c.*,min(coalesce(c.expires,1e999),coalesce(r.expires,1e999))<=? expired FROM main.call_controls c JOIN main.call_controls r ON r.id=coalesce(c.root,c.id)
+    WHERE (?=0 OR c.temporary=1) AND
+    (c.state IN ('queued','running','waiting') AND min(coalesce(c.expires,1e999),coalesce(r.expires,1e999))<=? OR c.state IN ('running','waiting') AND c.lease_expires<=?) ORDER BY c.id`)
+  (def recovery-parameters [now (if (s :temporary) 1 0) now now])
+  (when (first (query s (string recovery-query " LIMIT 1") recovery-parameters))
+    (transact s
+      (each row (query s recovery-query recovery-parameters)
+        (def expired (= 1 (row :expired)))
+        (def unstarted (and expired (= 0 (row :attempt))))
+        (def retry (and (= 0 (row :temporary)) (not expired) (not= "code" (row :kind)) (> (row :retries) 0)))
+        (def state (cond unstarted "cancelled" retry "queued" "uncertain"))
+        (when (= 0 (row :temporary))
+          (append s (view s (if (= "summarize" (row :kind)) (row :parent) (row :id))) "interruption"
+                  (if unstarted "Deadline expired before execution." "Interrupted execution; effects may have happened.")
+                  {:state state :attempt (row :attempt)} nil (row :id)))
+        (query s "UPDATE main.call_controls SET state=?,retries=retries-?,owner=CASE WHEN ? THEN NULL ELSE owner END,lease_expires=CASE WHEN ? THEN NULL ELSE lease_expires END WHERE id=?"
+               [state (if retry 1 0) (or retry unstarted) (or retry unstarted) (row :id)]))))
   (unless (s :temporary)
     (def origin (origin s))
     (unless (= (origin :base) (s :checkpoint-base))
