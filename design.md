@@ -2,8 +2,8 @@
 
 ## Ownership
 
-Portable Agents loads trusted modules and carries bounded bytes across a process
-boundary. Zinc owns execution, binding images, history, memory and Git checkpoints.
+Portable Agents loads trusted modules, provides ordinary command-backed imports and
+carries bounded bytes across a process boundary. Zinc owns execution, binding images, history, memory and Git checkpoints.
 Connector owns identity, authorization, admission, presentation and delivery.
 
 Each persistent agent has its own canonical directory, ac.yaml, history database,
@@ -53,7 +53,7 @@ bindings. Named filesystem, HTTP, process and trusted module grants are checked 
 the host on every invocation. Native syntax is not unrestricted host authority.
 Use `self` for independent child work. Children share budgets and deadlines.
 Waiting releases execution capacity, not world ownership. Runtime `repl` settings
-select bindings/modules; a separate flat host catalogue defines operations and
+select bindings and explicit `repl.imports`; a separate flat host catalogue defines operations and
 resource permissions. Schema `visible`/`public` annotations expose only selected
 settings and granted resource metadata.
 
@@ -75,7 +75,9 @@ Visible reasoning, streaming and parallel tool traces are retained. Presentation
 coordinates identify agent, request, run, branch and caller. Delivery intents and
 receipts prevent automatic repetition of uncertain external effects. Known rendered
 Discord history carries presentation provenance rather than masquerading as user
-conversation. Capability-created messages have separate provenance.
+conversation. Explicitly created messages have separate provenance. Application stdout
+is the only presentation input; import calls carry arguments and operation coordinates,
+never presentation frames or scope identities.
 
 Durable observation can detach without cancelling execution. Resume uses the same
 request ID and delivery receipts; it does not replay completed code. Temporary

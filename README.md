@@ -82,7 +82,7 @@ map with text. Text uses the configured agent profile; profiles share store/worl
 identity. Self snapshots live bindings before forking. Native `ev/gather` and model
 multi-tool calls retain concurrent execution. Join local fibers that matter.
 Parent and memory_range bound history, not world state. Parent 0 defaults to empty
-history. Revoked grants or changed module/setup paths prevent saved execution.
+history. Revoked grants or changed import/setup declarations prevent saved execution.
 
 Persist false keeps new call payloads in a bounded RAM journal over an immutable
 archive prefix; nested children carry only the RAM additions, not copies of archived
@@ -103,7 +103,8 @@ Ordinary Janet bindings are available by default. Explicit selectors remain an
 advanced restriction: core/* selects unqualified names, core/multiply selects *,
 and namespaced selectors expand deterministically. Saved calls retain exact sets.
 Native filesystem, network, subprocess, FFI, module loading, threads and environment
-access remain sandboxed. Trusted setup may return parser/read/expander options.
+access remain sandboxed. The evaluator has its own module cache containing only zinc/design;
+PA's foreign modules are reachable only through selected host bindings. Trusted setup may return parser/read/expander options.
 Host operations live in a flat binding catalogue, not nested REPL schema metadata.
 Schema `visible` settings and `public` resource fields are exposed through the
 selected catalogue; host-side grant checks still enforce authority.
@@ -111,9 +112,11 @@ selected catalogue; host-side grant checks still enforce authority.
 Named host grants remain: fs/list/read/write, http/request and process/run. Paths
 reject traversal and links; HTTP permits configured bases/methods without redirects
 or ambient proxies; processes use fixed argv/env and bounded output. These scopes
-are not race-proof OS confinement. Keep databases, credentials, trusted modules and
-Git metadata outside writable roots. Host RPC carries JSON data, not native handles.
-Modules may select one exported callable under an alias with `export: self`.
+are not race-proof OS confinement: granted directory ancestry must not be concurrently
+replaceable by an adversary. Keep databases, credentials, trusted modules and Git metadata
+outside writable roots. PA imports carry JSON data, not native handles. Declare modules in
+`repl.imports`, for example `discord: { module: "@connector/discord" }`; `export: self` selects one
+callable under an alias. Runtime commands and credential references never enter saved configuration.
 
 `world-bytes` defaults to 16 MiB and limits serialized images, not heap usage.
 `source-bytes` defaults to 1 MiB and limits submitted code. Zero means unlimited for

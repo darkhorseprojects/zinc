@@ -40,6 +40,8 @@
   (when (= 0 (result :exit)) (result :output)))
 
 (defn open [config &opt temporary]
+  (each profile (filter identity [config (config :agent)])
+    (put profile :world (os/realpath (profile :world))))
   (def s @{:db (sql/open (config :store)) :journal (if temporary "journal" "main")
            :config config :temporary temporary :profiles @{} :recovery @[0]})
   (try
@@ -103,7 +105,8 @@
 (defn image [s origin bytes]
   (assert (<= (length bytes) ((s :config) :world-bytes)) "world image byte ceiling")
   (def blob (string/trim (git (origin :root) ["hash-object" "-w" "--stdin"] bytes)))
-  (git (origin :root) ["update-ref" (string "refs/zinc/world/" blob) blob])
+  (unless (= blob (origin :blob))
+    (git (origin :root) ["update-ref" (string "refs/zinc/world/" blob) blob]))
   (merge origin {:blob blob}))
 
 (defn append [s scope kind text &opt data parent execution]
@@ -124,7 +127,7 @@
                                                "call-admission" "operation-outcome" "cancelled" "save-intent" "saved"])))))
             (def encoded (string (json/encode (merge data {:world (json/decode (if context (context :origin) (((query s "SELECT origin FROM main.world WHERE id=1") 0) :origin)) true true)}))))
             (assert (utf8/is-valid? encoded) "stored event must be UTF-8 JSON")
-            (when (= kind "operation-outcome") (charge s 0 (estimate (string text encoded))))
+            (when (index-of kind ["call-admission" "operation-outcome"]) (charge s 0 (estimate (string text encoded))))
             (def row ((query s (string "INSERT INTO " (s :journal) ".events(call,parent,kind,record_kind,memory,text,data,estimate,author,at) VALUES(?,?,?,?,?,?,?,?,?,coalesce(?,strftime('%Y-%m-%dT%H:%M:%fZ','now'))) RETURNING *")
                              [(or execution (scope :branch)) parent kind record-kind (if memory 1 0) text encoded (estimate (string text encoded))
                               (or (scope :author) (if context (string "self:" (context :request) "/" (context :id)) "system:zinc")) (scope :at)]) 0))
@@ -289,9 +292,7 @@
         (when saved
           (when (saved :agent) (put saved :agent (merge (saved :agent))))
           (each profile (filter identity [saved (saved :agent)])
-            (put profile :snapshot nil)
-            (when-let [repl (profile :repl)]
-              (put profile :repl (merge repl {:modules (tabseq [[name module] :pairs (repl :modules)] name {:module (module :module) :export (module :export)})})))))
+            (put profile :snapshot nil)))
         (def temporary (if (s :temporary) 1 0))
         (when caller (assert (or (= temporary 1) (= 0 ((call s (caller :branch)) :temporary))) "temporary calls cannot create durable descendants"))
         (def depth (if summary (caller :depth) (if caller (+ 1 (caller :depth)) (get-in config [:snapshot :depth] 0))))

@@ -51,11 +51,10 @@ Children share the root deadline and budgets. Waiting releases a slot. Workers p
           :fields {:bindings {:type :array :items :string :default ["*"]}
                    :values {:type :array :items :string :default []}
                    :setup {:type :string :absolute true :optional true}
-                   :modules {:type :dictionary :default {}
+                   :imports {:type :dictionary :default {}
                              :values {:type :dictionary
-                                      :fields {:module {:type :string :absolute true}
-                                               :export {:type :string :optional true}
-                                               :config {:type :dictionary :default {}}}}}}}
+                                      :fields {:module {:type :string}
+                                               :export {:type :string :optional true}}}}}}
    :fs {:type :dictionary :default {} :public [:root :description]
         :values {:type :dictionary
                  :fields {:root {:type :string :absolute true}

@@ -1,6 +1,5 @@
 (import spork/path :as path)
 (import spork/base64 :as base64)
-(import spork/json :as json)
 
 (defn project [value fields &opt omit]
   (tabseq [[key item] :pairs value :when (if omit (nil? (index-of key fields)) (index-of key fields))] key item))
@@ -42,7 +41,6 @@
 
 (defn configuration [schema supplied &opt discovery]
   (def config (validate schema supplied discovery))
-  (unless discovery (put config :world (os/realpath (config :world))))
   (when (config :context-quota)
     (assert (<= (config :summary-quota) (config :context-quota)) "summary quota exceeds context quota"))
   (when (config :agent)
@@ -52,7 +50,7 @@
       (assert (= (config key) (get-in config [:agent key])) "agent view changes world identity/location")))
   (when-let [repl (config :repl)]
     (put repl :values (select (seq [[key field] :in (pairs schema) :when (field :visible)] (string key)) (repl :values)))
-    (each name (keys (repl :modules))
+    (each name (keys (repl :imports))
       (assert (and (peg/match ~(* (some (set "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789_-")) -1) (string name))
                    (not (index-of name [:core :self :pa :fs :http :process :memory :world :zinc]))) "invalid module namespace")))
   (each field [:fs :http :processes]
@@ -87,9 +85,8 @@
   (each field [:fs :http :processes]
     (each [name grant] (pairs (saved field))
       (assert (deep= grant (get-in current [field name])) "saved resource changed or revoked")))
-  (each [name module] (pairs (get-in saved [:repl :modules] {}))
-    (each key [:module :export]
-      (assert (= (module key) (get-in current [:repl :modules name key])) "saved module revoked")))
+  (each [name module] (pairs (get-in saved [:repl :imports] {}))
+    (assert (deep= module (get-in current [:repl :imports name])) "saved import changed or revoked"))
   (when (saved :agent) (assert (current :agent) "agent execution view revoked"))
   (each [name provider] (pairs (saved :providers))
     (def granted (get-in current [:providers name]))
@@ -97,9 +94,6 @@
   (def config (merge saved {:memory-retrieval (and (saved :memory-retrieval) (current :memory-retrieval))
                             :score (max (saved :score) (current :score))
                             :agent (when (saved :agent) (authorize schema (current :agent) (saved :agent)))
-                            :repl (when (saved :repl)
-                                    (merge (saved :repl)
-                                           {:modules (tabseq [name :in (keys (get-in saved [:repl :modules]))] name (get-in current [:repl :modules name]))}))
                             :providers (tabseq [name :in (keys (saved :providers))] name (get-in current [:providers name]))}))
   (each [key field] (pairs schema)
     (when (and (= :integer (field :type)) (or (saved key) (current key)))
@@ -110,7 +104,6 @@
   config)
 
 (defn data [value]
-  (json/encode value)
   (postwalk |(if (dictionary? $) (tabseq [[key item] :in (pairs $)] key item) $) value))
 
 (defn request [value fields]

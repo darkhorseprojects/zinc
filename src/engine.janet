@@ -170,9 +170,9 @@
                     (when snapshot
                       (put current :candidate (store/image s (store/origin s (current :id)) (snapshot :image))))
                     (when (get binding :intrinsic) (assert (= 1 (length args)) "invalid intrinsic arity"))
-                    (def args (schema/data args))
                     (let [admission (store/transact s (store/charge s 1 0)
                                                       (store/append s view "call-admission" name {:arguments args} nil ((dyn :zinc/call) :id)))]
+                        (def args (schema/data args))
                         (def value
                           (cond
                             (or (= name "save") (string/has-prefix? "world/" name))
@@ -238,17 +238,12 @@
                               (def result (store/process (command :argv) (tabseq [[k v] :pairs (command :env)] (string k) v) nil (config :response-bytes) 0))
                               (assert (utf8/is-valid? (result :output)) "process output is not UTF-8")
                               result)
-                            (schema/data
-                              (with-dyns [:zinc/context [s view] :capability/config (binding :config)
-                                          :capability/operation (string (view :run) "/" (view :branch) "/" (admission :id))
-                                          :capability/presentation (filter identity (map message (memory/events s (view :run) (get-in current [:checkpoint :presentation] 0) (admission :id))))]
-                                (def result (apply (binding :value) args))
-                                (when (get-in binding [:config :scope])
-                                  (store/checkpoint s (merge (current :checkpoint) {:presentation (admission :id)})))
-                                result))))
+                            (with-dyns [:zinc/context [s view]
+                                        :pa/operation (string (view :run) "/" (view :branch) "/" (admission :id))]
+                              (apply (binding :value) args))))
                         (store/transact s (store/checkpoint s)
                                         (store/append s view "operation-outcome" name {:value value} (admission :id) ((dyn :zinc/call) :id)))
-                        value))
+                        (schema/data value)))
                   (let [run (if (view :expires) (max 0.001 (- (view :expires) (os/clock))) math/inf)
                         seconds (min (if (= 0 (config :seconds)) math/inf (config :seconds)) run)]
                     (if (= seconds math/inf) 0 seconds))))
@@ -461,23 +456,28 @@
   (tabseq [[operation fields] :in [["self" (keys (spec :input))] ["task" [:task :owner]] ["resume" [:run :request :after]] ["observe" [:run :request :after]]
                                    ["describe" []] ["init" []] ["join" []] ["instructions" []] ["models" [:role]] ["world" [:action :point :message :commit :name]] ["views" [:event]] ["render" [:event]] ["record" [:records]] ["abort" [:run :request :reason]] ["invalidate" [:event]]]]
     operation (fn [bytes opaque]
-                (def config (schema/configuration (spec :schema) (json/decode opaque true true) (index-of operation ["describe" "init"])))
+                (def config (schema/configuration (spec :schema) (json/decode opaque true true) (= operation "describe")))
                 (when (index-of operation ["self" "task" "resume" "observe"])
                   (each profile (filter identity [config (config :agent)]) (repl/definitions profile (spec :bindings))))
                 (assert (and (utf8/is-valid? bytes) (<= (length bytes) (config :request-bytes))) "request must be bounded UTF-8")
                 (when (index-of operation ["describe" "instructions"]) (assert (= "" bytes) "operation takes empty input"))
                 (def value (if (index-of operation ["describe" "instructions"]) {} (schema/request (json/decode bytes true true) fields)))
                 (when (= operation "init")
-                  (assert (path/abspath? (config :identity)) "canonical instance directory required")
+                  (assert (= (config :identity) (os/realpath (config :identity))) "canonical instance directory required")
                   (each key [:store :world]
                     (def relative (path/relpath (config :identity) (config key)))
-                    (assert (and (path/abspath? (config key)) (not (path/abspath? relative)) (not= ".." (first (path/parts relative)))) "state must belong to the new instance directory"))
-                  (assert (and (not (os/stat (config :store))) (not (os/stat (config :world)))) "init requires a fresh instance")
-                  (each key [:store :world] (os/mkdir (path/dirname (config key))))
+                    (assert (and (path/abspath? (config key)) (not (path/abspath? relative)) (not= ".." (first (path/parts relative)))) "state must belong to the new instance directory")
+                    (var directory (config :identity))
+                    (each part (path/parts (path/dirname relative))
+                      (unless (= part ".")
+                        (set directory (path/join directory part))
+                        (os/mkdir directory)
+                        (assert (= directory (os/realpath directory)) "state directories cannot contain links")))
+                    (assert (not (os/lstat (config key))) "init requires a fresh instance"))
                   (with-dyns [:zinc/config config]
                     (def root (path/dirname (config :world)))
                     (store/git root ["init" "--quiet"])
-                    (def initial (repl/execute nil {} "" {:settings {} :resources {}} {} "" {:world (config :world-bytes) :output (config :response-bytes)} {} (fn [&] (error "initialization cannot invoke capabilities")) (config :seconds)))
+                    (def initial (repl/execute nil {} "" {:settings {} :resources {}} {} "" {:world (config :world-bytes) :output (config :response-bytes)} {} (fn [&] (error "initialization cannot invoke host functions")) (config :seconds)))
                     (spit (config :world) (initial :image) :wb)
                     (store/git root ["add" "--" (path/basename (config :world))])
                     (store/git root ["commit" "--quiet" "-m" "Initialize world image"])))
