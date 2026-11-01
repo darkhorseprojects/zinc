@@ -465,7 +465,7 @@
                     (def relative (path/relpath (config :identity) (config key)))
                     (assert (and (path/abspath? (config key)) (not (path/abspath? relative)) (not= ".." (first (path/parts relative)))) "state must belong to the new instance directory")
                     (var directory (config :identity))
-                    (each part (path/parts (path/dirname relative))
+                    (each part (filter next (path/parts (path/dirname relative)))
                       (unless (= part ".")
                         (set directory (path/join directory part))
                         (os/mkdir directory)
