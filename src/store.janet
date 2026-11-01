@@ -346,7 +346,11 @@
             (append s {:branch (data :call)} "saved" (intent :text) (data :next) (intent :id)))
           (append s {:branch (data :call)} "artifact" "Save did not advance Git." {:save (intent :id)} (intent :id))))))
   (def now (os/clock))
-  (def recovery-query `SELECT c.*,min(coalesce(c.expires,1e999),coalesce(r.expires,1e999))<=? expired FROM main.call_controls c JOIN main.call_controls r ON r.id=coalesce(c.root,c.id)
+  (def recovery-query `SELECT c.*,min(coalesce(c.expires,1e999),coalesce(r.expires,1e999))<=? expired,
+    EXISTS(SELECT 1 FROM events a WHERE a.id=json_extract(p.checkpoint,'$.request') AND a.kind='model-admission'
+      AND NOT EXISTS(SELECT 1 FROM events o WHERE o.parent=a.id AND o.kind='model-outcome')) pending_model
+    FROM main.call_controls c JOIN main.call_controls r ON r.id=coalesce(c.root,c.id)
+    LEFT JOIN call_payloads p ON p.id=c.id
     WHERE (?=0 OR c.temporary=1) AND
     (c.state IN ('queued','running','waiting') AND min(coalesce(c.expires,1e999),coalesce(r.expires,1e999))<=? OR c.state IN ('running','waiting') AND c.lease_expires<=?) ORDER BY c.id`)
   (def recovery-parameters [now (if (s :temporary) 1 0) now now])
@@ -355,7 +359,7 @@
       (each row (query s recovery-query recovery-parameters)
         (def expired (= 1 (row :expired)))
         (def unstarted (and expired (= 0 (row :attempt))))
-        (def retry (and (= 0 (row :temporary)) (not expired) (not= "code" (row :kind)) (> (row :retries) 0)))
+        (def retry (and (= 0 (row :temporary)) (not expired) (not= "code" (row :kind)) (> (row :retries) 0) (= 0 (row :pending_model))))
         (def state (cond unstarted "cancelled" retry "queued" "uncertain"))
         (when (= 0 (row :temporary))
           (append s (view s (if (= "summarize" (row :kind)) (row :parent) (row :id))) "interruption"

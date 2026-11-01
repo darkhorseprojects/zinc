@@ -1,5 +1,14 @@
 (import spork/path :as path)
 (import spork/base64 :as base64)
+(import spork/json :as json)
+
+(defn encode [value]
+  (cond
+    (dictionary? value)
+    (string "{" (string/join (map (fn [[key item]] (string (json/encode (string key)) ":" (encode item)))
+                                 (sorted (pairs value) |(< (string ($0 0)) (string ($1 0))))) ",") "}")
+    (indexed? value) (string "[" (string/join (map encode value) ",") "]")
+    (string (json/encode value))))
 
 (defn project [value fields &opt omit]
   (tabseq [[key item] :pairs value :when (if omit (nil? (index-of key fields)) (index-of key fields))] key item))
@@ -67,8 +76,27 @@
                  (string/has-suffix? "/" url)
                  (not (find |(index-of $ ["." ".."]) (string/split "/" url)))) "invalid HTTP base"))
   (each [name provider] (pairs (config :providers))
-    (assert (index-of name [:llama :openrouter]) "unsupported provider")
-    (assert (peg/match ~(* (choice "https://" "http://") (some (if-not (set "?#@ \t\r\n") 1)) -1) (provider :url)) "invalid provider base"))
+    (assert (peg/match ~(* (some (set "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789_-")) -1) (string name)) "invalid provider name")
+    (assert (peg/match ~(* (choice "https://" "http://") (some (if-not (set "?#@ \t\r\n") 1)) -1) (provider :url)) "invalid provider base")
+    (assert (not (and (provider :token-env) (provider :credential-command))) "choose one provider credential source")
+    (when (provider :credential-command)
+      (assert (path/abspath? ((provider :credential-command) 0)) "credential executable must be absolute"))
+    (each [name value] (pairs (provider :headers))
+      (assert (and (peg/match ~(* (some (set "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789-")) -1) (string name))
+                   (not (string/find "\r" value)) (not (string/find "\n" value))) "invalid provider header"))
+    (each suffix (array/concat @[(provider :chat-path) (provider :rerank-path)] (values (provider :catalogue))
+                              (if (provider :properties) [(provider :properties)] []))
+      (assert (and (string/has-prefix? "/" suffix) (not (string/has-prefix? "//" suffix))
+                   (not (string/find "#" suffix)) (not (string/find "\r" suffix)) (not (string/find "\n" suffix))) "invalid provider path"))
+    (each key (keys (provider :parameters))
+      (assert (not (index-of key [:model :messages :input :instructions :tools :stream :stream_options :store :include
+                                  :max_tokens :max_completion_tokens :max_output_tokens :parallel_tool_calls :reasoning :reasoning_effort :prompt_cache_key]))
+              "provider parameters replace managed request fields"))
+    (each tool (provider :web-tools) (assert (dictionary? tool) "invalid provider web tool"))
+    (each [id model] (pairs (get provider :models {}))
+      (assert (and (> (length (string id)) 0) (not (string/find "\0" (string id)))) "invalid model ID")
+      (unless (get-in provider [:catalogue (keyword (get model :role "chat"))])
+        (assert (model :role) "static model requires a role"))))
   config)
 
 (defn authorize [schema current saved]
@@ -150,8 +178,8 @@ CREATE TEMP VIEW memory_records AS WITH records AS (
     ) ELSE e.parent END parent,
     e.record_kind kind,e.text,e.data,e.estimate,e.author,e.at,e.created,e.body,e.memory,
     CASE WHEN json_type(e.data,'$.message')='object' THEN
-      CASE WHEN json_extract(e.data,'$."reasoning-visible"') THEN json_extract(e.data,'$.message')
-        ELSE json_remove(json_extract(e.data,'$.message'),'$.reasoning','$.reasoning_content','$.reasoning_details') END
+      CASE WHEN json_extract(e.data,'$."reasoning-visible"') THEN json_remove(json_extract(e.data,'$.message'),'$.response')
+        ELSE json_remove(json_extract(e.data,'$.message'),'$.response','$.reasoning','$.reasoning_content','$.reasoning_details') END
     END public_message
   FROM events e LEFT JOIN calls c ON c.id=e.call
 )

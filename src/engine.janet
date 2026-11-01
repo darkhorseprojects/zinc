@@ -62,7 +62,7 @@
     (when-let [row (store/claim s id)]
       (try
         (cond here ((dyn :zinc/execute) s row)
-          (or (s :temporary) (and (= "summarize" (row :kind)) (not (dyn :zinc/background))))
+          (or (s :temporary) (= "summarize" (row :kind)))
           (ev/go (fn [] ((dyn :zinc/execute) s row)))
           (let [[process] (worker "task" {:task id :owner (row :owner)} (dyn :zinc/config))]
             (ev/close (process :out))))
@@ -262,7 +262,7 @@
     (def inquiry {:role "user" :content (model/images s (user :id) (memory/render user))})
     (def tool-size (if (> (length tools) 0) (store/estimate (json/encode tools)) 0))
     (def capacity (min (get config :context-quota math/inf) (- (selected :context) 256)))
-    (var space 0)
+    (var space 0) (var context nil)
     (def progress ((dyn :zinc/call) :checkpoint))
     (def pool (or (progress :semantic)
                   (let [pending (when (progress :request) (first (store/query s "SELECT id FROM events WHERE id=? AND json_extract(data,'$.input.role')='rerank'" [(progress :request)])))
@@ -279,11 +279,10 @@
       (def world (when (config :repl) {:role "user" :content (markdown/render {:name "World source" :level 2 :content [{:language "janet" :text ((repl/world s {:action "view"}) :text)}]})}))
       (set space (- capacity (model/estimate (filter identity [{:role "system" :content system} world inquiry])) tool-size 256))
       (assert (> space 256) "question, world bindings and instructions exhaust context")
-      (var context (memory/context s inherited space pool))
+      (unless context (set context (memory/context s inherited space pool)))
       (def messages @[]) (def views @{})
       (while true
         (array/clear messages) (array/push messages {:role "system" :content system})
-        (when world (array/push messages world))
         (table/clear views) (put views :through (context :through))
         (each [key title rows] [[:chronological "Chronological memory" (context :nodes)] [:semantic "Retrieved excerpts" (context :evidence)]]
           (def text (string/join (map |($ :rendered) rows)))
@@ -292,12 +291,13 @@
           (when (> (length text) 0) (array/push messages {:role "user" :content (string "## " title "\n\n" text)})))
         (put (views :semantic) :cutoff (config :score))
         (put (views :semantic) :candidates (seq [row :in pool] {:id (row :id) :score (row :score) :rerank (row :rerank)}))
+        (when world (array/push messages world))
         (array/push messages inquiry)
         (each record (store/query s "SELECT conversation_message,json_extract(data,'$.status') status FROM conversation_records WHERE branch=? AND id>? ORDER BY id" [id (context :through)])
           (array/push messages (json/decode (record :conversation_message) true true))
           (when (= "continue" (record :status))
             (array/push messages {:role "system" :content "Continue the inquiry."})))
-        (when (<= (+ (model/estimate messages) tool-size) capacity) (break))
+        (when (<= (+ (model/estimate messages (selected :reference)) tool-size) capacity) (break))
         (assert (< (context :through) (view :last)) "context metadata cannot fit")
         (set context (memory/context s (merge view {:exclude [(user :id)]}) space pool)))
       (def pending (get-in (dyn :zinc/call) [:checkpoint :request]))
@@ -328,9 +328,6 @@
                                       (merge outcome {:text nil :tool-id (tool :id) :response (response :event) :child (get handle :branch) :display (or (not parallel) (has-key? handle :error))}) (admission :id) id))
         (unless (outcome :ok)
           (eprint (json/encode (merge (outcome :error) {:context (merge (or (get-in outcome [:error :context]) {}) {:tool-call {:branch id :tool (tool :id) :event (admission :id)}})}))))))
-    (unless (s :temporary)
-      (try (with-dyns [:zinc/background true] (memory/context s (store/view s id) space pool true))
-        ([err] (store/append s (store/view s id) "launch-uncertain" "Background compaction preparation failed." {:error (string err)}))))
     {:completion ((first (store/query s "SELECT id FROM memory_records WHERE branch=? AND kind='completed'" [id])) :id)})
 
   (defn execute [store row]
@@ -412,7 +409,7 @@
       (when (> ((s :config) :run-seconds) 0)
         (store/query s "UPDATE main.call_controls SET expires=min(coalesce(expires,1e999),(SELECT created FROM events WHERE call=call_controls.id AND kind='user')+?) WHERE id=?"
                      [((s :config) :run-seconds) (existing :run)])))
-    (with-dyns [:zinc/wait wait :zinc/spawn launch :zinc/execute execute :zinc/config (s :config)]
+    (with-dyns [:zinc/wait wait :zinc/execute execute :zinc/config (s :config)]
       (store/recover s)
       (if (= operation "task")
         (do (assert (= (value :owner) (existing :owner)) "call ownership changed") (execute s existing) {:task (value :task)})

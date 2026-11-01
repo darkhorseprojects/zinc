@@ -116,7 +116,8 @@ are not race-proof OS confinement: granted directory ancestry must not be concur
 replaceable by an adversary. Keep databases, credentials, trusted modules and Git metadata
 outside writable roots. PA imports carry JSON data, not native handles. Declare modules in
 `repl.imports`, for example `discord: { module: "@connector/discord" }`; `export: self` selects one
-callable under an alias. Runtime commands and credential references never enter saved configuration.
+callable under an alias. PA runtime import commands never enter world images. Saved provider configuration contains
+credential references, never resolved tokens.
 
 `world-bytes` defaults to 16 MiB and limits serialized images, not heap usage.
 `source-bytes` defaults to 1 MiB and limits submitted code. Zero means unlimited for
@@ -132,8 +133,47 @@ Chronology uses checked, invalidatable summaries. Retrieval uses stopwords, exac
 Cygnet expansion, history trigrams, FTS candidates and model reranking, not vectors
 or web search. Disabling memory-retrieval gives chronology the whole memory budget.
 Score is the reranker cutoff; memory/expand pages originals and summary children.
-Usage remains separate from ceil(bytes/4) estimates. Provider grants select URLs,
-model IDs and token-env references; credentials resolve only in trusted code.
+Compaction is demand-driven; completing an inquiry does not schedule speculative inference.
+Memory covers remain stable across tool rounds until context pressure requires compaction.
+Stable instructions and memory precede changing world state, and prompt JSON uses deterministic key ordering.
+Usage remains separate from ceil(bytes/4) estimates, with reported replayed reasoning tokens accounted separately.
+
+Provider names are arbitrary configuration keys. Providers select a protocol (chat-completions or responses),
+URL, chat-path/rerank-path, optional catalogue paths by role, and an optional properties path with an escaped
+{model} substitution. Models are an ID-keyed grant/profile map, not an array. Static profiles require role and
+context; optional output, tools, parallel, images, control, efforts, reasoning-required and output-field describe
+capabilities. Catalogue metadata and properties documents supply capabilities when discovery is configured;
+explicit profiles override them, while context grants cannot exceed reported capacity. Failed discovery is an error.
+Provider parameters carry non-structural wire settings; web-tools are enabled only with web-search permission.
+No provider identities, endpoint URLs or model lists are built into inference code. A local server configuration is:
+
+```yaml
+providers:
+  local:
+    url: http://127.0.0.1:8080
+    catalogue:
+      chat: /v1/models
+      rerank: /v1/models
+    properties: /props?model={model}
+    parameters: { cache_prompt: true }
+chat: local:YOUR_MODEL
+rerank: local:YOUR_RERANK_MODEL
+```
+
+Settle old work before replacing model arrays with maps and adding discovery paths to existing YAML. No database schema
+change is required; saved calls still require their original grants to match current authority.
+
+Credentials resolve only in trusted HTTP workers through token-env or an absolute credential-command returning a JSON
+header object. Headers may also contain static protocol metadata. Command output/time are bounded and revocation is
+checked while waiting. Resolved credentials are not saved in configuration or model admissions. Responses uses
+store:false and locally selected context, preserving native output items and encrypted reasoning for same-model tool
+continuation; switching models/protocols uses normalized messages instead. Cached/input/output/reasoning usage remains
+available in the existing usage table. Optional cache-key is a stable routing hint, not a cache-hit guarantee.
+Use a stable deployment key that also resolves for initialization and settlement, which have no Discord context.
+
+An unfinished admitted inference is uncertain and is never automatically resubmitted, including during worker recovery.
+Completed outcomes are reused. Endpoints configured with output-field: none cannot enforce output-token limits;
+deadlines, byte limits and bounded-summary validation do not refund provider usage.
 
 Views returns recorded memory windows with readable record headings, counts and a
 retrieval-candidate table; render returns the exact model request,

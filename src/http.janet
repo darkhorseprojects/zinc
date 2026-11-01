@@ -1,5 +1,6 @@
 (import jurl/native :as curl)
 (import spork/utf8 :as utf8)
+(import spork/json :as json)
 (import sqlite3 :as sql)
 (import ./store)
 
@@ -19,15 +20,38 @@
                                [(current :id) (current :owner)]))))))
                  permitted))
     (assert (check) "HTTP job fenced")
-    (def token (when (endpoint :token-env) (os/getenv (endpoint :token-env))))
-    (when (endpoint :token-env) (assert token "provider credential is not configured"))
-    (def bound (min (if (= 0 (config :http-ms)) math/inf (config :http-ms))
-                    (if (get current :expires) (max 1 (math/floor (* 1000 (- (current :expires) (os/clock))))) math/inf)))
-    (def timeout (if (= bound math/inf) 0 bound))
+    (def deadline (min (if (= 0 (config :http-ms)) math/inf (+ (os/clock) (/ (config :http-ms) 1000)))
+                       (or (get current :expires) math/inf)))
+    (def headers (merge (get endpoint :headers {})))
+    (def secrets @[])
+    (when (endpoint :token-env)
+      (def token (os/getenv (endpoint :token-env)))
+      (assert (and token (> (length token) 0)) "provider credential is not configured")
+      (put headers :Authorization (string "Bearer " token))
+      (array/push secrets token))
+    (when-let [command (endpoint :credential-command)]
+      (def owner (fiber/root))
+      (def watcher (ev/go (fn [] (try (while true (assert (check) "HTTP job fenced") (ev/sleep store/interval))
+                                  ([err] (unless (= err :finished) (ev/cancel owner err)))))))
+      (def result (defer (ev/cancel watcher :finished)
+                    (store/process command (os/environ) nil 16384 (max 0.001 (min 30 (- deadline (os/clock)))))))
+      (assert (= 0 (result :exit)) "provider credential command failed; sign in again")
+      (def supplied (try (json/decode (result :output) true true) ([err] (error "invalid credential command response"))))
+      (assert (dictionary? supplied) "credential command must return headers")
+      (each value (values supplied)
+        (assert (and (string? value) (> (length value) 0)) "invalid credential header")
+        (array/push secrets value)
+        (when (and (string/has-prefix? "Bearer " value) (> (length value) 7)) (array/push secrets (string/slice value 7))))
+      (merge-into headers supplied))
+    (assert (and (check) (< (os/clock) deadline)) "HTTP job expired or fenced")
+    (def timeout (if (= deadline math/inf) 0 (max 1 (math/floor (* 1000 (- deadline (os/clock)))))))
     (each [key value]
       (pairs {:url (string (endpoint :url) suffix) :customrequest method :postfields body
               :httpheader (array/concat @["Content-Type: application/json" (if stream "Accept: text/event-stream" "Accept: application/json")]
-                                       (if token [(string "Authorization: Bearer " token)] []))
+                                       (seq [[name value] :pairs headers]
+                                         (assert (and (peg/match ~(* (some (set "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789-")) -1) (string name))
+                                                      (string? value) (not (string/find "\r" value)) (not (string/find "\n" value))) "invalid HTTP header")
+                                         (string name ": " value)))
               :writefunction (fn [chunk]
                                (+= size (length chunk))
                                (assert (<= size (config :response-bytes)) "HTTP response exceeds byte limit")
@@ -41,7 +65,9 @@
     (def status (:perform client))
     (assert (= :ok status) (string "HTTP transfer failed: " status "; effects may have happened"))
     (assert (utf8/is-valid? bytes) "HTTP response is not UTF-8")
-    {:status (client :response-code) :body (string bytes)}))
+    {:status (client :response-code)
+     :body (if (<= 200 (client :response-code) 299) (string bytes)
+               (reduce (fn [text secret] (string/replace-all secret "[redacted]" text)) (string bytes) secrets))}))
 
 (defn request [config endpoint method suffix &opt body consume]
   (assert endpoint "HTTP endpoint is not configured")

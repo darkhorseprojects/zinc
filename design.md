@@ -4,7 +4,8 @@
 
 Portable Agents loads trusted modules, provides ordinary command-backed imports and
 carries bounded bytes across a process boundary. Zinc owns execution, binding images, history, memory and Git checkpoints.
-Connector owns identity, authorization, admission, presentation and delivery.
+Connector owns identity, authorization, admission, presentation, delivery and provider credentials. Zinc owns inference
+protocols, not provider identities; URLs, discovery, capabilities and wire settings are configuration.
 
 Each persistent agent has its own canonical directory, ac.yaml, history database,
 world repository, Connector ledger and Discord bot credential. Only immutable
@@ -83,7 +84,10 @@ Durable observation can detach without cancelling execution. Resume uses the sam
 request ID and delivery receipts; it does not replay completed code. Temporary
 payloads cannot reattach. Explicit abort cancels linked work, not unrelated agents.
 
-Admissions prove acceptance, not execution. Inspect original outcomes before
+Admissions prove acceptance, not execution. An admitted inference without an outcome is never automatically resubmitted;
+provider usage may already have occurred. Compaction runs only when context requires it, not speculatively after answers.
+Stable instructions and memory precede changing world state. Responses replay retains encrypted reasoning and native
+items for the same model while all context selection and tool execution remain local. Inspect original outcomes before
 repeating uncertain work. `memory/expand` exposes bounded original records.
 The `views` entry reports chronological and semantic windows; `render` returns the
 exact recorded model request. Source submissions remain in event history, not in

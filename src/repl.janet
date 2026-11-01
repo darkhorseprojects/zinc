@@ -217,5 +217,5 @@
           (when (and (config :repl) available)
             (string "\n\n## Janet\n\nSuccessful bindings, mutations and closures persist as a native image. Initializers never replay. Errors leave the previous image intact; external effects are not undone. Parallel children fork without merging. Use `(doc name)`, `(doc \"string/\")`, and `(doc-of string/join)` for native documentation. `(import zinc/design :as design)` exposes `design/document`.\n`(input)`, `(self/document)`, `(settings)` and `(resources)` expose invocation data."
                     (string/join (seq [[title value] :in [["Settings" (public :settings)] ["Resources" (public :resources)]] :when (> (length value) 0)]
-                                   (string "\n\n## " title "\n\n" (json/encode value "  " "\n"))))
+                                   (string "\n\n## " title "\n\n" (schema/encode value))))
                     "\n\n## Host bindings\n\n" (string/join (seq [[_ binding] :in (sorted (pairs available)) :unless (binding :local)] (binding :doc)) "\n\n")))))

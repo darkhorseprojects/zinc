@@ -72,15 +72,39 @@ Children share the root deadline and budgets. Waiting releases a slot. Workers p
                         :fields {:argv {:type :array :items :string :minimum 1}
                                  :env {:type :dictionary :default {} :values {:type :string}}
                                  :description {:type :string :optional true}}}}
-   :providers {:type :dictionary
-               :default {}
+   :providers {:type :dictionary :default {}
                :values {:type :dictionary
                         :fields {:url {:type :string}
+                                 :protocol {:type :string :default "chat-completions" :choices ["chat-completions" "responses"]}
+                                 :chat-path {:type :string :default "/v1/chat/completions"}
+                                 :rerank-path {:type :string :default "/v1/rerank"}
                                  :token-env {:type :string :optional true}
-                                 :models {:type :array :items :string :optional true}}}}
-   :chat {:type :string :default "llama:chat" :visible true
+                                 :credential-command {:type :array :items :string :minimum 1 :optional true}
+                                 :headers {:type :dictionary :default {} :values {:type :string}}
+                                 :parameters {:type :dictionary :default {}}
+                                 :web-tools {:type :array :default []}
+                                 :cache-key {:type :string :optional true}
+                                 :catalogue {:type :dictionary :default {}
+                                             :fields {:chat {:type :string :optional true}
+                                                      :rerank {:type :string :optional true}}}
+                                 :properties {:type :string :optional true}
+                                 :models {:type :dictionary :optional true
+                                          :values {:type :dictionary
+                                                   :fields {:name {:type :string :optional true}
+                                                            :role {:type :string :optional true :choices ["chat" "rerank"]}
+                                                            :context {:type :integer :minimum 2 :optional true}
+                                                            :output {:type :integer :minimum 1 :optional true}
+                                                            :tools {:type :boolean :optional true}
+                                                            :parallel {:type :boolean :optional true}
+                                                            :images {:type :boolean :optional true}
+                                                            :control {:type :string :optional true :choices ["reasoning" "reasoning_effort"]}
+                                                            :efforts {:type :array :items :string :optional true}
+                                                            :reasoning-required {:type :boolean :optional true}
+                                                            :output-field {:type :string :optional true
+                                                                           :choices ["max_tokens" "max_completion_tokens" "max_output_tokens" "none"]}}}}}}}
+   :chat {:type :string :optional true :visible true
           :option "chat" :autocomplete "chat" :description "Chat model"}
-   :rerank {:type :string :default "llama:rerank"
+   :rerank {:type :string :optional true
             :option "rerank" :autocomplete "rerank" :description "Rerank model"}
    :thinking {:type :string :default "default" :visible true
               :option "thinking" :description "Reasoning effort"

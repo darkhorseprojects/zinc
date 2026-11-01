@@ -115,7 +115,7 @@
                                [policy (string (json/encode ids))])))
   (when hit (record s view (hit :id) 0 bytes)))
 
-(defn- compress [s view policy children prepare bytes]
+(defn- compress [s view policy children bytes]
   (def ids (map |($ :id) children))
   (or (cached s view policy ids bytes)
       (let [repair (((store/query s "SELECT coalesce(max(id),0) id FROM events WHERE kind='artifact' AND json_type(data,'$.invalidates')='integer'") 0) :id)
@@ -123,18 +123,17 @@
                          {:first ((first children) :first) :last ((last children) :last)})
             job ((store/start s {:view scope :children ids :model ((s :config) :chat) :policy policy} (s :config) (merge scope {:depth (view :depth) :expires (view :expires) :agent (view :agent)}) nil
                               (string "summary:" (view :branch) ":" repair ":" policy ":" (json/encode ids))) :id)]
-        (if prepare (do ((dyn :zinc/spawn) s job) nil)
-          (or (record s view (((dyn :zinc/wait) s job) :node) 0 bytes) (error "summary unavailable at the current history cut"))))))
+        (or (record s view (((dyn :zinc/wait) s job) :node) 0 bytes) (error "summary unavailable at the current history cut")))))
 
-(defn context [s view limit evidence &opt prepare]
+(defn context [s view limit evidence]
   (def budget (if ((s :config) :memory-retrieval) (math/floor (/ limit 2)) limit))
   (def policy (string ((s :config) :summary-quota) ":" summary-prompt))
-  (def nodes @[]) (var cursor (- (view :first) 1)) (var pending false) (var cost 0) (var members 0)
-  (while (not pending)
+  (def nodes @[]) (var cursor (- (view :first) 1)) (var cost 0) (var members 0)
+  (while true
     (def page (store/visible s (merge view {:first (+ cursor 1) :memory true :columns "e.id"}) :oldest ((s :config) :history-records)))
     (when (= 0 (length page)) (break))
     (each item page
-      (when (and (not pending) (> (item :id) cursor))
+      (when (> (item :id) cursor)
         (var node nil)
         (def before members)
         (each cached (store/query s `SELECT id,json_extract(data,'$.count') count FROM events WHERE kind='summary' AND json_extract(data,'$.first')=?
@@ -144,7 +143,7 @@
         (set node (or node (record s view (item :id) 0 (* 4 budget))))
         (assert node "memory source unavailable")
         (array/push nodes node) (set cursor (node :last)) (+= members (node :count)) (+= cost (node :cost))
-        (while (and (not pending) (> cost budget))
+        (while (> cost budget)
           (var index nil) (var count 2)
           (for i 0 (length nodes)
             (when (and (nil? index) (< ((nodes i) :next) ((nodes i) :total))) (set index i) (set count 1)))
@@ -157,30 +156,26 @@
                         (= 0 (mod (sum (map |($ :count) (slice nodes 0 index))) (* count 2)))
                         (every? (map |(and (= 0 ($ :height)) (not= "summary" ($ :kind))) (slice nodes index (+ index (* count 2)))))) (*= count 2)))
           (def children (slice nodes index (+ index count)))
-          (def parent (compress s view policy children prepare (* 4 budget)))
-          (if parent
-            (do
-              (+= cost (- (parent :cost) (sum (map |($ :cost) children))))
-              (array/remove nodes index count) (array/insert nodes index parent))
-            (set pending true))))))
-  (unless pending
-    (var i (length nodes))
-    (while (> i 0)
-      (-- i)
-      (def children ((nodes i) :children))
-      (when children
-        (def expanded (map |(record s view $ 0 (* 4 budget)) children))
-        (when (every? expanded)
-          (def next-cost (+ cost (- (sum (map |($ :cost) expanded)) ((nodes i) :cost))))
-          (when (<= next-cost budget)
-            (set cost next-cost)
-            (array/remove nodes i) (array/insert nodes i ;expanded) (set i (+ i (length expanded)))))))
-    (def raw (map |($ :id) (filter |(not= "summary" ($ :kind)) nodes)))
-    (var used 0)
-    {:through (view :last) :nodes nodes :evidence (seq [row :in evidence :when (>= (row :score) ((s :config) :score)) :unless (index-of (row :id) raw)
-                                                        :let [rendered (render row) cost (store/estimate (json/encode rendered))]
-                                                        :when (<= (+ used cost) (- limit budget))]
-                                                    (do (+= used cost) (merge row {:rendered rendered :cost cost})))}))
+          (def parent (compress s view policy children (* 4 budget)))
+          (+= cost (- (parent :cost) (sum (map |($ :cost) children))))
+          (array/remove nodes index count) (array/insert nodes index parent)))))
+  (var i (length nodes))
+  (while (> i 0)
+    (-- i)
+    (def children ((nodes i) :children))
+    (when children
+      (def expanded (map |(record s view $ 0 (* 4 budget)) children))
+      (when (every? expanded)
+        (def next-cost (+ cost (- (sum (map |($ :cost) expanded)) ((nodes i) :cost))))
+        (when (<= next-cost budget)
+          (set cost next-cost)
+          (array/remove nodes i) (array/insert nodes i ;expanded) (set i (+ i (length expanded)))))))
+  (def raw (map |($ :id) (filter |(not= "summary" ($ :kind)) nodes)))
+  (var used 0)
+  {:through (view :last) :nodes nodes :evidence (seq [row :in evidence :when (>= (row :score) ((s :config) :score)) :unless (index-of (row :id) raw)
+                                                   :let [rendered (render row) cost (store/estimate (json/encode rendered))]
+                                                   :when (<= (+ used cost) (- limit budget))]
+                                               (do (+= used cost) (merge row {:rendered rendered :cost cost})))})
 
 (def expand
   "(memory/expand id &opt offset)\n\nRead a record page. offset defaults to 0 and must be a UTF-8 byte boundary. :next is the next byte offset; :total is byte length. :children lists summary source IDs."
