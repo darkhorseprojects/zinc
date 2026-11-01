@@ -16,7 +16,8 @@ without a result. Inspect before repeating.
 (def bindings
   (merge
     {"self" {:intrinsic true
-             :doc `(self request) runs an independent child and returns its committed outcome, raising on failure. Supply exactly one of :text or :code.
+             :doc `(self request) yields this fiber until an independent child commits, returning its outcome or raising on failure. Supply exactly one of :text or :code.
+Use native (ev/spawn (self request)) for background work or (ev/gather (self a) (self b)) to join parallel children. Call-owned fibers continue across tool rounds; completion waits for them.
 :text uses :agent when configured; :code uses the caller profile. Code returns evaluation text; text returns a map with :text.
 Children snapshot current live bindings; edits do not merge automatically. :revision selects a Git revision.
 :parent sets history attachment; :memory_range {:start id :end id} sets inclusive bounds. :parent 0 defaults to empty history, not an empty world.

@@ -355,7 +355,8 @@
   (def now (os/clock))
   (def recovery-query `SELECT c.*,min(coalesce(c.expires,1e999),coalesce(r.expires,1e999))<=? expired,
     EXISTS(SELECT 1 FROM events a WHERE a.id=json_extract(p.checkpoint,'$.request') AND a.kind='model-admission'
-      AND NOT EXISTS(SELECT 1 FROM events o WHERE o.parent=a.id AND o.kind='model-outcome')) pending_model
+      AND NOT EXISTS(SELECT 1 FROM events o WHERE o.parent=a.id AND o.kind='model-outcome')) pending_model,
+    json_extract(p.checkpoint,'$.runtime') native_runtime
     FROM main.call_controls c JOIN main.call_controls r ON r.id=coalesce(c.root,c.id)
     LEFT JOIN call_payloads p ON p.id=c.id
     WHERE (?=0 OR c.temporary=1) AND
@@ -366,7 +367,7 @@
       (each row (query s recovery-query recovery-parameters)
         (def expired (= 1 (row :expired)))
         (def unstarted (and expired (= 0 (row :attempt))))
-        (def retry (and (= 0 (row :temporary)) (not expired) (not= "code" (row :kind)) (> (row :retries) 0) (= 0 (row :pending_model))))
+        (def retry (and (= 0 (row :temporary)) (not expired) (not= "code" (row :kind)) (> (row :retries) 0) (= 0 (row :pending_model)) (not= 1 (row :native_runtime))))
         (def state (cond unstarted "cancelled" retry "queued" "uncertain"))
         (when (= 0 (row :temporary))
           (append s (view s (if (= "summarize" (row :kind)) (row :parent) (row :id))) "interruption"
@@ -389,7 +390,7 @@
                      [(value :request) (os/clock)]))
             (def row (first (query s "SELECT * FROM calls WHERE request_key IS NOT NULL AND (id=? OR request_key=?)" [(value :run) (value :request)])))
             (assert row "run unavailable")
-            (def completed (or (= "done" (row :state)) (first (query s "SELECT id FROM memory_records WHERE branch=? AND kind='completed'" [(row :id)]))))
+            (def completed (= "done" (row :state)))
             (unless completed
               (query s "UPDATE main.call_controls SET cancelled=1 WHERE id=?" [(row :id)])
               (def affected (query s `UPDATE main.call_controls SET state='cancelled' WHERE state IN ('queued','running','waiting','uncertain')

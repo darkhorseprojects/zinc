@@ -28,7 +28,7 @@
                                          (def message (schema/project original [:response] true))
                                          (if (indexed? (message :content))
                                            (merge message {:content (map |(if (= "image_url" ($ :type))
-                                                                            {:type "image_url" :image_url "[image bytes accounted separately]"} $) (message :content))})
+                                                                            {:type "image_url" :image_url "[image tokens are provider-dependent]"} $) (message :content))})
                                            message)) messages)))))
 
 (defn delta [previous value &opt field]
@@ -240,7 +240,7 @@
                                          (def event (store/append s (current :scope) "model-admission" (selected :reference)
                                                                   {:input (schema/project input [:messages :tools :query :documents :views] true)
                                                                    :request {:method "POST" :url (string (get-in config [:providers (keyword (selected :provider)) :url]) endpoint) :body wire}
-                                                                   :views (input :views) :estimate size :output maximum} nil (current :id)))
+                                                                   :views (input :views) :context (selected :context) :estimate size :output maximum} nil (current :id)))
                                          (store/checkpoint s (merge (current :checkpoint) {:request (event :id)})) (event :id)))
           (def value (request config selected endpoint wire s))
           (def result
@@ -312,8 +312,14 @@
   (if (> (length parts) 0) (string/join parts "\n\n")
     (if (> (length (get message :tool_calls [])) 0) "" "[empty model response]")))
 
-(defn images [s event text]
+(defn images [s events text budget]
   (def parts @[{:type "text" :text text}])
-  (each row (store/query s "SELECT mime,bytes FROM images WHERE event=? ORDER BY position" [event])
-    (array/push parts {:type "image_url" :image_url {:url (string "data:" (row :mime) ";base64," (base64/encode (string (row :bytes))))}}))
+  (each row (store/query s `SELECT event,position,mime,length(bytes) size,
+    CASE WHEN sum(length(bytes)) OVER (ORDER BY event DESC,position)<=? THEN bytes END bytes
+    FROM images WHERE event IN (SELECT value FROM json_each(?)) ORDER BY event DESC,position` [(budget 0) (string (json/encode events))])
+    (array/push parts {:type "text" :text (string "Image from #" (row :event) " · attachment " (+ 1 (row :position))
+                                               (unless (row :bytes) " · omitted: prompt image byte budget"))})
+    (when (row :bytes)
+      (put budget 0 (- (budget 0) (row :size)))
+      (array/push parts {:type "image_url" :image_url {:url (string "data:" (row :mime) ";base64," (base64/encode (string (row :bytes))))}})))
   parts)

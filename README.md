@@ -45,7 +45,7 @@ The authoritative current-world descriptor is in SQLite. Git stores pinned nativ
 binding images and saved commits; world/world.jimage is a checkpoint artifact.
 Successful definitions, vars, closures, mutations, aliases and cycles persist.
 Initializers and prints do not replay. Unsupported values fail snapshotting.
-A per-evaluation registry resolves the fresh authorized base and host callables;
+A call-owned evaluator resolves the authorized base and host callables;
 credentials, channels, invocation configuration and output buffers are not images.
 Format/runtime identity is checked before unmarshaling.
 
@@ -71,7 +71,7 @@ dirty status. Forms are serialized as Janet code, not reconstructed initializers
 they describe provenance, not current mutable values, and never replay.
 Images without recorded source require explicit, audited annotation from history;
 Zinc does not decompile native functions or invent definitions.
-Discard/switch end the current evaluation. Save/switch/discard require the durable
+Discard/switch require the foreground evaluation and end it. Save/switch/discard require the durable
 instance root; switch requires saved/discarded changes. Saving after a rewind forks
 Git history. Save intent is durable before Git ref mutation; recovery reconciles
 only that intent, never arbitrary code or external effects. Use ordinary Git for
@@ -79,8 +79,16 @@ pushing and explicit merges, not automatic binary-image merging.
 
 Self takes exactly one of text/code. Code returns evaluation text; text returns a
 map with text. Text uses the configured agent profile; profiles share store/world
-identity. Self snapshots live bindings before forking. Native `ev/gather` and model
-multi-tool calls retain concurrent execution. Join local fibers that matter.
+identity. Self snapshots live bindings before forking and yields only the calling fiber.
+Use `(ev/spawn (self request))` for background work and `ev/gather` to join parallel calls.
+One evaluator stays alive across tool rounds. Native fibers continue while inference runs;
+an answer may render before they finish, but execution and request authority remain open
+until they settle. Uncaught background errors fail the call. Failed evaluations cancel
+that evaluator and its fibers; the next tool loads the last published image. Background
+mutations publish at the next successful snapshot or settlement. Runtime
+fibers/channels are not restartable world state. Lost evaluator leases are uncertain,
+not automatically replayed. Abort remains effective after an answer until execution settles.
+Model multi-tool calls still fork worlds.
 Parent and memory_range bound history, not world state. Parent 0 defaults to empty
 history. Revoked grants or changed import/setup declarations prevent saved execution.
 
@@ -137,6 +145,7 @@ Compaction is demand-driven; completing an inquiry does not schedule speculative
 Memory covers remain stable across tool rounds until context pressure requires compaction.
 Stable instructions and memory precede changing world state, and prompt JSON uses deterministic key ordering.
 Usage remains separate from ceil(bytes/4) estimates, with reported replayed reasoning tokens accounted separately.
+Image token costs are provider-dependent and are not estimated from Base64 length.
 
 Provider names are arbitrary configuration keys. Providers select a protocol (chat-completions or responses),
 URL, chat-path/rerank-path, optional catalogue paths by role, and an optional properties path with an escaped
@@ -175,9 +184,14 @@ An unfinished admitted inference is uncertain and is never automatically resubmi
 Completed outcomes are reused. Endpoints configured with output-field: none cannot enforce output-token limits;
 deadlines, byte limits and bounded-summary validation do not refund provider usage.
 
-Views returns recorded memory windows with readable record headings, counts and a
-retrieval-candidate table; render returns the exact model request,
-without inference or recomputation. Submitted source remains inspectable history,
+Views and render share one recorded-prompt projection for Chat Completions and Responses.
+Views includes chronological/retrieved windows, a token-estimate composition bar and
+retrieval candidates. `views` with `mode: summaries` shows used summaries and their source
+trees, ranges, depths and invalidations. Render includes readable messages and the exact
+wire request without inference or regenerating historical context. Images from selected
+original records share the prompt image byte budget; the inquiry takes priority and omitted
+attachments are labeled. Readable exports identify image/encrypted payloads without copying
+them; exact request exports retain their bytes. Capacity is shown only when recorded. Submitted source remains inspectable history,
 not executable persistence. Visible reasoning, SSE streaming and parallel tools
 remain. Streaming previews store deltas separately from execution checkpoints;
 observers fold only new deltas and skip unchanged previews. Binding source metadata is

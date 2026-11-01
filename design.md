@@ -52,7 +52,12 @@ object for continuing deterministic random state.
 Direct user code and tool code use identical publication rules and language
 bindings. Named filesystem, HTTP, process and trusted module grants are checked by
 the host on every invocation. Native syntax is not unrestricted host authority.
-Use `self` for independent child work. Children share budgets and deadlines.
+Use `self` for independent child work. It yields the calling fiber; native `ev/spawn`
+and `ev/gather` provide background and joined concurrency. A call owns one evaluator
+across tool rounds, and settles its native fibers before closing request authority.
+An answer can render while background work continues. Failed evaluations cancel
+that runtime; subsequent code loads the last publication. Active fibers/channels
+are runtime state, not restartable images. Children share budgets and deadlines.
 Waiting releases execution capacity, not world ownership. Runtime `repl` settings
 select bindings and explicit `repl.imports`; a separate flat host catalogue defines operations and
 resource permissions. Schema `visible`/`public` annotations expose only selected
@@ -89,8 +94,11 @@ provider usage may already have occurred. Compaction runs only when context requ
 Stable instructions and memory precede changing world state. Responses replay retains encrypted reasoning and native
 items for the same model while all context selection and tool execution remain local. Inspect original outcomes before
 repeating uncertain work. `memory/expand` exposes bounded original records.
-The `views` entry reports chronological and semantic windows; `render` returns the
-exact recorded model request. Source submissions remain in event history, not in
+The `views` and `render` entries use one recorded-prompt projection across protocols.
+Views reports chronological and semantic windows and a composition bar; its summaries
+mode shows used source trees, ranges, depths and invalidations. Render includes readable
+messages and the exact recorded request. Selected original images share a bounded
+prompt image budget, with current inquiry images first and omissions labeled. Source submissions remain in event history, not in
 executable persistence. Historical images do not grant historical authority.
 
 ## Janet documentation

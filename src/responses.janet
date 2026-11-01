@@ -38,6 +38,23 @@
     (put result :reasoning (merge {:summary "auto"} (get result :reasoning {}))))
   result)
 
+(defn decode [body]
+  (array/concat @[{:role "system" :content (body :instructions)}]
+    (map (fn [item]
+           {:role (get item :role (item :type))
+            :content (case (item :type)
+                       "function_call" (item :arguments)
+                       "function_call_output" (item :output)
+                       "reasoning" (map |{:type "text" :text ($ :text)} (get item :summary []))
+                       (let [content (item :content)]
+                         (if (string? content) content
+                           (map |(case ($ :type)
+                                   "input_text" {:type "text" :text ($ :text)}
+                                   "output_text" {:type "text" :text ($ :text)}
+                                   "input_image" {:type "image_url" :image_url {:url ($ :image_url) :detail ($ :detail)}}
+                                   "refusal" {:type "text" :text ($ :refusal)} $) content))))
+            :metadata (schema/project item [:role :content :arguments :output :summary] true)}) (body :input))))
+
 (defn message [response reference]
   (assert (indexed? (response :output)) "invalid Responses output")
   (def text @[]) (def refusal @[]) (def reasoning @[]) (def calls @[])
