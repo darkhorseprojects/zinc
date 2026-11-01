@@ -16,9 +16,9 @@ their creator owns joining accepted work and removing the directory. This is not
 ## Worlds
 
 The instance head is the latest successfully published durable root image. A call
-has its own branch head. Parallel children fork one snapshot and never merge
-implicitly. Explicit revisions stay pinned. Ordinary queued roots refresh from the
-instance head when execution starts. One durable root owns the world at a time,
+has its own branch head. Model tools share one world within a batch; explicit
+self children fork snapshots and never merge implicitly. Explicit revisions stay
+pinned. Ordinary queued roots refresh from the instance head when execution starts. One durable root owns the world at a time,
 including while waiting for children.
 
 Janet binding graphs, including vars, functions, macros, closure state, mutations,
@@ -27,9 +27,12 @@ The authorized evaluator base is rebuilt and resolved through an image registry;
 credentials, channels, I/O and invocation configuration are not world state.
 Unsupported values fail snapshotting. Images require a matching format and runtime.
 
-A working candidate remains private until evaluation succeeds. Failure discards
-only that candidate. Cancellation retains earlier publications. Neither rolls back
-external effects. A save is an explicit Git checkpoint, not a prerequisite for
+A batch candidate remains private until all scripts and their native descendants
+settle successfully. The executor publishes its image and tool results in one
+transaction. A script failure cancels the batch and discards only that candidate.
+Direct code is a batch of one. Shared mutable writes are not isolated transactions;
+order dependent work explicitly. Cancellation retains earlier publications. Neither
+rolls back external effects. A save is an explicit Git checkpoint, not a prerequisite for
 retaining successful work. SQLite's descriptor is authoritative; Git holds pinned
 immutable image blobs. The worktree image is a checkpoint artifact, not another head.
 
@@ -37,8 +40,10 @@ immutable image blobs. The worktree image is a checkpoint artifact, not another 
 checkpoint and dirty status. Source is provenance, never executable persistence;
 initializers do not replay. Images without
 recorded source require explicit annotation, not decompilation or guessed code.
-`world/save` commits. `world/discard` and `world/switch` replace the environment and
-end the evaluation. `world/remove` deletes a binding; assigning nil does not.
+`world/save` commits. Save, discard and switch require an exclusive single-script
+batch with no background fibers. `world/discard` and `world/switch` replace the
+environment and end the evaluation. `world/remove` deletes a binding; assigning nil
+does not.
 The external world entry uses the same operations as evaluated Janet.
 
 `world-bytes` limits serialized state, not heap memory. Use OS confinement for
@@ -53,15 +58,20 @@ Direct user code and tool code use identical publication rules and language
 bindings. Named filesystem, HTTP, process and trusted module grants are checked by
 the host on every invocation. Native syntax is not unrestricted host authority.
 Use `self` for independent child work. It yields the calling fiber; native `ev/spawn`
-and `ev/gather` provide background and joined concurrency. A call owns one evaluator
-across tool rounds, and settles its native fibers before closing request authority.
-An answer can render while background work continues. Failed evaluations cancel
-that runtime; subsequent code loads the last publication. Active fibers/channels
-are runtime state, not restartable images. Children share budgets and deadlines.
+and `ev/gather` provide background and joined concurrency within a batch. Each
+script runs in a native fiber in the shared evaluator; yielding host calls allow
+other scripts to proceed. Native descendants settle before snapshotting and do not
+survive model rounds. Output and host-operation admissions retain their originating
+script coordinates. Subsequent batches load the last publication without replaying
+initializers. Fibers/channels are runtime state, not restartable images. Self
+children commit independently; caller failure does not undo their publications.
+Children share budgets and deadlines. The parallel setting limits independent
+calls rather than shared-world fibers.
 Waiting releases execution capacity, not world ownership. Runtime `repl` settings
 select bindings and explicit `repl.imports`; a separate flat host catalogue defines operations and
 resource permissions. Schema `visible`/`public` annotations expose only selected
-settings and granted resource metadata.
+settings and granted resource metadata. Trusted setup runs once per script and
+must provide independent mutable parsers.
 
 Configured peer aliases are callable bindings, for example `(research request)`.
 They invoke the target's public self entry under the target's own configuration,
@@ -85,9 +95,13 @@ conversation. Explicitly created messages have separate provenance. Application 
 is the only presentation input; import calls carry arguments and operation coordinates,
 never presentation frames or scope identities.
 
-Durable observation can detach without cancelling execution. Resume uses the same
-request ID and delivery receipts; it does not replay completed code. Temporary
-payloads cannot reattach. Explicit abort cancels linked work, not unrelated agents.
+Observation reads committed events and waits; it never recovers, claims, launches,
+executes or changes execution deadlines. An expired lease is reported for inspection,
+not recovered by the observer. Execution owns publication and completion. Observation
+or presentation failure after an invocation attempt detaches without revoking request
+authority or implicitly aborting work. Reattachment uses the same request ID and
+delivery receipts without replaying completed code. Temporary payloads cannot
+reattach. Explicit abort cancels linked work, not unrelated agents.
 
 Admissions prove acceptance, not execution. An admitted inference without an outcome is never automatically resubmitted;
 provider usage may already have occurred. Compaction runs only when context requires it, not speculatively after answers.

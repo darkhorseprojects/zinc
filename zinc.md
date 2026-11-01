@@ -17,7 +17,7 @@ without a result. Inspect before repeating.
   (merge
     {"self" {:intrinsic true
              :doc `(self request) yields this fiber until an independent child commits, returning its outcome or raising on failure. Supply exactly one of :text or :code.
-Use native (ev/spawn (self request)) for background work or (ev/gather (self a) (self b)) to join parallel children. Call-owned fibers continue across tool rounds; completion waits for them.
+Use native (ev/spawn (self request)) for background work within a batch or (ev/gather (self a) (self b)) to join parallel children. All native fibers settle before the batch returns; none continue across tool rounds.
 :text uses :agent when configured; :code uses the caller profile. Code returns evaluation text; text returns a map with :text.
 Children snapshot current live bindings; edits do not merge automatically. :revision selects a Git revision.
 :parent sets history attachment; :memory_range {:start id :end id} sets inclusive bounds. :parent 0 defaults to empty history, not an empty world.
@@ -32,9 +32,9 @@ Children share the root deadline and budgets. Waiting releases a slot. Workers p
      "process/run" {:resource :processes :doc "(process/run name) runs fixed argv/env with empty stdin; returns {:exit :output}."}}
     (tabseq [[action help] :pairs
              {"view" "(world/view &opt point) returns image identity, checkpoint, dirty status and Janet definition forms for live bindings; source is provenance, never replayed state."
-              "save" "(world/save message) saves the current bindings to Git. Durable root only."
-              "discard" "(world/discard) restores the saved checkpoint and ends this evaluation. Durable root only."
-              "switch" "(world/switch commit) selects a revision and ends this evaluation. Save or discard first."
+              "save" "(world/save message) saves the current bindings to Git. Durable root and exclusive single-script batch without background fibers only."
+              "discard" "(world/discard) restores the saved checkpoint and ends this evaluation. Durable root and exclusive single-script batch without background fibers only."
+              "switch" "(world/switch commit) selects a revision and ends this evaluation. Save or discard first. Durable root and exclusive single-script batch without background fibers only."
               "remove" "(world/remove name) deletes a local binding, unlike setting its value to nil."}]
       (string "world/" action) {:doc help})))
 

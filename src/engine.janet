@@ -72,7 +72,7 @@
                              "launch-uncertain" "Call acceptance could not be confirmed." {:error err} nil id))))
     id)
 
-  (defn wait [s id &opt here]
+  (defn wait [s id &opt mode]
     (def current (dyn :zinc/call))
     (when current
       (when (= 0 (get current :waiters 0)) (store/park s true))
@@ -90,21 +90,33 @@
           (unless (= :dead (fiber/status worker)) (propagate (fiber/last-value worker) worker))
           (fiber/last-value worker))
         (label done (while true
-                      (store/recover s (and (dictionary? id) (not (id :root))))
+                      (unless (= mode :observe) (store/recover s (and (dictionary? id) (not (id :root)))))
                       (when current (store/checkpoint s))
                       (if (dictionary? id)
                         (let [root (id :root)
-                              pending (store/query s `SELECT c.id,c.state,c.owner,c.lease_expires,p.run FROM main.call_controls c
-                                LEFT JOIN call_payloads p ON p.id=c.id
+                              pending (store/query s `SELECT c.id,c.state,c.owner,c.lease_expires,p.run,
+                                min(coalesce(c.expires,1e999),coalesce(r.expires,1e999)) expires FROM main.call_controls c
+                                JOIN main.call_controls r ON r.id=coalesce(c.root,c.id) LEFT JOIN call_payloads p ON p.id=c.id
                                 WHERE (? IS NULL OR c.root=? AND c.kind<>'summarize')
                                 AND (c.state IN ('queued','running','waiting') OR (? IS NULL AND (c.state='uncertain' OR c.owner IS NOT NULL))) ORDER BY c.id` [root root root])]
                           (unless root
                             (each row pending (assert (and (not= "uncertain" (row :state))
                               (or (nil? (row :owner)) (> (row :lease_expires) (os/clock)))) "instance has unsettled effects; preserve it for inspection")))
                           (when (= 0 (length pending)) (return done {:settled true}))
-                          (each row pending (when (and (= "queued" (row :state)) (or (nil? (id :run)) (= (id :run) (row :run)))) (launch s (row :id)))))
-                        (let [row (first (store/query s "SELECT state,kind FROM main.call_controls WHERE id=?" [id]))]
+                          (each row pending
+                            (if (= mode :observe)
+                              (assert (and (> (row :expires) (os/clock))
+                                           (or (= "queued" (row :state)) (> (row :lease_expires) (os/clock))))
+                                      "executor lease or deadline expired; inspect before resuming")
+                              (when (and (= "queued" (row :state)) (or (nil? (id :run)) (= (id :run) (row :run)))) (launch s (row :id))))))
+                        (let [row (first (store/query s `SELECT c.state,c.kind,c.lease_expires,
+                                min(coalesce(c.expires,1e999),coalesce(r.expires,1e999)) expires FROM main.call_controls c
+                                JOIN main.call_controls r ON r.id=coalesce(c.root,c.id) WHERE c.id=?` [id]))]
                           (assert row "call unavailable")
+                          (when (and (= mode :observe) (index-of (row :state) ["queued" "running" "waiting"]))
+                            (assert (and (> (row :expires) (os/clock))
+                                         (or (= "queued" (row :state)) (> (row :lease_expires) (os/clock))))
+                                    "executor lease or deadline expired; inspect before resuming"))
                           (case (row :state)
                             "done" (return done (if (= "text" (row :kind))
                               {:text (((store/query s "SELECT text FROM memory_records WHERE branch=? AND kind='completed'" [id]) 0) :text)}
@@ -112,7 +124,7 @@
                             "failed" (error ((json/decode ((first (store/query s "SELECT data FROM events WHERE call=? AND kind='call-result' ORDER BY id DESC LIMIT 1" [id])) :data) true true) :error))
                             "uncertain" (error (string "Call #" id ": uncertain effects; inspect receipts, do not replay."))
                             "cancelled" (error "call cancelled")
-                            "queued" (launch s id here))))
+                            "queued" (unless (= mode :observe) (launch s id (= mode :inline))))))
                       (ev/sleep store/interval))))))
 
   (defn start-child [s view value &opt snapshot]
@@ -152,21 +164,23 @@
         (put ((dyn :zinc/call) :children) request [collector done])
         {:temporary request})))
 
-  (defn run-code [s view bindings code]
+  (defn run-code [s view bindings scripts]
     (def config (s :config))
     (assert (config :repl) "Janet execution is not permitted")
-    (assert (<= (length code) (config :source-bytes)) "tool source byte ceiling")
+    (each script scripts (assert (<= (length (script :code)) (config :source-bytes)) "tool source byte ceiling"))
     (store/checkpoint s)
     (def current (dyn :zinc/call))
     (os/cd (path/dirname (config :world)))
     (def origin (repl/image config (store/origin s (current :id))))
     (put current :candidate nil)
     (def public (repl/public config (spec :schema) bindings))
-    (unless (current :runtime)
-      (store/checkpoint s (merge (current :checkpoint) {:runtime true}))
-      (put current :runtime (repl/open (store/git (origin :root) ["cat-file" "blob" (origin :blob)]) (current :input) (repl/instructions config (spec :document) bindings public) public
+    (store/checkpoint s (merge (current :checkpoint) {:runtime true}))
+    (def outcome (repl/run (store/git (origin :root) ["cat-file" "blob" (origin :blob)]) (current :input) (repl/instructions config (spec :document) bindings public) public
                   (tabseq [[name binding] :in (pairs bindings)] name (if (binding :local) binding {:doc (binding :doc)}))
-                  {:world (config :world-bytes) :output (config :response-bytes)} (config :repl)
+                  {:world (config :world-bytes) :output (config :response-bytes)} (config :repl) scripts
+                  (let [run (if (view :expires) (max 0.001 (- (view :expires) (os/clock))) math/inf)
+                        seconds (min (if (= 0 (config :seconds)) math/inf (config :seconds)) run)]
+                    (if (= seconds math/inf) 0 seconds))
                   (fn [name args snapshot]
                     (store/checkpoint s)
                     (def view (store/view s (current :id)))
@@ -175,7 +189,7 @@
                     (def origin (when snapshot (store/image s (store/origin s (current :id)) (snapshot :image))))
                     (when (get binding :intrinsic) (assert (= 1 (length args)) "invalid intrinsic arity"))
                     (let [admission (store/transact s (store/charge s 1 0)
-                                                      (store/append s view "call-admission" name {:arguments args} nil ((dyn :zinc/call) :id)))]
+                                                      (store/append s view "call-admission" name {:arguments args} (dyn :zinc/effect) ((dyn :zinc/call) :id)))]
                         (def args (schema/data args))
                         (def value
                           (cond
@@ -248,20 +262,10 @@
                               (apply (binding :value) args))))
                         (store/transact s (store/checkpoint s)
                                         (store/append s view "operation-outcome" name {:value value} (admission :id) ((dyn :zinc/call) :id)))
-                        (schema/data value))))))
-    (def runtime (current :runtime))
-    (def outcome (try
-      (repl/execute runtime code
-        (let [run (if (view :expires) (max 0.001 (- (view :expires) (os/clock))) math/inf)
-              seconds (min (if (= 0 (config :seconds)) math/inf (config :seconds)) run)]
-          (if (= seconds math/inf) 0 seconds)))
-      ([err] (put current :runtime nil) (repl/close runtime true) (error err))))
-    (when (outcome :replacement)
-      (put current :runtime nil)
-      (repl/close runtime true))
+                        (schema/data value)))))
     (put current :candidate (or (outcome :replacement)
                                (store/image s (store/origin s (current :id)) (outcome :image))))
-    (outcome :value))
+    (outcome :values))
 
   (defn infer [s call bindings]
     (def id (call :id))
@@ -319,29 +323,34 @@
       (def pending (get-in (dyn :zinc/call) [:checkpoint :request]))
       (def response (model/call s {:turn true :model (config :chat) :messages messages :views views :tools (when (> (length tools) 0) tools)}
                                 (when (and pending (not (first (store/query s "SELECT id FROM events WHERE parent=? AND kind='model-outcome'" [pending])))) pending) selected))
-      (def parallel (> (length (response :tools)) 1))
-      (def fork (store/view s id))
-      (def origin (when parallel (repl/image config (store/origin s id))))
-      (def work (seq [tool :in (response :tools)]
-                  (def admission (store/transact s (store/checkpoint s) (store/charge s 1 (if (or parallel (tool :error)) 0 (store/estimate (tool :code))))
-                                                 (store/append s view (if (or parallel (tool :error)) "call-admission" "code-admission") (cond (tool :error) "run_janet" parallel "self" (tool :code))
-                                                               {:tool-id (tool :id) :response (response :event)} nil id)))
-                  [tool admission (if (tool :error) tool (when parallel (try (with-dyns [:zinc/effect (admission :id)] (start-child s fork {:code (tool :code)} origin)) ([err fiber] {:error (wire/diagnostic "ToolFailed" err fiber)}))))]))
-      (each [_ _ handle] work (when-let [job (get handle :job)] (launch s job)))
-      (each [tool admission handle] work
-        (def outcome (try
-                       {:ok true :text (if (get handle :error) (error (get handle :error)) (if parallel
-                                                                                             (wait s (or (handle :temporary) (handle :job)))
-                                                                                             (run-code s view bindings (tool :code))))}
-                       ([err fiber]
-                         (put (dyn :zinc/call) :candidate nil)
-                         (def failure (wire/diagnostic "ToolFailed" err fiber))
-                         {:ok false :text (string (failure :code) ": " (failure :message)) :error failure})))
-        (store/transact s (store/checkpoint s)
-                        (store/charge s 0 (store/estimate (outcome :text)))
-                        (when (and (not parallel) (outcome :ok)) (store/publish s ((dyn :zinc/call) :candidate)))
-                        (store/append s view "tool-result" (outcome :text)
-                                      (merge outcome {:text nil :tool-id (tool :id) :response (response :event) :child (get handle :branch) :display (or (not parallel) (has-key? handle :error))}) (admission :id) id))
+      (def work (store/transact s
+                  (store/checkpoint s)
+                  (seq [tool :in (response :tools)]
+                    (store/charge s 1 (if (tool :error) 0 (store/estimate (tool :code))))
+                    [tool (store/append s view (if (tool :error) "call-admission" "code-admission")
+                                        (if (tool :error) "run_janet" (tool :code))
+                                        {:tool-id (tool :id) :response (response :event)} nil id)])))
+      (def scripts (seq [[tool admission] :in work :unless (tool :error)] {:code (tool :code) :event (admission :id)}))
+      (def batch (try {:values (if (= 0 (length scripts)) [] (run-code s view bindings scripts))}
+                     ([err fiber]
+                       (put (dyn :zinc/call) :candidate nil)
+                       {:error (wire/diagnostic "ToolBatchFailed" err fiber)})))
+      (var index 0)
+      (def outcomes (seq [[tool admission] :in work]
+                      (def failure (or (tool :error) (batch :error)))
+                      (def outcome (if failure
+                                     {:ok false :text (string (failure :code) ": " (failure :message)) :error failure}
+                                     {:ok true :text ((batch :values) index)}))
+                      (unless (tool :error) (++ index))
+                      [tool admission outcome]))
+      (store/transact s
+        (store/checkpoint s)
+        (when (and (> (length scripts) 0) (not (batch :error))) (store/publish s ((dyn :zinc/call) :candidate)))
+        (each [tool admission outcome] outcomes
+          (store/charge s 0 (store/estimate (outcome :text)))
+          (store/append s view "tool-result" (outcome :text)
+                        (merge outcome {:text nil :tool-id (tool :id) :response (response :event) :display true}) (admission :id) id)))
+      (each [tool admission outcome] outcomes
         (unless (outcome :ok)
           (eprint (json/encode (merge (outcome :error) {:context (merge (or (get-in outcome [:error :context]) {}) {:tool-call {:branch id :tool (tool :id) :event (admission :id)}})}))))))
     {:completion ((first (store/query s "SELECT id FROM memory_records WHERE branch=? AND kind='completed'" [id])) :id)})
@@ -368,24 +377,13 @@
                   watcher (ev/go (fn [] (try (while true (store/checkpoint s) (ev/sleep store/interval))
                                             ([err] (unless (= err :finished) (ev/cancel owner err))))))]
               (defer (ev/cancel watcher :finished)
-                (def current (dyn :zinc/call))
-                (defer (when-let [runtime (current :runtime)]
-                         (put current :runtime nil)
-                         (repl/close runtime true))
-                  (def value (case (row :kind) "text" (infer s row bindings)
-                              "code" (run-code s view bindings (input :code)) "summarize" (memory/summarize s row input)))
-                  (when-let [runtime (current :runtime)]
-                    (put current :runtime nil)
-                    (def outcome (repl/close runtime))
-                    (put current :candidate (store/image s (store/origin s id) (outcome :image)))
-                    (when (> (length (outcome :value)) 0)
-                      (store/charge s 0 (store/estimate (outcome :value)))
-                      (store/append s (store/view s id) "artifact" (outcome :value) {:display true :source "background"} nil id))
-                    (when (= "text" (row :kind)) (store/publish s (current :candidate))))
-                  (each child (store/query s "SELECT id FROM main.call_controls WHERE parent=? AND temporary=0 AND kind<>'summarize' AND state IN ('queued','running','waiting','uncertain') ORDER BY id" [id])
-                    (wait s (child :id)))
-                  (when (= "code" (row :kind)) (store/charge s 0 (store/estimate (json/encode value))))
-                  [value nil])))
+                (def value (case (row :kind) "text" (infer s row bindings)
+                            "code" (first (run-code s view bindings [{:code (input :code) :event (row :admission)}]))
+                            "summarize" (memory/summarize s row input)))
+                (each child (store/query s "SELECT id FROM main.call_controls WHERE parent=? AND temporary=0 AND kind<>'summarize' AND state IN ('queued','running','waiting','uncertain') ORDER BY id" [id])
+                  (wait s (child :id)))
+                (when (= "code" (row :kind)) (store/charge s 0 (store/estimate (json/encode value))))
+                [value nil]))
             ([err fiber]
               (def tokens (keep |(when ($ :token-env) (os/getenv ($ :token-env))) (values (config :providers))))
               [nil {:error (postwalk (fn [value]
@@ -437,11 +435,11 @@
       (assert (= 0 (existing :cancelled)) "saved call unavailable")
       (put s :config (schema/authorize (spec :schema) (s :config) (json/decode (existing :config) true true)))
       (put s :budget-root (or (existing :root) (existing :id)))
-      (when (> ((s :config) :run-seconds) 0)
+      (when (and (not= operation "observe") (> ((s :config) :run-seconds) 0))
         (store/query s "UPDATE main.call_controls SET expires=min(coalesce(expires,1e999),(SELECT created FROM events WHERE call=call_controls.id AND kind='user')+?) WHERE id=?"
                      [((s :config) :run-seconds) (existing :run)])))
     (with-dyns [:zinc/wait wait :zinc/execute execute :zinc/config (s :config)]
-      (store/recover s)
+      (unless (= operation "observe") (store/recover s))
       (if (= operation "task")
         (do (assert (= (value :owner) (existing :owner)) "call ownership changed") (execute s existing) {:task (value :task)})
         (do
@@ -469,8 +467,8 @@
                                        ([err] (eprint (json/encode {:code "ObservationFailed" :message (string err)})))))))
           (defer (do (ev/cancel emitter "observer detached") (drain s (call :run) sequence previews))
             (var failure nil)
-            (def output (try (do (when claimed (execute s claimed)) (wait s id true)) ([err] (set failure err))))
-            (wait s {:root (or (call :root) id) :run (call :run)})
+            (def output (try (do (when claimed (execute s claimed)) (wait s id (if (= operation "observe") :observe :inline))) ([err] (set failure err))))
+            (wait s {:root (or (call :root) id) :run (call :run)} (when (= operation "observe") :observe))
             (if failure (error failure) output))))))
 
   (defn describe [config]
@@ -505,15 +503,15 @@
                   (with-dyns [:zinc/config config]
                     (def root (path/dirname (config :world)))
                     (store/git root ["init" "--quiet"])
-                    (def runtime (repl/open nil {} "" {:settings {} :resources {}} {} {:world (config :world-bytes) :output (config :response-bytes)} {} (fn [&] (error "initialization cannot invoke host functions"))))
-                    (def initial (defer (repl/close runtime true) (repl/execute runtime "" (config :seconds))))
+                    (def initial (repl/run nil {} "" {:settings {} :resources {}} {} {:world (config :world-bytes) :output (config :response-bytes)} {} [{:code ""}] (config :seconds)
+                                          (fn [&] (error "initialization cannot invoke host functions"))))
                     (spit (config :world) (initial :image) :wb)
                     (store/git root ["add" "--" (path/basename (config :world))])
                     (store/git root ["commit" "--quiet" "-m" "Initialize world image"])))
                 (def s (unless (index-of operation ["describe" "instructions" "models"]) (store/open config (and (= operation "self") (= false (get value :persist true))))))
                 (defer (when s (store/close s))
                   (with-dyns [:zinc/config config]
-                    (when (and s (index-of operation ["self" "task" "resume" "observe" "world" "init"]) (= "{}" (((store/query s "SELECT origin FROM main.world WHERE id=1") 0) :origin)))
+                    (when (and s (index-of operation ["self" "task" "resume" "world" "init"]) (= "{}" (((store/query s "SELECT origin FROM main.world WHERE id=1") 0) :origin)))
                       (def origin (repl/image config))
                       (store/query s "UPDATE main.world SET origin=? WHERE id=1 AND origin='{}'" [(string (json/encode origin))]))
                     (def output (cond

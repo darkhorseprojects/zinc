@@ -17,21 +17,22 @@
        :ref (if (and ref (string/has-prefix? "refs/heads/" (string/trim ref))) (string/trim ref) "HEAD")})))
   origin)
 
-(defn- evaluate [[bytes input document public bindings commands events limits config]]
+(defn- evaluate [[bytes input document public bindings scripts events stop limits config seconds]]
   (math/seedrandom (os/cryptorand 32))
   (def native (make-env))
-  (def output @"")
+  (def outputs (map (fn [_] @"") scripts))
+  (var output-size 0)
   (def emit (fn [bytes]
-              (assert (<= (+ (length output) (length bytes)) (limits :output)) "execution output byte ceiling")
-              (buffer/push-string output bytes)))
+              (+= output-size (length bytes))
+              (assert (<= output-size (limits :output)) "execution output byte ceiling")
+              (buffer/push-string (outputs ((fiber/getenv (fiber/root)) :zinc/script)) bytes)))
   (def base @{:out emit :err emit})
   (def reverse (merge make-image-dict {emit 'zinc/output}))
   (def forward (merge load-image-dict {'zinc/output emit}))
   (var env nil) (var primary nil)
   (def sources @{})
   (def known @{})
-  (var form nil)
-  (defn capture []
+  (defn capture [&opt form]
     (each name (all-bindings env true)
       (def binding (env name))
       (when (and form (not= binding (known name))) (put sources name (string/format "%j" form)))
@@ -44,8 +45,12 @@
     (assert (<= (length image) (limits :world)) "world image byte ceiling")
     {:image image})
   (defn request [name args]
+    (def index ((fiber/getenv (fiber/root)) :zinc/script))
+    (when (index-of name ["save" "world/save" "world/discard" "world/switch"])
+      (assert (and (= 1 (length scripts)) (= (fiber/root) primary) (= 2 (length (ev/all-tasks))))
+              "world checkpoint or replacement requires an exclusive script"))
     (def reply (ev/thread-chan 1))
-    (ev/give events [:call name args (when (index-of name ["self" "save" "world/save" "world/view"]) (snapshot)) reply])
+    (ev/give events [index name args (when (index-of name ["self" "save" "world/save" "world/view"]) (snapshot)) reply])
     (def outcome (ev/take reply))
     (assert (and outcome (outcome :ok)) (get outcome :error "Execution closed"))
     (outcome :value))
@@ -62,7 +67,6 @@
   (each name ["world/discard" "world/switch"]
     (when (bindings name)
       (put base (symbol name) @{:doc ((bindings name) :doc) :value (fn [& args]
-                               (assert (= (fiber/root) primary) "world replacement requires the foreground evaluation")
                                (return :zinc/replace (request name args)))})))
   (put reverse base 'zinc/base) (put forward 'zinc/base base)
   (loop [[name binding] :pairs base :when (symbol? name)]
@@ -77,8 +81,10 @@
   (set env (if loaded (unmarshal (loaded 5) forward) (make-env base)))
   (assert (and (table? env) (= base (table/getproto env))) "invalid world environment")
   (when loaded (each binding (loaded 4) (put sources (symbol (binding :name)) (binding :source))))
-  (def options (if (config :setup) ((module/value (require (config :setup)) 'configure) env) {}))
-  (each key (keys options) (assert (index-of key [:parser :read :expander]) "unsupported evaluator option"))
+  (def options (map (fn [_]
+                     (def options (if (config :setup) ((module/value (require (config :setup)) 'configure) env) {}))
+                     (each key (keys options) (assert (index-of key [:parser :read :expander]) "unsupported evaluator option"))
+                     options) scripts))
   (def documentation @{'document @{:value design}})
   (table/clear module/cache)
   (put module/cache "zinc/design" documentation)
@@ -88,97 +94,72 @@
   (merge-into known env)
   (def driver (fiber/root))
   (def supervised (ev/chan 1))
-  (var closing false) (var cancelled false)
+  (def results (map (fn [_] nil) scripts))
+  (var replacement nil)
   (sandbox :fs :net :subprocess :ffi :modules :threads :env :asm :unmarshal :exit :locale :signal :chroot :sandbox)
   (defer (do (each task (ev/all-tasks) (unless (= task driver) (ev/cancel task :evaluation-ended)))
+             (while (or (> (length (ev/all-tasks)) 1) (> (ev/count supervised) 0)) (ev/take supervised))
              (ev/chan-close supervised))
-    (label settled (while true
-      (when (and closing (= 1 (length (ev/all-tasks))) (= 0 (ev/count supervised)))
-        (return settled (if cancelled {:ok true} (merge {:ok true :value (string output)} (snapshot)))))
-      (def [status channel packet] (if cancelled [:take supervised (ev/take supervised)] (ev/select commands supervised)))
-      (if (= channel commands)
-        (let [[code seconds] packet]
-          (if (or (= status :close) (nil? code))
-            (do (set closing true) (set cancelled (or (= status :close) seconds))
-              (when cancelled (each task (ev/all-tasks) (unless (= task driver) (ev/cancel task :evaluation-ended)))))
-            (do
-              (set primary (ev/go (fn []
-                (def outcome (with-env env
-                  (try
-                    (let [replacement (prompt :zinc/replace
-                      (var value nil) (var chunk code)
-                      (put env :exit nil)
-                      (when (options :parser) (:flush (options :parser)))
-                      (run-context (merge options
-                        {:env env :source :world
-                         :chunks (fn [buffer &] (when chunk (buffer/push-string buffer chunk) (set chunk nil)))
-                         :on-status (fn [fiber value] (unless (= :dead (fiber/status fiber)) (propagate value fiber)))
-                         :on-parse-error (fn [parser source] (error (string source ":" (string/join (map string (:where parser)) ":") ": parse error: " (:error parser))))
-                         :on-compile-error (fn [message fiber source line column] (error (string source ":" line ":" column ": compile error: " message)))
-                         :evaluator (fn [thunk source &] (set form source) (set value (thunk)) (capture))}))
-                      (def text (string output (if (string? value) value (string/format "%n" value))))
-                      (assert (<= (length text) (limits :output)) "execution result byte ceiling")
-                      (merge {:ok true :value text} (snapshot)))]
-                      (if (replacement :ok) replacement {:ok true :value (string output) :replacement replacement}))
-                    ([err fiber]
-                      (def failure (wire/diagnostic "EvaluationFailed" err fiber))
-                      {:ok false :error (merge failure {:context {:output (string output) :cause (failure :context)}})}))))
-                (buffer/clear output)
-                (ev/give supervised [:evaluated outcome seconds])) nil supervised))
-              (when (> seconds 0) (ev/deadline seconds driver primary true)))))
-        (case (packet 0)
-          :evaluated (do
-            (when (> (packet 2) 0)
-              (each task (ev/all-tasks) (unless (= task driver) (ev/deadline (packet 2) driver task true))))
-            (ev/give events [:result (packet 1)]))
-          :error (unless (= :evaluation-ended (fiber/last-value (packet 1)))
-                   (error (wire/diagnostic "BackgroundFailed" (fiber/last-value (packet 1)) (packet 1))))))))))
+    (try
+      (do
+        (when (> seconds 0) (ev/deadline seconds driver driver true))
+        (eachp [index script] scripts
+          (set primary (ev/go (fiber/new (fn []
+              (var value nil) (var chunk (script :code))
+              (def outcome (prompt :zinc/replace
+                (when (get-in options [index :parser]) (:flush (get-in options [index :parser])))
+                (run-context (merge (options index)
+                  {:env env :source (string "world/" (script :event))
+                   :chunks (fn [buffer &] (when chunk (buffer/push-string buffer chunk) (set chunk nil)))
+                   :on-status (fn [fiber value] (unless (= :dead (fiber/status fiber)) (propagate value fiber)))
+                   :on-parse-error (fn [parser source] (error (string source ":" (string/join (map string (:where parser)) ":") ": parse error: " (:error parser))))
+                   :on-compile-error (fn [message fiber source line column] (error (string source ":" line ":" column ": compile error: " message)))
+                   :evaluator (fn [thunk source &]
+                                (capture source)
+                                (with-env (fiber/getenv (fiber/root)) (set value (thunk))))}))
+                {:ok true :text (if (string? value) value (string/format "%n" value))}))
+              (if (outcome :ok) (put results index (outcome :text))
+                (do (set replacement outcome) (put results index "")))) : (table/setproto @{:zinc/script index} env)) nil supervised)))
+        (while (or (> (length (ev/all-tasks)) 1) (> (ev/count supervised) 0))
+          (def [_ channel packet] (ev/select stop supervised))
+          (when (= channel stop) (error :evaluation-ended))
+          (def [status task] packet)
+          (when (= status :error) (propagate (fiber/last-value task) task)))
+        (def values (seq [index :range [0 (length scripts)]] (string (outputs index) (results index))))
+        (assert (<= (sum (map length values)) (limits :output)) "execution result byte ceiling")
+        (merge {:values values} (if replacement {:replacement replacement} (snapshot))))
+      ([err fiber]
+        (def failure (wire/diagnostic "EvaluationFailed" err fiber))
+        (error (merge failure {:context {:output (string/join (map string outputs) "\n") :cause (failure :context)}}))))))
 
-(defn open [bytes input document public bindings limits config handler]
-  (def commands (ev/thread-chan 1))
+(defn run [bytes input document public bindings limits config scripts seconds handler]
   (def events (ev/thread-chan 1))
-  (def runtime @{:commands commands :reply (ev/chan 1) :done (ev/chan 1)})
+  (def stop (ev/thread-chan 1))
+  (def finished (ev/thread-chan 1))
   (def pending @{})
-  (ev/thread evaluate [bytes input document public bindings commands events limits config] :n events)
-  (ev/go (fn []
-    (defer (do (ev/chan-close commands) (ev/chan-close events)
-               (each [task done] (pairs (merge pending))
-                 (when (fiber/can-resume? task) (ev/cancel task :evaluation-ended))
-                 (ev/take done)))
-      (try
-        (while true
-          (def packet (ev/take events))
-          (case (packet 0)
-            :call (do
-              (def [_ name args snapshot response] packet)
-              (def joined (ev/chan))
-              (def task (ev/go (fn []
-                (def task (fiber/root))
-                (defer (do (put pending task nil) (ev/chan-close joined))
-                  (ev/give response (try {:ok true :value (handler name args snapshot)} ([err] {:ok false :error err})))))))
-              (put pending task joined))
-            :result (ev/give (runtime :reply) (packet 1))
-            :ok (do (ev/give (runtime :reply) (packet 1)) (break))
-            :error (error (packet 1))))
-        ([err] (put runtime :failure err) (ev/give (runtime :reply) {:ok false :error err}))))) nil (runtime :done))
-  runtime)
-
-(defn execute [runtime code seconds]
-  (when (runtime :failure) (error (runtime :failure)))
-  (ev/give (runtime :commands) [code seconds])
-  (def outcome (ev/take (runtime :reply)))
-  (assert (outcome :ok) (outcome :error))
-  outcome)
-
-(defn close [runtime &opt cancel]
-  (defer (do (ev/chan-close (runtime :commands))
-             (def [status fiber] (ev/take (runtime :done)))
-             (unless (= :ok status) (propagate (fiber/last-value fiber) fiber)))
-    (when (runtime :failure) (error (runtime :failure)))
-    (ev/give (runtime :commands) [nil cancel])
-    (def outcome (ev/take (runtime :reply)))
-    (assert (outcome :ok) (outcome :error))
-    outcome))
+  (var joined false)
+  (ev/thread evaluate [bytes input document public bindings scripts events stop limits config seconds] :n finished)
+  (defer (do (ev/chan-close stop) (ev/chan-close events)
+             (each [task done] (pairs (merge pending))
+               (when (fiber/can-resume? task) (ev/cancel task :evaluation-ended))
+               (ev/take done))
+             (unless joined (ev/take finished))
+             (ev/chan-close finished))
+    (label complete (while true
+      (def [_ channel packet] (ev/select events finished))
+      (if (= channel finished)
+        (do (set joined true)
+            (assert (= :ok (packet 0)) (packet 1))
+            (return complete (packet 1)))
+        (do
+          (def [index name args snapshot response] packet)
+          (def done (ev/chan))
+          (def task (ev/go (fn []
+            (def task (fiber/root))
+            (defer (do (put pending task nil) (ev/chan-close done))
+              (ev/give response (try {:ok true :value (with-dyns [:zinc/effect ((scripts index) :event)] (handler name args snapshot))}
+                                    ([err] {:ok false :error err})))))))
+          (put pending task done)))))))
 
 (defn world [s value &opt status-only]
   (def config (s :config))
@@ -271,7 +252,7 @@
   (string (markdown/render document-tree)
           (when (config :instructions) (string "\n\n## World instructions\n\n" (slurp (config :instructions))))
           (when (and (config :repl) available)
-            (string "\n\n## Janet\n\nSuccessful bindings, mutations and closures persist as a native image. Initializers never replay. Native ev/ fibers continue across tool rounds and settle before call completion; they are not persisted. Errors cancel the runtime and leave the previous image intact; external effects are not undone. Parallel children fork without merging. Use `(doc name)`, `(doc \"string/\")`, and `(doc-of string/join)` for native documentation. `(import zinc/design :as design)` exposes `design/document`.\n`(input)`, `(self/document)`, `(settings)` and `(resources)` expose invocation data."
+            (string "\n\n## Janet\n\nSuccessful bindings, mutations and closures persist as a native image. Initializers never replay. All tool scripts in a model response run as concurrent native fibers in one shared world. Top-level bindings are shared; dynamic bindings are fiber-local. Scripts and their native descendants settle before one atomic image/result publication; no fibers continue across model rounds. A script error cancels the batch and leaves earlier publications intact; external effects are not undone. Conflicting shared-state writes are not isolated; order dependent work explicitly. Use self for independently committed forked worlds without implicit merging. Save, discard and switch require an exclusive single-script batch without background fibers. Use `(doc name)`, `(doc \"string/\")`, and `(doc-of string/join)` for native documentation. `(import zinc/design :as design)` exposes `design/document`.\n`(input)`, `(self/document)`, `(settings)` and `(resources)` expose invocation data."
                     (string/join (seq [[title value] :in [["Settings" (public :settings)] ["Resources" (public :resources)]] :when (> (length value) 0)]
                                    (string "\n\n## " title "\n\n" (schema/encode value))))
                     "\n\n## Host bindings\n\n" (string/join (seq [[_ binding] :in (sorted (pairs available)) :unless (binding :local)] (binding :doc)) "\n\n")))))

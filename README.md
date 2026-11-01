@@ -45,16 +45,21 @@ The authoritative current-world descriptor is in SQLite. Git stores pinned nativ
 binding images and saved commits; world/world.jimage is a checkpoint artifact.
 Successful definitions, vars, closures, mutations, aliases and cycles persist.
 Initializers and prints do not replay. Unsupported values fail snapshotting.
-A call-owned evaluator resolves the authorized base and host callables;
+A batch-scoped evaluator resolves the authorized base and host callables;
 credentials, channels, invocation configuration and output buffers are not images.
 Format/runtime identity is checked before unmarshaling.
 
-Failures discard only the current candidate, never earlier successful work.
-Cancellation does not undo publications or external effects. Direct code and tool
-code publish identically. One durable root owns an instance world, even while
-waiting. Queued roots refresh from the instance head on first execution. Parallel
-children fork the same snapshot and never merge. Explicit revisions remain pinned
-and do not replace the instance head.
+Every script runs as a native fiber. Tools from one model response share one world
+and run concurrently at yield points. Top-level bindings are shared; dynamic bindings
+are fiber-local. The executor settles all batch fibers, then
+atomically publishes one image and all tool results. Direct code is a batch of one.
+A script failure cancels the batch and discards its unpublished candidate, never
+earlier successful work. Conflicting writes are ordinary shared-state races; keep
+dependent operations in one script or synchronize them explicitly.
+Cancellation does not undo publications or external effects. One durable root owns
+an instance world, even while waiting. Queued roots refresh from the instance head
+on first execution. Explicit self children fork snapshots and never merge.
+Explicit revisions remain pinned and do not replace the instance head.
 
 ```janet
 (var counter 0)
@@ -71,8 +76,9 @@ dirty status. Forms are serialized as Janet code, not reconstructed initializers
 they describe provenance, not current mutable values, and never replay.
 Images without recorded source require explicit, audited annotation from history;
 Zinc does not decompile native functions or invent definitions.
-Discard/switch require the foreground evaluation and end it. Save/switch/discard require the durable
-instance root; switch requires saved/discarded changes. Saving after a rewind forks
+Discard/switch end the evaluation. Save/switch/discard require an exclusive
+single-script batch with no background fibers and the durable instance root;
+switch requires saved/discarded changes. Saving after a rewind forks
 Git history. Save intent is durable before Git ref mutation; recovery reconciles
 only that intent, never arbitrary code or external effects. Use ordinary Git for
 pushing and explicit merges, not automatic binary-image merging.
@@ -80,15 +86,15 @@ pushing and explicit merges, not automatic binary-image merging.
 Self takes exactly one of text/code. Code returns evaluation text; text returns a
 map with text. Text uses the configured agent profile; profiles share store/world
 identity. Self snapshots live bindings before forking and yields only the calling fiber.
-Use `(ev/spawn (self request))` for background work and `ev/gather` to join parallel calls.
-One evaluator stays alive across tool rounds. Native fibers continue while inference runs;
-an answer may render before they finish, but execution and request authority remain open
-until they settle. Uncaught background errors fail the call. Failed evaluations cancel
-that evaluator and its fibers; the next tool loads the last published image. Background
-mutations publish at the next successful snapshot or settlement. Runtime
-fibers/channels are not restartable world state. Lost evaluator leases are uncertain,
-not automatically replayed. Abort remains effective after an answer until execution settles.
-Model multi-tool calls still fork worlds.
+Use `(ev/spawn (self request))` for background work within a batch and `ev/gather`
+to join parallel calls. All native descendants settle before the batch returns;
+none continue across model rounds. Their output remains attached to the originating
+script. Each batch loads the last published image without replaying initializers.
+Uncaught fiber errors fail the executing batch. Explicit self children commit their
+own worlds independently, including when the caller's batch fails. Children share
+the root deadline and budgets. The parallel setting limits independent calls, not
+shared-world script fibers. Runtime fibers/channels are not restartable world state.
+Lost evaluator leases are uncertain, not automatically replayed.
 Parent and memory_range bound history, not world state. Parent 0 defaults to empty
 history. Revoked grants or changed import/setup declarations prevent saved execution.
 
@@ -97,8 +103,9 @@ archive prefix; nested children carry only the RAM additions, not copies of arch
 history or images. Descendants stay temporary and cannot reattach. Controls/images may
 reach disk and callers may retain results. This is not a temporary agent instance.
 Accepted workers survive lost observers; interrupted code is never automatically
-replayed. Supervisors must not kill their job/cgroup. `observe` reattaches without
-rerunning code; `resume` explicitly reconciles resumable text work.
+replayed. Supervisors must not kill their job/cgroup. `observe` only reads and waits;
+it never recovers, launches, executes, or changes deadlines. Expired executor leases
+require inspection. `resume` explicitly reconciles resumable text work.
 
 Root input `queue: false` atomically claims execution or records a terminal
 `AgentBusy` outcome. It never commits queued work or retries automatically; explicit
@@ -112,7 +119,9 @@ advanced restriction: core/* selects unqualified names, core/multiply selects *,
 and namespaced selectors expand deterministically. Saved calls retain exact sets.
 Native filesystem, network, subprocess, FFI, module loading, threads and environment
 access remain sandboxed. The evaluator has its own module cache containing only zinc/design;
-PA's foreign modules are reachable only through selected host bindings. Trusted setup may return parser/read/expander options.
+PA's foreign modules are reachable only through selected host bindings. Trusted setup
+runs once per script and may return parser/read/expander options; mutable parsers must
+be independent for concurrent scripts.
 Host operations live in a flat binding catalogue, not nested REPL schema metadata.
 Schema `visible` settings and `public` resource fields are exposed through the
 selected catalogue; host-side grant checks still enforce authority.
@@ -128,7 +137,8 @@ callable under an alias. PA runtime import commands never enter world images. Sa
 credential references, never resolved tokens.
 
 `world-bytes` defaults to 16 MiB and limits serialized images, not heap usage.
-`source-bytes` defaults to 1 MiB and limits submitted code. Zero means unlimited for
+`source-bytes` defaults to 1 MiB per script; response-bytes bounds aggregate batch
+output and evaluation results. Zero means unlimited for
 run-seconds (default 0), seconds (120), http-ms (600000), and output (0). Finite
 authorized ceilings still constrain unlimited requests. Leases remain finite.
 Finite evaluation deadlines interrupt inside the evaluator VM; not every blocking
