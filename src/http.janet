@@ -30,12 +30,18 @@
       (put headers :Authorization (string "Bearer " token))
       (array/push secrets token))
     (when-let [command (endpoint :credential-command)]
+      (def diagnostics @"")
       (def owner (fiber/root))
       (def watcher (ev/go (fn [] (try (while true (assert (check) "HTTP job fenced") (ev/sleep store/interval))
                                   ([err] (unless (= err :finished) (ev/cancel owner err)))))))
       (def result (defer (ev/cancel watcher :finished)
-                    (store/process command (os/environ) nil 16384 (max 0.001 (min 30 (- deadline (os/clock)))))))
-      (assert (= 0 (result :exit)) "provider credential command failed; sign in again")
+                    (store/process command (os/environ) nil 16384
+                                   (max 0.001 (min 30 (- deadline (os/clock)))) diagnostics)))
+      (unless (= 0 (result :exit))
+        (error {:code "CredentialCommandFailed"
+                :message (string "provider credential command exited " (result :exit))
+                :detail (string diagnostics)
+                :context {:executable (first command) :exit (result :exit)}}))
       (def supplied (try (json/decode (result :output) true true) ([err] (error "invalid credential command response"))))
       (assert (dictionary? supplied) "credential command must return headers")
       (each value (values supplied)

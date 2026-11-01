@@ -18,17 +18,24 @@
            (let [result (with-dyns [:zinc/transaction ,db] ,;body)] (,sql/eval ,db "COMMIT") result)
            ([err] (,sql/eval ,db "ROLLBACK") (error err)))))))
 
-(defn process [argv environment input limit seconds]
-  (def child (os/spawn argv :pe (merge environment {:in :pipe :out :pipe :err :out})))
+(defn process [argv environment input limit seconds &opt diagnostics]
+  (def child (os/spawn argv :pe (merge environment {:in :pipe :out :pipe :err (if diagnostics :pipe :out)})))
   (defer (do (when (nil? (get child :return-code)) (try (os/proc-kill child) ([err] nil))) (os/proc-close child))
-    (def output @"")
-    (def [_ _ status] (ev/with-deadline (if (= seconds 0) math/inf seconds)
+    (def output @"") (var size 0)
+    (def [_ _ _ status] (ev/with-deadline (if (= seconds 0) math/inf seconds)
       (ev/gather
         (defer (ev/close (child :in)) (when input (ev/write (child :in) input)))
         (do (var chunk nil)
           (while (set chunk (ev/read (child :out) 4096))
-            (assert (<= (+ (length output) (length chunk)) limit) "process output byte ceiling")
+            (+= size (length chunk))
+            (assert (<= size limit) "process output byte ceiling")
             (buffer/push-string output chunk)))
+        (when diagnostics
+          (var chunk nil)
+          (while (set chunk (ev/read (child :err) 4096))
+            (+= size (length chunk))
+            (assert (<= size limit) "process output byte ceiling")
+            (buffer/push-string diagnostics chunk)))
         (os/proc-wait child))))
     {:exit status :output (string output)}))
 
