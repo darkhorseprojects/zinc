@@ -89,8 +89,8 @@ initializers. Fibers/channels are runtime state, not restartable images. Self
 children commit independently; caller failure does not undo their publications.
 Children share budgets and deadlines. The parallel setting limits independent
 calls rather than shared-world fibers.
-Waiting releases execution capacity, not world ownership. Runtime `repl` settings
-select bindings and explicit `repl.imports`; a separate flat host catalogue defines operations and
+Waiting releases execution capacity, not world ownership. Runtime `janet` settings
+select bindings and explicit `janet.imports`; a separate flat host catalogue defines operations and
 resource permissions. Schema `visible`/`public` annotations expose only selected
 settings and granted resource metadata. Trusted setup runs once per script and
 must provide independent mutable parsers.

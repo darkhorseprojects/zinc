@@ -48,7 +48,7 @@ Children share the root deadline and budgets. Waiting releases a slot. Workers p
    :ephemeral {:type :boolean :default false}
    :caller {:type :dictionary :optional true}
    :inference {:type :boolean :default true}
-   :repl {:type :dictionary :optional true
+   :janet {:type :dictionary :optional true
           :fields {:bindings {:type :array :items :string :default ["*"]}
                    :values {:type :array :items :string :default []}
                    :setup {:type :string :absolute true :optional true}

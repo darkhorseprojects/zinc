@@ -164,7 +164,7 @@
                                [:text :code :parent :memory_range :persist :revision]))
     (assert (not= (nil? (value :text)) (nil? (value :code))) "self requires text or code")
     (def config (if (value :text) (or ((s :config) :agent) (s :config)) (s :config)))
-    (assert (if (value :text) (config :inference) (config :repl)) "child execution is not permitted")
+    (assert (if (value :text) (config :inference) (config :janet)) "child execution is not permitted")
     (def parent (store/call s (view :branch)))
     (put value :author (string "self:" (parent :request) "/" (parent :id)))
     (put value :at (((store/query s "SELECT strftime('%Y-%m-%dT%H:%M:%fZ','now') at") 0) :at))
@@ -207,7 +207,7 @@
 
   (defn run-code [s view bindings scripts]
     (def config (s :config))
-    (assert (config :repl) "Janet execution is not permitted")
+    (assert (config :janet) "Janet execution is not permitted")
     (each script scripts (assert (<= (length (script :code)) (config :source-bytes)) "tool source byte ceiling"))
     (store/checkpoint s)
     (def current (dyn :zinc/call))
@@ -218,7 +218,7 @@
     (store/checkpoint s (merge (current :checkpoint) {:runtime true}))
     (def outcome (world/run (world/bytes s origin) (current :input) (world/instructions config (spec :document) bindings public) public
                   (tabseq [[name binding] :in (pairs bindings)] name (if (binding :local) binding {:doc (binding :doc)}))
-                  {:world (config :world-bytes) :output (config :response-bytes)} (config :repl) scripts
+                  {:world (config :world-bytes) :output (config :response-bytes)} (config :janet) scripts
                   (let [run (if (view :expires) (max 0.001 (- (view :expires) (os/clock))) math/inf)
                         seconds (min (if (= 0 (config :seconds)) math/inf (config :seconds)) run)]
                     (if (= seconds math/inf) 0 seconds))
@@ -264,7 +264,7 @@
     (def config (s :config))
     (def inherited (store/view s id false))
     (def selected (model/profile s (config :chat) :chat))
-    (def tools (filter |(or (config :repl) (not= "function" ($ :type))) (selected :tools)))
+    (def tools (filter |(or (config :janet) (not= "function" ($ :type))) (selected :tools)))
     (def system (world/instructions config (spec :document) (when (find |(= "function" ($ :type)) tools) bindings) (world/public config (spec :schema) bindings)))
     (def user (first (store/query s "SELECT * FROM memory_records WHERE task=? AND kind='user'" [id])))
     (def image-budget @[(config :image-bytes)])
@@ -286,7 +286,7 @@
                       {:tool-id (tool :tool_id) :response (tool :response) :ok false :uncertain true} (tool :response) id))
       (assert (< (length responses) (config :rounds)) "model round limit exhausted")
       (def view (store/view s id))
-      (def world (when (config :repl) {:role "user" :content (markdown/render {:name "World source" :level 2 :content [{:language "janet" :text ((world/operate s {:action "view"}) :text)}]})}))
+      (def world (when (config :janet) {:role "user" :content (markdown/render {:name "World source" :level 2 :content [{:language "janet" :text ((world/operate s {:action "view"}) :text)}]})}))
       (set space (- capacity (model/estimate (filter identity [{:role "system" :content system} world inquiry])) tool-size 256))
       (assert (> space 256) "question, world bindings and instructions exhaust context")
       (unless context (set context (memory/context s inherited space pool)))
@@ -438,7 +438,7 @@
         (do
           (unless (= operation "resume")
             (assert (and (value :author) (value :at) (not= (nil? (value :text)) (nil? (value :code)))) "self requires text or code, authenticated author and occurrence time")
-            (assert (if (value :text) (config :inference) (config :repl)) "execution is not permitted in this view")
+            (assert (if (value :text) (config :inference) (config :janet)) "execution is not permitted in this view")
             (unless (value :request) (put value :request (string/join (map |(string/format "%02x" $) (os/cryptorand 24))))))
           (def call (if (= operation "resume") existing
                       (store/start s value config nil
@@ -567,7 +567,7 @@
                                       (put config :agent nil)
                                       (def name (string "world/" (value :action)))
                                       (assert ((world/definitions config (spec :bindings)) name)
-                                              {:code "WorldBindingNotGranted" :message (string name " is not granted; add it to the executing profile's repl.bindings.")})
+                                              {:code "WorldBindingNotGranted" :message (string name " is not granted; add it to the executing profile's janet.bindings.")})
                                       (def receipt (run s @{:code (string "(world/" (value :action)
                                                             (case (value :action)
                                                               "save" (string " " (string/format "%q" (value :message)))

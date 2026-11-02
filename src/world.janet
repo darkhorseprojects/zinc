@@ -206,7 +206,7 @@
                          (assert (string? (binding :source)) (string "source was not recorded for " (binding :name)))
                          (binding :source))) "\n\n"))}))
     (do
-      (assert (config :repl) "world editing is not permitted")
+      (assert (config :janet) "world editing is not permitted")
       (assert current "world edits require an executing root")
       (assert (and (= 0 (current :temporary)) (nil? (current :parent)) (nil? (get-in current [:input :revision]))) "only the durable instance root can replace or save the world")
       (assert (not (first (store/query s "SELECT id FROM main.live_calls WHERE parent IS NULL AND temporary=0 AND id<>coalesce(?,0) LIMIT 1" [(get current :id)]))) "world is busy")
@@ -241,13 +241,13 @@
       updated)))
 
 (defn definitions [config supplied]
-  (if-not (config :repl) {}
+  (if-not (config :janet) {}
     (do
       (def base (make-env))
       (def available (tabseq [name :in (all-bindings base) :unless (get (base name) :private)]
                        (cond (= name '*) "core/multiply" (string/find "/" (string name)) (string name) (string "core/" name)) {:local name}))
       (merge-into available supplied)
-      (each [namespace module] (pairs (get-in config [:repl :imports]))
+      (each [namespace module] (pairs (get-in config [:janet :imports]))
         (each [name binding] (pairs (require (module :module)))
           (when (and (symbol? name) (not (binding :private)) (not (binding :macro)) (index-of (type (binding :value)) [:function :cfunction])
                      (or (nil? (module :export)) (= (string name) (module :export))))
@@ -255,13 +255,13 @@
             (assert (not (available qualified)) "host function shadows a binding")
             (assert (string? (binding :doc)) "host function requires documentation")
             (put available qualified binding))))
-      (def selected (schema/select (keys available) (get-in config [:repl :bindings])))
-      (put (config :repl) :bindings selected)
+      (def selected (schema/select (keys available) (get-in config [:janet :bindings])))
+      (put (config :janet) :bindings selected)
       (tabseq [name :in selected] name (available name)))))
 
 (defn public [config fields bindings]
-  {:settings (schema/project config (map keyword (get-in config [:repl :values] [])))
-   :resources (tabseq [[key field] :pairs fields :when (and (config :repl) (field :public))
+  {:settings (schema/project config (map keyword (get-in config [:janet :values] [])))
+   :resources (tabseq [[key field] :pairs fields :when (and (config :janet) (field :public))
                        :let [grants (tabseq [[name grant] :pairs (config key)
                                              :let [functions (sorted (seq [[function binding] :pairs bindings
                                                                            :when (= key (binding :resource))
@@ -273,7 +273,7 @@
 (defn instructions [config document-tree available public]
   (string (markdown/render document-tree)
           (when (config :instructions) (string "\n\n## World instructions\n\n" (slurp (config :instructions))))
-          (when (and (config :repl) available)
+          (when (and (config :janet) available)
             (string "\n\n## Janet\n\nSuccessful bindings, mutations and closures persist as a native image. Initializers never replay. All tool scripts in a model response run as concurrent native fibers in one shared world. Top-level bindings are shared; dynamic bindings are fiber-local. Scripts and their native descendants settle before one atomic image/result publication; no fibers continue across model rounds. A script error cancels the batch and leaves earlier publications intact; external effects are not undone. Conflicting shared-state writes are not isolated; order dependent work explicitly. Use self for independently committed forked worlds without implicit merging. Save, discard and switch require an exclusive single-script batch without background fibers. Use `(doc name)`, `(doc \"string/\")`, and `(doc-of string/join)` for native documentation. `(import zinc/design :as design)` exposes `design/document`.\n`(input)`, `(self/document)`, `(settings)` and `(resources)` expose invocation data."
                     (string/join (seq [[title value] :in [["Settings" (public :settings)] ["Resources" (public :resources)]] :when (> (length value) 0)]
                                    (string "\n\n## " title "\n\n" (schema/encode value))))

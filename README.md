@@ -138,7 +138,7 @@ access remain sandboxed. The evaluator has its own module cache containing only 
 PA's foreign modules are reachable only through selected host bindings. Trusted setup
 runs once per script and may return parser/read/expander options; mutable parsers must
 be independent for concurrent scripts.
-Host operations live in a flat binding catalogue, not nested REPL schema metadata.
+Host operations live in a flat binding catalogue, not nested evaluator schema metadata.
 Schema `visible` settings and `public` resource fields are exposed through the
 selected catalogue; host-side grant checks still enforce authority.
 
@@ -148,9 +148,10 @@ or ambient proxies; processes use fixed argv/env and bounded output. These scope
 are not race-proof OS confinement: granted directory ancestry must not be concurrently
 replaceable by an adversary. Keep databases, credentials, trusted modules and Git metadata
 outside writable roots. PA imports carry JSON data, not native handles. Declare modules in
-`repl.imports`, for example `discord: { module: "@connector/discord" }`; `export: self` selects one
+`janet.imports`, for example `discord: { module: "@connector/discord" }`; `export: self` selects one
 callable under an alias. PA runtime import commands never enter world images. Saved provider configuration contains
-credential references, never resolved tokens.
+credential references, never resolved tokens. `janet` replaces `repl` without an alias; settle old
+calls before updating configuration. The database and world image formats are unchanged.
 
 `world-bytes` defaults to 16 MiB and limits serialized images, not heap usage.
 `source-bytes` defaults to 1 MiB per script; response-bytes bounds aggregate batch

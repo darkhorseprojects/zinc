@@ -57,9 +57,9 @@
     (put config :agent (configuration schema (config :agent) discovery))
     (each key [:store :world]
       (assert (= (config key) (get-in config [:agent key])) "agent view changes world identity/location")))
-  (when-let [repl (config :repl)]
-    (put repl :values (select (seq [[key field] :in (pairs schema) :when (field :visible)] (string key)) (repl :values)))
-    (each name (keys (repl :imports))
+  (when-let [janet (config :janet)]
+    (put janet :values (select (seq [[key field] :in (pairs schema) :when (field :visible)] (string key)) (janet :values)))
+    (each name (keys (janet :imports))
       (assert (and (peg/match ~(* (some (set "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789_-")) -1) (string name))
                    (not (index-of name [:core :self :pa :fs :http :process :memory :world :zinc]))) "invalid module namespace")))
   (each field [:fs :http :processes]
@@ -105,16 +105,16 @@
     (assert (= (current key) (saved key)) "saved identity/location differs"))
   (each key [:inference :web-search]
     (assert (or (not (saved key)) (current key)) (string "saved permission revoked: " key)))
-  (assert (or (not (saved :repl)) (current :repl)) "saved REPL revoked")
-  (assert (= (get-in saved [:repl :setup]) (get-in current [:repl :setup])) "saved REPL setup changed")
+  (assert (or (not (saved :janet)) (current :janet)) "saved Janet execution revoked")
+  (assert (= (get-in saved [:janet :setup]) (get-in current [:janet :setup])) "saved Janet setup changed")
   (each key [:bindings :values]
-    (each name (get-in saved [:repl key] [])
-      (assert (index-of name (get-in current [:repl key])) "saved REPL selection revoked")))
+    (each name (get-in saved [:janet key] [])
+      (assert (index-of name (get-in current [:janet key])) "saved Janet selection revoked")))
   (each field [:fs :http :processes]
     (each [name grant] (pairs (saved field))
       (assert (deep= grant (get-in current [field name])) "saved resource changed or revoked")))
-  (each [name module] (pairs (get-in saved [:repl :imports] {}))
-    (assert (deep= module (get-in current [:repl :imports name])) "saved import changed or revoked"))
+  (each [name module] (pairs (get-in saved [:janet :imports] {}))
+    (assert (deep= module (get-in current [:janet :imports name])) "saved import changed or revoked"))
   (when (saved :agent) (assert (current :agent) "agent execution view revoked"))
   (each [name provider] (pairs (saved :providers))
     (def granted (get-in current [:providers name]))
