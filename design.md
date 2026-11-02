@@ -130,8 +130,10 @@ No provider previews are written. An expired lease is reported for inspection.
 
 Temporary execution uses a native executor thread and a named in-memory SQLite
 database, observed through another read-only connection. PA isolates protocol writes
-on an I/O thread. Executor completion cancels observation and closes the RAM database
-before draining any trailing presentation; no observer acknowledgement gates execution.
+on an I/O thread. Observation calls the asynchronous `:out` function directly;
+Janet's native `print` invokes output callbacks synchronously and cannot yield.
+Executor completion cancels observation and closes the RAM database before draining
+any trailing presentation; no observer acknowledgement gates execution.
 Temporary images never enter Git. Temporary execution cannot reattach or recover.
 
 Execution owns publication and completion. Observation or presentation failure after

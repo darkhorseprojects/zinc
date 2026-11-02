@@ -276,7 +276,7 @@ CREATE UNIQUE INDEX $schema.context_key ON events(json_extract(data,'$.key')) WH
           :value (if (and (= "done" (row :state)) (= "text" (row :kind)))
                    {:text ((first (query s "SELECT text FROM memory_records WHERE branch=? AND kind='completed' ORDER BY id DESC LIMIT 1" [id])) :text)}
                    (get data :value))}
-         (when (get data :error) {:error (data :error)})))
+         (if (get data :error) {:error (data :error)} {})))
 
 (defn origin [s &opt id]
   (json/decode (if id ((call s id) :origin) (((query s "SELECT origin FROM main.world WHERE id=1") 0) :origin)) true true))

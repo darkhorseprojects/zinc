@@ -56,14 +56,14 @@
        :run (event :run) :branch (event :branch) :request (event :request)
        :persist durable :sequence (event :id)
        :world {:path (origin :path) :blob (or (data :blob) (origin :blob)) :ref (or (data :ref) (origin :ref))}}
-             (when (data :error) {:diagnostic (data :error)})))))
+             (if (data :error) {:diagnostic (data :error)} {})))))
 
 (defn- receipt [call]
   {:type "admission" :run (call :run) :branch (call :id) :request (call :request)
    :persist (= 0 (call :temporary))})
 
 (defn- observe [s call progress]
-  (print (json/encode (receipt call)))
+  ((dyn :out) (string (json/encode (receipt call)) "\n"))
   (put progress 1 true)
   (while true
     (def pending (store/query s `SELECT c.state,c.lease_expires,
@@ -73,7 +73,7 @@
     (while true
       (def records (events s (call :run) (progress 0)))
       (each event records
-        (when-let [frame (message event (s :config))] (print (json/encode frame)))
+        (when-let [frame (message event (s :config))] ((dyn :out) (string (json/encode frame) "\n")))
         (put progress 0 (event :id)))
       (when (< (length records) 256) (break)))
     (when (= 0 (length pending)) (break))
@@ -471,13 +471,13 @@
                                  (events reader (call :run) (progress 0) 9007199254740991)))
                 (store/close reader)
                 (unless (get-in config [:snapshot :silent])
-                  (unless (progress 1) (print (json/encode (receipt call))))
-                  (each event remaining (when-let [frame (message event config)] (print (json/encode frame)))))
+                  (unless (progress 1) ((dyn :out) (string (json/encode (receipt call)) "\n")))
+                  (each event remaining (when-let [frame (message event config)] ((dyn :out) (string (json/encode frame) "\n")))))
                 result))
             (do
               (def active (store/call s id))
               (when (or (= "queued" (active :state)) (and (active :owner) (not= (active :owner) (get existing :owner))))
-                (def [process] (worker "task" (merge {:task id} (when (active :owner) {:owner (active :owner)})) (s :config)))
+                (def [process] (worker "task" (merge {:task id} (if (active :owner) {:owner (active :owner)} {})) (s :config)))
                 (ev/close (process :out)))
               (store/close s)
               (def reader (store/open config :observe))
@@ -525,7 +525,7 @@
                 (def temporary (and (= operation "self") (= false (get value :persist true))))
                 (when temporary
                   (put value :persist false)
-                  (put config :snapshot (merge (config :snapshot)
+                  (put config :snapshot (merge (or (config :snapshot) {})
                     {:database (string "file:/zinc-" (string/join (map |(string/format "%02x" $) (os/cryptorand 24))) "?vfs=memdb")})))
                 (def s (unless (index-of operation ["describe" "instructions" "models"])
                          (store/open config (cond temporary :temporary (= operation "task") :worker

@@ -82,8 +82,12 @@
                   (assert (nil? terminal) "trailing model stream data")
                   (def part (json/decode data true true))
                   (case (part :type)
-                    "error" (error "Responses stream error")
-                    "response.failed" (error "Responses generation failed")
+                    "error" (error {:code (or (part :code) "ProviderError")
+                                    :message (part :message) :detail (string (json/encode part))})
+                    "response.failed"
+                    (let [failure (get-in part [:response :error])]
+                      (error {:code (or (failure :code) "ProviderError")
+                              :message (failure :message) :detail (string (json/encode failure))}))
                     (when (index-of (part :type) ["response.completed" "response.done" "response.incomplete"])
                       (set terminal (part :response))))))))))))
   (assert (<= 200 (response :status) 299) (string "model HTTP " (response :status) ": " (response :body)))
@@ -91,7 +95,9 @@
                (do (assert (and terminal (= "" (string/trim pending))) "incomplete Responses stream") terminal)
                (json/decode (response :body) true true)))
   (assert (dictionary? value) "model response must be an object")
-  (when-let [failure (value :error)] (error (string "provider error: " (json/encode failure))))
+  (when-let [failure (or (value :error) (get-in value [:choices 0 :error]))]
+    (error {:code (or (failure :code) "ProviderError")
+            :message (failure :message) :detail (string (json/encode failure))}))
   value)
 
 (defn decode [selected response]
@@ -126,7 +132,6 @@
     (do
       (assert (and (indexed? (response :choices)) (= 1 (length (response :choices)))) "expected one assistant choice")
       (def choice ((response :choices) 0))
-      (when-let [failure (choice :error)] (error (string "provider error: " (json/encode failure))))
       (assert (string? (choice :finish_reason)) "missing assistant finish reason")
       {:message (choice :message) :finish-reason (choice :finish_reason) :usage (response :usage)})))
 
