@@ -175,10 +175,10 @@
             (return complete (packet 1)))
         (do
           (def [index name args snapshot response] packet)
-          (def done (ev/chan))
+          (def done (ev/chan 1))
           (def task (ev/go (fn []
             (def task (fiber/root))
-            (defer (do (put pending task nil) (ev/chan-close done))
+            (defer (put pending task nil)
               (ev/give response (try {:ok true :value (with-dyns [:zinc/effect ((scripts index) :event)] (handler name args snapshot))}
                                     ([err] {:ok false :error err}))))) nil done))
           (put pending task done)))))))

@@ -275,7 +275,7 @@ CREATE UNIQUE INDEX $schema.context_key ON events(json_extract(data,'$.key')) WH
   (merge {:run (row :run) :branch id :state (row :state)
           :value (if (and (= "done" (row :state)) (= "text" (row :kind)))
                    {:text ((first (query s "SELECT text FROM memory_records WHERE branch=? AND kind='completed' ORDER BY id DESC LIMIT 1" [id])) :text)}
-                   (get data :value))}
+                   (get data :value :null))}
          (if (get data :error) {:error (data :error)} {})))
 
 (defn origin [s &opt id]
@@ -429,7 +429,7 @@ CREATE UNIQUE INDEX $schema.context_key ON events(json_extract(data,'$.key')) WH
                                      [(not (nil? failure)) (row :id) (row :owner) (not (nil? failure))])))
             (assert owner "call completion fenced")
             (def state (owner :state))
-            (def outcome (merge {:ok (= state "done") :value value :state state :attempt (row :attempt)} (or failure {})))
+            (def outcome (merge {:ok (= state "done") :value (if (nil? value) :null value) :state state :attempt (row :attempt)} (or failure {})))
             (append s (view s (if (= "summarize" (row :kind)) (row :parent) (row :id))) "call-result"
                     (if failure (get-in failure [:error :message]) (if (string? value) value "")) outcome nil (row :id))
             outcome))
