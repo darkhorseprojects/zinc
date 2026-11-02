@@ -9,9 +9,11 @@ protocols, not provider identities; URLs, discovery, capabilities and wire setti
 
 Each persistent agent has its own canonical directory, ac.yaml, history database,
 world repository, Connector ledger and Discord bot credential. Only immutable
-versioned packages and assets are shared. Temporary instances have the same layout;
-their creator owns joining accepted work and removing the directory. This is not
-`:persist false`, which selects RAM call payloads within an existing instance.
+versioned packages and assets are shared. Temporary computation uses `:persist false`
+within an existing instance: execution records and world images stay in RAM, with a
+read-only prefix of existing history. It does not create or initialize a directory.
+Temporary descendants remain in memory; durable callers can retain returned results
+and their own budget counters. External effects remain external.
 
 ## Worlds
 
@@ -83,11 +85,11 @@ Rejected IDs cannot execute later. Nonqueued work never retries automatically;
 explicit resume must also acquire ownership immediately. No peer waits for another
 root's world ownership, so no distributed wait graph or ancestry list is needed.
 Persistent targets render through their own bots; temporary computational agents
-can render under the owning bot with a temporary identity.
+render under the invoking bot and mark their output temporary.
 
 ## Observation and memory
 
-Visible reasoning, streaming and parallel tool traces are retained. Presentation
+Committed visible reasoning and parallel tool traces are retained. Presentation
 coordinates identify agent, request, run, branch and caller. Delivery intents and
 receipts prevent automatic repetition of uncertain external effects. Known rendered
 Discord history carries presentation provenance rather than masquerading as user
@@ -95,13 +97,26 @@ conversation. Explicitly created messages have separate provenance. Application 
 is the only presentation input; import calls carry arguments and operation coordinates,
 never presentation frames or scope identities.
 
-Observation reads committed events and waits; it never recovers, claims, launches,
-executes or changes execution deadlines. An expired lease is reported for inspection,
-not recovered by the observer. Execution owns publication and completion. Observation
-or presentation failure after an invocation attempt detaches without revoking request
-authority or implicitly aborting work. Reattachment uses the same request ID and
-delivery receipts without replaying completed code. Temporary payloads cannot
-reattach. Explicit abort cancels linked work, not unrelated agents.
+Durable executors run in task workers and write only execution state and outcomes.
+The initial self entry admits work and becomes a read-only observer; it does not
+execute the call. Observation opens SQLite read-only, polls committed events with a
+sequence cursor, and emits admission receipts separately from presentation. It never
+recovers, claims, launches, executes, heartbeats, checkpoints or changes deadlines.
+Provider streaming does not write previews. An expired lease is reported for inspection.
+
+Temporary execution uses a native executor thread and a named in-memory SQLite
+database, observed through another read-only connection. PA isolates protocol writes
+on an I/O thread. Executor completion cancels observation and closes the RAM database
+before draining any trailing presentation; no observer acknowledgement gates execution.
+Temporary images never enter Git. Temporary execution cannot reattach or recover.
+
+Execution owns publication and completion. Observation or presentation failure after
+an invocation attempt detaches without revoking request authority or implicitly aborting
+work. Durable reattachment reads the same journal and uses delivery receipts without
+replaying completed code. Connector retains its own delivery intents and receipts, not
+execution outcomes or duplicate execution diagnostics. Explicit abort cancels linked
+work, not unrelated agents; a temporary worker can be terminated only while its owning
+Connector process still holds its handle.
 
 Admissions prove acceptance, not execution. An admitted inference without an outcome is never automatically resubmitted;
 provider usage may already have occurred. Compaction runs only when context requires it, not speculatively after answers.

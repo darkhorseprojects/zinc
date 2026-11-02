@@ -89,6 +89,7 @@ assets.mkdir(exist_ok=True)
 staged = assets / "cygnet.db.building"
 staged.hardlink_to(index)
 staged.replace(assets / "cygnet.db")
+staged.unlink(missing_ok=True)
 shutil.copyfile(stopwords, assets / "stopwords.json")
 (assets / "cygnet.NOTICE.json").write_text(json.dumps({"source": cygnet, "recipe": recipe, "resources": resources}, ensure_ascii=False, indent=2) + "\n")
 print(assets)

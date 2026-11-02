@@ -9,7 +9,7 @@
 (def- tool
   {:type "function"
    :function {:name "run_janet"
-              :description "Evaluate Janet source. One tool call uses the current environment. Multiple calls in one response use separate children with the same source and history snapshot. Child source changes do not merge automatically."
+              :description "Evaluate Janet source. All calls in one response run concurrently in the shared world. Their fibers settle before one atomic image/result publication. Use self for independent forked worlds."
               :parameters {:type "object"
                            :additionalProperties false
                            :required ["code"]
@@ -44,7 +44,7 @@
     (and (string? value) (index-of field [:content :refusal :reasoning :reasoning_content :text :data :summary :name :arguments])) (buffer/push-string (or previous @"") value)
     value))
 
-(defn request [config reference path &opt body s]
+(defn request [config reference path &opt body]
   (def provider (get-in config [:providers (keyword (reference :provider))]))
   (def supplied (when body (json/decode body true true)))
   (when (and body (has-key? provider :models))
@@ -57,7 +57,6 @@
       (when streaming
         (fn [chunk]
           (set pending (string/replace-all "\r\n" "\n" (string pending chunk)))
-          (def updates @[])
           (var boundary nil)
           (while (set boundary (string/find "\n\n" pending))
             (def data (string/trim (string/join (seq [line :in (string/split "\n" (string/slice pending 0 boundary)) :when (string/has-prefix? "data:" line)] (string/slice line 5)) "\n")))
@@ -72,8 +71,7 @@
                   (if (= "responses" (reference :protocol))
                     (do
                       (each update (responses/event value part (reference :reference))
-                        (delta (value :message) update)
-                        (array/push updates update))
+                        (delta (value :message) update))
                       (set done (value :done)))
                     (do
                       (when-let [failure (or (part :error) (get-in part [:choices 0 :error]))] (error (string "provider error: " (json/encode failure))))
@@ -81,14 +79,7 @@
                       (each choice (get part :choices [])
                         (assert (= 0 (choice :index)) "expected one assistant stream")
                         (when (choice :finish_reason) (put value :finish-reason (choice :finish_reason)))
-                        (delta (value :message) (choice :delta))
-                        (array/push updates (or (choice :delta) {})))))))))
-          (def updates (map |(tabseq [[key item] :pairs $ :unless (and (= "none" (config :thinking)) (index-of key [:reasoning :reasoning_content :reasoning_details]))] key item) updates))
-          (when (and s (> (length updates) 0) (not= "summarize" ((dyn :zinc/call) :kind)))
-            (def current (dyn :zinc/call))
-            (assert (first (store/query s (string "INSERT INTO " (s :journal) ".previews(request,delta)
-              SELECT ?,value FROM json_each(?) WHERE EXISTS(SELECT 1 FROM main.live_calls WHERE id=? AND owner=?) RETURNING id")
-              [(get-in current [:checkpoint :request]) (string (json/encode updates)) (current :id) (current :owner)])) "model preview fenced"))))))
+                        (delta (value :message) (choice :delta)))))))))))))
   (assert (<= 200 (response :status) 299) (string "model HTTP " (response :status) ": " (response :body)))
   (def value (if streaming
               (do (assert (and done (= "" (string/trim pending)) (value :finish-reason)) "incomplete model stream")
@@ -183,7 +174,7 @@
   (assert (dictionary? raw) "invalid usage report")
   (each field [:prompt_tokens :completion_tokens :total_tokens]
     (when (has-key? raw field) (assert (and (int? (raw field)) (>= (raw field) 0)) "invalid reported usage")))
-  (store/query s (string "INSERT INTO " (s :journal) ".usage(request,provider,model,raw) VALUES(?,?,?,?)")
+  (store/query s "INSERT INTO main.usage(request,provider,model,raw) VALUES(?,?,?,?)"
                [request (selected :provider) (selected :id) (string (json/encode raw))]))
 
 (defn call [s input &opt pending selected]
@@ -242,7 +233,7 @@
                                                                    :request {:method "POST" :url (string (get-in config [:providers (keyword (selected :provider)) :url]) endpoint) :body wire}
                                                                    :views (input :views) :context (selected :context) :estimate size :output maximum} nil (current :id)))
                                          (store/checkpoint s (merge (current :checkpoint) {:request (event :id)})) (event :id)))
-          (def value (request config selected endpoint wire s))
+          (def value (request config selected endpoint wire))
           (def result
             (try
               (do
@@ -295,7 +286,6 @@
           (store/transact s
                           (assert (first (store/query s "SELECT id FROM main.call_controls WHERE id=? AND owner=? AND state IN ('running','waiting','uncertain','cancelled')"
                                                       [(current :id) (current :owner)])) "model completion fenced")
-                          (store/query s (string "DELETE FROM " (s :journal) ".previews WHERE request=?") [admission])
                           (store/append s (current :scope) "model-outcome" (if (= role "chat") (text (result :message)) "") result admission (current :id))))))
   (merge (json/decode (event :data) true true) {:event (event :id) :text (event :text)}))
 

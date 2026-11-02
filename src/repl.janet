@@ -109,7 +109,7 @@
               (def outcome (prompt :zinc/replace
                 (when (get-in options [index :parser]) (:flush (get-in options [index :parser])))
                 (run-context (merge (options index)
-                  {:env env :source (string "world/" (script :event))
+                  {:env env :fiber-flags :yi :source (string "world/" (script :event))
                    :chunks (fn [buffer &] (when chunk (buffer/push-string buffer chunk) (set chunk nil)))
                    :on-status (fn [fiber value] (unless (= :dead (fiber/status fiber)) (propagate value fiber)))
                    :on-parse-error (fn [parser source] (error (string source ":" (string/join (map string (:where parser)) ":") ": parse error: " (:error parser))))
@@ -119,7 +119,7 @@
                                 (with-env (fiber/getenv (fiber/root)) (set value (thunk))))}))
                 {:ok true :text (if (string? value) value (string/format "%n" value))}))
               (if (outcome :ok) (put results index (outcome :text))
-                (do (set replacement outcome) (put results index "")))) : (table/setproto @{:zinc/script index} env)) nil supervised)))
+                (do (set replacement outcome) (put results index "")))) :e (table/setproto @{:zinc/script index} env)) nil supervised)))
         (while (or (> (length (ev/all-tasks)) 1) (> (ev/count supervised) 0))
           (def [_ channel packet] (ev/select stop supervised))
           (when (= channel stop) (error :evaluation-ended))
@@ -158,7 +158,7 @@
             (def task (fiber/root))
             (defer (do (put pending task nil) (ev/chan-close done))
               (ev/give response (try {:ok true :value (with-dyns [:zinc/effect ((scripts index) :event)] (handler name args snapshot))}
-                                    ([err] {:ok false :error err})))))))
+                                    ([err] {:ok false :error err}))))) nil done))
           (put pending task done)))))))
 
 (defn world [s value &opt status-only]
@@ -174,7 +174,7 @@
   (assert (selected :base) "event has no world image")
   (def clean (string/trim (store/git (selected :root) ["rev-parse" "--verify" "--end-of-options" (string (selected :base) ":" (selected :path))])))
   (if (= action "view")
-    (let [bytes (store/git (selected :root) ["cat-file" "blob" (selected :blob)])
+    (let [bytes (store/bytes s selected)
           metadata (do (assert (<= (length bytes) (config :world-bytes)) "world image byte ceiling") (unmarshal bytes @{}))]
       (assert (and (tuple? metadata) (= 6 (length metadata)) (= 1 (metadata 0)) (indexed? (metadata 4))) "incompatible world image")
       (merge selected {:bindings (metadata 4) :dirty (not= clean (selected :blob))

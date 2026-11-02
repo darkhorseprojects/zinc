@@ -13,7 +13,7 @@
   ~(let [,db (,s :db)]
      (if (= ,db (dyn :zinc/transaction)) (do ,;body)
        (do
-         (,sql/eval ,db "BEGIN IMMEDIATE")
+         (,sql/eval ,db (if (,s :temporary) "BEGIN" "BEGIN IMMEDIATE"))
          (try
            (let [result (with-dyns [:zinc/transaction ,db] ,;body)] (,sql/eval ,db "COMMIT") result)
            ([err] (,sql/eval ,db "ROLLBACK") (error err)))))))
@@ -46,44 +46,52 @@
   (assert (or probe (= 0 (result :exit))) (string "Git " (string/join args " ") ": " (result :output)))
   (when (= 0 (result :exit)) (result :output)))
 
-(defn open [config &opt temporary]
-  (each profile (filter identity [config (config :agent)])
-    (put profile :world (os/realpath (profile :world))))
-  (def s @{:db (sql/open (config :store)) :journal (if temporary "journal" "main")
-           :config config :temporary temporary :profiles @{} :recovery @[0]})
+(defn uri [file]
+  (def file (if (index-of (os/which) [:windows :mingw]) (string/replace-all "\\" "/" file) file))
+  (string "file:" (string/replace-all "?" "%3F" (string/replace-all "#" "%23" (string/replace-all "%" "%25" file)))))
+
+(defn open [config &opt mode]
+  (def temporary (or (= mode :temporary) (not (nil? (get-in config [:snapshot :database])))))
+  (def file (or (get-in config [:snapshot :database]) (uri (config :store))))
+  (def s @{:db (sql/open (if (index-of mode [:observe :worker])
+                         (string file (if temporary "&" "?") "mode=" (if (= mode :observe) "ro" "rw")) file))
+           :file file :config config :temporary temporary :worlds @{} :profiles @{} :recovery @[0]})
   (try
     (do
-      (query s "PRAGMA foreign_keys=ON; PRAGMA trusted_schema=OFF; PRAGMA busy_timeout=5000; PRAGMA synchronous=FULL; PRAGMA journal_mode=WAL; PRAGMA temp_store=MEMORY;")
-      (unless (= 1 (((query s "PRAGMA user_version") 0) :user_version))
-        (transact s
-                  (def version (((query s "PRAGMA user_version") 0) :user_version))
-                  (assert (index-of version [0 1]) "unsupported Zinc database; preserve it and provision a fresh database")
-                  (when (= version 0) (query s (schema/database)))))
-      (assert (first (query s "SELECT name FROM pragma_table_info('events') WHERE name='record_kind'")) "incompatible Zinc layout; preserve it and provision a fresh database")
-      (query s "INSERT INTO main.world(id,file) VALUES(1,?) ON CONFLICT(id) DO NOTHING" [(config :world)])
-      (assert (= (config :world) (((query s "SELECT file FROM main.world WHERE id=1") 0) :file)) "history database belongs to another world")
+      (query s "PRAGMA foreign_keys=ON; PRAGMA trusted_schema=OFF; PRAGMA busy_timeout=5000; PRAGMA temp_store=MEMORY;")
+      (unless (index-of mode [:observe :worker])
+        (if temporary
+          (do
+            (query s (schema/database true))
+            (query s (string "PRAGMA max_page_count=" (math/floor (/ (config :journal-bytes) (((query s "PRAGMA page_size") 0) :page_size))))))
+          (do
+            (query s "PRAGMA synchronous=FULL; PRAGMA journal_mode=WAL;")
+            (unless (= 1 (((query s "PRAGMA user_version") 0) :user_version))
+              (transact s
+                (def version (((query s "PRAGMA user_version") 0) :user_version))
+                (assert (index-of version [0 1]) "unsupported Zinc database; preserve it and provision a fresh database")
+                (when (= version 0) (query s (schema/database)))))
+            (query s "INSERT INTO main.world(id,file) VALUES(1,?) ON CONFLICT(id) DO NOTHING" [(config :world)]))))
       (when temporary
-        (query s "ATTACH DATABASE ':memory:' AS journal;")
-        (query s (string "PRAGMA journal.max_page_count=" (math/floor (/ (config :journal-bytes) (((query s "PRAGMA journal.page_size") 0) :page_size)))))
-        (query s (schema/database true))
-        (put s :archive-last (get-in config [:snapshot :archive-last] (((query s "SELECT coalesce(max(id),0) n FROM main.events") 0) :n)))
-        (each [name key] [["call_payloads" nil] ["events" "id"] ["images" "event"] ["usage" "request"]]
-          (query s (string "CREATE TEMP VIEW " name " AS SELECT * FROM main." name " WHERE "
-                           (if key (string key "<=" (s :archive-last)) "id IN (SELECT id FROM main.call_controls WHERE temporary=0)")
-                           " UNION ALL SELECT * FROM journal." name)))
-        (query s (string `CREATE VIRTUAL TABLE temp.archive_words USING fts5vocab(main,event_fts,'instance');
+        (query s "ATTACH DATABASE ? AS archive" [(string (uri (config :store)) "?mode=ro")])
+        (when (= mode :temporary)
+          (transact s
+            (each name ["world" "call_controls"]
+              (query s (string "INSERT INTO main." name " SELECT * FROM archive." name)))
+            (put (config :snapshot) :archive-last (((query s "SELECT coalesce(max(id),0) n FROM archive.events") 0) :n))
+            (put (config :snapshot) :controls-last (((query s "SELECT coalesce(max(id),0) n FROM main.call_controls") 0) :n))
+            (query s "INSERT INTO main.sqlite_sequence(name,seq) VALUES('events',?)" [(get-in config [:snapshot :archive-last])])
+            (query s "UPDATE main.call_controls SET state='done',owner=NULL,lease_expires=NULL;")))
+        (put s :archive-last (get-in config [:snapshot :archive-last]))
+        (each [name key cutoff] [["call_payloads" "id" (get-in config [:snapshot :controls-last])]
+                                ["events" "id" (s :archive-last)] ["images" "event" (s :archive-last)] ["usage" "request" (s :archive-last)]]
+          (query s (string "CREATE TEMP VIEW " name " AS SELECT * FROM archive." name " WHERE " key "<=" cutoff
+                           " UNION ALL SELECT * FROM main." name)))
+        (query s (string `CREATE VIRTUAL TABLE temp.archive_words USING fts5vocab(archive,event_fts,'instance');
           CREATE TEMP VIEW event_words AS SELECT term FROM archive_words WHERE doc<=` (s :archive-last) `
-            UNION SELECT term FROM journal.event_words;
-          CREATE TEMP TRIGGER journal_parent BEFORE INSERT ON journal.events
-            WHEN new.parent IS NOT NULL AND NOT EXISTS(SELECT 1 FROM events WHERE id=new.parent)
-            BEGIN SELECT raise(ABORT,'event parent unavailable'); END;`))
-        (transact s
-          (query s "INSERT INTO journal.sqlite_sequence(name,seq) SELECT 'events',coalesce(max(seq),0) FROM main.sqlite_sequence WHERE name='events';")
-          (each name [:call_payloads :events :images :usage]
-            (def columns (map |($ :name) (query s (string "PRAGMA journal.table_info(" name ")"))))
-            (each row (get-in config [:snapshot name] [])
-              (query s (string "INSERT INTO journal." name "(" (string/join columns ",") ") VALUES(" (string/join (map (fn [_] "?") columns) ",") ")")
-                     (map |(if (and (= name :images) (= $ "bytes")) (buffer (base64/decode (row :bytes))) (get row (keyword $))) columns))))))
+            UNION SELECT term FROM main.event_words;`)))
+      (assert (first (query s "SELECT name FROM pragma_table_info('events') WHERE name='record_kind'")) "incompatible Zinc layout; preserve it and provision a fresh database")
+      (assert (= (config :world) (((query s "SELECT file FROM main.world WHERE id=1") 0) :file)) "history database belongs to another world")
       (query s (string `CREATE TEMP VIEW calls AS SELECT c.id,c.parent,c.root,c.kind,c.temporary,c.expires,c.cancelled,
         c.state,c.attempt,c.owner,c.lease_expires,c.retries,c.key,c.work_used,c.tool_used,c.request request_key,
         coalesce(p.run,c.id) run,g.request request,coalesce(p.config,r.config) config,p.entry,p.first,p.last,p.history_last,p.origin,p.agent,p.depth,p.checkpoint,
@@ -92,15 +100,23 @@
         LEFT JOIN main.call_controls g ON g.id=coalesce(p.run,c.id)
         LEFT JOIN events a ON a.call=c.id AND a.kind IN ('user','summary-input');`))
       (query s schema/projections)
+      (when (and (not= mode :observe) (get-in config [:snapshot :budget-root]))
+        (put s :external-root (get-in config [:snapshot :budget-root]))
+        (put s :budget-db (sql/open (string (uri (config :store)) "?mode=rw")))
+        (sql/eval (s :budget-db) "PRAGMA busy_timeout=5000;"))
+      (when (= mode :observe) (query s "PRAGMA query_only=ON;"))
       s)
-    ([err] (sql/close (s :db)) (error err))))
+    ([err]
+      (each key [:budget-db :db] (when (s key) (sql/close (s key))))
+      (error err))))
 
-(defn close [s] (sql/close (s :db)))
+(defn close [s]
+  (each key [:budget-db :db] (when (s key) (sql/close (s key)) (put s key nil))))
 
 (defn charge [s work tokens]
-  (assert (first (query s `UPDATE main.call_controls SET work_used=work_used+?,tool_used=tool_used+? WHERE id=?
+  (assert (first (sql/eval (or (s :budget-db) (s :db)) `UPDATE main.call_controls SET work_used=work_used+?,tool_used=tool_used+? WHERE id=?
     AND (?=0 OR (expires IS NULL OR expires>?) AND NOT cancelled) AND work_used+?<=? AND tool_used+?<=? RETURNING id`
-                        [work tokens (s :budget-root) work (os/clock) work ((s :config) :task-quota) tokens ((s :config) :tool-quota)])) "shared call budget exhausted"))
+                        [work tokens (or (s :external-root) (s :budget-root)) work (os/clock) work ((s :config) :task-quota) tokens ((s :config) :tool-quota)])) "shared call budget exhausted"))
 
 (defn call [s id]
   (def row (first (query s "SELECT * FROM calls WHERE id=?" [id])))
@@ -109,12 +125,18 @@
 (defn origin [s &opt id]
   (json/decode (if id ((call s id) :origin) (((query s "SELECT origin FROM main.world WHERE id=1") 0) :origin)) true true))
 
-(defn image [s origin bytes]
+(defn image [s origin bytes &opt temporary]
   (assert (<= (length bytes) ((s :config) :world-bytes)) "world image byte ceiling")
-  (def blob (string/trim (git (origin :root) ["hash-object" "-w" "--stdin"] bytes)))
-  (unless (= blob (origin :blob))
-    (git (origin :root) ["update-ref" (string "refs/zinc/world/" blob) blob]))
+  (def temporary (or temporary (s :temporary)))
+  (def blob (string/trim (git (origin :root) (if temporary ["hash-object" "--stdin"] ["hash-object" "-w" "--stdin"]) bytes)))
+  (if temporary
+    (do (put (s :worlds) blob bytes)
+        (assert (<= (sum (map length (values (s :worlds)))) ((s :config) :journal-bytes)) "temporary world byte ceiling"))
+    (unless (= blob (origin :blob)) (git (origin :root) ["update-ref" (string "refs/zinc/world/" blob) blob])))
   (merge origin {:blob blob}))
+
+(defn bytes [s origin]
+  (or ((s :worlds) (origin :blob)) (git (origin :root) ["cat-file" "blob" (origin :blob)])))
 
 (defn append [s scope kind text &opt data parent execution]
   (transact s
@@ -135,7 +157,7 @@
             (def encoded (string (json/encode (merge data {:world (json/decode (if context (context :origin) (((query s "SELECT origin FROM main.world WHERE id=1") 0) :origin)) true true)}))))
             (assert (utf8/is-valid? encoded) "stored event must be UTF-8 JSON")
             (when (index-of kind ["call-admission" "operation-outcome"]) (charge s 0 (estimate (string text encoded))))
-            (def row ((query s (string "INSERT INTO " (s :journal) ".events(call,parent,kind,record_kind,memory,text,data,estimate,author,at) VALUES(?,?,?,?,?,?,?,?,?,coalesce(?,strftime('%Y-%m-%dT%H:%M:%fZ','now'))) RETURNING *")
+            (def row ((query s "INSERT INTO main.events(call,parent,kind,record_kind,memory,text,data,estimate,author,at) VALUES(?,?,?,?,?,?,?,?,?,coalesce(?,strftime('%Y-%m-%dT%H:%M:%fZ','now'))) RETURNING *"
                              [(or execution (scope :branch)) parent kind record-kind (if memory 1 0) text encoded (estimate (string text encoded))
                               (or (scope :author) (if context (string "self:" (context :request) "/" (context :id)) "system:zinc")) (scope :at)]) 0))
             row))
@@ -158,14 +180,14 @@
   (if (and (s :temporary) (view :match) (not (view :index)))
     (take (or ceiling 4096)
       (sorted (array/concat @[]
-        (visible s (merge view {:index "main" :last (min (view :last) (s :archive-last))}) order ceiling)
-        (visible s (merge view {:index "journal" :first (max (view :first) (+ 1 (s :archive-last)))}) order ceiling))
+        (visible s (merge view {:index "archive" :last (min (view :last) (s :archive-last))}) order ceiling)
+        (visible s (merge view {:index "main" :first (max (view :first) (+ 1 (s :archive-last)))}) order ceiling))
         |(if (= order :recent) (> ($0 :id) ($1 :id)) (< ($0 :id) ($1 :id)))))
     (query s (string `WITH RECURSIVE ancestry(id,through) AS (
     SELECT ?,9007199254740991 UNION ALL SELECT c.parent,min(a.through,c.last) FROM calls c JOIN ancestry a ON c.id=a.id WHERE c.parent IS NOT NULL
   ), members(id) AS (SELECT ? UNION SELECT c.value FROM members m JOIN events n ON n.id=m.id,json_each(n.data,'$.children') c WHERE n.kind='summary')
   SELECT ` (get view :columns "e.*") ` FROM `
-                   (if (view :match) (string (get view :index (s :journal)) ".event_fts JOIN memory_records e ON e.id=event_fts.rowid") "memory_records e")
+                   (if (view :match) (string (get view :index "main") ".event_fts JOIN memory_records e ON e.id=event_fts.rowid") "memory_records e")
                    ` LEFT JOIN main.call_controls b ON b.id=e.branch WHERE `
                    (when (view :match) "event_fts MATCH ? AND ")
                    `e.id BETWEEN ? AND ? AND (e.id<=? OR (e.run=? AND EXISTS(SELECT 1 FROM ancestry a WHERE a.id=e.branch AND e.id<=a.through)))
@@ -185,10 +207,12 @@
 (defn checkpoint [s &opt value]
   (def current (dyn :zinc/call))
   (assert current "checkpoint requires an executing call")
+  (when (s :budget-db)
+    (assert (first (sql/eval (s :budget-db) "SELECT id FROM live_calls WHERE id=?" [(s :external-root)])) "parent execution ended"))
   (if value
     (let [encoded (string (json/encode value))]
       (assert (<= (length encoded) (+ ((s :config) :request-bytes) ((s :config) :response-bytes))) "stored checkpoint byte ceiling")
-      (assert (first (query s (string "UPDATE " (s :journal) ".call_payloads SET checkpoint=? WHERE id IN (SELECT id FROM main.live_calls WHERE id=? AND owner=?) RETURNING id")
+      (assert (first (query s "UPDATE main.call_payloads SET checkpoint=? WHERE id IN (SELECT id FROM main.live_calls WHERE id=? AND owner=?) RETURNING id"
                             [encoded (current :id) (current :owner)])) "call lease lost")
       (put current :checkpoint value))
     (assert (first (query s "SELECT id FROM main.live_calls WHERE id=? AND owner=?" [(current :id) (current :owner)])) "call lease lost")))
@@ -201,7 +225,7 @@
   (when (and (nil? (row :parent)) (= 0 (row :temporary)) (nil? ((json/decode (row :input) true true) :revision)))
     (assert (first (query s "UPDATE main.world SET origin=? WHERE id=1 AND origin=? RETURNING id"
                           [updated (row :origin)])) "world changed; retry against the current world"))
-  (query s (string "UPDATE " (s :journal) ".call_payloads SET origin=? WHERE id=?") [updated (row :id)])
+  (query s "UPDATE main.call_payloads SET origin=? WHERE id=?" [updated (row :id)])
   (put (dyn :zinc/call) :candidate nil))
 
 (defn view [s id &opt active]
@@ -211,14 +235,6 @@
              :history-last (c :history_last) :agent (= 1 (c :agent)) :depth (c :depth)})
   (if active (merge view {:first (if (= 0 (view :first)) (c :admission) (view :first))
                           :last (get (first (visible s (merge view {:last 9007199254740991 :columns "e.id"}) :recent 1)) :id (view :last))}) view))
-
-(defn snapshot [s view]
-  (def snapshot @{:depth (+ 1 (view :depth)) :budget-root (s :budget-root) :parent-call (view :branch) :deadline (view :expires)
-                  :archive-last (or (s :archive-last) (((query s "SELECT coalesce(max(id),0) n FROM main.events") 0) :n))})
-  (when (s :temporary)
-    (each name [:call_payloads :events :images :usage]
-      (put snapshot name (map |(if (= name :images) (merge $ {:bytes (base64/encode (string ($ :bytes)))}) $) (query s (string "SELECT * FROM journal." name (when (= name :events) " ORDER BY id")))))))
-  snapshot)
 
 (defn park [s waiting]
   (def current (dyn :zinc/call))
@@ -248,15 +264,19 @@
       (call s id))))
 
 (defn heartbeat [[file seconds id owner stop]]
-  (def db (sql/open file))
+  (def db (sql/open (string file (if (string/find "?" file) "&" "?") "mode=rw")))
   (defer (sql/close db)
     (sql/eval db "PRAGMA busy_timeout=5000;")
     (try (while true
            (assert (first (sql/eval db "UPDATE call_controls SET lease_expires=? WHERE id IN (SELECT id FROM live_calls WHERE id=? AND owner=?) RETURNING id"
                                     [(+ (os/clock) seconds) id owner])) "execution fenced")
            (def tick (ev/chan 1))
-           (def timer (ev/go (fn [] (ev/sleep (/ seconds 3)) (ev/give tick true))))
-           (when (= stop ((ev/select stop tick) 1)) (ev/cancel timer "finished") (break))) ([err] nil))))
+           (def done (ev/chan 1))
+           (def timer (ev/go (fn [] (ev/sleep (/ seconds 3)) (ev/give tick true)) nil done))
+           (def stopped (= stop ((ev/select stop tick) 1)))
+           (when stopped (ev/cancel timer :finished))
+           (ev/take done)
+           (when stopped (break))) ([err] nil))))
 
 (defn finish [s row value failure]
   (transact s
@@ -305,14 +325,14 @@
         (def depth (if summary (caller :depth) (if caller (+ 1 (caller :depth)) (get-in config [:snapshot :depth] 0))))
         (assert (<= depth (config :task-depth)) "agent recursion ceiling exhausted")
         (def id (((query s "INSERT INTO main.call_controls(request,parent,root,kind,temporary,expires,key,retries) VALUES(?,?,?,?,?,?,?,?) RETURNING id"
-                         [(input :request) (or (get-in (dyn :zinc/call) [:id]) (when caller (caller :branch)) (get-in config [:snapshot :parent-call]))
-                          (or (s :budget-root) (get-in config [:snapshot :budget-root])) (cond summary "summarize" (input :code) "code" "text") temporary
+                         [(input :request) (or (get-in (dyn :zinc/call) [:id]) (when caller (caller :branch)))
+                          (s :budget-root) (cond summary "summarize" (input :code) "code" "text") temporary
                           (if caller (caller :expires)
                             (let [deadline (min (if (= 0 (config :run-seconds)) math/inf (+ (os/clock) (config :run-seconds))) (or (get-in config [:snapshot :deadline]) math/inf))]
                               (unless (= deadline math/inf) deadline))) key (if (= false (input :queue)) 0 1)]) 0) :id))
-        (unless (s :budget-root) (put s :budget-root (get-in config [:snapshot :budget-root] id)))
+        (unless (s :budget-root) (put s :budget-root id))
         (def run (if caller (caller :run) id))
-        (query s (string "INSERT INTO " (s :journal) ".call_payloads(id,run,config,entry,first,last,history_last,origin,agent,depth) VALUES(?,?,?,?,?,?,?,?,?,?)")
+        (query s "INSERT INTO main.call_payloads(id,run,config,entry,first,last,history_last,origin,agent,depth) VALUES(?,?,?,?,?,?,?,?,?,?)"
                [id run (when (and saved (not summary)) (string (json/encode saved))) entry first-id last (if caller (caller :history-last) last)
                 (string (json/encode (or origin {}))) (if (and caller (caller :agent)) 1 0) depth])
         (def input-event (append s {:branch id :author (input :author) :at (input :at)} (if summary "summary-input" "user") (get input :text (get input :code "")) {:input admitted} (when (and entry (> entry 0)) entry) id))
@@ -320,7 +340,7 @@
         (eachp [position image] (get input :images [])
           (def bytes (image :bytes)) (+= image-bytes (length bytes))
           (assert (<= image-bytes (config :image-bytes)) "stored image byte ceiling")
-          (query s (string "INSERT INTO " (s :journal) ".images(event,position,mime,bytes) VALUES(?,?,?,?)") [(input-event :id) position (image :type) (buffer bytes)]))
+          (query s "INSERT INTO main.images(event,position,mime,bytes) VALUES(?,?,?,?)" [(input-event :id) position (image :type) (buffer bytes)]))
         (charge s 1 (if (input :code) (estimate (input :code)) 0))
         (if (= false (input :queue))
           (or (claim s id)
@@ -330,11 +350,6 @@
 (defn recover [s &opt force]
   (when (and (not force) (< (os/clock) ((s :recovery) 0))) (break))
   (put (s :recovery) 0 (+ (os/clock) interval))
-  (def orphaned-previews (string (s :journal) ".previews WHERE request NOT IN
-    (SELECT json_extract(p.checkpoint,'$.request') FROM main.live_calls c JOIN call_payloads p ON p.id=c.id
-      WHERE json_type(p.checkpoint,'$.request')='integer')"))
-  (when (first (query s (string "SELECT 1 FROM " orphaned-previews " LIMIT 1")))
-    (query s (string "DELETE FROM " orphaned-previews)))
   (each intent (if (s :temporary) [] (query s `SELECT e.* FROM events e WHERE e.kind='save-intent'
     AND NOT EXISTS(SELECT 1 FROM events n WHERE n.parent=e.id AND n.kind IN ('saved','artifact'))
     AND NOT EXISTS(SELECT 1 FROM main.live_calls c WHERE c.id=json_extract(e.data,'$.call'))`))

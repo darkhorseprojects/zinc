@@ -10,10 +10,12 @@
 (defn events [s run after &opt through]
   (assert (or (s :temporary) (not (first (store/query s "SELECT id FROM main.call_controls WHERE id=? AND temporary=1" [run])))) "temporary execution has no durable events")
   (assert (first (store/query s "SELECT id FROM main.call_controls WHERE id=?" [run])) "run unavailable")
-  (store/query s (string "SELECT * FROM memory_records WHERE "
-                         (if (s :temporary) "task IN (SELECT id FROM main.call_controls WHERE coalesce(root,id)=?)" "run=?")
-                         " AND id>? AND (? IS NULL OR id<=?) ORDER BY id LIMIT ?")
-               [(if (s :temporary) (s :budget-root) run) after through through (if through -1 256)]))
+  (store/query s `SELECT id,parent,run,branch,branch_temporary,branch_parent,request,kind,text,public_message,
+    json_remove(data,'$.message','$.input','$.request','$.views','$.text') data FROM memory_records
+    WHERE run=? AND id>? AND (? IS NULL OR id<=?)
+      AND kind IN ('response','completed','model-outcome','interruption','artifact','saved','summary',
+                   'code-admission','tool-result','tool-ambiguity','error','launch-uncertain') ORDER BY id LIMIT ?`
+               [run (if (s :temporary) (max after (s :archive-last)) after) through through (if through -1 256)]))
 
 (defn render [row]
   (def text (row :text))
@@ -57,7 +59,7 @@
   (def db (sql/open ":memory:"))
   (try
     (do
-      (sql/eval db "ATTACH DATABASE ? AS graph" [(config :cygnet)])
+      (sql/eval db "ATTACH DATABASE ? AS graph" [(string (store/uri (config :cygnet)) "?mode=ro")])
       (sql/eval db "PRAGMA trusted_schema=OFF; PRAGMA query_only=ON;")
       (def metadata (table ;(catseq [row :in (sql/eval db "SELECT key,value FROM graph.metadata")] [(keyword (row :key)) (row :value)])))
       (assert (and (= 1 (((sql/eval db "PRAGMA graph.user_version") 0) :user_version))

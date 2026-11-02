@@ -198,7 +198,7 @@ CREATE TEMP VIEW conversation_records AS
 `)
 
 (defn database [&opt temporary]
-  (string (unless temporary `
+  (string `
 CREATE TABLE world(id INTEGER PRIMARY KEY CHECK(id=1),file TEXT NOT NULL,origin TEXT NOT NULL DEFAULT '{}' CHECK(json_valid(origin))) STRICT;
 CREATE TABLE call_controls(
   id INTEGER PRIMARY KEY AUTOINCREMENT CHECK(id<=9007199254740991),
@@ -230,7 +230,7 @@ CREATE VIEW live_calls AS
     AND (r.expires IS NULL OR r.expires>unixepoch('subsec')) AND NOT c.cancelled AND NOT r.cancelled;
 CREATE VIEW running AS SELECT id FROM live_calls WHERE state='running';
 PRAGMA user_version=1;
-`) (string/replace-all "$schema." (if temporary "journal." "main.")
+` (string/replace-all "$schema." "main."
                       (string/replace-all "$parent" (if temporary "" "REFERENCES events(id)") `
 CREATE TABLE $schema.call_payloads(
   id INTEGER PRIMARY KEY,

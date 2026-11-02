@@ -1,6 +1,7 @@
 (import spork/json :as json)
 (import spork/path :as path)
 (import spork/utf8 :as utf8)
+(import spork/base64 :as base64)
 (import portable-agents/protocol :as wire)
 (import portable-agents/markdown :as markdown)
 (import ./store)
@@ -10,39 +11,9 @@
 (import ./repl)
 (import ./http)
 (import ./prompt)
+(import ./observer)
 
 (defn make [spec]
-  (defn message [event]
-    (when (event :branch)
-      (def data (json/decode (event :data) true true))
-      (def origin (data :world))
-      (def durable (and (= 0 (event :branch_temporary)) (not ((dyn :zinc/config) :ephemeral))))
-      (def coordinate (if durable "#" "local "))
-      (def body (case (event :kind)
-                  "user" ""
-                  "response" (model/render event)
-                  "model-admission" (when (event :public_message) (model/render event))
-                  "completed" (if (event :public_message) (model/render event) (event :text))
-                  "model-outcome" (when (and (= "chat" (data :role)) (data :visible)) (model/render event))
-                  "interruption" (when (= "uncertain" (data :state)) (event :text))
-                  "artifact" (when (data :display) (event :text))
-                  "saved" (string "Saved " (data :ref) " @ " (string/slice (data :base) 0 7) (when (data :pushed) " · pushed") "\n" (event :text))
-                  "summary" (string "summary " coordinate (event :id) " · " (data :count)
-                                    " records · source range " coordinate (data :first) "–" (data :last))
-                  (when (and (not= false (data :display)) (index-of (event :kind) ["code-admission" "tool-result" "tool-ambiguity" "error"]))
-                    (if-let [failure (data :error)]
-                      (string/trim (string (get-in failure [:context :output] "") "\n" (failure :code) ": " (failure :message))) (event :text)))))
-      (when body
-        {:body (if (and (event :public_message) (data :status) (not (index-of (data :status) ["complete" "tools"]))) (string body "\n\n[" (data :status) "]") body)
-         :kind (event :kind)
-         :agent ((dyn :zinc/config) :identity)
-         :caller (if-let [parent (event :branch_parent)] {:agent ((dyn :zinc/config) :identity) :request (event :request) :branch parent} (or ((dyn :zinc/config) :caller) :null)) :prompt (cond (= "model-admission" (event :kind)) (event :id) (or (data :turn) (= "model-outcome" (event :kind))) (event :parent) :null)
-         :related (if (and (not (data :turn)) (index-of (event :kind) ["tool-result" "tool-ambiguity" "completed"])) (or (event :parent) :null) :null)
-         :status (or (data :status) (case (event :kind) "model-admission" "streaming" "code-admission" "admitted" "error" "failed" "tool-ambiguity" "uncertain" (if (= false (data :ok)) "failed" "complete")))
-         :run (event :run) :branch (event :branch) :request (event :request)
-         :persist durable :sequence (event :id)
-         :world {:path (origin :path) :blob (or (data :blob) (origin :blob)) :ref (or (data :ref) (origin :ref))}})))
-
   (defn worker [entry input config]
     (def limits (dyn :pa/limits))
     (def process (os/spawn [(dyn :pa/executable) "run" (string (limits "frameBytes")) (string (limits "admissionSeconds"))]
@@ -90,33 +61,25 @@
           (unless (= :dead (fiber/status worker)) (propagate (fiber/last-value worker) worker))
           (fiber/last-value worker))
         (label done (while true
-                      (unless (= mode :observe) (store/recover s (and (dictionary? id) (not (id :root)))))
+                      (store/recover s (dictionary? id))
                       (when current (store/checkpoint s))
                       (if (dictionary? id)
                         (let [root (id :root)
                               pending (store/query s `SELECT c.id,c.state,c.owner,c.lease_expires,p.run,
                                 min(coalesce(c.expires,1e999),coalesce(r.expires,1e999)) expires FROM main.call_controls c
                                 JOIN main.call_controls r ON r.id=coalesce(c.root,c.id) LEFT JOIN call_payloads p ON p.id=c.id
-                                WHERE (? IS NULL OR c.root=? AND c.kind<>'summarize')
+                                WHERE (? IS NULL OR c.root=?)
                                 AND (c.state IN ('queued','running','waiting') OR (? IS NULL AND (c.state='uncertain' OR c.owner IS NOT NULL))) ORDER BY c.id` [root root root])]
                           (unless root
                             (each row pending (assert (and (not= "uncertain" (row :state))
                               (or (nil? (row :owner)) (> (row :lease_expires) (os/clock)))) "instance has unsettled effects; preserve it for inspection")))
                           (when (= 0 (length pending)) (return done {:settled true}))
                           (each row pending
-                            (if (= mode :observe)
-                              (assert (and (> (row :expires) (os/clock))
-                                           (or (= "queued" (row :state)) (> (row :lease_expires) (os/clock))))
-                                      "executor lease or deadline expired; inspect before resuming")
-                              (when (and (= "queued" (row :state)) (or (nil? (id :run)) (= (id :run) (row :run)))) (launch s (row :id))))))
+                            (when (and (= "queued" (row :state)) (or (nil? (id :run)) (= (id :run) (row :run)))) (launch s (row :id)))))
                         (let [row (first (store/query s `SELECT c.state,c.kind,c.lease_expires,
                                 min(coalesce(c.expires,1e999),coalesce(r.expires,1e999)) expires FROM main.call_controls c
                                 JOIN main.call_controls r ON r.id=coalesce(c.root,c.id) WHERE c.id=?` [id]))]
                           (assert row "call unavailable")
-                          (when (and (= mode :observe) (index-of (row :state) ["queued" "running" "waiting"]))
-                            (assert (and (> (row :expires) (os/clock))
-                                         (or (= "queued" (row :state)) (> (row :lease_expires) (os/clock))))
-                                    "executor lease or deadline expired; inspect before resuming"))
                           (case (row :state)
                             "done" (return done (if (= "text" (row :kind))
                               {:text (((store/query s "SELECT text FROM memory_records WHERE branch=? AND kind='completed'" [id]) 0) :text)}
@@ -124,7 +87,7 @@
                             "failed" (error ((json/decode ((first (store/query s "SELECT data FROM events WHERE call=? AND kind='call-result' ORDER BY id DESC LIMIT 1" [id])) :data) true true) :error))
                             "uncertain" (error (string "Call #" id ": uncertain effects; inspect receipts, do not replay."))
                             "cancelled" (error "call cancelled")
-                            "queued" (unless (= mode :observe) (launch s id (= mode :inline))))))
+                            "queued" (launch s id (= mode :inline)))))
                       (ev/sleep store/interval))))))
 
   (defn start-child [s view value &opt snapshot]
@@ -138,10 +101,12 @@
     (put value :at (((store/query s "SELECT strftime('%Y-%m-%dT%H:%M:%fZ','now') at") 0) :at))
     (put value :persist (get value :persist (= 0 (parent :temporary))))
     (when (= 1 (parent :temporary)) (assert (not (value :persist)) "temporary calls cannot create durable descendants"))
-    (def origin (or snapshot (repl/image config (or ((dyn :zinc/call) :candidate) (store/origin s (parent :id))) (value :revision))))
-    (if (value :persist)
+    (def origin (cond (value :revision) (repl/image config nil (value :revision))
+                      snapshot (store/image s (store/origin s (parent :id)) (snapshot :image) (not (value :persist)))
+                      (repl/image config (or ((dyn :zinc/call) :candidate) (store/origin s (parent :id))))))
+    (if (or (value :persist) (s :temporary))
       (do
-        (store/git (origin :root) ["update-ref" (string "refs/zinc/world/" (origin :blob)) (origin :blob)])
+        (unless (s :temporary) (store/git (origin :root) ["update-ref" (string "refs/zinc/world/" (origin :blob)) (origin :blob)]))
         (def call (store/start s value config (merge view {:event (dyn :zinc/effect) :agent (or (view :agent) (not= config (s :config)))}) origin))
         {:job (call :id) :branch (call :id)})
       (do
@@ -150,17 +115,24 @@
         (assert (< (view :depth) (config :task-depth)) "agent recursion ceiling exhausted")
         (def request (string/join (map |(string/format "%02x" $) (os/cryptorand 24))))
         (def entry (get value :parent (view :last)))
+        (def slots (s :temporary-slots))
+        (ev/give slots true)
         (def [process reader exited]
-          (worker "self" (merge value {:request request :parent entry
+          (try (worker "self" (merge value {:request request :parent entry
                                        :memory_range (get value :memory_range {:start (if (= 0 entry) 0 (view :first)) :end entry})})
-                  (merge config {:snapshot (merge (store/snapshot s view) {:origin origin})})))
+                  (merge config {:snapshot {:origin origin :image (base64/encode (store/bytes s origin))
+                                            :depth (+ 1 (view :depth)) :deadline (view :expires)
+                                            :budget-root (s :budget-root) :silent true}}))
+            ([err] (ev/take slots) (error err))))
         (def done (ev/chan 1))
         (def collector (ev/go (fn []
-          (defer (ev/close (process :out))
+          (defer (do (ev/close (process :out)) (ev/take slots))
             (def output (json/decode (wire/output reader) true true))
             (ev/take exited)
             (assert (= 0 (process :return-code)) "ProcessFailure")
-            output)) nil done))
+            (when (output :error) (error (output :error)))
+            (assert (= "done" (output :state)) (string "Temporary call ended " (output :state)))
+            (output :value))) nil done))
         (put ((dyn :zinc/call) :children) request [collector done])
         {:temporary request})))
 
@@ -175,7 +147,7 @@
     (put current :candidate nil)
     (def public (repl/public config (spec :schema) bindings))
     (store/checkpoint s (merge (current :checkpoint) {:runtime true}))
-    (def outcome (repl/run (store/git (origin :root) ["cat-file" "blob" (origin :blob)]) (current :input) (repl/instructions config (spec :document) bindings public) public
+    (def outcome (repl/run (store/bytes s origin) (current :input) (repl/instructions config (spec :document) bindings public) public
                   (tabseq [[name binding] :in (pairs bindings)] name (if (binding :local) binding {:doc (binding :doc)}))
                   {:world (config :world-bytes) :output (config :response-bytes)} (config :repl) scripts
                   (let [run (if (view :expires) (max 0.001 (- (view :expires) (os/clock))) math/inf)
@@ -186,7 +158,8 @@
                     (def view (store/view s (current :id)))
                     (def binding (bindings name))
                     (assert (and binding (not (binding :local))) "function revoked")
-                    (def origin (when snapshot (store/image s (store/origin s (current :id)) (snapshot :image))))
+                    (def origin (when (and snapshot (not= name "self"))
+                                  (store/image s (store/origin s (current :id)) (snapshot :image) (= name "world/view"))))
                     (when (get binding :intrinsic) (assert (= 1 (length args)) "invalid intrinsic arity"))
                     (let [admission (store/transact s (store/charge s 1 0)
                                                       (store/append s view "call-admission" name {:arguments args} (dyn :zinc/effect) ((dyn :zinc/call) :id)))]
@@ -202,7 +175,7 @@
                                                :point (when (= name "world/view") (first args))
                                                :commit (when (= name "world/switch") (first args))})))
                             (= name "self")
-                            (let [handle (with-dyns [:zinc/effect (admission :id)] (start-child s view (first args) origin))]
+                            (let [handle (with-dyns [:zinc/effect (admission :id)] (start-child s view (first args) snapshot))]
                               (when (handle :job) (launch s (handle :job)))
                               (wait s (or (handle :temporary) (handle :job))))
                             (index-of name ["fs/list" "fs/read" "fs/write"])
@@ -349,41 +322,40 @@
         (each [tool admission outcome] outcomes
           (store/charge s 0 (store/estimate (outcome :text)))
           (store/append s view "tool-result" (outcome :text)
-                        (merge outcome {:text nil :tool-id (tool :id) :response (response :event) :display true}) (admission :id) id)))
-      (each [tool admission outcome] outcomes
-        (unless (outcome :ok)
-          (eprint (json/encode (merge (outcome :error) {:context (merge (or (get-in outcome [:error :context]) {}) {:tool-call {:branch id :tool (tool :id) :event (admission :id)}})}))))))
+                        (merge outcome {:text nil :tool-id (tool :id) :response (response :event) :display true}) (admission :id) id))))
     {:completion ((first (store/query s "SELECT id FROM memory_records WHERE branch=? AND kind='completed'" [id])) :id)})
 
   (defn execute [store row]
     (def config (if (and (= 1 (row :agent)) ((store :config) :agent)) ((store :config) :agent) (store :config)))
-    (def s (merge store {:config config :budget-root (or (row :root) (row :id))}))
+    (def s (merge store {:config config :budget-root (or (row :root) (row :id)) :temporary-slots (ev/chan (config :parallel))}))
     (def id (row :id))
     (def view (store/view s (if (= "summarize" (row :kind)) (row :parent) id)))
     (def stop (ev/thread-chan 1))
     (def finished (ev/thread-chan 1))
-    (ev/thread store/heartbeat [(config :store) (config :lease-seconds) id (row :owner) stop] :n finished)
+    (ev/thread store/heartbeat [(store :file) (config :lease-seconds) id (row :owner) stop] :n finished)
     (defer (do (ev/give stop true) (ev/take finished))
-      (with-dyns [:zinc/call (merge row {:scope view :children @{} :input (json/decode (row :input) true true)
+      (with-dyns [:zinc/call (merge row {:database (s :file) :scope view :children @{} :input (json/decode (row :input) true true)
                                          :checkpoint (json/decode (row :checkpoint) true true)}) :zinc/effect (row :admission)]
-        (store/transact s
-                        (store/checkpoint s)
-                        (store/append s view "call-attempt" (if (= "code" (row :kind)) (get-in (dyn :zinc/call) [:input :code]) "execution entered") {:attempt (row :attempt)} nil id))
         (def [value failure]
           (try
+            (do
+              (store/transact s
+                (store/checkpoint s)
+                (store/append s view "call-attempt" (if (= "code" (row :kind)) (get-in (dyn :zinc/call) [:input :code]) "execution entered") {:attempt (row :attempt)} nil id))
             (let [input ((dyn :zinc/call) :input)
                   bindings (if (not= "summarize" (row :kind)) (repl/definitions config (spec :bindings)) {})
                   owner (fiber/root)
+                  stopped (ev/chan 1)
                   watcher (ev/go (fn [] (try (while true (store/checkpoint s) (ev/sleep store/interval))
-                                            ([err] (unless (= err :finished) (ev/cancel owner err))))))]
-              (defer (ev/cancel watcher :finished)
+                                            ([err] (unless (= err :finished) (ev/cancel owner err))))) nil stopped)]
+              (defer (do (ev/cancel watcher :finished) (ev/take stopped))
                 (def value (case (row :kind) "text" (infer s row bindings)
                             "code" (first (run-code s view bindings [{:code (input :code) :event (row :admission)}]))
                             "summarize" (memory/summarize s row input)))
-                (each child (store/query s "SELECT id FROM main.call_controls WHERE parent=? AND temporary=0 AND kind<>'summarize' AND state IN ('queued','running','waiting','uncertain') ORDER BY id" [id])
+                (each child (store/query s "SELECT id FROM main.call_controls WHERE parent=? AND kind<>'summarize' AND state IN ('queued','running','waiting','uncertain') ORDER BY id" [id])
                   (wait s (child :id)))
                 (when (= "code" (row :kind)) (store/charge s 0 (store/estimate (json/encode value))))
-                [value nil]))
+                [value nil])))
             ([err fiber]
               (def tokens (keep |(when ($ :token-env) (os/getenv ($ :token-env))) (values (config :providers))))
               [nil {:error (postwalk (fn [value]
@@ -391,7 +363,8 @@
                                      (wire/diagnostic "ExecutionFailed" err fiber))}])))
         (when (first (store/query s "SELECT id FROM main.live_calls WHERE id=? AND owner=?" [id (row :owner)]))
           (each request (keys ((dyn :zinc/call) :children))
-            (try (wait s request) ([err] (eprint (json/encode (if (dictionary? err) err {:code "ChildFailed" :message (string err)})))))))
+            (try (wait s request) ([err fiber] (store/append s view "artifact" "Temporary child failed."
+                                      {:display true :error (wire/diagnostic "ChildFailed" err fiber)} nil id)))))
         (try
           (store/transact s
                           (unless failure
@@ -403,87 +376,107 @@
         (each pending (store/query s "SELECT c.id FROM main.call_controls c JOIN call_payloads p ON p.id=c.id WHERE p.run=? AND c.state='queued' AND (c.expires IS NULL OR c.expires>?) ORDER BY c.id LIMIT ?"
                                    [(row :run) (os/clock) (config :parallel)]) (launch s (pending :id))))))
 
-  (defn drain [s run after previews]
-    (var sequence after)
-    (while true
-      (def records (memory/events s run sequence))
-      (each event records
-        (when-let [frame (message event)] (print (json/encode frame)))
-        (set sequence (event :id)))
-      (when (< (length records) 256) (break)))
-    (def active @{})
-    (each event (store/query s `SELECT e.* FROM main.live_calls c JOIN call_payloads p ON p.id=c.id
-      JOIN memory_records e ON e.id=json_extract(p.checkpoint,'$.request') AND e.task=p.id
-      WHERE p.run=? AND c.kind<>'summarize' AND e.kind='model-admission'` [run])
-      (put active (event :id) true)
-      (def progress (get previews (event :id) @{:after 0 :message @{}}))
-      (put previews (event :id) progress)
-      (def updates (store/query s (string "SELECT id,delta FROM " (s :journal) ".previews WHERE request=? AND id>? ORDER BY id") [(event :id) (progress :after)]))
-      (each update updates
-        (model/delta (progress :message) (json/decode (update :delta) true true))
-        (put progress :after (update :id)))
-      (when (> (length updates) 0)
-        (when-let [frame (message (merge event {:public_message (string (json/encode (progress :message))) :text ""}))] (print (json/encode frame)))))
-    (each id (keys previews) (unless (active id) (put previews id nil)))
-    sequence)
+  (defn temporary [[config call program executable limits]]
+    (with-dyns [:zinc/config config :zinc/execute execute :zinc/wait wait
+                :pa/program program :pa/executable executable :pa/limits limits]
+      (def s (store/open config :worker))
+      (def supervised (ev/chan 1))
+      (defer (store/close s)
+        (ev/go (fn []
+          (when-let [image (get-in config [:snapshot :image])]
+            (put (s :worlds) (get-in config [:snapshot :origin :blob]) (base64/decode image)))
+          (when (index-of (call :state) ["queued" "running" "waiting"])
+            (if-let [row (or (when (call :owner) call) (store/claim s (call :id)))]
+              (execute s row)
+              (store/finish s call nil {:error {:code "DeadlineExceeded" :message "Temporary execution expired before starting."}})))
+          (wait s {:root (call :id) :run (call :run)})) nil supervised)
+        (var failure nil)
+        (while (or (> (length (ev/all-tasks)) 1) (> (ev/count supervised) 0))
+          (def [status task] (ev/take supervised))
+          (when (and (= status :error) (nil? failure))
+            (set failure (wire/diagnostic "ExecutionFailed" (fiber/last-value task) task))))
+        (when failure (error failure)))))
 
   (defn run [s value operation]
+    (def config (s :config))
     (def existing (first (store/query s "SELECT * FROM calls WHERE id=? OR request_key=?" [(or (value :task) (value :run)) (value :request)])))
-    (when (index-of operation ["task" "resume" "observe"]) (assert existing "call unavailable"))
+    (when (index-of operation ["task" "resume"]) (assert existing "call unavailable"))
     (when existing
-      (assert (= 0 (existing :temporary)) "temporary execution cannot be reattached")
       (assert (= 0 (existing :cancelled)) "saved call unavailable")
-      (put s :config (schema/authorize (spec :schema) (s :config) (json/decode (existing :config) true true)))
+      (put s :config (schema/authorize (spec :schema) config (json/decode (existing :config) true true)))
       (put s :budget-root (or (existing :root) (existing :id)))
-      (when (and (not= operation "observe") (> ((s :config) :run-seconds) 0))
+      (when (> ((s :config) :run-seconds) 0)
         (store/query s "UPDATE main.call_controls SET expires=min(coalesce(expires,1e999),(SELECT created FROM events WHERE call=call_controls.id AND kind='user')+?) WHERE id=?"
                      [((s :config) :run-seconds) (existing :run)])))
     (with-dyns [:zinc/wait wait :zinc/execute execute :zinc/config (s :config)]
-      (unless (= operation "observe") (store/recover s))
+      (unless (s :temporary) (store/recover s))
       (if (= operation "task")
-        (do (assert (= (value :owner) (existing :owner)) "call ownership changed") (execute s existing) {:task (value :task)})
         (do
-          (unless (index-of operation ["resume" "observe"])
+          (if (value :owner)
+            (do (assert (= (value :owner) (existing :owner)) "call ownership changed") (execute s existing))
+            (wait s (existing :id) :inline))
+          {:task (value :task)})
+        (do
+          (unless (= operation "resume")
             (assert (and (value :author) (value :at) (not= (nil? (value :text)) (nil? (value :code)))) "self requires text or code, authenticated author and occurrence time")
-            (assert (if (value :text) ((s :config) :inference) ((s :config) :repl)) "execution is not permitted in this view")
+            (assert (if (value :text) (config :inference) (config :repl)) "execution is not permitted in this view")
             (unless (value :request) (put value :request (string/join (map |(string/format "%02x" $) (os/cryptorand 24))))))
-          (def call (if (index-of operation ["resume" "observe"]) existing
-                      (store/start s value (s :config) nil
-                        (unless existing (or (get-in (s :config) [:snapshot :origin])
-                                             (repl/image (s :config) (store/origin s) (value :revision)))))))
-          (var claimed (when (and (= operation "self") (call :owner)) call))
+          (def call (if (= operation "resume") existing
+                      (store/start s value config nil
+                        (unless existing (or (get-in config [:snapshot :origin]) (repl/image config (store/origin s) (value :revision)))))))
           (def id (call :id))
           (when (= operation "resume")
             (assert (and (= "text" (call :kind)) (or (nil? (call :expires)) (> (call :expires) (os/clock)))) "call requires reconciliation or its deadline expired")
             (def queued (not= false ((json/decode (call :input) true true) :queue)))
             (store/transact s
               (when (first (store/query s "UPDATE main.call_controls SET state='queued',retries=?,owner=NULL,lease_expires=NULL WHERE id=? AND state IN ('failed','uncertain') RETURNING id" [(if queued 1 0) id]))
-                (unless queued
-                  (set claimed (store/claim s id))
-                  (unless claimed (error {:code "AgentBusy" :message "Target cannot resume immediately."}))))))
-          (var sequence (get value :after 0))
-          (def previews @{})
-          (def emitter (ev/go (fn [] (try (while true (set sequence (drain s (call :run) sequence previews)) (ev/sleep store/interval))
-                                       ([err] (eprint (json/encode {:code "ObservationFailed" :message (string err)})))))))
-          (defer (do (ev/cancel emitter "observer detached") (drain s (call :run) sequence previews))
-            (var failure nil)
-            (def output (try (do (when claimed (execute s claimed)) (wait s id (if (= operation "observe") :observe :inline))) ([err] (set failure err))))
-            (wait s {:root (or (call :root) id) :run (call :run)} (when (= operation "observe") :observe))
-            (if failure (error failure) output))))))
+                (unless queued (assert (store/claim s id) {:code "AgentBusy" :message "Target cannot resume immediately."})))))
+          (if (s :temporary)
+            (let [finished (ev/thread-chan 1)
+                  progress @[(get value :after 0) false]
+                  reader (store/open config :observe)]
+              (def done (ev/chan 1))
+              (var observing nil)
+              (defer (do (when observing (ev/cancel observing :finished)) (store/close reader) (ev/chan-close finished))
+                (store/close s)
+                (ev/thread temporary [config call (dyn :pa/program) (dyn :pa/executable) (dyn :pa/limits)] :n finished)
+                (unless (get-in config [:snapshot :silent])
+                  (set observing (ev/go (fn [] (observer/run reader call progress)) nil done)))
+                (def [status failure] (ev/take finished))
+                (when observing
+                  (ev/cancel observing :finished)
+                  (unless (index-of (fiber/status observing) [:dead :error]) (ev/take done)))
+                (assert (= status :ok) failure)
+                (def result (observer/outcome reader call))
+                (def remaining (unless (get-in config [:snapshot :silent])
+                                 (memory/events reader (call :run) (progress 0) 9007199254740991)))
+                (store/close reader)
+                (unless (get-in config [:snapshot :silent])
+                  (unless (progress 1) (print (json/encode (observer/receipt call))))
+                  (each event remaining (when-let [frame (observer/message event config)] (print (json/encode frame)))))
+                result))
+            (do
+              (def active (store/call s id))
+              (when (or (= "queued" (active :state)) (and (active :owner) (not= (active :owner) (get existing :owner))))
+                (def [process] (worker "task" (merge {:task id} (when (active :owner) {:owner (active :owner)})) (s :config)))
+                (ev/close (process :out)))
+              (store/close s)
+              (def reader (store/open config :observe))
+              (defer (store/close reader) (observer/run reader call @[(get value :after 0) false]))))))))
 
   (defn describe [config]
-    {:contract "inquiry-v1" :initialize "init" :settle "join" :profile {:field "agent" :inference "inference"}
+    {:contract "inquiry-v1" :initialize "init" :profile {:field "agent" :inference "inference"}
      :parameters (catseq [[target fields] :in [[:config (spec :schema)] [:input (spec :input)]]]
                    (seq [[key field] :in (sorted (pairs fields)) :when (field :option)]
                      (def parameter (merge (schema/project field [:optional :option :visible :public :unlimited] true)
                                            {:name (field :option) :path (string target "." key) :type (string (field :type)) :default (get config key (get field :default "automatic"))}))
                      (when (and (= target :config) (= :integer (field :type)) (> (config key) 0)) (put parameter :maximum (config key))) parameter))})
 
-  (tabseq [[operation fields] :in [["self" (keys (spec :input))] ["task" [:task :owner]] ["resume" [:run :request :after]] ["observe" [:run :request :after]]
+  (tabseq [[operation fields] :in [["self" (keys (spec :input))] ["task" [:task :owner]] ["resume" [:run :request :after]] ["observe" [:run :request :after]] ["diagnostics" [:request]]
                                    ["describe" []] ["init" []] ["join" []] ["instructions" []] ["models" [:role]] ["world" [:action :point :message :commit :name]] ["views" [:event :mode]] ["render" [:event]] ["record" [:records]] ["abort" [:run :request :reason]] ["invalidate" [:event]]]]
     operation (fn [bytes opaque]
                 (def config (schema/configuration (spec :schema) (json/decode opaque true true) (= operation "describe")))
-                (when (index-of operation ["self" "task" "resume" "observe"])
+                (when (index-of operation ["self" "task" "resume"])
                   (each profile (filter identity [config (config :agent)]) (repl/definitions profile (spec :bindings))))
                 (assert (and (utf8/is-valid? bytes) (<= (length bytes) (config :request-bytes))) "request must be bounded UTF-8")
                 (when (index-of operation ["describe" "instructions"]) (assert (= "" bytes) "operation takes empty input"))
@@ -508,10 +501,22 @@
                     (spit (config :world) (initial :image) :wb)
                     (store/git root ["add" "--" (path/basename (config :world))])
                     (store/git root ["commit" "--quiet" "-m" "Initialize world image"])))
-                (def s (unless (index-of operation ["describe" "instructions" "models"]) (store/open config (and (= operation "self") (= false (get value :persist true))))))
+                (when (and (= operation "self") (config :ephemeral))
+                  (assert (= false (get value :persist true)) "ephemeral profiles require persist:false"))
+                (def temporary (and (= operation "self") (= false (get value :persist true))))
+                (when temporary
+                  (put value :persist false)
+                  (put config :snapshot (merge (config :snapshot)
+                    {:database (string "file:/zinc-" (string/join (map |(string/format "%02x" $) (os/cryptorand 24))) "?vfs=memdb")})))
+                (def s (unless (index-of operation ["describe" "instructions" "models"])
+                         (store/open config (cond temporary :temporary (= operation "task") :worker
+                           (or (index-of operation ["observe" "diagnostics" "views" "render"])
+                               (and (= operation "world") (= "view" (value :action)))) :observe))))
                 (defer (when s (store/close s))
                   (with-dyns [:zinc/config config]
-                    (when (and s (index-of operation ["self" "task" "resume" "world" "init"]) (= "{}" (((store/query s "SELECT origin FROM main.world WHERE id=1") 0) :origin)))
+                    (when (and s (or (index-of operation ["self" "task" "resume" "init"])
+                                     (and (= operation "world") (not= "view" (value :action))))
+                               (= "{}" (((store/query s "SELECT origin FROM main.world WHERE id=1") 0) :origin)))
                       (def origin (repl/image config))
                       (store/query s "UPDATE main.world SET origin=? WHERE id=1 AND origin='{}'" [(string (json/encode origin))]))
                     (def output (cond
@@ -524,6 +529,18 @@
                                     (repl/instructions config (spec :document) bindings (repl/public config (spec :schema) bindings)))
                                   (= operation "models") (map |{:ref ($ :ref) :name ($ :name)} (model/catalogue config (get value :role "chat")))
                                   (= operation "record") {:events (store/record s (value :records))}
+                                  (= operation "observe")
+                                  (let [call (first (store/query s "SELECT * FROM calls WHERE id=? OR request_key=?" [(value :run) (value :request)]))]
+                                    (assert call "call unavailable")
+                                    (assert (= (call :id) (call :run)) "observe requires a run root")
+                                    (assert (= 0 (call :temporary)) "temporary execution cannot be reattached")
+                                    (observer/run s call @[(get value :after 0) false]))
+                                  (= operation "diagnostics")
+                                  (map (fn [row] (merge row {:data (json/decode (row :data) true true)}))
+                                    (store/query s `SELECT 'zinc' source,e.id,e.record_kind kind,e.at created_at,json_extract(e.data,'$.error') data
+                                      FROM events e JOIN call_payloads p ON p.id=e.call
+                                      WHERE p.run=(SELECT id FROM main.call_controls WHERE request=?)
+                                        AND json_type(e.data,'$.error')='object' ORDER BY e.id` [(value :request)]))
                                   (= operation "world")
                                   (if (= "view" (value :action)) (repl/world s value)
                                     (do
@@ -532,14 +549,16 @@
                                       (def name (string "world/" (value :action)))
                                       (assert ((repl/definitions config (spec :bindings)) name)
                                               {:code "WorldBindingNotGranted" :message (string name " is not granted; add it to the executing profile's repl.bindings.")})
-                                      (run s @{:code (string "(world/" (value :action)
+                                      (def receipt (run s @{:code (string "(world/" (value :action)
                                                             (case (value :action)
                                                               "save" (string " " (string/format "%q" (value :message)))
                                                               "switch" (string " " (string/format "%q" (value :commit)))
                                                               "remove" (do (assert (string? (value :name)) "binding name required") (string " (symbol " (string/format "%q" (value :name)) ")")) "") ")")
                                               :author (string "system:" (config :identity))
-                                              :at (((store/query s "SELECT strftime('%Y-%m-%dT%H:%M:%fZ','now') at") 0) :at)} "self")
-                                      (repl/world s {:action "view"} true)))
+                                              :at (((store/query s "SELECT strftime('%Y-%m-%dT%H:%M:%fZ','now') at") 0) :at)} "self"))
+                                      (when (receipt :error) (error (receipt :error)))
+                                      (def reader (store/open config :observe))
+                                      (defer (store/close reader) (repl/world reader {:action "view"} true))))
                                   (index-of operation ["views" "render"])
                                   (do
                                     (assert (and (int? (value :event)) (> (value :event) 0)) "choose a model-admission event")

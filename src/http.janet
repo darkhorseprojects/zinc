@@ -5,8 +5,8 @@
 (import ./store)
 
 (defn- transfer [[config endpoint method suffix body current stream]]
-  (def db (when current (sql/open (config :store))))
-  (when db (sql/eval db "PRAGMA busy_timeout=5000;"))
+  (def db (when current (sql/open (string (current :database) (if (string/find "?" (current :database)) "&" "?") "mode=ro"))))
+  (when db (sql/eval db "PRAGMA busy_timeout=5000; PRAGMA query_only=ON;"))
   (def client (curl/new))
   (def bytes @"")
   (var size 0) (var next-check 0)
@@ -32,9 +32,10 @@
     (when-let [command (endpoint :credential-command)]
       (def diagnostics @"")
       (def owner (fiber/root))
+      (def stopped (ev/chan 1))
       (def watcher (ev/go (fn [] (try (while true (assert (check) "HTTP job fenced") (ev/sleep store/interval))
-                                  ([err] (unless (= err :finished) (ev/cancel owner err)))))))
-      (def result (defer (ev/cancel watcher :finished)
+                                  ([err] (unless (= err :finished) (ev/cancel owner err))))) nil stopped))
+      (def result (defer (do (ev/cancel watcher :finished) (ev/take stopped))
                     (store/process command (os/environ) nil 16384
                                    (max 0.001 (min 30 (- deadline (os/clock)))) diagnostics)))
       (unless (= 0 (result :exit))
@@ -79,8 +80,8 @@
   (assert endpoint "HTTP endpoint is not configured")
   (def current (dyn :zinc/call))
   (def finished (ev/thread-chan (+ 1 (config :response-bytes))))
-  (ev/thread transfer [(tabseq [key :in [:store :response-bytes :http-ms]] key (config key)) endpoint method suffix body
-                       (when current {:id (current :id) :owner (current :owner) :expires (get-in current [:scope :expires])}) (not (nil? consume))] :n finished)
+  (ev/thread transfer [(tabseq [key :in [:response-bytes :http-ms]] key (config key)) endpoint method suffix body
+                       (when current {:database (current :database) :id (current :id) :owner (current :owner) :expires (get-in current [:scope :expires])}) (not (nil? consume))] :n finished)
   (defer (ev/chan-close finished)
     (label done (while true
                   (def [status result] (ev/take finished))

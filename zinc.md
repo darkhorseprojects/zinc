@@ -21,7 +21,7 @@ Use native (ev/spawn (self request)) for background work within a batch or (ev/g
 :text uses :agent when configured; :code uses the caller profile. Code returns evaluation text; text returns a map with :text.
 Children snapshot current live bindings; edits do not merge automatically. :revision selects a Git revision.
 :parent sets history attachment; :memory_range {:start id :end id} sets inclusive bounds. :parent 0 defaults to empty history, not an empty world.
-:persist inherits the caller policy; false uses RAM payloads and forbids durable descendants. Controls/images may reach disk and callers may retain results.
+:persist inherits the caller policy; false keeps execution records and world images in RAM and forbids durable descendants. Existing history is read-only. A durable caller may retain returned results and its own budget counters; external effects remain external.
 Children share the root deadline and budgets. Waiting releases a slot. Workers persist independently of observation.`}
      "memory/expand" ((require "./src/memory") 'expand)
      "save" {:doc "(save message) is world/save."}
@@ -158,7 +158,7 @@ Children share the root deadline and budgets. Waiting releases a slot. Workers p
    :parent {:type :integer :minimum 0
             :option "parent" :description "History attachment event; 0 defaults to empty history"}
    :persist {:type :boolean :default true
-             :option "persist" :description "Use a durable payload journal; false uses RAM"}
+             :option "persist" :description "Persist execution and world changes; false keeps them in RAM"}
    :after {:type :integer :minimum 0}})
 
 (each [name entry]

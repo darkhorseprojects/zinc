@@ -28,11 +28,12 @@ Build with Janet 1.42+, Jpm, Python 3.11+, Git, tar, a C compiler and libcurl
 headers. POSIX needs pkg-config; MSVC needs CURL_ROOT:
 
 ```sh
-JANET_SYSTEM_SQLITE=0 jpm --local --cflags=-std=c99,-DSQLITE_ENABLE_FTS5 deps
+JANET_SYSTEM_SQLITE=0 jpm --local --cflags=-std=c99,-DSQLITE_ENABLE_FTS5,-DSQLITE_USE_URI=1 deps
 jpm --local run package
 ```
 
-MSVC flags are `/nologo,/MD,/DSQLITE_ENABLE_FTS5`; PYTHON selects the interpreter.
+MSVC flags are `/nologo,/MD,/DSQLITE_ENABLE_FTS5,/DSQLITE_USE_URI=1`; PYTHON selects the interpreter.
+SQLite must support URI filenames and the memdb VFS. Upgrade PA, Zinc and Connector together.
 The assets task verifies pinned inputs, downloads Cygnet, builds a format-1 graph,
 and preserves resource citations/licences. Cache identity includes source checksum,
 asset-builder checksum and format; cached schema, integrity and provenance are verified. The builder verifies the source
@@ -92,20 +93,35 @@ none continue across model rounds. Their output remains attached to the originat
 script. Each batch loads the last published image without replaying initializers.
 Uncaught fiber errors fail the executing batch. Explicit self children commit their
 own worlds independently, including when the caller's batch fails. Children share
-the root deadline and budgets. The parallel setting limits independent calls, not
-shared-world script fibers. Runtime fibers/channels are not restartable world state.
+the root deadline and budgets. The parallel setting bounds durable calls across the
+instance, calls within each RAM store, and temporary worker forks per executor. It
+does not limit shared-world script fibers; use OS limits for aggregate temporary work. Runtime fibers/channels are not restartable world state.
 Lost evaluator leases are uncertain, not automatically replayed.
 Parent and memory_range bound history, not world state. Parent 0 defaults to empty
 history. Revoked grants or changed import/setup declarations prevent saved execution.
 
-Persist false keeps new call payloads in a bounded RAM journal over an immutable
-archive prefix; nested children carry only the RAM additions, not copies of archived
-history or images. Descendants stay temporary and cannot reattach. Controls/images may
-reach disk and callers may retain results. This is not a temporary agent instance.
-Accepted workers survive lost observers; interrupted code is never automatically
-replayed. Supervisors must not kill their job/cgroup. `observe` only reads and waits;
-it never recovers, launches, executes, or changes deadlines. Expired executor leases
-require inspection. `resume` explicitly reconciles resumable text work.
+Persist false keeps new execution controls, inputs, events, checkpoints and world
+images in RAM. Historical payloads remain in a read-only archive prefix; only its
+control metadata is copied into RAM. Temporary descendants share the worker and
+cannot become durable. A durable caller can retain returned results and charges its
+own shared budget, but no temporary execution record or image is written to disk.
+External effects are not undone. Temporary execution cannot reattach or recover.
+An ephemeral profile requires an explicit persist:false request; it never silently changes retention.
+
+Durable roots execute in independent task workers. `self` admits work, then switches
+to the same read-only observer used by `observe`. The observer polls committed rows
+with a sequence cursor; it never recovers, claims, executes, heartbeats, checkpoints,
+or changes deadlines. Presentation cannot establish execution acceptance. An explicit
+admission receipt precedes frames; terminal results are read from the journal.
+The byte-valued self/observe/resume entries return `{run, branch, state, value, error?}`;
+state is done, failed, cancelled or uncertain. Sandbox self retains its text/code return values.
+Temporary execution uses an independent native thread and a named in-memory SQLite
+database. Its observer has a separate read-only connection. On completion the executor
+thread ends, observation is cancelled, and the RAM database is closed before trailing
+presentation is sent. A stalled output consumer cannot stall execution or retain its
+mutable world. Lost observers do not cancel work. Expired executor leases require
+inspection; `resume` explicitly reconciles resumable text work. Supervisors must not
+kill accepted workers through their job/cgroup.
 
 Root input `queue: false` atomically claims execution or records a terminal
 `AgentBusy` outcome. It never commits queued work or retries automatically; explicit
@@ -202,13 +218,15 @@ wire request without inference or regenerating historical context. Images from s
 original records share the prompt image byte budget; the inquiry takes priority and omitted
 attachments are labeled. Readable exports identify image/encrypted payloads without copying
 them; exact request exports retain their bytes. Capacity is shown only when recorded. Submitted source remains inspectable history,
-not executable persistence. Visible reasoning, SSE streaming and parallel tools
-remain. Streaming previews store deltas separately from execution checkpoints;
-observers fold only new deltas and skip unchanged previews. Binding source metadata is
+not executable persistence. Providers may stream internally, but observation emits
+only committed outcomes, including visible reasoning and parallel tool results.
+There are no preview writes or streaming-preview cursors. Binding source metadata is
 read from native images on demand rather than copied into every event descriptor.
 Presentation records identify agent/request/run/branch/caller; PA still uses its
-existing wire protocol. Other entries include describe, instructions,
-models, record, world, task, observe, resume, abort, invalidate and join.
+existing wire protocol. Errors retain their structured diagnostics in the journal;
+`diagnostics` reads them by request without executing or copying them to another ledger.
+Other entries include describe, instructions, models, record, world, task, observe,
+resume, abort, invalidate and join.
 
 Import `zinc/design` inside the evaluator and read design/document for architecture.
 Use native `(doc math/rng-int)`, `(doc "string/")`, doc* and doc-of for language
