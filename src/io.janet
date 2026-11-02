@@ -1,8 +1,30 @@
 (import jurl/native :as curl)
+(import spork/path :as path)
 (import spork/utf8 :as utf8)
 (import spork/json :as json)
 (import sqlite3 :as sql)
 (import ./store)
+
+(defn process [argv environment input limit seconds &opt diagnostics]
+  (def child (os/spawn argv :pe (merge environment {:in :pipe :out :pipe :err (if diagnostics :pipe :out)})))
+  (defer (do (when (nil? (get child :return-code)) (try (os/proc-kill child) ([err] nil))) (os/proc-close child))
+    (def output @"") (var size 0)
+    (def [_ _ _ status] (ev/with-deadline (if (= seconds 0) math/inf seconds)
+      (ev/gather
+        (defer (ev/close (child :in)) (when input (ev/write (child :in) input)))
+        (do (var chunk nil)
+          (while (set chunk (ev/read (child :out) 4096))
+            (+= size (length chunk))
+            (assert (<= size limit) "process output byte ceiling")
+            (buffer/push-string output chunk)))
+        (when diagnostics
+          (var chunk nil)
+          (while (set chunk (ev/read (child :err) 4096))
+            (+= size (length chunk))
+            (assert (<= size limit) "process output byte ceiling")
+            (buffer/push-string diagnostics chunk)))
+        (os/proc-wait child))))
+    {:exit status :output (string output)}))
 
 (defn- transfer [[config endpoint method suffix body current stream]]
   (def db (when current (sql/open (string (current :database) (if (string/find "?" (current :database)) "&" "?") "mode=ro"))))
@@ -36,7 +58,7 @@
       (def watcher (ev/go (fn [] (try (while true (assert (check) "HTTP job fenced") (ev/sleep store/interval))
                                   ([err] (unless (= err :finished) (ev/cancel owner err))))) nil stopped))
       (def result (defer (do (ev/cancel watcher :finished) (ev/take stopped))
-                    (store/process command (os/environ) nil 16384
+                    (process command (os/environ) nil 16384
                                    (max 0.001 (min 30 (- deadline (os/clock)))) diagnostics)))
       (unless (= 0 (result :exit))
         (error {:code "CredentialCommandFailed"
@@ -87,3 +109,58 @@
                   (def [status result] (ev/take finished))
                   (if (= :stdout status) (consume result)
                     (do (assert (= :ok status) result) (return done result)))))))
+
+(defn invoke [config name args]
+  (cond
+    (index-of name ["fs/list" "fs/read" "fs/write"])
+    (do
+      (assert (= (length args) (if (= name "fs/write") 3 2)) "invalid filesystem arity")
+      (def [root relative text] args)
+      (def grant (get-in config [:fs (keyword root)]))
+      (assert (and grant (grant (if (= name "fs/write") :write :read))) "filesystem operation is not granted")
+      (assert (and (string? relative) (> (length relative) 0) (not (string/find "\0" relative))
+                   (not (string/find "\\" relative)) (not (string/find ":" relative)) (not (path/abspath? relative))) "invalid relative path")
+      (var target (os/realpath (grant :root)))
+      (each part (array/concat @[""] (if (= relative ".") [] (string/split "/" relative)))
+        (unless (= part "")
+          (assert (not (index-of part ["." ".."])) "invalid path component")
+          (when (index-of (os/which) [:windows :mingw])
+            (assert (and (not (index-of (last part) [32 46]))
+                         (not (peg/match ~(* (choice "CON" "PRN" "AUX" "NUL" (* (choice "COM" "LPT") (range "19"))) -1)
+                                         (string/ascii-upper (first (string/split "." part)))))) "invalid Windows path component"))
+          (set target (path/join target part)))
+        (assert (if (index-of (os/which) [:windows :mingw])
+                  (let [attributes (ffi/call (ffi/lookup (ffi/native "kernel32.dll") "GetFileAttributesA") (ffi/signature :default :uint32 :string) target)]
+                    (or (= attributes 0xffffffff) (= 0 (band attributes 0x400))))
+                  (not= :link (os/lstat target :mode))) "filesystem links are not permitted"))
+      (case name
+        "fs/list" (do (assert (= :directory (os/stat target :mode)) "directory required")
+                    (def names (os/dir target))
+                    (assert (<= (sum (map length names)) (config :response-bytes)) "directory result exceeds limit")
+                    (sorted names))
+        "fs/read" (do (assert (= :file (os/stat target :mode)) "regular file required")
+                    (with [file (file/open target :rbn)]
+                      (def bytes (or (file/read file (+ 1 (config :response-bytes))) ""))
+                      (assert (and (<= (length bytes) (config :response-bytes)) (utf8/is-valid? bytes)) "file exceeds limit or is not UTF-8")
+                      (string bytes)))
+        (do (assert (and (string? text) (utf8/is-valid? text) (<= (length text) (config :response-bytes))) "invalid file contents")
+          (assert (or (nil? (os/stat target)) (= :file (os/stat target :mode))) "regular file required")
+          (spit target text :wb) nil)))
+    (= name "http/request")
+    (do
+      (assert (= 4 (length args)) "invalid HTTP arity")
+      (def [root method segments body] args)
+      (def grant (get-in config [:http (keyword root)]))
+      (assert (and grant (index-of method (grant :methods))) "HTTP operation is not granted")
+      (assert (and (indexed? segments) (every? (map |(and (string? $) (not (index-of $ ["." ".."]))
+                                                          (peg/match ~(* (some (set "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789_-~.")) -1) $)) segments))) "invalid HTTP path")
+      (assert (or (nil? body) (string? body)) "HTTP body must be text or nil")
+      (request config grant method (string/join segments "/") body))
+    (= name "process/run")
+    (do
+      (assert (= 1 (length args)) "invalid process arity")
+      (def command (get-in config [:processes (keyword (first args))]))
+      (assert command "process is not granted")
+      (def result (process (command :argv) (tabseq [[k v] :pairs (command :env)] (string k) v) nil (config :response-bytes) 0))
+      (assert (utf8/is-valid? (result :output)) "process output is not UTF-8")
+      result)))

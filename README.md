@@ -218,9 +218,11 @@ wire request without inference or regenerating historical context. Images from s
 original records share the prompt image byte budget; the inquiry takes priority and omitted
 attachments are labeled. Readable exports identify image/encrypted payloads without copying
 them; exact request exports retain their bytes. Capacity is shown only when recorded. Submitted source remains inspectable history,
-not executable persistence. Providers may stream internally, but observation emits
-only committed outcomes, including visible reasoning and parallel tool results.
-There are no preview writes or streaming-preview cursors. Binding source metadata is
+not executable persistence. Chat Completions uses non-streaming JSON; Responses uses
+SSE only to obtain its terminal response object. Both normalize once into a complete
+assistant message, finish reason and usage report. There is no partial-output assembly.
+Observation emits only committed outcomes, including visible reasoning and parallel
+tool results. There are no preview writes or streaming-preview cursors. Binding source metadata is
 read from native images on demand rather than copied into every event descriptor.
 Presentation records identify agent/request/run/branch/caller; PA still uses its
 existing wire protocol. Errors retain their structured diagnostics in the journal;

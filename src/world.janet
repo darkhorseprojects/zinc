@@ -4,15 +4,37 @@
 (import portable-agents/protocol :as wire)
 (import ./store)
 (import ./schema)
+(import ./io)
+
 (def- design (module/value (markdown/load (path/join (path/dirname (dyn :source)) "../design.md") []) 'document))
 
-(defn image [config &opt inherited revision]
+(defn git [directory args &opt input environment probe]
+  (def config (dyn :zinc/config))
+  (def result (io/process ["git" "-C" directory "--literal-pathspecs" ;args] (merge (os/environ) (or environment {})) input
+                          (max (config :world-bytes) (config :response-bytes)) (/ (config :http-ms) 1000)))
+  (assert (or probe (= 0 (result :exit))) (string "Git " (string/join args " ") ": " (result :output)))
+  (when (= 0 (result :exit)) (result :output)))
+
+(defn image [s origin bytes &opt temporary]
+  (assert (<= (length bytes) ((s :config) :world-bytes)) "world image byte ceiling")
+  (def temporary (or temporary (s :temporary)))
+  (def blob (string/trim (git (origin :root) (if temporary ["hash-object" "--stdin"] ["hash-object" "-w" "--stdin"]) bytes)))
+  (if temporary
+    (do (put (s :worlds) blob bytes)
+        (assert (<= (sum (map length (values (s :worlds)))) ((s :config) :journal-bytes)) "temporary world byte ceiling"))
+    (unless (= blob (origin :blob)) (git (origin :root) ["update-ref" (string "refs/zinc/world/" blob) blob])))
+  (merge origin {:blob blob}))
+
+(defn bytes [s origin]
+  (or ((s :worlds) (origin :blob)) (git (origin :root) ["cat-file" "blob" (origin :blob)])))
+
+(defn resolve [config &opt inherited revision]
   (def origin (if (and inherited (not revision)) inherited
-    (let [root (string/trim (store/git (path/dirname (config :world)) ["rev-parse" "--show-toplevel"]))
+    (let [root (string/trim (git (path/dirname (config :world)) ["rev-parse" "--show-toplevel"]))
           relative (string/join (path/parts (path/relpath root (config :world))) "/")
-          base (string/trim (store/git root ["rev-parse" "--verify" "--end-of-options" (string (or revision "HEAD") "^{commit}")]))
-          blob (string/trim (store/git root ["rev-parse" "--verify" "--end-of-options" (string base ":" relative)]))
-          ref (store/git root (if revision ["rev-parse" "--symbolic-full-name" "--verify" "--end-of-options" revision] ["symbolic-ref" "-q" "HEAD"]) nil nil true)]
+          base (string/trim (git root ["rev-parse" "--verify" "--end-of-options" (string (or revision "HEAD") "^{commit}")]))
+          blob (string/trim (git root ["rev-parse" "--verify" "--end-of-options" (string base ":" relative)]))
+          ref (git root (if revision ["rev-parse" "--symbolic-full-name" "--verify" "--end-of-options" revision] ["symbolic-ref" "-q" "HEAD"]) nil nil true)]
       {:root root :path relative :blob blob :base base
        :ref (if (and ref (string/has-prefix? "refs/heads/" (string/trim ref))) (string/trim ref) "HEAD")})))
   origin)
@@ -161,7 +183,7 @@
                                     ([err] {:ok false :error err}))))) nil done))
           (put pending task done)))))))
 
-(defn world [s value &opt status-only]
+(defn operate [s value &opt status-only]
   (def config (s :config))
   (def current (dyn :zinc/call))
   (def action (value :action))
@@ -172,9 +194,9 @@
                    (do (assert (= action "view") "only view accepts a historical point")
                      ((json/decode ((store/event s (or (get current :scope) {:first 1 :last 9007199254740991}) (value :point)) :data) true true) :world)) origin))
   (assert (selected :base) "event has no world image")
-  (def clean (string/trim (store/git (selected :root) ["rev-parse" "--verify" "--end-of-options" (string (selected :base) ":" (selected :path))])))
+  (def clean (string/trim (git (selected :root) ["rev-parse" "--verify" "--end-of-options" (string (selected :base) ":" (selected :path))])))
   (if (= action "view")
-    (let [bytes (store/bytes s selected)
+    (let [bytes (bytes s selected)
           metadata (do (assert (<= (length bytes) (config :world-bytes)) "world image byte ceiling") (unmarshal bytes @{}))]
       (assert (and (tuple? metadata) (= 6 (length metadata)) (= 1 (metadata 0)) (indexed? (metadata 4))) "incompatible world image")
       (merge selected {:bindings (metadata 4) :dirty (not= clean (selected :blob))
@@ -190,10 +212,10 @@
       (assert (not (first (store/query s "SELECT id FROM main.live_calls WHERE parent IS NULL AND temporary=0 AND id<>coalesce(?,0) LIMIT 1" [(get current :id)]))) "world is busy")
       (def updated
         (case action
-          "discard" (merge (image config nil (origin :base)) {:ref (origin :ref)})
+          "discard" (merge (resolve config nil (origin :base)) {:ref (origin :ref)})
           "switch" (do (assert (= clean (origin :blob)) "save or discard changes before switching")
                        (assert (and (string? (value :commit)) (> (length (value :commit)) 0)) "commit required")
-                       (merge (image config nil (value :commit)) {:ref "HEAD"}))
+                       (merge (resolve config nil (value :commit)) {:ref "HEAD"}))
           "save" (do
                    (def message (value :message))
                    (assert (and (string? message) (<= 1 (length (string/trim message)) 2048)) "commit message required")
@@ -201,19 +223,19 @@
                    (def index (string (config :store) ".index"))
                    (def environment {"GIT_INDEX_FILE" index})
                    (defer (when (os/stat index) (os/rm index))
-                     (store/git (origin :root) ["read-tree" (origin :base)] nil environment)
-                     (store/git (origin :root) ["update-index" "--add" "--cacheinfo" "100644" (origin :blob) (origin :path)] nil environment)
-                     (def tree (string/trim (store/git (origin :root) ["write-tree"] nil environment)))
-                     (def commit (string/trim (store/git (origin :root) ["commit-tree" tree "-p" (origin :base)] message)))
+                     (git (origin :root) ["read-tree" (origin :base)] nil environment)
+                     (git (origin :root) ["update-index" "--add" "--cacheinfo" "100644" (origin :blob) (origin :path)] nil environment)
+                     (def tree (string/trim (git (origin :root) ["write-tree"] nil environment)))
+                     (def commit (string/trim (git (origin :root) ["commit-tree" tree "-p" (origin :base)] message)))
                      (def before (unless (= "HEAD" (origin :ref)) (origin :base)))
                      (def next (merge origin {:ref ref :base commit}))
                      (def intent (store/append s (current :scope) "save-intent" message {:ref ref :before before :after commit :origin ((store/call s (current :id)) :origin) :next next :call (current :id)}))
                      (store/checkpoint s)
-                     (store/git (origin :root) ["update-ref" "--stdin"] (string (if before "update " "create ") ref " " commit (when before (string " " before)) "\n"))
+                     (git (origin :root) ["update-ref" "--stdin"] (string (if before "update " "create ") ref " " commit (when before (string " " before)) "\n"))
                      (store/transact s
                        (store/publish s next)
                        (store/append s (current :scope) "saved" message next (intent :id)))
-                     (spit (config :world) (store/git (origin :root) ["cat-file" "blob" (origin :blob)]) :wb)
+                     (spit (config :world) (git (origin :root) ["cat-file" "blob" (origin :blob)]) :wb)
                      next))))
       (when (= action "save") (put current :candidate updated))
       updated)))
@@ -256,3 +278,29 @@
                     (string/join (seq [[title value] :in [["Settings" (public :settings)] ["Resources" (public :resources)]] :when (> (length value) 0)]
                                    (string "\n\n## " title "\n\n" (schema/encode value))))
                     "\n\n## Host bindings\n\n" (string/join (seq [[_ binding] :in (sorted (pairs available)) :unless (binding :local)] (binding :doc)) "\n\n")))))
+
+(defn reconcile [s]
+  (each intent (store/query s `SELECT e.* FROM events e WHERE e.kind='save-intent'
+    AND NOT EXISTS(SELECT 1 FROM events n WHERE n.parent=e.id AND n.kind IN ('saved','artifact'))
+    AND NOT EXISTS(SELECT 1 FROM main.live_calls c WHERE c.id=json_extract(e.data,'$.call'))`)
+    (def data (json/decode (intent :data) true true))
+    (def origin (json/decode (data :origin) true true))
+    (def ref (git (origin :root) ["rev-parse" "--verify" (data :ref)] nil nil true))
+    (def actual (when ref (string/trim ref)))
+    (assert (or (= actual (data :before)) (= actual (data :after))) "unfinished save conflicts with Git; reconcile explicitly")
+    (store/transact s
+      (unless (first (store/query s "SELECT id FROM events WHERE parent=? AND kind IN ('saved','artifact')" [(intent :id)]))
+        (if (= actual (data :after))
+          (do
+            (assert (first (store/query s "UPDATE main.world SET origin=? WHERE id=1 AND origin=? RETURNING id"
+                                       [(string (json/encode (data :next))) (data :origin)])) "unfinished save conflicts with instance head")
+            (store/query s "UPDATE main.call_payloads SET origin=? WHERE id=? AND origin=?" [(string (json/encode (data :next))) (data :call) (data :origin)])
+            (store/append s {:branch (data :call)} "saved" (intent :text) (data :next) (intent :id)))
+          (store/append s {:branch (data :call)} "artifact" "Save did not advance Git." {:save (intent :id)} (intent :id)))))))
+
+(defn materialize [s]
+  (def origin (store/origin s))
+  (unless (= (origin :base) (s :checkpoint-base))
+    (def bytes (git (origin :root) ["show" (string (origin :base) ":" (origin :path))]))
+    (unless (= bytes (string (slurp ((s :config) :world)))) (spit ((s :config) :world) bytes :wb))
+    (put s :checkpoint-base (origin :base))))

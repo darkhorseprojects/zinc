@@ -2,9 +2,8 @@
 (import spork/json :as json)
 (import spork/base64 :as base64)
 (import ./store)
-(import ./http)
 (import ./schema)
-(import ./responses)
+(import ./provider)
 
 (def- tool
   {:type "function"
@@ -31,65 +30,6 @@
                                                                             {:type "image_url" :image_url "[image tokens are provider-dependent]"} $) (message :content))})
                                            message)) messages)))))
 
-(defn delta [previous value &opt field]
-  (cond
-    (dictionary? value) (let [result (or previous @{})]
-                         (each [key item] (pairs value)
-                           (unless (or (nil? item) (and (= field :tool_calls) (= key :index))) (put result key (delta (result key) item key)))) result)
-    (indexed? value) (let [result (or previous @[])]
-                      (eachp [position item] value
-                        (def index (get item :index position))
-                        (assert (and (int? index) (<= 0 index (length result))) "invalid streamed index")
-                        (put result index (delta (get result index) item field))) result)
-    (and (string? value) (index-of field [:content :refusal :reasoning :reasoning_content :text :data :summary :name :arguments])) (buffer/push-string (or previous @"") value)
-    value))
-
-(defn request [config reference path &opt body]
-  (def provider (get-in config [:providers (keyword (reference :provider))]))
-  (def supplied (when body (json/decode body true true)))
-  (when (and body (has-key? provider :models))
-    (assert (has-key? (provider :models) (keyword (supplied :model))) "model is not granted"))
-  (def streaming (get supplied :stream false))
-  (def value @{:message @{}})
-  (var pending "") (var done false)
-  (def response
-    (http/request config provider (if body "POST" "GET") path body
-      (when streaming
-        (fn [chunk]
-          (set pending (string/replace-all "\r\n" "\n" (string pending chunk)))
-          (var boundary nil)
-          (while (set boundary (string/find "\n\n" pending))
-            (def data (string/trim (string/join (seq [line :in (string/split "\n" (string/slice pending 0 boundary)) :when (string/has-prefix? "data:" line)] (string/slice line 5)) "\n")))
-            (set pending (string/slice pending (+ boundary 2)))
-            (unless (= "" data)
-              (if (= "[DONE]" data)
-                (do (when (= "responses" (reference :protocol)) (assert done "Responses stream has no terminal event"))
-                    (set done true))
-                (do
-                  (assert (not done) "trailing model stream data")
-                  (def part (json/decode data true true))
-                  (if (= "responses" (reference :protocol))
-                    (do
-                      (each update (responses/event value part (reference :reference))
-                        (delta (value :message) update))
-                      (set done (value :done)))
-                    (do
-                      (when-let [failure (or (part :error) (get-in part [:choices 0 :error]))] (error (string "provider error: " (json/encode failure))))
-                      (when (part :usage) (put value :usage (part :usage)))
-                      (each choice (get part :choices [])
-                        (assert (= 0 (choice :index)) "expected one assistant stream")
-                        (when (choice :finish_reason) (put value :finish-reason (choice :finish_reason)))
-                        (delta (value :message) (choice :delta)))))))))))))
-  (assert (<= 200 (response :status) 299) (string "model HTTP " (response :status) ": " (response :body)))
-  (def value (if streaming
-              (do (assert (and done (= "" (string/trim pending)) (value :finish-reason)) "incomplete model stream")
-                  (postwalk |(if (buffer? $) (string $) $) (schema/project value [:done :indices] true)))
-              (json/decode (response :body) true true)))
-  (assert (dictionary? value) "model response must be an object")
-  (when-let [failure (value :error)]
-    (error (string "provider error: " (json/encode failure))))
-  value)
-
 (defn catalogue [config role &opt provider]
   (assert (index-of role ["chat" "rerank"]) "unsupported model role")
   (def models @[])
@@ -97,7 +37,7 @@
     (def granted (get-in config [:providers name]))
     (assert granted "provider is not configured")
     (def path (get-in granted [:catalogue (keyword role)]))
-    (def records (if path ((request config {:provider (string name)} path) :data)
+    (def records (if path ((provider/request config {:provider (string name)} path) :data)
                     (seq [[id model] :pairs (get granted :models {}) :when (= role (model :role))] {:id (string id)})))
     (assert (indexed? records) "invalid model catalogue")
     (def identities @{})
@@ -129,7 +69,7 @@
         (def catalogued (find |(= ($ :id) id) (catalogue config (string role) provider)))
         (assert catalogued "exact model is unavailable")
         (def properties (endpoint :properties))
-        (def record (if properties (request config ref (string/replace-all "{model}" ((module/value (require "jurl/native") 'escape) id) properties)) catalogued))
+        (def record (if properties (provider/request config ref (string/replace-all "{model}" ((module/value (require "jurl/native") 'escape) id) properties)) catalogued))
         (def parameters (get record :supported_parameters []))
         (def native-context (if properties (get-in record [:default_generation_settings :n_ctx]) (record :context_length)))
         (when properties (assert (and (int? native-context) (> native-context 1)) "invalid properties context capacity"))
@@ -188,8 +128,6 @@
           (assert (nil? pending) "inference outcome is uncertain; refusing to resubmit an admitted request")
           (default selected (profile s (input :model) (keyword role)))
           (assert (= (selected :reference) (input :model)) "profile does not match admitted model")
-          (def provider (get-in config [:providers (keyword (selected :provider))]))
-          (def body (merge (provider :parameters) {:model (selected :id)}))
           (var size 0) (var maximum 0)
           (if (= role "rerank")
             (do
@@ -197,8 +135,7 @@
               (each passage (input :documents)
                 (def cost (store/estimate (string (input :query) passage)))
                 (assert (< cost (selected :context)) "original rerank query/passage exceeds capacity")
-                (+= size cost))
-              (merge-into body {:query (input :query) :documents (input :documents) :top_n (length (input :documents))}))
+                (+= size cost)))
             (do
               (each message (input :messages)
                 (each part (if (indexed? (message :content)) (message :content) [])
@@ -208,21 +145,9 @@
               (def caps (map (fn [cap] (assert (and (int? cap) (>= cap 0)) "invalid output limit") (if (= cap 0) math/inf cap)) [(config :output) (get input :output 0)]))
               (set maximum (min (or (selected :output) (selected :context)) ;caps (- (selected :context) size)))
               (assert (> maximum 0) "approximate context capacity exhausted")
-              (merge-into body {:messages (input :messages) :stream true :stream_options {:include_usage true}})
-              (unless (= "none" (selected :output-field)) (put body (keyword (selected :output-field)) maximum))
-              (when (input :tools)
-                (each definition (input :tools) (assert (index-of definition (selected :tools)) "model does not support tool"))
-                (put body :tools (input :tools))
-                (when (selected :parallel) (put body :parallel_tool_calls true)))
-              (unless (= "default" (config :thinking))
-                (case (selected :control)
-                  :reasoning (put body :reasoning (if (and (= "none" (config :thinking)) (not= "responses" (selected :protocol))) {:enabled false} {:effort (config :thinking)}))
-                  :reasoning_effort (put body :reasoning_effort (config :thinking))))
-              (when (provider :cache-key) (put body :prompt_cache_key (provider :cache-key)))))
-          (def wire (schema/encode
-                      (if (= role "rerank") body
-                        (if (= "responses" (selected :protocol)) (responses/encode body (selected :reference))
-                          (merge body {:messages (map |(schema/project $ [:response] true) (body :messages))})))))
+              (each definition (get input :tools [])
+                (assert (index-of definition (selected :tools)) "model does not support tool"))))
+          (def wire (provider/encode config selected input maximum))
           (def endpoint (selected :path))
           (def current (dyn :zinc/call))
           (def admission (store/transact s
@@ -233,10 +158,11 @@
                                                                    :request {:method "POST" :url (string (get-in config [:providers (keyword (selected :provider)) :url]) endpoint) :body wire}
                                                                    :views (input :views) :context (selected :context) :estimate size :output maximum} nil (current :id)))
                                          (store/checkpoint s (merge (current :checkpoint) {:request (event :id)})) (event :id)))
-          (def value (request config selected endpoint wire))
+          (def raw (provider/request config selected endpoint wire))
           (def result
             (try
               (do
+                (def value (if (= role "rerank") raw (provider/decode selected raw)))
                 (account s admission selected (value :usage))
                 (merge
                   (if (= role "rerank")
@@ -282,7 +208,7 @@
                                  (and (= "stop" finish) (= "text" (get tail :type)) (> (length (string/trim (tail :text))) 0)) "complete" "continue")}))
                   {:role role :turn (get input :turn false)
                    :visible (and (= role "chat") (not (input :turn)) (not= "summarize" (current :kind)))}))
-              ([err] (error {:code "InvalidModelResponse" :message (string err) :detail (string (json/encode value)) :context {:request admission}}))))
+              ([err] (error {:code "InvalidModelResponse" :message (string err) :detail (string (json/encode raw)) :context {:request admission}}))))
           (store/transact s
                           (assert (first (store/query s "SELECT id FROM main.call_controls WHERE id=? AND owner=? AND state IN ('running','waiting','uncertain','cancelled')"
                                                       [(current :id) (current :owner)])) "model completion fenced")

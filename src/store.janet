@@ -4,6 +4,180 @@
 (import spork/utf8 :as utf8)
 (import ./schema)
 
+(def- projections `
+CREATE TEMP VIEW unresolved_tools AS
+  SELECT r.branch,r.id response,json_extract(c.value,'$.id') tool_id
+  FROM memory_records r,json_each(r.data,'$.tools') c
+  WHERE r.kind='response'
+    AND r.id=(SELECT max(id) FROM memory_records WHERE branch=r.branch AND kind='response')
+    AND NOT EXISTS(
+      SELECT 1 FROM events e
+      WHERE e.call=r.task AND e.kind IN ('tool-result','tool-ambiguity')
+        AND json_extract(e.data,'$.tool-id')=json_extract(c.value,'$.id')
+        AND json_extract(e.data,'$.response')=r.id
+    );
+CREATE TEMP VIEW invalid_summaries AS WITH RECURSIVE invalid(id) AS (
+  SELECT n.id FROM events a JOIN events n ON n.id=json_extract(a.data,'$.invalidates') AND n.kind='summary'
+  WHERE a.kind='artifact' AND json_type(a.data,'$.invalidates')='integer'
+  UNION SELECT n.id FROM events n,json_each(n.data,'$.children') c JOIN invalid i ON i.id=c.value WHERE n.kind='summary'
+)
+SELECT id FROM invalid;
+CREATE TEMP VIEW memory_records AS WITH records AS (
+  SELECT e.id,e.call task,c.run,
+    CASE WHEN c.kind='summarize' THEN c.parent ELSE c.id END branch,
+    CASE WHEN e.kind='call-result' AND c.kind='code' THEN (
+      SELECT id FROM events n WHERE n.call=c.id AND n.kind='call-attempt' ORDER BY id DESC LIMIT 1
+    ) ELSE e.parent END parent,
+    e.record_kind kind,e.text,e.data,e.estimate,e.author,e.at,e.created,e.body,e.memory,
+    CASE WHEN json_type(e.data,'$.message')='object' THEN
+      CASE WHEN json_extract(e.data,'$."reasoning-visible"') THEN json_remove(json_extract(e.data,'$.message'),'$.response')
+        ELSE json_remove(json_extract(e.data,'$.message'),'$.response','$.reasoning','$.reasoning_content','$.reasoning_details') END
+    END public_message
+  FROM events e LEFT JOIN calls c ON c.id=e.call
+)
+SELECT e.*,b.temporary branch_temporary,b.parent branch_parent,
+  g.request,CASE WHEN b.temporary=1 THEN 'tmp:'||g.request||'/'||b.id||':'||e.id END label
+FROM records e LEFT JOIN main.call_controls b ON b.id=e.branch
+LEFT JOIN main.call_controls g ON g.id=e.run;
+CREATE TEMP VIEW conversation_records AS
+  SELECT e.*,CASE WHEN kind='response' THEN json_remove(json_extract(data,'$.message'),'$.reasoning','$.reasoning_content')
+    ELSE json_object('role','tool','tool_call_id',json_extract(data,'$.tool-id'),'content',text) END conversation_message
+  FROM memory_records e
+  WHERE kind='response' OR kind IN ('tool-result','tool-ambiguity') AND NOT EXISTS(
+    SELECT 1 FROM events n WHERE n.call=e.task AND n.id>e.id AND n.kind IN ('tool-result','tool-ambiguity')
+      AND json_extract(n.data,'$.response')=json_extract(e.data,'$.response')
+      AND json_extract(n.data,'$.tool-id')=json_extract(e.data,'$.tool-id'));
+`)
+
+(defn- database [&opt temporary]
+  (string `
+CREATE TABLE world(id INTEGER PRIMARY KEY CHECK(id=1),file TEXT NOT NULL,origin TEXT NOT NULL DEFAULT '{}' CHECK(json_valid(origin))) STRICT;
+CREATE TABLE call_controls(
+  id INTEGER PRIMARY KEY AUTOINCREMENT CHECK(id<=9007199254740991),
+  request TEXT,
+  parent INTEGER REFERENCES call_controls(id),
+  root INTEGER REFERENCES call_controls(id),
+  kind TEXT NOT NULL CHECK(kind IN ('text','code','summarize')),
+  temporary INTEGER NOT NULL CHECK(temporary IN (0,1)),
+  expires REAL,
+  cancelled INTEGER NOT NULL DEFAULT 0 CHECK(cancelled IN (0,1)),
+  state TEXT NOT NULL DEFAULT 'queued' CHECK(state IN ('queued','running','waiting','done','failed','cancelled','uncertain')),
+  attempt INTEGER NOT NULL DEFAULT 0,
+  owner TEXT,
+  lease_expires REAL,
+  retries INTEGER NOT NULL DEFAULT 1,
+  key TEXT,
+  work_used INTEGER NOT NULL DEFAULT 0,
+  tool_used INTEGER NOT NULL DEFAULT 0,
+  UNIQUE(request),
+  UNIQUE(key)
+) STRICT;
+CREATE INDEX call_pending ON call_controls(state,id);
+CREATE INDEX call_parent ON call_controls(parent,id);
+CREATE VIEW live_calls AS
+  SELECT c.*
+  FROM call_controls c JOIN call_controls r ON r.id=coalesce(c.root,c.id)
+  WHERE c.state IN ('running','waiting')
+    AND c.lease_expires>unixepoch('subsec') AND (c.expires IS NULL OR c.expires>unixepoch('subsec'))
+    AND (r.expires IS NULL OR r.expires>unixepoch('subsec')) AND NOT c.cancelled AND NOT r.cancelled;
+CREATE VIEW running AS SELECT id FROM live_calls WHERE state='running';
+PRAGMA user_version=1;
+` (string/replace-all "$schema." "main."
+                      (string/replace-all "$parent" (if temporary "" "REFERENCES events(id)") `
+CREATE TABLE $schema.call_payloads(
+  id INTEGER PRIMARY KEY,
+  run INTEGER NOT NULL,
+  config TEXT CHECK(config IS NULL OR json_valid(config)),
+  entry INTEGER,
+  first INTEGER NOT NULL,
+  last INTEGER NOT NULL,
+  history_last INTEGER NOT NULL,
+  origin TEXT NOT NULL DEFAULT '{}' CHECK(json_valid(origin)),
+  agent INTEGER NOT NULL,
+  depth INTEGER NOT NULL,
+  checkpoint TEXT NOT NULL DEFAULT '{}' CHECK(json_valid(checkpoint)),
+  CHECK(first>=0 AND last>=first AND ((first=0 AND last=0) OR first>0))
+) STRICT;
+CREATE TABLE $schema.events(
+  id INTEGER PRIMARY KEY AUTOINCREMENT CHECK(id<=9007199254740991),
+  call INTEGER REFERENCES call_payloads(id),
+  parent INTEGER $parent,
+  kind TEXT NOT NULL,
+  record_kind TEXT NOT NULL,
+  memory INTEGER NOT NULL CHECK(memory IN (0,1)),
+  text TEXT NOT NULL DEFAULT '',
+  data TEXT NOT NULL CHECK(json_valid(data)),
+  body TEXT GENERATED ALWAYS AS (CASE WHEN record_kind IN ('call-admission','operation-outcome','artifact','model-outcome','call-result')
+    THEN text||char(10)||json_remove(data,'$.world') ELSE text END) VIRTUAL,
+  author TEXT NOT NULL CHECK(length(author)>0),
+  at TEXT NOT NULL DEFAULT(strftime('%Y-%m-%dT%H:%M:%fZ','now')) CHECK(strftime('%Y-%m-%dT%H:%M:%fZ',at) IS at),
+  estimate INTEGER NOT NULL CHECK(estimate>=0),
+  created REAL NOT NULL DEFAULT(unixepoch('subsec'))
+) STRICT;
+CREATE INDEX $schema.event_call ON events(call,id);
+CREATE UNIQUE INDEX $schema.call_input ON events(call) WHERE kind IN ('user','summary-input');
+CREATE UNIQUE INDEX $schema.call_entry ON events(call,json_extract(data,'$.attempt')) WHERE kind='call-attempt';
+CREATE UNIQUE INDEX $schema.call_terminal ON events(call,json_extract(data,'$.attempt')) WHERE kind='call-result';
+CREATE UNIQUE INDEX $schema.call_answer ON events(call)
+  WHERE kind='model-outcome' AND json_extract(data,'$.turn')=1
+    AND json_extract(data,'$.status') IN ('complete','refused','blocked');
+CREATE UNIQUE INDEX $schema.tool_result ON events(parent) WHERE kind='tool-result';
+CREATE TRIGGER $schema.immutable_events_update BEFORE UPDATE ON events
+  BEGIN SELECT raise(ABORT,'immutable events'); END;
+CREATE TRIGGER $schema.immutable_events_delete BEFORE DELETE ON events
+  BEGIN SELECT raise(ABORT,'immutable events'); END;
+CREATE TABLE $schema.images(
+  event INTEGER NOT NULL REFERENCES events(id),
+  position INTEGER NOT NULL,
+  mime TEXT NOT NULL,
+  bytes BLOB NOT NULL,
+  PRIMARY KEY(event,position)
+) WITHOUT ROWID;
+CREATE TRIGGER $schema.immutable_images_update BEFORE UPDATE ON images
+  BEGIN SELECT raise(ABORT,'immutable images'); END;
+CREATE TRIGGER $schema.immutable_images_delete BEFORE DELETE ON images
+  BEGIN SELECT raise(ABORT,'immutable images'); END;
+CREATE TABLE $schema.usage(
+  request INTEGER PRIMARY KEY REFERENCES events(id),
+  provider TEXT NOT NULL,
+  model TEXT NOT NULL,
+  raw TEXT NOT NULL CHECK(json_valid(raw)),
+  input INTEGER GENERATED ALWAYS AS (json_extract(raw,'$.prompt_tokens')) VIRTUAL,
+  output INTEGER GENERATED ALWAYS AS (json_extract(raw,'$.completion_tokens')) VIRTUAL,
+  total INTEGER GENERATED ALWAYS AS (json_extract(raw,'$.total_tokens')) VIRTUAL,
+  reasoning INTEGER GENERATED ALWAYS AS (json_extract(raw,'$.completion_tokens_details.reasoning_tokens')) VIRTUAL,
+  cached INTEGER GENERATED ALWAYS AS (json_extract(raw,'$.prompt_tokens_details.cached_tokens')) VIRTUAL
+) STRICT;
+CREATE TABLE $schema.previews(
+  id INTEGER PRIMARY KEY AUTOINCREMENT,request INTEGER NOT NULL REFERENCES events(id),
+  delta TEXT NOT NULL CHECK(json_valid(delta))
+) STRICT;
+CREATE INDEX $schema.preview_request ON previews(request,id);
+CREATE UNIQUE INDEX $schema.model_terminal ON events(parent) WHERE kind='model-outcome';
+CREATE TRIGGER $schema.event_kind BEFORE INSERT ON events
+  WHEN new.kind NOT IN (
+    'user','summary-input','call-attempt','call-result','code-admission','tool-result','tool-ambiguity',
+    'model-admission','model-outcome','call-admission','launch-uncertain','summary','interruption',
+    'cancelled','artifact','context','save-intent','saved','operation-outcome'
+  )
+  BEGIN SELECT raise(ABORT,'unsupported event kind'); END;
+CREATE UNIQUE INDEX $schema.summary_call ON events(call) WHERE kind='summary';
+CREATE INDEX $schema.summary_key ON events(json_extract(data,'$.policy'),json_extract(data,'$.children'))
+  WHERE kind='summary';
+CREATE INDEX $schema.summary_start ON events(json_extract(data,'$.first')) WHERE kind='summary';
+CREATE INDEX $schema.summary_invalidations ON events(id)
+  WHERE kind='artifact' AND json_type(data,'$.invalidates')='integer';
+CREATE VIEW $schema.search_records AS SELECT id,body FROM events WHERE memory;
+CREATE VIRTUAL TABLE $schema.event_fts USING fts5(
+  body,content='search_records',content_rowid='id',tokenize='unicode61 remove_diacritics 0'
+);
+CREATE VIRTUAL TABLE $schema.event_words USING fts5vocab(event_fts,'row');
+CREATE TRIGGER $schema.event_index AFTER INSERT ON events BEGIN
+  INSERT INTO event_fts(rowid,body) SELECT id,body FROM search_records WHERE id=new.id;
+END;
+CREATE UNIQUE INDEX $schema.context_key ON events(json_extract(data,'$.key')) WHERE kind='context';
+`))))
+
 (def interval 0.1)
 (defn estimate [bytes] (math/ceil (/ (length bytes) 4)))
 (defn query [s statement &opt parameters] (sql/eval (s :db) statement (or parameters [])))
@@ -17,34 +191,6 @@
          (try
            (let [result (with-dyns [:zinc/transaction ,db] ,;body)] (,sql/eval ,db "COMMIT") result)
            ([err] (,sql/eval ,db "ROLLBACK") (error err)))))))
-
-(defn process [argv environment input limit seconds &opt diagnostics]
-  (def child (os/spawn argv :pe (merge environment {:in :pipe :out :pipe :err (if diagnostics :pipe :out)})))
-  (defer (do (when (nil? (get child :return-code)) (try (os/proc-kill child) ([err] nil))) (os/proc-close child))
-    (def output @"") (var size 0)
-    (def [_ _ _ status] (ev/with-deadline (if (= seconds 0) math/inf seconds)
-      (ev/gather
-        (defer (ev/close (child :in)) (when input (ev/write (child :in) input)))
-        (do (var chunk nil)
-          (while (set chunk (ev/read (child :out) 4096))
-            (+= size (length chunk))
-            (assert (<= size limit) "process output byte ceiling")
-            (buffer/push-string output chunk)))
-        (when diagnostics
-          (var chunk nil)
-          (while (set chunk (ev/read (child :err) 4096))
-            (+= size (length chunk))
-            (assert (<= size limit) "process output byte ceiling")
-            (buffer/push-string diagnostics chunk)))
-        (os/proc-wait child))))
-    {:exit status :output (string output)}))
-
-(defn git [directory args &opt input environment probe]
-  (def config (dyn :zinc/config))
-  (def result (process ["git" "-C" directory "--literal-pathspecs" ;args] (merge (os/environ) (or environment {})) input
-                      (max (config :world-bytes) (config :response-bytes)) (/ (config :http-ms) 1000)))
-  (assert (or probe (= 0 (result :exit))) (string "Git " (string/join args " ") ": " (result :output)))
-  (when (= 0 (result :exit)) (result :output)))
 
 (defn uri [file]
   (def file (if (index-of (os/which) [:windows :mingw]) (string/replace-all "\\" "/" file) file))
@@ -62,7 +208,7 @@
       (unless (index-of mode [:observe :worker])
         (if temporary
           (do
-            (query s (schema/database true))
+            (query s (database true))
             (query s (string "PRAGMA max_page_count=" (math/floor (/ (config :journal-bytes) (((query s "PRAGMA page_size") 0) :page_size))))))
           (do
             (query s "PRAGMA synchronous=FULL; PRAGMA journal_mode=WAL;")
@@ -70,7 +216,7 @@
               (transact s
                 (def version (((query s "PRAGMA user_version") 0) :user_version))
                 (assert (index-of version [0 1]) "unsupported Zinc database; preserve it and provision a fresh database")
-                (when (= version 0) (query s (schema/database)))))
+                (when (= version 0) (query s (database)))))
             (query s "INSERT INTO main.world(id,file) VALUES(1,?) ON CONFLICT(id) DO NOTHING" [(config :world)]))))
       (when temporary
         (query s "ATTACH DATABASE ? AS archive" [(string (uri (config :store)) "?mode=ro")])
@@ -99,7 +245,7 @@
         LEFT JOIN call_payloads p ON p.id=c.id LEFT JOIN call_payloads r ON r.id=p.run
         LEFT JOIN main.call_controls g ON g.id=coalesce(p.run,c.id)
         LEFT JOIN events a ON a.call=c.id AND a.kind IN ('user','summary-input');`))
-      (query s schema/projections)
+      (query s projections)
       (when (and (not= mode :observe) (get-in config [:snapshot :budget-root]))
         (put s :external-root (get-in config [:snapshot :budget-root]))
         (put s :budget-db (sql/open (string (uri (config :store)) "?mode=rw")))
@@ -122,21 +268,18 @@
   (def row (first (query s "SELECT * FROM calls WHERE id=?" [id])))
   (assert row "call unavailable") row)
 
+(defn result [s id]
+  (def row (call s id))
+  (def result (first (query s "SELECT data FROM events WHERE call=? AND kind='call-result' ORDER BY id DESC LIMIT 1" [id])))
+  (def data (when result (json/decode (result :data) true true)))
+  (merge {:run (row :run) :branch id :state (row :state)
+          :value (if (and (= "done" (row :state)) (= "text" (row :kind)))
+                   {:text ((first (query s "SELECT text FROM memory_records WHERE branch=? AND kind='completed' ORDER BY id DESC LIMIT 1" [id])) :text)}
+                   (get data :value))}
+         (when (get data :error) {:error (data :error)})))
+
 (defn origin [s &opt id]
   (json/decode (if id ((call s id) :origin) (((query s "SELECT origin FROM main.world WHERE id=1") 0) :origin)) true true))
-
-(defn image [s origin bytes &opt temporary]
-  (assert (<= (length bytes) ((s :config) :world-bytes)) "world image byte ceiling")
-  (def temporary (or temporary (s :temporary)))
-  (def blob (string/trim (git (origin :root) (if temporary ["hash-object" "--stdin"] ["hash-object" "-w" "--stdin"]) bytes)))
-  (if temporary
-    (do (put (s :worlds) blob bytes)
-        (assert (<= (sum (map length (values (s :worlds)))) ((s :config) :journal-bytes)) "temporary world byte ceiling"))
-    (unless (= blob (origin :blob)) (git (origin :root) ["update-ref" (string "refs/zinc/world/" blob) blob])))
-  (merge origin {:blob blob}))
-
-(defn bytes [s origin]
-  (or ((s :worlds) (origin :blob)) (git (origin :root) ["cat-file" "blob" (origin :blob)])))
 
 (defn append [s scope kind text &opt data parent execution]
   (transact s
@@ -347,26 +490,7 @@
               (do (finish s (call s id) nil {:error {:code "AgentBusy" :message "Target cannot start immediately."}}) (call s id)))
           (call s id))))))
 
-(defn recover [s &opt force]
-  (when (and (not force) (< (os/clock) ((s :recovery) 0))) (break))
-  (put (s :recovery) 0 (+ (os/clock) interval))
-  (each intent (if (s :temporary) [] (query s `SELECT e.* FROM events e WHERE e.kind='save-intent'
-    AND NOT EXISTS(SELECT 1 FROM events n WHERE n.parent=e.id AND n.kind IN ('saved','artifact'))
-    AND NOT EXISTS(SELECT 1 FROM main.live_calls c WHERE c.id=json_extract(e.data,'$.call'))`))
-    (def data (json/decode (intent :data) true true))
-    (def origin (json/decode (data :origin) true true))
-    (def ref (git (origin :root) ["rev-parse" "--verify" (data :ref)] nil nil true))
-    (def actual (when ref (string/trim ref)))
-    (assert (or (= actual (data :before)) (= actual (data :after))) "unfinished save conflicts with Git; reconcile explicitly")
-    (transact s
-      (unless (first (query s "SELECT id FROM events WHERE parent=? AND kind IN ('saved','artifact')" [(intent :id)]))
-        (if (= actual (data :after))
-          (do
-            (assert (first (query s "UPDATE main.world SET origin=? WHERE id=1 AND origin=? RETURNING id"
-                                [(string (json/encode (data :next))) (data :origin)])) "unfinished save conflicts with instance head")
-            (query s "UPDATE main.call_payloads SET origin=? WHERE id=? AND origin=?" [(string (json/encode (data :next))) (data :call) (data :origin)])
-            (append s {:branch (data :call)} "saved" (intent :text) (data :next) (intent :id)))
-          (append s {:branch (data :call)} "artifact" "Save did not advance Git." {:save (intent :id)} (intent :id))))))
+(defn recover [s]
   (def now (os/clock))
   (def recovery-query `SELECT c.*,min(coalesce(c.expires,1e999),coalesce(r.expires,1e999))<=? expired,
     EXISTS(SELECT 1 FROM events a WHERE a.id=json_extract(p.checkpoint,'$.request') AND a.kind='model-admission'
@@ -389,13 +513,7 @@
                   (if unstarted "Deadline expired before execution." "Interrupted execution; effects may have happened.")
                   {:state state :attempt (row :attempt)} nil (row :id)))
         (query s "UPDATE main.call_controls SET state=?,retries=retries-?,owner=CASE WHEN ? THEN NULL ELSE owner END,lease_expires=CASE WHEN ? THEN NULL ELSE lease_expires END WHERE id=?"
-               [state (if retry 1 0) (or retry unstarted) (or retry unstarted) (row :id)]))))
-  (unless (s :temporary)
-    (def origin (origin s))
-    (unless (= (origin :base) (s :checkpoint-base))
-      (def bytes (git (origin :root) ["show" (string (origin :base) ":" (origin :path))]))
-      (unless (= bytes (string (slurp ((s :config) :world)))) (spit ((s :config) :world) bytes :wb))
-      (put s :checkpoint-base (origin :base)))))
+               [state (if retry 1 0) (or retry unstarted) (or retry unstarted) (row :id)])))))
 
 (defn abort [s value]
   (assert (and (not= (nil? (value :run)) (nil? (value :request))) (string? (value :reason)) (<= (length (value :reason)) 2048)) "abort requires run or request and reason")

@@ -15,6 +15,26 @@ read-only prefix of existing history. It does not create or initialize a directo
 Temporary descendants remain in memory; durable callers can retain returned results
 and their own budget counters. External effects remain external.
 
+## Source boundaries
+
+`zinc.md` declares the application contract, bindings and exported entries. The source
+modules own domains, not separate read and write layers:
+
+- `engine.janet`: admission, workers, inference coordination, application frames and read-only observation.
+- `schema.janet`: configuration/input validation and saved-grant authorization.
+- `store.janet`: SQLite layout, journal operations, call ownership, fencing and stored results.
+- `world.janet`: native evaluation, binding images, Git checkpoints and temporary image storage.
+- `model.janet`: discovery, effective model permissions, budgets, admissions and committed inference outcomes.
+- `provider.janet`: exact request encoding, provider transport and complete-response normalization.
+- `memory.janet`: retrieval, compression, expansion and recorded-context inspection.
+- `io.janet`: bounded subprocesses, HTTP and configured filesystem/HTTP/process operations.
+
+Observation is private to the engine and receives a read-only connection; file placement
+is not an authority boundary. Recovery coordinates Git save reconciliation, call-state
+recovery and world-file materialization in that order. Temporary recovery touches only
+its RAM call state. SQLite definitions stay with the store, and Git operations stay
+with the world; neither depends on the other through callbacks.
+
 ## Worlds
 
 The instance head is the latest successfully published durable root image. A call
@@ -102,7 +122,11 @@ The initial self entry admits work and becomes a read-only observer; it does not
 execute the call. Observation opens SQLite read-only, polls committed events with a
 sequence cursor, and emits admission receipts separately from presentation. It never
 recovers, claims, launches, executes, heartbeats, checkpoints or changes deadlines.
-Provider streaming does not write previews. An expired lease is reported for inspection.
+Chat Completions uses JSON responses. Responses uses SSE only to capture the terminal
+response object; partial text and tool-call deltas are not assembled. The provider
+normalizes the final message, finish reason and usage before model validation and
+publication. HTTP progress callbacks enforce fencing independently of response chunks.
+No provider previews are written. An expired lease is reported for inspection.
 
 Temporary execution uses a native executor thread and a named in-memory SQLite
 database, observed through another read-only connection. PA isolates protocol writes
