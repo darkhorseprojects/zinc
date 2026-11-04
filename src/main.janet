@@ -1,6 +1,6 @@
 (import spork/path :as path)
 (import ./schema)
-(import ./protocol)
+(import ./io)
 (import ./store)
 (import ./world)
 (import ./engine)
@@ -18,9 +18,10 @@
   (var observer true)
   (try
     (do
-      (def input-stream (protocol/reader stdin))
-      (def call (protocol/receive input-stream limit))
-      (assert (and (= "call" (call :type)) (not (protocol/receive input-stream limit))) "one call and EOF required")
+      (var call nil)
+      (each frame (io/messages stdin limit)
+        (assert (= "call" (frame :type)) "one call and EOF required")
+        (set call frame))
       (set method (call :method))
       (def params (call :params))
       (schema/request params [:input :config :imports])
@@ -29,7 +30,7 @@
       (def input (get params :input {}))
       (assert (dictionary? input) "input must be an object")
       (assert (<= (length (schema/encode input)) (config :request-bytes)) "input exceeds request byte limit")
-      (protocol/send stdout {:version 1 :type "ready"} limit)
+      (io/send stdout {:version 1 :type "ready"} limit)
       (def value
         (case method
           "describe" (engine/describe config)
@@ -75,18 +76,18 @@
                           (ev/chan-close done)
                           (ev/give completed packet)
                           (unless (= :ok (packet 0)) (ev/cancel owner (packet 1)))))
-                        (try (protocol/send stdout {:version 1 :type "event" :value handle} limit) ([err] (set observer false)))
+                        (try (io/send stdout {:version 1 :type "event" :value handle} limit) ([err] (set observer false)))
                         (def reader (store/open config true (local :file)))
                         (def result (defer (store/close reader)
                           (engine/observe reader task 0 (fn [frame]
-                            (when observer (try (protocol/send stdout {:version 1 :type "event" :value frame} limit)
+                            (when observer (try (io/send stdout {:version 1 :type "event" :value frame} limit)
                               ([err] (set observer false))))) true)))
                         (def [status failure] (ev/take completed))
                         (ev/chan-close completed) (set execution nil)
                         (assert (= status :ok) failure)
                         result))
                     (let [task (try (store/start s input config)
-                      ([err fiber] (error (merge (protocol/diagnostic "AdmissionRejected" err fiber) {:code "AdmissionRejected"}))))]
+                      ([err fiber] (error (merge (schema/diagnostic "AdmissionRejected" err fiber) {:code "AdmissionRejected"}))))]
                       (set admitted true)
                       {:type "admission" :task (task :id) :store (s :identity) :request (get-in task [:data :request]) :persist true})))
                 "run"
@@ -108,10 +109,10 @@
                   (assert (= (input :store) (s :identity)) "observation store identity changed")
                   (def task (first (store/query s "SELECT * FROM events WHERE key=?" [(string "task:" (input :request))])))
                   (assert task "task unavailable")
-                  (protocol/send stdout {:version 1 :type "event" :value {:type "admission" :task (task :id) :store (s :identity)
+                  (io/send stdout {:version 1 :type "event" :value {:type "admission" :task (task :id) :store (s :identity)
                     :request (get-in task [:data :request]) :persist true}} limit)
                   (engine/observe s task (get input :after 0)
-                    (fn [frame] (protocol/send stdout {:version 1 :type "event" :value frame} limit)) true))
+                    (fn [frame] (io/send stdout {:version 1 :type "event" :value frame} limit)) true))
                 "status"
                 (do
                   (schema/request input [:request :store])
@@ -155,12 +156,12 @@
                   (seq [row :in (if task (store/tree s (task :id)) []) :when (get-in row [:data :error])]
                     {:source "zinc" :id (row :id) :kind (row :kind) :created_at (os/strftime "%Y-%m-%dT%H:%M:%SZ" (row :created)) :data (get-in row [:data :error])}))
                 (error (string "unknown method " method)))))))
-      (when observer (protocol/send stdout {:version 1 :type "result" :value value} limit)))
+      (when observer (io/send stdout {:version 1 :type "result" :value value} limit)))
     ([err fiber]
-      (eprint (schema/encode (protocol/diagnostic "ProgramError" err fiber)))
+      (eprint (schema/encode (schema/diagnostic "ProgramError" err fiber)))
       (when execution (ev/take execution) (ev/chan-close execution))
       (when observer
-        (def failure (protocol/diagnostic "ProgramError" err fiber))
-        (protocol/send stdout {:version 1 :type "error" :error
+        (def failure (schema/diagnostic "ProgramError" err fiber))
+        (io/send stdout {:version 1 :type "error" :error
           (if (and (= method "self") (not admitted)) (merge failure {:code "AdmissionRejected"}) failure)} limit))
       (os/exit 1))))

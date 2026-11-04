@@ -10,8 +10,8 @@ Portable Agents
 ---------------
 Source: https://github.com/darkhorseprojects/portable-agents
 License: AGPL-3.0-only; see LICENSE.
-The local report renderer derives from Portable Agents' former rendering utility;
-Portable Agents is no longer a Janet runtime dependency.
+Zinc implements the Portable Agents protocol.
+Portable Agents is not a Janet runtime dependency.
 
 Janet and janet-lang/sqlite3
 ---------------------------

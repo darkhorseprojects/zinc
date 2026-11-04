@@ -3,7 +3,6 @@
 (import ./memory)
 (import ./schema)
 (import ./world)
-(import ./protocol)
 (import ./io)
 
 (def bindings
@@ -62,7 +61,7 @@
               config (pending :id)))
             (set admitted true)
             {:task (child :id) :status "accepted"})
-          ([err fiber] {:status "rejected" :error (protocol/diagnostic "AdmissionRejected" err fiber)})))
+          ([err fiber] {:status "rejected" :error (schema/diagnostic "AdmissionRejected" err fiber)})))
         (when (receipt :error) (set rejected (or rejected (receipt :error))))
         (store/append s (pending :id) "receipt"
           {:tool (tool :id) :message {:role "tool" :tool_call_id (tool :id) :content (schema/encode receipt)}}
@@ -198,7 +197,7 @@
               ([err fiber]
                 (if (and (not= "failed" (get-in err [:context :outcome])) (index-of (get err :code) ["Yield" "Blocked"])) (error err)
                   (do
-                    (def failure (protocol/diagnostic "OperationFailed" err fiber))
+                    (def failure (schema/diagnostic "OperationFailed" err fiber))
                     (def failure (merge failure {:context (merge (get failure :context {})
                       {:operation (admission :id) :outcome (get-in failure [:context :outcome] "unknown")})}))
                     (when (= "failed" (get-in failure [:context :outcome]))
@@ -274,15 +273,15 @@
                                 (store/commit own {:wait {:operations [operation]}}))
                               (unless (first (store/query own "SELECT id FROM events WHERE key=?" [(string "blocked:" (task :id) ":" (get-in err [:context :operation] 0))]))
                                 (store/append own (task :id) "diagnostic"
-                                  {:error (protocol/diagnostic "Blocked" err fiber) :text (string (err :code) ": " (err :message))}
+                                  {:error (schema/diagnostic "Blocked" err fiber) :text (string (err :code) ": " (err :message))}
                                   (string "blocked:" (task :id) ":" (get-in err [:context :operation] 0)))))
-                            (store/finish own (task :id) "failed" nil (protocol/diagnostic "ExecutionFailed" err fiber))))))))
+                            (store/finish own (task :id) "failed" nil (schema/diagnostic "ExecutionFailed" err fiber))))))))
                 coordinate) [coordinate task claim (local :file)] finished))
               (put active coordinate {:token (claim :token) :fiber worker})))))
       (when (and (= 0 pending) (= 0 (length active))) (break))
       (if (> (ev/count finished) 0)
         (let [[status fiber] (ev/take finished) coordinate (fiber/last-value fiber)]
-          (assert (= :ok status) (protocol/diagnostic "ExecutorFailed" coordinate fiber))
+          (assert (= :ok status) (schema/diagnostic "ExecutorFailed" coordinate fiber))
           (store/query (sessions (coordinate 0)) "DELETE FROM claims WHERE task=? AND token=?" [(coordinate 1) ((active coordinate) :token)])
           (put active coordinate nil))
         (ev/sleep store/interval)))))

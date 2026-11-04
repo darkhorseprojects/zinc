@@ -1,7 +1,6 @@
 (import spork/json :as json)
 (import ./schema)
 (import ./io)
-(import ./protocol)
 
 (defn encode [config selected input maximum]
   (def endpoint (get-in config [:providers (keyword (selected :provider))]))
@@ -111,7 +110,7 @@
                 :message (failure :message) :detail (string (json/encode failure))}))
       value)
     ([err fiber]
-      (def failure (protocol/diagnostic "ProviderError" err fiber))
+      (def failure (schema/diagnostic "ProviderError" err fiber))
       (error (merge failure
         (if (and response (not (get err :detail))) {:detail (string (get failure :detail "") "\n" (response :body))} {})
         {:context (merge (get failure :context {})

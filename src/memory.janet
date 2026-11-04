@@ -1,6 +1,5 @@
 (import sqlite3 :as sql)
 (import spork/json :as json)
-(import ./render :as markdown)
 (import ./store)
 (import ./model)
 (import ./schema)
@@ -11,10 +10,14 @@
 (defn render [row]
   (def data (row :data))
   (def text (if (= "model" (data :type)) (model/render data) (get data :text "")))
+  (def body (if (and (= "task" (row :kind)) (= "script" (data :type)))
+    (let [runs (peg/match ~(any (choice (capture (some "`")) 1)) text)
+          fence (string/repeat "`" (max 3 (+ 1 (max 0 ;(map length runs)))))]
+      (string fence "janet\n" text "\n" fence)) text))
   (string "### #" (row :id) " · " (row :kind) (when (data :state) (string " · " (data :state)))
     "\n\nAuthor: " (get data :author "zinc") " · Occurred: " (get data :at (os/strftime "%Y-%m-%dT%H:%M:%SZ" (row :created)))
     (when (data :children) (string "\n\nSources: " (schema/encode (data :children))))
-    "\n\n" (if (and (= "task" (row :kind)) (= "script" (data :type))) (markdown/render {:language "janet" :text text}) text) "\n\n"))
+    "\n\n" body "\n\n"))
 
 (defn records [s task &opt all]
   (def bounds (get-in task [:data :memory_range]))
@@ -202,9 +205,13 @@
   (def chart (string "[" bar (string/repeat "." (- 64 (length bar))) "] ~" (data :estimate) " / " (data :context) " tokens"))
   (def summary (string "Prompt #" id "\n`" chart "`\nI instructions · C chronological · R retrieved · W world · U inquiry · E exchanges · T tools · M rerank"))
   {:event id :views views :summaries summaries :composition {:sections sections :bar chart :estimate (data :estimate) :capacity (data :context)}
-   :summary summary :request request :text (markdown/render {:name (string "Prompt #" id) :level 1 :content [summary
+   :summary summary :request request :text (string "# " summary "\n\n"
      (case mode
-       "render" [(string (request :method) " " (request :url)) (schema/project body [:messages :input :instructions] true)
-         (seq [[index message] :pairs messages] {:name (string "Message " index " · " (message :role)) :level 2 :content [(message :content)]})]
-       "summaries" (map render summaries)
-       [views (map render (seq [id :in (get views :records [])] (store/event s id)))]) ]})})
+       "render" (string (request :method) " " (request :url) "\n\n"
+         (json/encode (schema/project body [:messages :input :instructions] true) "  " "\n") "\n\n"
+         (string/join (seq [[index message] :pairs messages]
+           (string "## Message " index " · " (message :role) "\n\n"
+             (if (string? (message :content)) (message :content) (json/encode (message :content) "  " "\n")))) "\n\n"))
+       "summaries" (string/join (map render summaries) "\n\n")
+       (string (json/encode views "  " "\n") "\n\n"
+         (string/join (map render (seq [id :in (get views :records [])] (store/event s id))) "\n\n"))))})

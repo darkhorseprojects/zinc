@@ -116,6 +116,16 @@
 (defn project [value selected &opt omit]
   (tabseq [[key item] :pairs value :when (if omit (nil? (index-of key selected)) (index-of key selected))] key item))
 
+(defn diagnostic [code err &opt fiber]
+  (def value (if (and (dictionary? err) (string? (err :code)) (string? (err :message)))
+    (project err [:code :message :detail :context])
+    {:code code :message (if (string? err) err (string/format "%n" err))}))
+  (if (or (value :detail) (nil? fiber)) value
+    (do
+      (def trace @"")
+      (with-dyns [:err trace] (debug/stacktrace fiber))
+      (merge value {:detail (string trace)}))))
+
 (defn validate [schema supplied &opt discovery]
   (assert (dictionary? supplied) "configuration must be an object")
   (def config @{})

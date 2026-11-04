@@ -4,7 +4,6 @@
 (import ./store)
 (import ./schema)
 (import ./provider)
-(import ./protocol)
 
 (def- tool {:type "function" :function {:name "run_janet"
   :description "Admit an independent Janet script. Its receipt is not its result. Scripts publish their own database commits; they need not settle before other work continues."
@@ -132,7 +131,7 @@
          :estimate size :context (selected :context) :output maximum :turn (get input :turn false) :role role} identity))
       (def raw (try (provider/request config selected (selected :path) wire)
         ([err fiber]
-          (def failure (protocol/diagnostic "ProviderFailed" err fiber))
+          (def failure (schema/diagnostic "ProviderFailed" err fiber))
           (def failure (merge failure {:context (merge (get failure :context {}) {:operation (admission :id)})}))
           (when (= "failed" (get-in failure [:context :outcome]))
             (store/append s (admission :id) "result"
@@ -170,7 +169,7 @@
                     (def arguments (schema/request (json/decode (get-in call [:function :arguments]) true true) [:code]))
                     (assert (arguments :code) "missing source")
                     {:id (call :id) :code (arguments :code)})
-                  ([err fiber] {:id (call :id) :error (protocol/diagnostic "InvalidToolCall" err fiber)}))) calls))
+                  ([err fiber] {:id (call :id) :error (schema/diagnostic "InvalidToolCall" err fiber)}))) calls))
               {:message message :tools work :text (text message) :finish-reason finish
                :status (cond (> (length calls) 0) "tools" (> (length (get message :refusal "")) 0) "refused"
                  (= "content_filter" finish) "blocked" (and (= finish "stop") (> (length (string/trim (text message))) 0)) "complete"
@@ -180,7 +179,7 @@
           (merge result {:type "model" :state "done" :role role :turn (get input :turn false) :usage (value :usage) :raw raw
             :reasoning-visible (not= "none" (config :thinking))}))
         ([err fiber] {:type "model" :state "failed" :role role :turn (get input :turn false) :raw raw
-          :error (protocol/diagnostic "InvalidModelResponse" err fiber)})))
+          :error (schema/diagnostic "InvalidModelResponse" err fiber)})))
       (def result (store/append s (admission :id) "result" outcome (string "result:" (admission :id))))
       (when (outcome :error) (error (outcome :error)))
       (merge (result :data) {:event (result :id)}))))

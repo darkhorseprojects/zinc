@@ -1,5 +1,5 @@
 (import ./schema)
-(import ./protocol)
+(import ./io)
 
 (defn definitions [config supplied]
   (if-not (config :janet) {}
@@ -13,7 +13,7 @@
         (put cache (string namespace)
           (tabseq [[name documentation] :pairs (spec :exports)]
             (symbol name) @{:doc documentation :value (fn [& args]
-              (protocol/call spec (string name) args (dyn :zinc/operation) (config :response-bytes)))})))
+              (io/call spec (string name) args (dyn :zinc/operation) (config :response-bytes)))})))
       (array/insert paths 0 [(fn [name] (when (get imports (keyword name)) name)) :preload])
       (put base *module-cache* cache)
       (put base *module-paths* paths)
@@ -115,5 +115,5 @@
               fiber (ev/go (fn []
                 (defer (put pending (fiber/root) nil)
                   (ev/give reply (try {:value (handler name args)}
-                    ([err fiber] {:error (protocol/diagnostic "OperationFailed" err fiber)}))))) nil stopped)]
+                    ([err fiber] {:error (schema/diagnostic "OperationFailed" err fiber)}))))) nil stopped)]
           (put pending fiber stopped)))))))
