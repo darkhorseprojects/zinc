@@ -35,7 +35,7 @@ License: MIT
 
 Jurl and libcurl
 ----------------
-Source: https://github.com/darkhorseprojects/jurl (fork of CosmicToast/jurl)
+Source: https://github.com/CosmicToast/jurl
 Jurl license: Unlicense
 libcurl license: curl license, https://curl.se/docs/copyright.html
 
