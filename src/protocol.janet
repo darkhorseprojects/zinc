@@ -42,13 +42,14 @@
   (when (get io :flush) (:flush io)))
 
 (defn diagnostic [code err &opt fiber]
-  (def trace @"")
-  (when fiber (with-dyns [:err trace] (debug/stacktrace fiber)))
-  (def value (if (and (dictionary? err) (string? (err :code)) (string? (err :message))) err
-                {:code code :message (if (string? err) err (string/format "%n" err))}))
-  (merge (schema/project value [:code :message])
-    (if (dictionary? (value :context)) {:context (value :context)} {})
-    {:detail (string (get value :detail "") "\n" trace)}))
+  (def value (if (and (dictionary? err) (string? (err :code)) (string? (err :message)))
+    (schema/project err [:code :message :detail :context])
+    {:code code :message (if (string? err) err (string/format "%n" err))}))
+  (if (or (value :detail) (nil? fiber)) value
+    (do
+      (def trace @"")
+      (with-dyns [:err trace] (debug/stacktrace fiber))
+      (merge value {:detail (string trace)}))))
 
 (defn call [spec name args operation limit]
   (def process (os/spawn (spec :command) :pd {:in :pipe :out :pipe :err stderr}))
@@ -70,6 +71,8 @@
           (error "invalid response message")))
       (assert terminal "missing terminal response")
       (ev/take finished)
-      (when (= "error" (terminal :type)) (error (terminal :error)))
+      (when (= "error" (terminal :type))
+        (def failure (terminal :error))
+        (error (merge failure {:context (merge (get failure :context {}) {:outcome "failed"})})))
       (assert (= 0 (process :return-code)) "capability process failed; effects may have happened")
       (terminal :value))))

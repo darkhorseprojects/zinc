@@ -1,6 +1,7 @@
 (import spork/json :as json)
 (import ./schema)
 (import ./io)
+(import ./protocol)
 
 (defn encode [config selected input maximum]
   (def endpoint (get-in config [:providers (keyword (selected :provider))]))
@@ -65,40 +66,57 @@
   (when (and body (has-key? endpoint :models))
     (assert (has-key? (endpoint :models) (keyword (supplied :model))) "model is not granted"))
   (def streaming (get supplied :stream false))
-  (var pending "") (var terminal nil)
-  (def response
-    (io/request config endpoint (if body "POST" "GET") path body
-      (when streaming
-        (fn [chunk]
-          (set pending (string/replace-all "\r\n" "\n" (string pending chunk)))
-          (var boundary nil)
-          (while (set boundary (string/find "\n\n" pending))
-            (def data (string/trim (string/join (seq [line :in (string/split "\n" (string/slice pending 0 boundary)) :when (string/has-prefix? "data:" line)] (string/slice line 5)) "\n")))
-            (set pending (string/slice pending (+ boundary 2)))
-            (unless (= "" data)
-              (if (= "[DONE]" data)
-                (assert terminal "Responses stream has no terminal response")
-                (do
-                  (assert (nil? terminal) "trailing model stream data")
-                  (def part (json/decode data true true))
-                  (case (part :type)
-                    "error" (error {:code (or (part :code) "ProviderError")
-                                    :message (part :message) :detail (string (json/encode part))})
-                    "response.failed"
-                    (let [failure (get-in part [:response :error])]
-                      (error {:code (or (failure :code) "ProviderError")
-                              :message (failure :message) :detail (string (json/encode failure))}))
+  (var pending "") (var terminal nil) (var response nil) (var confirmed false)
+  (try
+    (do
+      (set response (io/request config endpoint (if body "POST" "GET") path body
+        (when streaming
+          (fn [chunk]
+            (set pending (string/replace-all "\r\n" "\n" (string pending chunk)))
+            (var boundary nil)
+            (while (set boundary (string/find "\n\n" pending))
+              (def data (string/trim (string/join (seq [line :in (string/split "\n" (string/slice pending 0 boundary)) :when (string/has-prefix? "data:" line)] (string/slice line 5)) "\n")))
+              (set pending (string/slice pending (+ boundary 2)))
+              (unless (= "" data)
+                (if (= "[DONE]" data)
+                  (assert terminal "Responses stream has no terminal response")
+                  (do
+                    (assert (nil? terminal) "trailing model stream data")
+                    (def part (json/decode data true true))
+                    (case (part :type)
+                      "error" (do (set confirmed true)
+                        (error {:code (or (part :code) "ProviderError")
+                                :message (part :message) :detail (string (json/encode part))}))
+                      "response.failed"
+                      (let [failure (get-in part [:response :error])]
+                        (set confirmed true)
+                        (error {:code (or (failure :code) "ProviderError")
+                                :message (failure :message) :detail (string (json/encode part))})))
                     (when (index-of (part :type) ["response.completed" "response.done" "response.incomplete"])
-                      (set terminal (part :response))))))))))))
-  (assert (<= 200 (response :status) 299) (string "model HTTP " (response :status) ": " (response :body)))
-  (def value (if streaming
-               (do (assert (and terminal (= "" (string/trim pending))) "incomplete Responses stream") terminal)
-               (json/decode (response :body) true true)))
-  (assert (dictionary? value) "model response must be an object")
-  (when-let [failure (or (value :error) (get-in value [:choices 0 :error]))]
-    (error {:code (or (failure :code) "ProviderError")
-            :message (failure :message) :detail (string (json/encode failure))}))
-  value)
+                      (set terminal (part :response)))))))))))
+      (set confirmed true)
+      (unless (<= 200 (response :status) 299)
+        (def payload (when (string/find "application/json" (get-in response [:headers "content-type"] ""))
+          (json/decode (response :body) true true)))
+        (def failure (get payload :error))
+        (error {:code (or (get failure :code) (string "HTTP" (response :status)))
+                :message (or (get failure :message) (get payload :message) (response :message))
+                :detail (response :body)}))
+      (def value (if streaming
+        (do (assert (and terminal (= "" (string/trim pending))) "incomplete Responses stream") terminal)
+        (json/decode (response :body) true true)))
+      (assert (dictionary? value) "model response must be an object")
+      (when-let [failure (or (value :error) (get-in value [:choices 0 :error]))]
+        (error {:code (or (failure :code) "ProviderError")
+                :message (failure :message) :detail (string (json/encode failure))}))
+      value)
+    ([err fiber]
+      (def failure (protocol/diagnostic "ProviderError" err fiber))
+      (error (merge failure
+        (if (and response (not (get err :detail))) {:detail (string (get failure :detail "") "\n" (response :body))} {})
+        {:context (merge (get failure :context {})
+          {:provider (reference :provider) :path path :status (get response :status)
+           :outcome (if confirmed "failed" (get-in failure [:context :outcome] "unknown"))})})))))
 
 (defn decode [selected response]
   (if (= "responses" (selected :protocol))

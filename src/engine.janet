@@ -53,7 +53,7 @@
       (store/check s (task :id))
       (def response (pending :data))
       (when (response :error) (error (response :error)))
-      (var admitted false)
+      (var admitted false) (var rejected nil)
       (each tool (get response :tools [])
         (def receipt (try
           (do
@@ -63,14 +63,16 @@
             (set admitted true)
             {:task (child :id) :status "accepted"})
           ([err fiber] {:status "rejected" :error (protocol/diagnostic "AdmissionRejected" err fiber)})))
+        (when (receipt :error) (set rejected (or rejected (receipt :error))))
         (store/append s (pending :id) "receipt"
           {:tool (tool :id) :message {:role "tool" :tool_call_id (tool :id) :content (schema/encode receipt)}}
           (string "receipt:" (pending :id) ":" (tool :id))))
       (store/append s (pending :id) "turn" {} (string "turn:" (pending :id)))
       (if (index-of (response :status) ["complete" "refused" "blocked"])
         (store/finish s (task :id) "done" {:text (response :text) :status (response :status)})
-        (when admitted
-          (store/commit s {:wait {:changes true} :after (get-in (store/event s (pending :parent)) [:data :views :after] 0)}))))
+        (if admitted
+          (store/commit s {:wait {:changes true} :after (get-in (store/event s (pending :parent)) [:data :views :after] 0)})
+          (store/finish s (task :id) "failed" nil rejected))))
     (do
       (when-let [unknown (first (store/query s `SELECT m.id FROM events m WHERE m.parent=? AND m.kind='model'
         AND NOT EXISTS(SELECT 1 FROM events r WHERE r.parent=m.id AND r.kind='result') ORDER BY m.id LIMIT 1` [(task :id)]))]
@@ -194,9 +196,14 @@
                   (index-of name ["fs/write" "http/request" "process/run"]) (io/invoke (s :config) name args)
                   (apply (binding :value) args)))
               ([err fiber]
-                (if (index-of (get err :code) ["Yield" "Blocked"]) (error err)
-                  (error {:code "Blocked" :message "Operation was admitted; reconcile its outcome before repeating."
-                    :context {:operation (admission :id) :cause (protocol/diagnostic "OperationFailed" err fiber)}})))))
+                (if (and (not= "failed" (get-in err [:context :outcome])) (index-of (get err :code) ["Yield" "Blocked"])) (error err)
+                  (do
+                    (def failure (protocol/diagnostic "OperationFailed" err fiber))
+                    (def failure (merge failure {:context (merge (get failure :context {})
+                      {:operation (admission :id) :outcome (get-in failure [:context :outcome] "unknown")})}))
+                    (when (= "failed" (get-in failure [:context :outcome]))
+                      (store/append s (admission :id) "result" {:state "failed" :error failure} (string "result:" (admission :id))))
+                    (error failure))))))
             (store/append s (admission :id) "result" {:state "done" :value value :text (if (string? value) value "")} (string "result:" (admission :id)))
             value)))))))
 
@@ -245,7 +252,7 @@
                 (def own (store/open current nil file))
                 (defer (store/close own)
                   (with-dyns [:zinc/task task :zinc/token (claim :token)
-                              :zinc/call {:database file :id (task :id) :owner (claim :token) :scope {:expires (get-in task [:data :expires])}}]
+                              :zinc/call own]
                     (try
                       (do
                         (store/check own (task :id))
@@ -257,7 +264,7 @@
                           "script" (store/finish own (task :id) "done" (code own task available sessions))))
                       ([err fiber]
                         (unless (or (store/result own (task :id)) (not (first (store/query own "SELECT task FROM claims WHERE task=? AND token=? AND expires>?" [(task :id) (claim :token) (os/clock)]))))
-                          (case (get err :code)
+                          (case (case (get-in err [:context :outcome]) "failed" nil "unknown" "Blocked" (get err :code))
                             "Yield" nil
                             "TaskClosed" nil
                             "TaskReplaced" nil
@@ -266,7 +273,8 @@
                               (when-let [operation (get-in err [:context :operation])]
                                 (store/commit own {:wait {:operations [operation]}}))
                               (unless (first (store/query own "SELECT id FROM events WHERE key=?" [(string "blocked:" (task :id) ":" (get-in err [:context :operation] 0))]))
-                                (store/append own (task :id) "diagnostic" {:error (protocol/diagnostic "Blocked" err fiber) :text (err :message)}
+                                (store/append own (task :id) "diagnostic"
+                                  {:error (protocol/diagnostic "Blocked" err fiber) :text (string (err :code) ": " (err :message))}
                                   (string "blocked:" (task :id) ":" (get-in err [:context :operation] 0)))))
                             (store/finish own (task :id) "failed" nil (protocol/diagnostic "ExecutionFailed" err fiber))))))))
                 coordinate) [coordinate task claim (local :file)] finished))
@@ -285,7 +293,7 @@
     (def root (store/root s (task :id)))
     (def data (row :data))
     (def body (cond
-      (and (= "result" (row :kind)) (= "model" (data :type)) (or (data :turn) (not= "summary" (get-in task [:data :type])))) (model/render data)
+      (and (= "result" (row :kind)) (= "model" (data :type)) (not (data :error)) (or (data :turn) (not= "summary" (get-in task [:data :type])))) (model/render data)
       (and (= "task" (row :kind)) (= "script" (data :type))) (data :text)
       (and (= "result" (row :kind)) (not= "model" (data :type))) (data :text)
       (index-of (row :kind) ["commit" "artifact" "summary" "diagnostic"]) (data :text)))

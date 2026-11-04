@@ -60,7 +60,11 @@
       (def catalogued (find |(= ($ :id) id) (catalogue config (string role) provider-name)))
       (assert catalogued "exact model is unavailable")
       (def properties (endpoint :properties))
-      (def record (if properties (provider/request config ref (string/replace-all "{model}" ((module/value (require "jurl/native") 'escape) id) properties)) catalogued))
+      (def record (if properties
+        (provider/request config ref (string/replace-all "{model}"
+          (string/join (seq [byte :in (string/bytes id)]
+            (if (or (<= 48 byte 57) (<= 65 byte 90) (<= 97 byte 122) (index-of byte [45 46 95 126]))
+              (string/from-bytes byte) (string/format "%%%02X" byte)))) properties)) catalogued))
       (def native-context (if properties (get-in record [:default_generation_settings :n_ctx]) (record :context_length)))
       (when properties (assert (and (int? native-context) (> native-context 1)) "invalid properties context capacity"))
       (def parameters (get record :supported_parameters []))
@@ -127,8 +131,14 @@
          :request {:method "POST" :url (string (get-in config [:providers (keyword (selected :provider)) :url]) (selected :path)) :body wire}
          :estimate size :context (selected :context) :output maximum :turn (get input :turn false) :role role} identity))
       (def raw (try (provider/request config selected (selected :path) wire)
-        ([err fiber] (error {:code "Blocked" :message "Inference was admitted but its outcome is unknown."
-          :context {:operation (admission :id) :cause (protocol/diagnostic "ProviderFailed" err fiber)}}))))
+        ([err fiber]
+          (def failure (protocol/diagnostic "ProviderFailed" err fiber))
+          (def failure (merge failure {:context (merge (get failure :context {}) {:operation (admission :id)})}))
+          (when (= "failed" (get-in failure [:context :outcome]))
+            (store/append s (admission :id) "result"
+              {:type "model" :state "failed" :role role :turn (get input :turn false) :error failure}
+              (string "result:" (admission :id))))
+          (error failure))))
       (def outcome (try
         (do
           (def value (if (= role "rerank") raw (provider/decode selected raw)))
@@ -160,14 +170,17 @@
                     (def arguments (schema/request (json/decode (get-in call [:function :arguments]) true true) [:code]))
                     (assert (arguments :code) "missing source")
                     {:id (call :id) :code (arguments :code)})
-                  ([err] {:id (call :id) :error {:code "InvalidToolCall" :message (string err)}}))) calls))
+                  ([err fiber] {:id (call :id) :error (protocol/diagnostic "InvalidToolCall" err fiber)}))) calls))
               {:message message :tools work :text (text message) :finish-reason finish
                :status (cond (> (length calls) 0) "tools" (> (length (get message :refusal "")) 0) "refused"
-                 (= "content_filter" finish) "blocked" (and (= finish "stop") (> (length (string/trim (text message))) 0)) "complete" "continue")})))
+                 (= "content_filter" finish) "blocked" (and (= finish "stop") (> (length (string/trim (text message))) 0)) "complete"
+                 (error {:code "IncompleteModelResponse"
+                         :message (string "Model finished with " finish " without a complete answer or executable tool call.")
+                         :context {:finish-reason finish :response-status (raw :status) :incomplete-details (raw :incomplete_details)}}))})))
           (merge result {:type "model" :state "done" :role role :turn (get input :turn false) :usage (value :usage) :raw raw
             :reasoning-visible (not= "none" (config :thinking))}))
         ([err fiber] {:type "model" :state "failed" :role role :turn (get input :turn false) :raw raw
-          :text "Invalid model response" :error (protocol/diagnostic "InvalidModelResponse" err fiber)})))
+          :error (protocol/diagnostic "InvalidModelResponse" err fiber)})))
       (def result (store/append s (admission :id) "result" outcome (string "result:" (admission :id))))
       (when (outcome :error) (error (outcome :error)))
       (merge (result :data) {:event (result :id)}))))

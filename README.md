@@ -9,10 +9,11 @@ Install source under `~/.agents/zinc` on Linux/macOS, or `%LOCALAPPDATA%\agents\
 separately installed application, not a directory beneath that root. No shared source, library or asset folder is
 required.
 
-Use Janet 1.42+, Jpm, a C compiler, libcurl headers, Python 3.11+ and Git. Build this installation's dependencies with
+Use Janet 1.42+, Jpm, a C compiler, OpenSSL development headers and trusted CA certificates, Python 3.11+ and Git.
+Build this installation's dependencies with
 `JANET_SYSTEM_SQLITE=0 jpm --local --cflags=-std=c99,-DSQLITE_ENABLE_FTS5,-DSQLITE_USE_URI=1 deps`, then build retrieval
-assets with `jpm --local run assets`. MSVC flags are `/nologo,/MD,/DSQLITE_ENABLE_FTS5,/DSQLITE_USE_URI=1`; set
-CURL_ROOT for its libcurl installation.
+assets with `jpm --local run assets`. MSVC flags are `/nologo,/MD,/DSQLITE_ENABLE_FTS5,/DSQLITE_USE_URI=1`;
+Jsec uses VCPKG_ROOT on Windows and OPENSSL_PREFIX for a nonstandard macOS OpenSSL installation.
 
 Set JANET_PATH to this installation's jpm_tree/lib. SQLite must support FTS5, URI filenames and the memdb VFS. Native
 modules must match Janet's ABI. There is no Zinc or agent executable to build.
@@ -50,7 +51,12 @@ operation, whose value is a stable string key. Reusing a key with different argu
 reused; attempted effects without outcomes block for reconciliation instead of being blindly repeated. The
 direct-execution profile may use resolve to record a verified outcome: value for an operation success or an error
 diagnostic for failure. Model reconciliation requires a verified normalized response; the runtime assigns outcome state
-and model coordinates.
+and model coordinates. Explicit provider and capability failures are recorded and retain their original diagnostics;
+unknown outcomes retain the operation ID and block replay. Empty or incomplete model answers and entirely rejected
+tool admissions stop the task rather than silently issuing another inference.
+
+HTTP uses Spork with Jsec TLS, certificate and hostname verification, bounded streaming reads, and no redirects.
+The pinned URL parser supports DNS names and IPv4; unsupported URLs, including IPv6 literals, are rejected before dispatch.
 
 parallel bounds active durable tasks through shared claims. Deadlines and current ownership are checked before
 publication. Task depth, work, tool output, source, response, context, image and RAM-journal limits bound their

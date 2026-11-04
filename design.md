@@ -45,7 +45,9 @@ Scripts must guard completed prefixes using their checkpoint.
 External operations require stable application keys. Completed outcomes are reused. An unresolved attempted effect
 blocks for explicit reconciliation; neither a timeout nor claim expiry proves that the effect did not occur. The resolve
 entry accepts a verified outcome under the direct-execution profile. Fencing cannot undo an effect already accepted by
-another system.
+another system. Definitive provider and capability failures are recorded as outcomes without replacing their original
+diagnostics. Interrupted calls with unknown outcomes retain their operation identity and wait for reconciliation.
+An unusable model answer or a turn with no admitted tools fails the task instead of retrying inference without progress.
 
 ## Observation and delivery
 

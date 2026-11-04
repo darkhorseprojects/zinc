@@ -17,7 +17,7 @@ jobs:
           repository: janet-lang/jpm
           ref: 029d0c4cfefd2d359ddc5344eae61a1771f4e673
           path: jpm
-      - run: sudo apt-get update && sudo apt-get install -y libcurl4-openssl-dev
+      - run: sudo apt-get update && sudo apt-get install -y libssl-dev
       - run: make -C janet -j2 && sudo make -C janet install
       - run: sudo janet bootstrap.janet
         working-directory: jpm

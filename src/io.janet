@@ -1,9 +1,10 @@
-(import jurl/native :as curl)
+(import spork/http :as http)
+(import jsec/tls :as tls)
 (import spork/path :as path)
 (import spork/utf8 :as utf8)
 (import spork/json :as json)
-(import sqlite3 :as sql)
 (import ./store)
+(import ./protocol)
 
 (defn process [argv environment input limit seconds &opt diagnostics]
   (def child (os/spawn argv :pe (merge environment {:in :pipe :out :pipe :err (if diagnostics :pipe :out)})))
@@ -26,90 +27,83 @@
         (os/proc-wait child))))
     {:exit status :output (string output)}))
 
-(defn- transfer [[config endpoint method suffix body current stream]]
-  (def db (when current (sql/open (string (current :database) (if (string/find "?" (current :database)) "&" "?") "mode=ro"))))
-  (when db (sql/eval db "PRAGMA busy_timeout=5000; PRAGMA query_only=ON;"))
-  (def client (curl/new))
-  (def bytes @"")
-  (var size 0) (var next-check 0)
-  (var permitted true)
-  (defer (do (curl/reset client) (when db (sql/close db)))
-    (def check (fn [& counts]
-                 (when (and current (>= (os/clock) next-check))
-                   (set next-check (+ (os/clock) store/interval))
-                   (set permitted (not (nil? (first
-                     (sql/eval db `SELECT c.task FROM claims c WHERE c.task=? AND c.token=? AND c.expires>?
-                       AND NOT EXISTS(SELECT 1 FROM events r WHERE r.parent=c.task AND r.kind='result')`
-                               [(current :id) (current :owner) (os/clock)]))))))
-                 permitted))
-    (assert (check) "HTTP job fenced")
-    (def deadline (min (if (= 0 (config :http-ms)) math/inf (+ (os/clock) (/ (config :http-ms) 1000)))
-                       (or (get current :expires) math/inf)))
-    (def headers (merge (get endpoint :headers {})))
-    (def secrets @[])
-    (when (endpoint :token-env)
-      (def token (os/getenv (endpoint :token-env)))
-      (assert (and token (> (length token) 0)) "provider credential is not configured")
-      (put headers :Authorization (string "Bearer " token))
-      (array/push secrets token))
-    (when-let [command (endpoint :credential-command)]
-      (def diagnostics @"")
-      (def owner (fiber/root))
-      (def stopped (ev/chan 1))
-      (def watcher (ev/go (fn [] (try (while true (assert (check) "HTTP job fenced") (ev/sleep store/interval))
-                                  ([err] (unless (= err :finished) (ev/cancel owner err))))) nil stopped))
-      (def result (defer (do (ev/cancel watcher :finished) (ev/take stopped))
-                    (process command (os/environ) nil 16384
-                                   (max 0.001 (min 30 (- deadline (os/clock)))) diagnostics)))
-      (unless (= 0 (result :exit))
-        (error {:code "CredentialCommandFailed"
-                :message (string "provider credential command exited " (result :exit))
-                :detail (string diagnostics)
-                :context {:executable (first command) :exit (result :exit)}}))
-      (def supplied (try (json/decode (result :output) true true) ([err] (error "invalid credential command response"))))
-      (assert (dictionary? supplied) "credential command must return headers")
-      (each value (values supplied)
-        (assert (and (string? value) (> (length value) 0)) "invalid credential header")
-        (array/push secrets value)
-        (when (and (string/has-prefix? "Bearer " value) (> (length value) 7)) (array/push secrets (string/slice value 7))))
-      (merge-into headers supplied))
-    (assert (and (check) (< (os/clock) deadline)) "HTTP job expired or fenced")
-    (def timeout (if (= deadline math/inf) 0 (max 1 (math/floor (* 1000 (- deadline (os/clock)))))))
-    (each [key value]
-      (pairs {:url (string (endpoint :url) suffix) :customrequest method :postfields body
-              :httpheader (array/concat @["Content-Type: application/json" (if stream "Accept: text/event-stream" "Accept: application/json")]
-                                       (seq [[name value] :pairs headers]
-                                         (assert (and (peg/match ~(* (some (set "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789-")) -1) (string name))
-                                                      (string? value) (not (string/find "\r" value)) (not (string/find "\n" value))) "invalid HTTP header")
-                                         (string name ": " value)))
-              :writefunction (fn [chunk]
-                               (+= size (length chunk))
-                               (assert (<= size (config :response-bytes)) "HTTP response exceeds byte limit")
-                               (if (and stream (<= 200 (client :response-code) 299))
-                                 (when (> (length chunk) 0) (ev/give-supervisor :stdout (string chunk)))
-                                 (buffer/push-string bytes chunk)))
-              :proxy "" :nobody (= method "HEAD") :followlocation false :ssl-verifypeer true :ssl-verifyhost 2
-              :timeout-ms timeout :connecttimeout-ms 10000
-              :protocols "http,https" :noprogress false :xferinfofunction check})
-      (unless (nil? value) (put client key value)))
-    (def status (:perform client))
-    (assert (= :ok status) (string "HTTP transfer failed: " status "; effects may have happened"))
-    (assert (utf8/is-valid? bytes) "HTTP response is not UTF-8")
-    {:status (client :response-code)
-     :body (if (<= 200 (client :response-code) 299) (string bytes)
-               (reduce (fn [text secret] (string/replace-all secret "[redacted]" text)) (string bytes) secrets))}))
-
 (defn request [config endpoint method suffix &opt body consume]
-  (assert endpoint "HTTP endpoint is not configured")
   (def current (dyn :zinc/call))
-  (def finished (ev/thread-chan (+ 1 (config :response-bytes))))
-  (ev/thread transfer [(tabseq [key :in [:response-bytes :http-ms]] key (config key)) endpoint method suffix body
-                       (when current {:database (current :database) :id (current :id) :owner (current :owner) :expires (get-in current [:scope :expires])}) (not (nil? consume))] :n finished)
-  (defer (ev/chan-close finished)
-    (label done (while true
-                  (def [status result] (ev/take finished))
-                  (if (= :stdout status) (consume result)
-                    (do (assert (= :ok status) result) (return done result)))))))
+  (def task (dyn :zinc/task))
+  (def token (dyn :zinc/token))
+  (def deadline (min (if (= 0 (config :http-ms)) math/inf (+ (os/clock) (/ (config :http-ms) 1000)))
+                     (or (get-in task [:data :expires]) math/inf)))
+  (def headers (merge {:Content-Type "application/json" :Accept (if consume "text/event-stream" "application/json")}
+                     (get endpoint :headers {})))
+  (def secrets @[])
+  (def owner (fiber/root))
+  (def stopped (ev/chan 1))
+  (var connection nil) (var secure false) (var attempted false) (var received false)
+  (def watcher (when current
+    (ev/go (fn [] (try (while true (store/check current (task :id) token) (ev/sleep store/interval))
+                      ([err] (unless (= err :finished) (ev/cancel owner err))))) nil stopped)))
+  (defer (do (when watcher (ev/cancel watcher :finished) (ev/take stopped)) (ev/chan-close stopped))
+    (try
+      (ev/with-deadline (max 0.001 (- deadline (os/clock)))
+        (assert endpoint "HTTP endpoint is not configured")
+        (def url (string (endpoint :url) suffix))
+        (def parsed (peg/match http/url-grammar url))
+        (assert (and parsed (= url (string (parsed 0) "://" (parsed 1)
+          (when (parsed 2) (string ":" (parsed 2))) (parsed 3)))) (string "unsupported HTTP URL: " url))
+        (when current (store/check current (task :id) token))
+        (when (endpoint :token-env)
+          (def credential (os/getenv (endpoint :token-env)))
+          (assert (and credential (> (length credential) 0)) "provider credential is not configured")
+          (put headers :Authorization (string "Bearer " credential))
+          (array/push secrets credential))
+        (when-let [command (endpoint :credential-command)]
+          (def diagnostics @"")
+          (def result (process command (os/environ) nil 16384
+            (max 0.001 (min 30 (- deadline (os/clock)))) diagnostics))
+          (unless (= 0 (result :exit))
+            (error {:code "CredentialCommandFailed"
+                    :message (string "provider credential command exited " (result :exit))
+                    :detail (string diagnostics)
+                    :context {:executable (first command) :exit (result :exit)}}))
+          (def supplied (json/decode (result :output) true true))
+          (assert (dictionary? supplied) "credential command must return headers")
+          (each value (values supplied)
+            (assert (and (string? value) (> (length value) 0)) "invalid credential header")
+            (array/push secrets value)
+            (when (and (string/has-prefix? "Bearer " value) (> (length value) 7))
+              (array/push secrets (string/slice value 7))))
+          (merge-into headers supplied))
+        (def wire-headers (tabseq [[name value] :pairs headers]
+          (do (assert (and (peg/match ~(* (some (set "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789-")) -1) (string name))
+                           (string? value) (not (string/find "\r" value)) (not (string/find "\n" value))) "invalid HTTP header")
+              (string name)) value))
+        (defer (when connection (if secure (:close connection true) (ev/close connection)))
+          (def response (http/open-stream url :method method :body body :headers wire-headers :max-redirects 0
+            :stream-factory (fn [host port opts]
+              (set secure (= "https" (opts :scheme)))
+              (set connection (ev/with-deadline 10
+                (if secure (tls/connect host port {:verify true :hostname host :verify-hostname host :alpn ["http/1.1"]})
+                  (net/connect host port))))
+              (set attempted true)
+              connection)))
+          (def bytes @"") (var size 0)
+          (each chunk (:blocks response 4096)
+            (+= size (length chunk))
+            (assert (<= size (config :response-bytes)) "HTTP response exceeds byte limit")
+            (if (and consume (<= 200 (response :status) 299)) (consume (string chunk))
+              (buffer/push-string bytes chunk)))
+          (set received true)
+          (assert (utf8/is-valid? bytes) "HTTP response is not UTF-8")
+          {:status (response :status) :message (response :message) :headers (response :headers)
+           :body (if (<= 200 (response :status) 299) (string bytes)
+             (reduce (fn [text secret] (string/replace-all secret "[redacted]" text)) (string bytes) secrets))}))
+      ([err fiber]
+        (def failure (protocol/diagnostic "HttpError" err fiber))
+        (error (merge failure
+          (tabseq [key :in [:message :detail] :when (failure key)] key
+            (reduce (fn [text secret] (string/replace-all secret "[redacted]" text)) (failure key) secrets))
+          {:context (merge (get failure :context {})
+            {:outcome (get-in failure [:context :outcome] (if (or (not attempted) received) "failed" "unknown"))})}))))))
 
 (defn invoke [config name args]
   (cond

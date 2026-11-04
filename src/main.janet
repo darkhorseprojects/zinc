@@ -142,7 +142,7 @@
                     (assert (and (dictionary? failure) (string? (failure :code)) (string? (failure :message))) "invalid outcome diagnostic"))
                   (unless (outcome :error)
                     (if (= "operation" (admission :kind)) (assert (has-key? outcome :value) "operation outcome requires value")
-                      (assert (and (index-of (outcome :status) ["complete" "refused" "blocked" "tools" "continue"])
+                      (assert (and (index-of (outcome :status) ["complete" "refused" "blocked" "tools"])
                         (if (= "rerank" (get-in admission [:data :role])) (indexed? (outcome :results))
                           (and (dictionary? (outcome :message)) (= "assistant" (get-in outcome [:message :role]))))) "invalid normalized model outcome")))
                   (def recorded (merge outcome {:state (if (outcome :error) "failed" "done")}
