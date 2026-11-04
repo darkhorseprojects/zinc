@@ -1,12 +1,27 @@
 name: CI
-on:
-  push:
-    branches: [main]
-    tags: ["v*"]
-  pull_request:
-  workflow_dispatch:
-permissions: { contents: write }
+on: [push, pull_request]
 jobs:
-  build:
-    uses: darkhorseprojects/portable-agents/.github/workflows/ci.yml@4bf5a9ce0ba4d45a138f6cc16a2815fb04f8ff4f
-    with: { pa: "4bf5a9ce0ba4d45a138f6cc16a2815fb04f8ff4f" }
+  check:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          path: zinc
+      - uses: actions/checkout@v4
+        with:
+          repository: janet-lang/janet
+          ref: e1963cdfe0148f83601907727e00bd672d798115
+          path: janet
+      - uses: actions/checkout@v4
+        with:
+          repository: janet-lang/jpm
+          ref: 029d0c4cfefd2d359ddc5344eae61a1771f4e673
+          path: jpm
+      - run: sudo apt-get update && sudo apt-get install -y libcurl4-openssl-dev
+      - run: make -C janet -j2 && sudo make -C janet install
+      - run: sudo janet bootstrap.janet
+        working-directory: jpm
+      - run: JANET_SYSTEM_SQLITE=0 jpm --local --cflags=-std=c99,-DSQLITE_ENABLE_FTS5,-DSQLITE_USE_URI=1 deps
+        working-directory: zinc
+      - run: JANET_PATH="$PWD/jpm_tree/lib" janet -e '(import ./src/main)'
+        working-directory: zinc

@@ -38,8 +38,9 @@
                  (when (and current (>= (os/clock) next-check))
                    (set next-check (+ (os/clock) store/interval))
                    (set permitted (not (nil? (first
-                     (sql/eval db "SELECT id FROM live_calls WHERE id=? AND owner=?"
-                               [(current :id) (current :owner)]))))))
+                     (sql/eval db `SELECT c.task FROM claims c WHERE c.task=? AND c.token=? AND c.expires>?
+                       AND NOT EXISTS(SELECT 1 FROM events r WHERE r.parent=c.task AND r.kind='result')`
+                               [(current :id) (current :owner) (os/clock)]))))))
                  permitted))
     (assert (check) "HTTP job fenced")
     (def deadline (min (if (= 0 (config :http-ms)) math/inf (+ (os/clock) (/ (config :http-ms) 1000)))

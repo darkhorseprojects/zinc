@@ -1,0 +1,165 @@
+(import spork/path :as path)
+(import ./schema)
+(import ./protocol)
+(import ./store)
+(import ./world)
+(import ./engine)
+(import ./model)
+(import ./memory)
+
+(defn main [executable & args]
+  (assert (= 0 (length args)) "Zinc accepts one version-1 call on stdin")
+  (unless (index-of (os/which) [:windows :mingw]) (os/sigaction :pipe (fn [])))
+  (def limit (scan-number (os/getenv "PA_FRAME_BYTES")))
+  (assert (and (int? limit) (<= 1 limit 0x7fffffff)) "PA_FRAME_BYTES is required")
+  (var execution nil)
+  (var method nil)
+  (var admitted false)
+  (var observer true)
+  (try
+    (do
+      (def input-stream (protocol/reader stdin))
+      (def call (protocol/receive input-stream limit))
+      (assert (and (= "call" (call :type)) (not (protocol/receive input-stream limit))) "one call and EOF required")
+      (set method (call :method))
+      (def params (call :params))
+      (schema/request params [:input :config :imports])
+      (def config (schema/configuration (merge (get params :config {}) {:imports (get params :imports {})}) (= method "describe")))
+      (when (config :agent) (put (config :agent) :imports (config :imports)))
+      (def input (get params :input {}))
+      (assert (dictionary? input) "input must be an object")
+      (assert (<= (length (schema/encode input)) (config :request-bytes)) "input exceeds request byte limit")
+      (protocol/send stdout {:version 1 :type "ready"} limit)
+      (def value
+        (case method
+          "describe" (engine/describe config)
+          "instructions" (world/instructions config (world/definitions config engine/bindings))
+          "models" (map |{:ref ($ :ref) :name ($ :name)} (model/catalogue config (get input :role "chat")))
+          (do
+            (when (= method "init")
+              (assert (= (config :identity) (os/realpath (config :identity))) "canonical instance directory required")
+              (def relative (path/relpath (config :identity) (config :store)))
+              (assert (and (not (path/abspath? relative)) (not= ".." (first (path/parts relative)))) "store must belong to the instance")
+              (assert (not (os/lstat (config :store))) "init requires a fresh database")
+              (var directory (config :identity))
+              (each part (filter next (path/parts (path/dirname relative)))
+                (unless (= part ".")
+                  (set directory (path/join directory part))
+                  (os/mkdir directory)
+                  (assert (= directory (os/realpath directory)) "state directories cannot contain links"))))
+            (def readonly (index-of method ["observe" "diagnostics" "world" "views" "render" "status"]))
+            (def s (store/open config readonly))
+            (defer (store/close s)
+              (case method
+                "init" {:store (s :identity) :world (config :world)}
+                "self"
+                (do
+                  (schema/request input (keys schema/inputs))
+                  (assert (and (input :author) (input :at)) "authenticated author and occurrence time required")
+                  (when (config :ephemeral) (assert (= false (get input :persist true)) "ephemeral profiles require persist:false"))
+                  (each profile (filter identity [config (config :agent)]) (world/definitions profile engine/bindings))
+                  (if (= false (get input :persist true))
+                    (let [local (store/temporary config)]
+                      (defer (store/close local)
+                        (def task (store/start local input config))
+                        (set admitted true)
+                        (def handle {:type "admission" :task (task :id) :store (local :identity) :request (get-in task [:data :request]) :persist false})
+                        (def done (ev/thread-chan 1))
+                        (def completed (ev/chan 1))
+                        (set execution completed)
+                        (ev/thread (fn [[config id file floor]] (engine/run config id file floor))
+                          [config (task :id) (local :file) (local :floor)] :n done)
+                        (def owner (fiber/root))
+                        (ev/go (fn []
+                          (def packet (ev/take done))
+                          (ev/chan-close done)
+                          (ev/give completed packet)
+                          (unless (= :ok (packet 0)) (ev/cancel owner (packet 1)))))
+                        (try (protocol/send stdout {:version 1 :type "event" :value handle} limit) ([err] (set observer false)))
+                        (def reader (store/open config true (local :file)))
+                        (def result (defer (store/close reader)
+                          (engine/observe reader task 0 (fn [frame]
+                            (when observer (try (protocol/send stdout {:version 1 :type "event" :value frame} limit)
+                              ([err] (set observer false))))) true)))
+                        (def [status failure] (ev/take completed))
+                        (ev/chan-close completed) (set execution nil)
+                        (assert (= status :ok) failure)
+                        result))
+                    (let [task (try (store/start s input config)
+                      ([err fiber] (error (merge (protocol/diagnostic "AdmissionRejected" err fiber) {:code "AdmissionRejected"}))))]
+                      (set admitted true)
+                      {:type "admission" :task (task :id) :store (s :identity) :request (get-in task [:data :request]) :persist true})))
+                "run"
+                (do
+                  (schema/request input [:request :wait])
+                  (def seconds (get input :wait 0))
+                  (assert (and (number? seconds) (<= 0 seconds) (< seconds math/inf)) "invalid admission wait")
+                  (def deadline (+ (os/clock) seconds))
+                  (var task nil)
+                  (while (not (set task (first (store/query s "SELECT * FROM events WHERE key=?" [(string "task:" (input :request))]))))
+                    (when (or (>= (os/clock) deadline) (first (store/query s "SELECT id FROM events WHERE key=?" [(string "cancel:" (input :request))]))) (break))
+                    (ev/sleep store/interval))
+                  (assert task "task admission unavailable")
+                  (engine/run config (task :id))
+                  {:task (task :id)})
+                "observe"
+                (do
+                  (schema/request input [:request :after :store])
+                  (assert (= (input :store) (s :identity)) "observation store identity changed")
+                  (def task (first (store/query s "SELECT * FROM events WHERE key=?" [(string "task:" (input :request))])))
+                  (assert task "task unavailable")
+                  (protocol/send stdout {:version 1 :type "event" :value {:type "admission" :task (task :id) :store (s :identity)
+                    :request (get-in task [:data :request]) :persist true}} limit)
+                  (engine/observe s task (get input :after 0)
+                    (fn [frame] (protocol/send stdout {:version 1 :type "event" :value frame} limit)) true))
+                "status"
+                (do
+                  (schema/request input [:request :store])
+                  (assert (= (input :store) (s :identity)) "status store identity changed")
+                  (def task (first (store/query s "SELECT id FROM events WHERE key=?" [(string "task:" (input :request))])))
+                  (assert task "task unavailable")
+                  (get (store/result s (task :id)) :data {:state "pending"}))
+                "abort" (do (schema/request input [:request :reason]) (store/abort s (input :request) (input :reason)))
+                "record" (do (schema/request input [:records]) {:events (store/record s (input :records))})
+                "world"
+                (do (schema/request input [:action :point :world])
+                  (assert (= "view" (get input :action "view")) "world edits are task/commit scripts")
+                  (store/view s (get input :world (config :world)) (input :point)))
+                "views" (do (schema/request input [:event :mode]) (memory/report s (input :event) (get input :mode "memory")))
+                "render" (do (schema/request input [:event]) (memory/report s (input :event) "render"))
+                "invalidate" (do (schema/request input [:event]) (assert (= "summary" ((store/event s (input :event)) :kind)) "choose a summary")
+                  {:event ((store/append s (input :event) "invalidate" {}) :id)})
+                "resolve"
+                (do
+                  (schema/request input [:event :outcome])
+                  (assert (and (not (config :inference)) (config :janet)) "resolution requires an authorized direct-execution profile")
+                  (def admission (store/event s (input :event)))
+                  (assert (index-of (admission :kind) ["operation" "model"]) "choose an unresolved external admission")
+                  (assert (not (store/result s (admission :id))) "outcome already recorded")
+                  (def outcome (input :outcome))
+                  (assert (dictionary? outcome) "outcome must be an object")
+                  (when-let [failure (outcome :error)]
+                    (assert (and (dictionary? failure) (string? (failure :code)) (string? (failure :message))) "invalid outcome diagnostic"))
+                  (unless (outcome :error)
+                    (if (= "operation" (admission :kind)) (assert (has-key? outcome :value) "operation outcome requires value")
+                      (assert (and (index-of (outcome :status) ["complete" "refused" "blocked" "tools" "continue"])
+                        (if (= "rerank" (get-in admission [:data :role])) (indexed? (outcome :results))
+                          (and (dictionary? (outcome :message)) (= "assistant" (get-in outcome [:message :role]))))) "invalid normalized model outcome")))
+                  (def recorded (merge outcome {:state (if (outcome :error) "failed" "done")}
+                    (when (= "model" (admission :kind)) {:type "model" :role (get-in admission [:data :role]) :turn (get-in admission [:data :turn])})))
+                  {:event ((store/append s (admission :id) "result" recorded (string "result:" (admission :id))) :id)})
+                "diagnostics"
+                (do
+                  (schema/request input [:request])
+                  (def task (first (store/query s "SELECT id FROM events WHERE key=?" [(string "task:" (input :request))])))
+                  (seq [row :in (if task (store/tree s (task :id)) []) :when (get-in row [:data :error])]
+                    {:source "zinc" :id (row :id) :kind (row :kind) :created_at (os/strftime "%Y-%m-%dT%H:%M:%SZ" (row :created)) :data (get-in row [:data :error])}))
+                (error (string "unknown method " method)))))))
+      (when observer (protocol/send stdout {:version 1 :type "result" :value value} limit)))
+    ([err fiber]
+      (eprint (schema/encode (protocol/diagnostic "ProgramError" err fiber)))
+      (when execution (ev/take execution) (ev/chan-close execution))
+      (when observer
+        (def failure (protocol/diagnostic "ProgramError" err fiber))
+        (protocol/send stdout {:version 1 :type "error" :error
+          (if (and (= method "self") (not admitted)) (merge failure {:code "AdmissionRejected"}) failure)} limit)))))

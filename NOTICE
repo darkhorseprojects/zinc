@@ -1,16 +1,17 @@
 Zinc third-party notices
 ========================
 
-Runtime artifacts bundle Portable Agents' Janet libraries, Remarkable, Spork,
-the Janet SQLite binding and Jurl. Janet modules are pinned in the source repository's
-project.janet. Windows curl DLLs and licenses are included in bin and share.
-Executors, other system libraries, model servers and weights are separately
-provisioned. The generated Cygnet index and verified stopwords are shared assets. Bundled dependency license texts follow below.
+Source installations use Spork, the Janet SQLite binding and Jurl, pinned in
+project.janet. Runtimes, system libraries, model servers and weights are separately
+provisioned. Generated Cygnet data and stopwords belong to each installation.
+Dependency notices and license texts follow below.
 
 Portable Agents
 ---------------
 Source: https://github.com/darkhorseprojects/portable-agents
 License: AGPL-3.0-only; see LICENSE.
+The local report renderer derives from Portable Agents' former rendering utility;
+Portable Agents is no longer a Janet runtime dependency.
 
 Janet and janet-lang/sqlite3
 ---------------------------
@@ -25,13 +26,6 @@ Spork
 Copyright (c) 2022 Calvin Rose and contributors.
 Source: https://github.com/janet-lang/spork
 License: MIT; bundled third-party code retains its upstream licenses.
-
-Remarkable
-----------
-Copyright (c) 2021 Michael Camilleri and Contributors
-Source: https://github.com/pyrmont/remarkable
-Revision: e3bbf2f5e18c1b3ed33ccf7872b6719351334424
-License: MIT
 
 Stopwords ISO
 -------------
