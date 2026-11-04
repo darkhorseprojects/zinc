@@ -154,7 +154,7 @@
                   (schema/request input [:request])
                   (def task (first (store/query s "SELECT id FROM events WHERE key=?" [(string "task:" (input :request))])))
                   (seq [row :in (if task (store/tree s (task :id)) []) :when (get-in row [:data :error])]
-                    {:source "zinc" :id (row :id) :kind (row :kind) :created_at (os/strftime "%Y-%m-%dT%H:%M:%SZ" (row :created)) :data (get-in row [:data :error])}))
+                    {:source "zinc" :id (row :id) :kind (row :kind) :created_at (os/strftime "%Y-%m-%dT%H:%M:%SZ" (math/floor (row :created))) :data (get-in row [:data :error])}))
                 (error (string "unknown method " method)))))))
       (when observer (io/send stdout {:version 1 :type "result" :value value} limit)))
     ([err fiber]

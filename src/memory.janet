@@ -15,7 +15,7 @@
           fence (string/repeat "`" (max 3 (+ 1 (max 0 ;(map length runs)))))]
       (string fence "janet\n" text "\n" fence)) text))
   (string "### #" (row :id) " · " (row :kind) (when (data :state) (string " · " (data :state)))
-    "\n\nAuthor: " (get data :author "zinc") " · Occurred: " (get data :at (os/strftime "%Y-%m-%dT%H:%M:%SZ" (row :created)))
+    "\n\nAuthor: " (get data :author "zinc") " · Occurred: " (get data :at (os/strftime "%Y-%m-%dT%H:%M:%SZ" (math/floor (row :created))))
     (when (data :children) (string "\n\nSources: " (schema/encode (data :children))))
     "\n\n" body "\n\n"))
 
@@ -128,7 +128,7 @@
     (or (= offset (length text)) (not (<= 0x80 (text offset) 0xbf)))) "invalid UTF-8 page offset")
   (var end (min (length text) (+ offset (min 65536 (math/floor (/ ((s :config) :response-bytes) 4))))))
   (while (and (< end (length text)) (<= 0x80 (text end) 0xbf)) (++ end))
-  {:id id :at (get-in row [:data :at] (os/strftime "%Y-%m-%dT%H:%M:%SZ" (row :created))) :kind (row :kind) :author (get-in row [:data :author] "zinc")
+  {:id id :at (get-in row [:data :at] (os/strftime "%Y-%m-%dT%H:%M:%SZ" (math/floor (row :created)))) :kind (row :kind) :author (get-in row [:data :author] "zinc")
    :text (string/slice text offset end) :children (get-in row [:data :children]) :offset offset :next end :total (length text)})
 
 (defn summarize [s task]
