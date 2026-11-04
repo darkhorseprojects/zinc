@@ -47,7 +47,7 @@
   (def value (if (and (dictionary? err) (string? (err :code)) (string? (err :message))) err
                 {:code code :message (if (string? err) err (string/format "%n" err))}))
   (merge (schema/project value [:code :message])
-    (when (dictionary? (value :context)) {:context (value :context)})
+    (if (dictionary? (value :context)) {:context (value :context)} {})
     {:detail (string (get value :detail "") "\n" trace)}))
 
 (defn call [spec name args operation limit]

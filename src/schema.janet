@@ -144,7 +144,7 @@
 (defn select [names selections]
   (sorted (distinct (catseq [selection :in selections]
     (def matches (filter |(or (= selection "*") (= selection $)
-      (and (string/has-suffix? "/*" selection) (string/has-prefix? (string/slice selection 0 -1) $))) names))
+      (and (string/has-suffix? "/*" selection) (string/has-prefix? (string/slice selection 0 -2) $))) names))
     (assert (> (length matches) 0) (string "unknown selection: " selection)) matches))))
 
 (defn configuration [supplied &opt discovery]
@@ -200,16 +200,21 @@
   (each key [:bindings :values]
     (each name (get-in saved [:janet key] [])
       (assert (find |(or (= $ "*") (= $ name)
-        (and (string/has-suffix? "/*" $) (string/has-prefix? (string/slice $ 0 -1) name)))
+        (and (string/has-suffix? "/*" $) (string/has-prefix? (string/slice $ 0 -2) name)))
         (get-in current [:janet key])) "saved selection revoked")))
   (each [name spec] (pairs (saved :imports))
     (def granted (get-in current [:imports name]))
-    (assert (and granted (deep= (spec :command) (granted :command)) (deep= (spec :exports) (granted :exports))) "saved capability changed"))
+    (assert (and granted (= (encode (spec :command)) (encode (granted :command)))
+                         (= (encode (spec :exports)) (encode (granted :exports))))
+            {:code "AuthorityChanged" :message "saved capability changed" :context {:capability (string name)}}))
   (each field [:fs :http :processes :providers]
     (each [name grant] (pairs (saved field))
-      (assert (deep= grant (get-in current [field name])) "saved resource changed or revoked")))
+      (assert (= (encode grant) (encode (get-in current [field name])))
+              {:code "AuthorityChanged" :message "saved resource changed or revoked"
+               :context {:field (string field) :resource (string name)}})))
   (each [name module] (pairs (get-in saved [:janet :imports]))
-    (assert (deep= module (get-in current [:janet :imports name])) "saved import changed or revoked"))
+    (assert (= (encode module) (encode (get-in current [:janet :imports name])))
+            {:code "AuthorityChanged" :message "saved import changed or revoked" :context {:module (string name)}}))
   (when (saved :agent) (assert (current :agent) "agent profile revoked"))
   (merge saved {:memory-retrieval (and (saved :memory-retrieval) (current :memory-retrieval))
                 :score (max (saved :score) (current :score))

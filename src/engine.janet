@@ -242,13 +242,14 @@
               (def worker (ev/go (fn [[coordinate task claim file]]
                 (def saved (get-in task [:data :config]))
                 (def current (if (and (saved :inference) (not (config :inference)) (config :agent)) (config :agent) config))
-                (def own (store/open (schema/authorize current saved) nil file))
+                (def own (store/open current nil file))
                 (defer (store/close own)
                   (with-dyns [:zinc/task task :zinc/token (claim :token)
                               :zinc/call {:database file :id (task :id) :owner (claim :token) :scope {:expires (get-in task [:data :expires])}}]
                     (try
                       (do
                         (store/check own (task :id))
+                        (put own :config (schema/authorize current saved))
                         (def available (world/definitions (own :config) bindings))
                         (case (get-in task [:data :type])
                           "inquiry" (infer own task available)
@@ -318,4 +319,4 @@
        (merge (schema/project field [:description :minimum :choices :autocomplete])
          {:name (field :option) :path (string target "." key) :type (string (field :type))
           :default (get config key (get field :default "automatic"))}
-         (when (and (= target :config) (= :integer (field :type)) (> (get config key 0) 0)) {:maximum (config key)}))))})
+         (if (and (= target :config) (= :integer (field :type)) (> (get config key 0) 0)) {:maximum (config key)} {}))))})

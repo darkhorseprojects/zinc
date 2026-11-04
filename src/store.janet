@@ -5,7 +5,7 @@
 (import ./schema)
 
 (def interval 0.1)
-(def- layout (slurp (path/join (path/dirname (dyn :source)) "store.sql")))
+(def- layout (string (slurp (path/join (path/dirname (dyn :source)) "store.sql"))))
 (defn estimate [bytes] (math/ceil (/ (length bytes) 4)))
 (defn uuid [] (string/join (map |(string/format "%02x" $) (os/cryptorand 24))))
 
@@ -125,7 +125,7 @@
   (transact s
     (or (result s id)
         (append s id "result" (merge {:state state :value value :text (cond failure (string (failure :code) ": " (failure :message)) (string? value) value "")}
-                                     (when failure {:error failure})) (string "result:" id)))))
+                                     (if failure {:error failure} {})) (string "result:" id)))))
 
 (defn start [s input config &opt parent]
   (assert (not= (nil? (input :text)) (nil? (input :code))) "supply exactly one of text or code")
