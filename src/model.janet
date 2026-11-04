@@ -176,7 +176,7 @@
   (def message (or (data :message) {}))
   (def reasoning (when (data :reasoning-visible) (or (message :reasoning_content) (message :reasoning)
     (string/join (seq [part :in (get message :reasoning_details []) :when (string? (part :text))] (part :text)) "\n"))))
-  (def content (when (indexed? (message :content)) (filter |(not= "text" ($ :type)) (message :content))))
+  (def content (if (indexed? (message :content)) (filter |(not= "text" ($ :type)) (message :content)) []))
   (string (when (and reasoning (> (length reasoning) 0)) (string "> " (string/replace-all "\n" "\n> " reasoning) "\n\n"))
     (get data :text "") (when (> (length content) 0) (string "\n\nNon-text content: " (schema/encode content)))))
 

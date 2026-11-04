@@ -162,4 +162,5 @@
       (when observer
         (def failure (protocol/diagnostic "ProgramError" err fiber))
         (protocol/send stdout {:version 1 :type "error" :error
-          (if (and (= method "self") (not admitted)) (merge failure {:code "AdmissionRejected"}) failure)} limit)))))
+          (if (and (= method "self") (not admitted)) (merge failure {:code "AdmissionRejected"}) failure)} limit))
+      (os/exit 1))))

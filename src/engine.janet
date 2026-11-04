@@ -298,16 +298,16 @@
 (defn observe [s task after emit &opt until-done]
   (var cursor after)
   (while true
+    (def pending (first (store/query s `WITH RECURSIVE members(id) AS (
+      SELECT ? UNION ALL SELECT e.id FROM events e JOIN members m ON e.parent=m.id
+    ) SELECT e.id FROM events e JOIN members m ON m.id=e.id WHERE e.kind='task'
+      AND NOT EXISTS(SELECT 1 FROM events r WHERE r.parent=e.id AND r.kind='result') LIMIT 1` [(task :id)])))
     (def rows (store/query s `WITH RECURSIVE members(id) AS (
       SELECT ? UNION ALL SELECT e.id FROM events e JOIN members m ON e.parent=m.id
     ) SELECT e.* FROM events e JOIN members m ON m.id=e.id WHERE e.id>? ORDER BY e.id LIMIT 256` [(task :id) cursor]))
     (each row rows
       (when-let [frame (presentation s row)] (emit frame))
       (set cursor (row :id)))
-    (def pending (first (store/query s `WITH RECURSIVE members(id) AS (
-      SELECT ? UNION ALL SELECT e.id FROM events e JOIN members m ON e.parent=m.id
-    ) SELECT e.id FROM events e JOIN members m ON m.id=e.id WHERE e.kind='task'
-      AND NOT EXISTS(SELECT 1 FROM events r WHERE r.parent=e.id AND r.kind='result') LIMIT 1` [(task :id)])))
     (when (and until-done (not pending) (< (length rows) 256)) (break))
     (unless (= 256 (length rows)) (ev/sleep store/interval)))
   (merge {:task (task :id) :store (s :identity)} ((store/result s (task :id)) :data)))
