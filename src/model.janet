@@ -77,7 +77,12 @@
          :images (if properties (get-in record [:modalities :vision]) (not (nil? (index-of "image" (get-in record [:architecture :input_modalities] [])))))
          :control (if properties (when (get-in record [:chat_template_caps :supports_reasoning_effort]) "reasoning_effort")
                     (cond (index-of "reasoning" parameters) "reasoning" (index-of "reasoning_effort" parameters) "reasoning_effort"))
-         :efforts (get-in record [:reasoning :supported_efforts]) :reasoning-required (get-in record [:reasoning :mandatory])
+         :efforts (if properties
+                    (let [levels (get-in record [:chat_template_caps :reasoning_effort_levels])]
+                      (when (and levels (> (length levels) 0)) levels))
+                    (get-in record [:reasoning :supported_efforts]))
+         :preserve-reasoning (if properties (get-in record [:chat_template_caps :supports_preserve_reasoning]) true)
+         :reasoning-required (get-in record [:reasoning :mandatory])
          :output (when (= role :chat) (get-in record [:top_provider :max_completion_tokens]))
          :output-field (if (= "responses" (endpoint :protocol)) "max_output_tokens" "max_tokens")}
         (catalogued :profile)))
@@ -85,7 +90,7 @@
       (when (= role :chat)
         (when (= thinking "none") (assert (not (capabilities :reasoning-required)) "model requires reasoning"))
         (unless (index-of thinking ["default" "none"]) (assert (capabilities :control) "thinking effort is unsupported"))
-        (when (and (capabilities :efforts) (not= thinking "default") (or (not= thinking "none") (= "responses" (endpoint :protocol))))
+        (when (and (capabilities :efforts) (not (index-of thinking ["default" "none"])))
           (assert (index-of thinking (capabilities :efforts)) (string reference " does not support thinking=" thinking)))
         (when (config :web-search) (assert (> (length (endpoint :web-tools)) 0) "web search is not configured")))
       (when-let [output (capabilities :output)] (assert (and (int? output) (<= 1 output context)) "invalid provider output capacity"))
@@ -170,16 +175,29 @@
                     (assert (arguments :code) "missing source")
                     {:id (call :id) :code (arguments :code)})
                   ([err fiber] {:id (call :id) :error (schema/diagnostic "InvalidToolCall" err fiber)}))) calls))
-              {:message message :tools work :text (text message) :finish-reason finish
-               :status (cond (> (length calls) 0) "tools" (> (length (get message :refusal "")) 0) "refused"
-                 (= "content_filter" finish) "blocked" (and (= finish "stop") (> (length (string/trim (text message))) 0)) "complete"
-                 (error {:code "IncompleteModelResponse"
-                         :message (string "Model finished with " finish " without a complete answer or executable tool call.")
-                         :context {:finish-reason finish :response-status (raw :status) :incomplete-details (raw :incomplete_details)}}))})))
+              (def answer (text message))
+              (def status (cond
+                (= "content_filter" finish) "blocked"
+                (> (length (get message :refusal "")) 0) "refused"
+                (and (index-of finish ["stop" "tool_calls"]) (> (length calls) 0)) "tools"
+                (and (= finish "stop") (value :final) (> (length (string/trim answer)) 0)) "complete"
+                (error {:code "IncompleteModelResponse"
+                        :message (string "Model finished with " finish " without a complete answer or executable tool call.")
+                        :context {:finish-reason finish :native-finish-reason (value :native-finish-reason)
+                                  :response-status (raw :status) :incomplete-details (raw :incomplete_details)
+                                  :phase (get-in message [:response :phase]) :end-turn (get-in message [:response :end-turn])
+                                  :text-bytes (length answer) :tool-count (length calls)
+                                  :rejected-tools (length (filter |($ :error) work))
+                                  :reasoning-tokens (get-in message [:response :reasoning-tokens])}})))
+              {:message message :tools (if (= status "tools") work []) :text answer :finish-reason finish :status status})))
           (merge result {:type "model" :state "done" :role role :turn (get input :turn false) :usage (value :usage) :raw raw
             :reasoning-visible (not= "none" (config :thinking))}))
-        ([err fiber] {:type "model" :state "failed" :role role :turn (get input :turn false) :raw raw
-          :error (schema/diagnostic "InvalidModelResponse" err fiber)})))
+        ([err fiber]
+          (def failure (schema/diagnostic "InvalidModelResponse" err fiber))
+          {:type "model" :state "failed" :role role :turn (get input :turn false) :raw raw
+           :error (merge failure {:context (merge (get failure :context {})
+             {:operation (admission :id) :provider (selected :provider) :model (selected :id)
+              :protocol (selected :protocol) :response-id (raw :id)})})})))
       (def result (store/append s (admission :id) "result" outcome (string "result:" (admission :id))))
       (when (outcome :error) (error (outcome :error)))
       (merge (result :data) {:event (result :id)}))))
