@@ -9,11 +9,16 @@
 
 (defn render [row]
   (def data (row :data))
-  (def text (if (= "model" (data :type)) (model/render data) (get data :text (get row :text ""))))
+  (def text (cond
+    (= "model" (data :type)) (model/render data)
+    (data :error) (string (get-in data [:error :code]) ": " (get-in data [:error :message]))
+    (has-key? data :text) (data :text)
+    (has-key? data :value) (schema/encode (data :value))
+    (get row :text "")))
   (def body (if (and (= "task" (row :kind)) (= "script" (data :type)))
     (let [runs (peg/match ~(any (choice (capture (some "`")) 1)) text)
           fence (string/repeat "`" (max 3 (+ 1 (max 0 ;(map length runs)))))]
-      (string fence "janet\n" text "\n" fence)) text))
+      (string fence "clojure\n" text "\n" fence)) text))
   (string "### #" (row :id) " · " (row :kind) (when (data :state) (string " · " (data :state)))
     "\n\nAuthor: " (get data :author "zinc") " · Occurred: " (get data :at (os/strftime "%Y-%m-%dT%H:%M:%SZ" (math/floor (row :created))))
     (when (data :children) (string "\n\nSources: " (schema/encode (data :children))))

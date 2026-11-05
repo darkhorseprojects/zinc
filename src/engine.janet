@@ -8,7 +8,7 @@
 (def bindings
   {"self" {:arity [1 1] :doc "(self request) starts independent :text, :code or :stages work and returns a handle. Descendants inherit persistence."}
    "task/status" {:arity [1 1] :doc "(task/status handle) reads an authorized task's outcome and uncertain operations."}
-   "task/wait" {:arity [1 1] :doc "(task/wait handle) waits for work within the workflow. Use as a call stage."}
+   "task/wait" {:arity [1 1] :doc "(task/wait handle) is a workflow call stage. It waits for a descendant or declared dependency and returns its outcome object; read :value for the result. Ordinary scripts cannot wait."}
    "task/cancel" {:arity [1 1] :doc "(task/cancel handle) cancels a descendant tree without undoing effects."}
    "task/resolve" {:arity [2 2] :doc "(task/resolve operation outcome) records an uncertain operation's verified :value or :error and :evidence."}
    "world/get" {:arity [1 1] :doc "(world/get key) reads a shared JSON value."}
@@ -167,12 +167,15 @@
           {:task (child :id) :store (s :identity) :request (admission :key) :persist (not (s :temporary))})
         (if (index-of name ["task/status" "task/wait" "task/cancel"])
           (let [handle (first args) id (if (dictionary? handle) (handle :task) handle)]
+            (when (= name "task/wait")
+              (assert (= "stage" (get-in task [:data :type]))
+                "task/wait requires a workflow call stage; ordinary scripts cannot resume after yielding"))
             (when (dictionary? handle) (assert (= (handle :store) (s :identity)) "task belongs to another store"))
             (assert (= "task" ((store/event s id) :kind)) "choose a task")
             (assert (= ((store/root s id) :id) ((store/root s (task :id)) :id)) "task is outside this inquiry")
             (when (not= name "task/status")
               (assert (some (fn [parent]
-                (and (not= id parent) (find |(= id ($ :id)) (store/tree s parent))))
+                (and (not= id (task :id)) (find |(= id ($ :id)) (store/tree s parent))))
                 (array/concat @[(task :id)] (get-in task [:data :input :dependencies] [])))
                 "choose a descendant of this task or a declared dependency"))
             (case name
@@ -214,7 +217,9 @@
       (put children (stage :id) (child :id)))
     (if (every? (map |(store/result s $) (values children)))
       (let [failed (find |(not= "done" (get-in (store/result s $) [:data :state])) (values children))]
-        (if failed (store/finish s (task :id) "failed" nil {:code "StageFailed" :message "A workflow stage failed." :context {:task failed}})
+        (if failed (store/finish s (task :id) "failed" nil
+          {:code "StageFailed" :message "A workflow stage failed."
+           :context {:task failed :cause (get-in (store/result s failed) [:data :error])}})
           (store/finish s (task :id) "done" (tabseq [[name id] :pairs children] name (get-in (store/result s id) [:data :value])))))
       (store/advance s {:wait {:tasks (values children)}}))))
 
@@ -230,7 +235,10 @@
           previous (first (store/query s "SELECT * FROM events WHERE key=?" [key]))
           admission (or previous
             (let [args (runtime/run s task available nil (spec :arguments) inputs true)]
-              (assert (indexed? args) "stage arguments must evaluate to an array")
+              (assert (indexed? args)
+                {:code "InvalidStageArguments"
+                 :message (string "Stage " (spec :id) " arguments must return an array or tuple, got " (type args) ". Use [value] for one argument.")
+                 :context {:stage (spec :id) :call (spec :call)}})
               (store/append s (task :id) "operation" {:name (spec :call) :arguments args} key)))]
       (invoke s task available admission))))
   (store/finish s (task :id) "done" value))
@@ -315,27 +323,38 @@
   (def task (store/task s (row :id)))
   (when task
     (def root (store/root s (task :id))) (def data (row :data))
+    (def source (when (= "task" (row :kind))
+      (case (data :type)
+        "script" (get-in data [:input :code])
+        "stage" (let [spec (find |(= ($ :id) (get-in data [:input :stage]))
+          (get-in (store/event s (task :parent)) [:data :input :stages]))]
+          (or (spec :code) (string "(apply " (spec :call) " (do\n" (spec :arguments) "\n))")))
+        nil)))
+    (def terminal (and (= "result" (row :kind)) (= (task :id) (row :parent))))
     (def body (cond
       (and (= "result" (row :kind)) (= "model" (data :type)) (not (data :error)) (or (data :turn) (not= "summary" (get-in task [:data :type])))) (model/render data)
-      (and (= "task" (row :kind)) (= "script" (data :type))) (row :text)
-      (and (= "result" (row :kind)) (not= "model" (data :type))) (data :text)
+      source source
+      (and terminal (or (data :error) (not= "inquiry" (get-in task [:data :type])))) (data :text)
       (index-of (row :kind) ["world" "artifact" "summary" "diagnostic"]) (data :text)))
     (when (and body (not= "summary" (get-in task [:data :type])))
       {:kind (if (= "model" (data :type)) "model" (row :kind)) :task (task :id) :root (root :id) :store (s :identity)
        :agent (get-in s [:config :identity]) :request (get-in root [:data :request])
-       :parent (row :parent) :status (get data :status (get data :state "complete")) :world (get-in task [:data :world])
+       :parent (or (row :parent) :null) :status (if source "accepted" (get data :status (get data :state "complete"))) :world (get-in task [:data :world])
+       :language (cond source "clojure"
+         (and terminal (not (data :error)) (not (string? (data :value)))) "json" :null)
        :persist (not (s :temporary)) :sequence (row :id) :body body :diagnostic (data :error)})))
 
 (defn observe [s task after emit &opt until-done]
   (var cursor after)
   (while true
+    (def pending (and until-done (first (store/query s `WITH RECURSIVE members(id) AS (
+      SELECT ? UNION ALL SELECT e.id FROM events e JOIN members m ON e.parent=m.id
+    ) SELECT e.id FROM events e JOIN members m ON m.id=e.id WHERE e.kind='task'
+      AND NOT EXISTS(SELECT 1 FROM events r WHERE r.parent=e.id AND r.kind='result') LIMIT 1` [(task :id)]))))
     (each row (store/tree s (task :id) cursor)
       (when-let [frame (presentation s row)] (emit frame))
       (set cursor (row :id)))
-    (when (and until-done (not (first (store/query s `WITH RECURSIVE members(id) AS (
-      SELECT ? UNION ALL SELECT e.id FROM events e JOIN members m ON e.parent=m.id
-    ) SELECT e.id FROM events e JOIN members m ON m.id=e.id WHERE e.kind='task'
-      AND NOT EXISTS(SELECT 1 FROM events r WHERE r.parent=e.id AND r.kind='result') LIMIT 1` [(task :id)])))) (break))
+    (when (and until-done (not pending)) (break))
     (ev/sleep store/interval))
   (merge {:task (task :id) :store (s :identity)} ((store/result s (task :id)) :data)))
 

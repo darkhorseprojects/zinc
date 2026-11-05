@@ -12,7 +12,7 @@ Independent stages may run concurrently. :code computes a JSON result without ho
 Both expressions read declared dependency results from (input), using keyword stage IDs.
 Use :null for JSON null.
 
-```janet
+```clojure
 (self {:stages [{:id "value" :code "{:answer 42}"}
                 {:id "publish" :after ["value"] :call "world/commit"
                  :arguments "[((input) :value)]"}]})
@@ -20,7 +20,20 @@ Use :null for JSON null.
 
 Completed results are reused; interrupted computation may repeat. Inspect uncertain operations with
 task/status. Verify external state before task/resolve records an outcome with evidence.
-Use task/wait as a call stage for descendants launched by a declared dependency.
+Use task/wait only as a workflow call stage. It can wait on declared dependencies
+and descendants of the current stage or its dependencies. It returns an outcome object; read :value.
+Arguments always return an array or tuple: one handle is [handle], not handle.
+Do not claim work succeeded from an admission receipt.
+
+```clojure
+(self {:stages [{:id "launch" :call "self"
+                 :arguments "[{:code \"(+ 20 22)\"}]"}
+                {:id "join" :after ["launch"] :call "task/wait"
+                 :arguments "[((input) :launch)]"}
+                {:id "value" :after ["join"]
+                 :code "(get-in (input) [:join :value])"}]})
+```
+
 Ordinary :code scripts have no saved stacks or locals and are not rerun after interruption.
 
 world/get takes string keys. world/commit publishes JSON values; supply the expected revision for

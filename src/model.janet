@@ -14,7 +14,7 @@
         :properties {:id {:type "string"} :after {:type "array" :items {:type "string"}}
           :code {:type "string" :description "Pure Janet; (input) returns declared dependency results."}
           :call {:type "string" :description "Granted host binding name."}
-          :arguments {:type "string" :description "Pure Janet returning the call's argument array."}}}}}}}})
+          :arguments {:type "string" :description "Pure Janet returning an array or tuple, including for one argument: [((input) :launch)]. (input) returns declared dependency values keyed by keyword stage ID."}}}}}}}})
 
 (defn text [message]
   (def content (message :content))

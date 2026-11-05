@@ -87,7 +87,11 @@
   (def root (fiber/new (fn []
     (var value nil)
     (each form forms
-      (set value ((compile (if (options :expander) ((options :expander) form) form) env))))
+      (def thunk (compile (if (options :expander) ((options :expander) form) form) env))
+      (when (dictionary? thunk)
+        (error {:code "CompileFailed" :message (thunk :error)
+                :context (schema/project thunk [:line :column])}))
+      (set value (thunk)))
     value) :a env))
   (sandbox :fs :net :subprocess :ffi :modules :threads :env :asm :unmarshal :exit :locale :signal :chroot :sandbox)
   (when (> seconds 0) (ev/deadline seconds (fiber/root) (fiber/root) true))
