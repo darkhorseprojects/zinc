@@ -64,7 +64,7 @@
       (os/proc-wait child)
       (when (= "error" (terminal :type))
         (def failure (terminal :error))
-        (error (merge failure {:context (merge (get failure :context {}) {:outcome "failed"})})))
+        (error failure))
       (assert (= 0 (child :return-code)) "capability process failed; effects may have happened")
       (terminal :value))))
 

@@ -1,85 +1,86 @@
 # Zinc
 
-Zinc runs independent Janet tasks. Each task commits its own progress to SQLite; inference and presentation observe
-those commits without gathering sibling results.
+Zinc runs independent Janet tasks with SQLite memory, shared worlds and durable VM continuations.
 
-## Source installation
+## Installation
 
-Install source under `~/.agents/zinc` on Linux/macOS, or `%LOCALAPPDATA%\agents\zinc` on Windows. Connector is a
-separately installed application, not a directory beneath that root. No shared source, library or asset folder is
-required.
+Install under `~/.agents/zinc` or `%LOCALAPPDATA%\agents\zinc`. Each installation owns its source, dependencies,
+assets and private database. Connector is installed separately. Git tracks installed source, not running state.
 
-Use Janet 1.42+, Jpm, a C compiler, OpenSSL development headers and trusted CA certificates, Python 3.11+ and Git.
-Build this installation's dependencies with
-`JANET_SYSTEM_SQLITE=0 jpm --local --cflags=-std=c99,-DSQLITE_ENABLE_FTS5,-DSQLITE_USE_URI=1 deps`, then build retrieval
+Use Janet 1.42+, Jpm, a C compiler, OpenSSL headers and trusted CA certificates, Python 3.11+ and Git. Build dependencies
+with `JANET_SYSTEM_SQLITE=0 jpm --local --cflags=-std=c99,-DSQLITE_ENABLE_FTS5,-DSQLITE_USE_URI=1 deps`, then retrieval
 assets with `jpm --local run assets`. MSVC flags are `/nologo,/MD,/DSQLITE_ENABLE_FTS5,/DSQLITE_USE_URI=1`;
-Jsec uses VCPKG_ROOT on Windows and OPENSSL_PREFIX for a nonstandard macOS OpenSSL installation.
+Jsec uses VCPKG_ROOT on Windows and OPENSSL_PREFIX for nonstandard macOS installations.
 
-Set JANET_PATH to this installation's jpm_tree/lib. SQLite must support FTS5, URI filenames and the memdb VFS. Native
-modules must match Janet's ABI. There is no Zinc or agent executable to build.
-
-A second agent may be a modified Git worktree of this repository. Each worktree owns its configuration, dependencies,
-generated assets and private database. Connector's create operation creates such a worktree and configuration. Provision
-its own dependencies/assets, then initialize fresh state with agc init.
+Set JANET_PATH to the installation's jpm_tree/lib. SQLite must support FTS5, URI filenames and memdb. Native modules
+must match Janet's ABI. Initialize fresh state with `agc init`. No agent executable or shared runtime directory is needed.
 
 ## Invocation
 
-Connector invokes src/main.janet with Janet. One version-1 call arrives on stdin, with method and params. Parameters
-contain input, effective config, and Connector-owned capability commands. PA_FRAME_BYTES supplies the bounded transport
-limit. The source entry replies with ready, events and one terminal result/error. No manifest is needed.
+src/main.janet accepts one version-1 call on stdin. Parameters contain input, config, imports, an optional after cursor and the expected store identity when attaching.
+PA_FRAME_BYTES bounds transport frames. Portable Agents defines only the wire envelopes; Zinc owns these methods.
 
-self admits work and returns a committed receipt. run executes that request's task tree independently of observation.
-observe uses a read-only connection and cursor. status reads an outcome; abort explicitly cancels a request tree without
-undoing prior commits or external effects.
+self admits full input or attaches to an existing request identity. It emits an admission event, executes or recovers
+work, streams committed presentation and returns an outcome. Disconnecting observation does not cancel execution.
+Repeated admission uses the same request identity. There is no separate run entry.
 
-Other entries are describe, instructions, models, init, record, world, views, render, diagnostics, invalidate and
-resolve. World inspection reads committed JSON values. World edits are authorized task/commit scripts, not Git-image
-save/discard operations.
+Observation within self uses a read-only connection. status reads an outcome; abort cancels a request tree without undoing effects. Other entries are
+describe, instructions, models, init, record, world, views, render, diagnostics, invalidate and resolve.
 
-## Scripts
+## Execution and recovery
 
-Read task/checkpoint at entry and guard finished stages. task/commit accepts checkpoint, put, remove, expect and text;
-progress and published values become durable in one transaction. world/get and world/view read shared committed values.
-Locals, closures, channels and fibers are process-local, not durable continuations.
+Ordinary host calls need no operation keys. self returns an independent child's handle; task/wait explicitly suspends
+until its outcome exists. Parent completion neither joins nor cancels independent children.
 
-self returns a handle immediately. task/status inspects it. task/wait is an explicit dependency: checkpoint first,
-because waiting releases execution capacity and the caller re-enters from source. Native ev/spawn and ev/gather remain
-available within scripts. Parent completion does not join independent descendants.
+At VM safepoints, Zinc saves the complete reachable task graph: stacks, program counters, locals, closures, output and
+managed async waits. A restart resumes that graph, not the script's source. Managed ev/go, ev/spawn, ev/gather,
+ev/go-gather, ev/sleep, ev/chan, ev/take, ev/give, ev/count, ev/chan-close and ev/cancel use serializable scheduling state.
+Other native ev operations are not exposed. Random-generator state is task-local; host observations are journaled.
 
-Effects such as fs/write, http/request, process/run, imported capabilities and self require a final map containing only
-operation, whose value is a stable string key. Reusing a key with different arguments fails. Completed outcomes are
-reused; attempted effects without outcomes block for reconciliation instead of being blindly repeated. The
-direct-execution profile may use resolve to record a verified outcome: value for an operation success or an error
-diagnostic for failure. Model reconciliation requires a verified normalized response; the runtime assigns outcome state
-and model coordinates. Explicit provider and capability failures are recorded and retain their original diagnostics;
-unknown outcomes retain the operation ID and block replay. Empty or incomplete model answers and entirely rejected
-tool admissions stop the task rather than silently issuing another inference.
+Sockets, processes, SQLite connections and thread channels remain outside images. Pure computation since the last
+safepoint may repeat. Unsupported native objects and C stack frames fail snapshotting before new effects dispatch.
+Setup may supply an expander, not a live parser or reader. Images require their original runtime and registry.
 
-HTTP uses Spork with Jsec TLS, certificate and hostname verification, bounded streaming reads, and no redirects.
-The pinned URL parser supports DNS names and IPv4; unsupported URLs, including IPv6 literals, are rejected before dispatch.
+An operation admission and its waiting continuation commit together. Dispatch is recorded before external invocation;
+definitive outcomes are stored before resumption. A recorded outcome is reused. Dispatch without an outcome is uncertain,
+not failed. Connector delivery receipts are checked automatically when available. Otherwise inspect external state before
+task/resolve records a verified value/error and evidence. The direct-execution resolve entry also accepts normalized
+model outcomes. Transport errors, lease expiry and missing messages do not establish that an effect never happened.
 
-parallel bounds active durable tasks through shared claims. Deadlines and current ownership are checked before
-publication. Task depth, work, tool output, source, response, context, image and RAM-journal limits bound their
-respective resources; this is not an OS memory sandbox.
+Current grants are checked again on recovery. Claims fence publication and bound active tasks. Late operation receipts
+may be retained, but stale workers cannot advance continuations or worlds. Deadlines and configured resource quotas
+remain enforced; this is not an OS memory sandbox. HTTP uses bounded Spork/Jsec requests with certificate and hostname
+verification and no redirects. The pinned parser accepts DNS names and IPv4, not IPv6 literals.
 
-## Temporary execution
+## Worlds
 
-persist:false retains new execution records and shared-value changes in a bounded RAM database. Existing history is
-copied at admission. A temporary session cannot create durable descendants. A durable caller may retain returned values
-and its own admission metadata. Observer failure does not cancel its executor, but losing the owning process can lose
-the entire session. No restart durability is promised.
+world/get reads shared values. world/commit explicitly publishes values or serializable definitions; it is not an execution
+save. Independent tasks exchange snapshots, not live heap pointers. Worlds and task continuations use database-backed
+binary images. There is no world/save or world/fork.
 
-## Memory and inspection
+`/world view [point]` inspects a publication; `/world rewind <id|hash>` restores one under direct-execution authority.
+Rewind increments the world epoch and fences unfinished old work. It does not erase history, resurrect old tasks or undo
+external effects. Branches are initialized once from configuration only:
 
-Chronological memory, bounded paged summaries, semantic retrieval, original-record expansion, image budgeting, exact
-provider requests and raw usage remain recorded. views reports memory composition and summary sources; render includes
-readable and exact requests. Markdown is ordinary instruction/documentation text, never executable persistence.
+```yaml
+world: main
+worlds:
+  main: {}
+  experiment: { from: "publication-id-or-image-hash" }
+```
 
-## Storage compatibility
+self may select only granted worlds. Changing a branch's from field does not reset it.
 
-The execution core is two tables: events and claims. The memory FTS index is derived. Version numbers and PRAGMA
-user_version are not increased by this change. The old call_controls/image-based layout is rejected structurally;
-initialize a fresh database rather than opening it with incompatible source. No migration or backward-compatibility
-layer is provided.
+## Storage and temporary work
 
-See [design.md](design.md) for ownership and recovery rules and [zinc.md](zinc.md) for agent instructions.
+The core tables are events, images, claims and worlds. Events retain admissions, dispatches, outcomes and world
+publications. Claims retain the latest task image, scheduling state and lease. Superseded unreferenced task images are
+reclaimed. Worlds retain publication heads and rewind epochs. FTS is a derived memory index. No schema/version number
+is increased; incompatible layouts are rejected structurally. Existing JSON checkpoints cannot become VM stacks.
+
+persist:false uses the same execution machinery in a bounded RAM database, with inherited history and world images.
+It cannot create durable descendants. Observer failure does not cancel it, but losing the owning process loses its
+session. Temporary work is never silently recreated.
+
+Chronological memory, bounded summaries, retrieval, original records, image budgeting and exact provider requests remain
+inspectable through views, render and memory/expand. Markdown is instruction/data, not executable persistence.

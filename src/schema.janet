@@ -5,6 +5,7 @@
 (def fields
   {:store {:type :string :absolute true}
    :world {:type :string :default "main" :visible true}
+   :worlds {:type :dictionary :default {:main {}} :values {:type :dictionary :fields {:from {:type :string :optional true}}}}
    :instructions {:type :string :absolute true}
    :identity {:type :string}
    :agent {:type :dictionary :optional true}
@@ -160,6 +161,7 @@
 (defn configuration [supplied &opt discovery]
   (def config (validate fields supplied discovery))
   (when (config :context-quota) (assert (<= (config :summary-quota) (config :context-quota)) "summary quota exceeds context quota"))
+  (assert (has-key? (config :worlds) (keyword (config :world))) "selected world is not granted")
   (when (config :agent)
     (assert (not (get-in config [:agent :agent])) "nested execution profiles are not supported")
     (put config :agent (configuration (config :agent) discovery))
@@ -204,6 +206,8 @@
 (defn authorize [current saved]
   (each key [:store :identity :instructions :ephemeral]
     (assert (= (current key) (saved key)) "saved identity/location changed"))
+  (each [name spec] (pairs (saved :worlds))
+    (assert (= (encode spec) (encode (get-in current [:worlds name]))) "saved world grant changed or revoked"))
   (each key [:inference :web-search] (assert (or (not (saved key)) (current key)) "saved permission revoked"))
   (assert (or (not (saved :janet)) (current :janet)) "Janet execution revoked")
   (assert (= (get-in saved [:janet :setup]) (get-in current [:janet :setup])) "saved setup changed")

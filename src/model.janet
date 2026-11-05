@@ -5,7 +5,7 @@
 (import ./schema)
 (import ./provider)
 
-(def- tool {:type "function" :function {:name "run_janet"
+(def- tool {:type "function" :function {:name "self"
   :description "Admit an independent Janet script. Its receipt is not its result. Scripts publish their own database commits; they need not settle before other work continues."
   :parameters {:type "object" :additionalProperties false :required ["code"] :properties {:code {:type "string"}}}}})
 
@@ -100,19 +100,23 @@
         :tools (array/concat @[] (if (capabilities :tools) [tool] []) (if (and (= role :chat) (config :web-search)) (endpoint :web-tools) []))}))
       (put (s :profiles) key selected) selected)))
 
-(defn call [s input key &opt selected]
+(defn call [s inquiry key &opt profiled]
   (def task (dyn :zinc/task))
   (def config (s :config))
-  (def role (get input :role "chat"))
+  (def role (get inquiry :role "chat"))
   (assert (index-of role ["chat" "rerank"]) "unknown model role")
   (def identity (string "model:" (task :id) ":" key))
   (def prior (first (store/query s "SELECT * FROM events WHERE key=?" [identity])))
   (def recorded (when prior (store/result s (prior :id))))
+  (def saved (when prior (store/restore s (prior :image))))
+  (def input (if saved (saved :input) inquiry))
+  (var selected (if saved (saved :selected) profiled))
   (if recorded
     (do (when (get-in recorded [:data :error]) (error (get-in recorded [:data :error])))
         (merge (recorded :data) {:event (recorded :id)}))
     (do
-      (when prior (error {:code "Blocked" :message "Admitted inference has no committed outcome; reconcile before repeating." :context {:operation (prior :id)}}))
+      (when (and prior (first (store/query s "SELECT id FROM events WHERE parent=? AND kind='dispatch'" [(prior :id)])))
+        (error {:code "Blocked" :message "Dispatched inference has no committed outcome; reconcile before repeating." :context {:operation (prior :id)}}))
       (default selected (profile s (get input :model (config (if (= role "rerank") :rerank :chat))) (keyword role)))
       (def size (if (= role "rerank") (store/estimate (schema/encode input))
         (+ (estimate (input :messages) (selected :reference)) (store/estimate (schema/encode (input :tools))))))
@@ -129,19 +133,21 @@
           (if (= 0 (config :output)) math/inf (config :output)) (get input :output math/inf))))
       (unless (= role "rerank")
         (assert (and (> maximum 0) (<= size (get config :context-quota math/inf))) "model context exhausted"))
-      (def wire (provider/encode config selected input maximum))
-      (def admission (store/append s (task :id) "model"
+      (def wire (if prior (get-in prior [:data :request :body]) (provider/encode config selected input maximum)))
+      (def admission (store/transact s (or prior (store/append s (task :id) "model"
         {:input (schema/project input [:messages :tools :query :documents :views] true) :views (input :views)
          :request {:method "POST" :url (string (get-in config [:providers (keyword (selected :provider)) :url]) (selected :path)) :body wire}
-         :estimate size :context (selected :context) :output maximum :turn (get input :turn false) :role role} identity))
+         :estimate size :context (selected :context) :output maximum :turn (get input :turn false) :role role} identity
+        (store/image s {:input input :selected selected :key key})))))
+      (store/append s (admission :id) "dispatch" {})
       (def raw (try (provider/request config selected (selected :path) wire)
         ([err fiber]
           (def failure (schema/diagnostic "ProviderFailed" err fiber))
           (def failure (merge failure {:context (merge (get failure :context {}) {:operation (admission :id)})}))
           (when (= "failed" (get-in failure [:context :outcome]))
-            (store/append s (admission :id) "result"
-              {:type "model" :state "failed" :role role :turn (get input :turn false) :error failure}
-              (string "result:" (admission :id))))
+            (with-dyns [:zinc/token false]
+              (store/append s (admission :id) "result" {:type "model" :state "failed" :role role :turn (get input :turn false) :error failure}
+                (string "result:" (admission :id)))))
           (error failure))))
       (def outcome (try
         (do
@@ -170,7 +176,7 @@
                 (try
                   (do
                     (assert (and (index-of finish ["stop" "tool_calls"]) (= "function" (call :type))
-                      (= "run_janet" (get-in call [:function :name])) (index-of tool (input :tools))) "unavailable or incomplete tool")
+                      (= "self" (get-in call [:function :name])) (index-of tool (input :tools))) "unavailable or incomplete tool")
                     (def arguments (schema/request (json/decode (get-in call [:function :arguments]) true true) [:code]))
                     (assert (arguments :code) "missing source")
                     {:id (call :id) :code (arguments :code)})
@@ -198,8 +204,9 @@
            :error (merge failure {:context (merge (get failure :context {})
              {:operation (admission :id) :provider (selected :provider) :model (selected :id)
               :protocol (selected :protocol) :response-id (raw :id)})})})))
-      (def result (store/append s (admission :id) "result" outcome (string "result:" (admission :id))))
-      (when (outcome :error) (error (outcome :error)))
+      (def result (with-dyns [:zinc/token false]
+        (or (store/result s (admission :id)) (store/append s (admission :id) "result" outcome (string "result:" (admission :id))))))
+      (when (get-in result [:data :error]) (error (get-in result [:data :error])))
       (merge (result :data) {:event (result :id)}))))
 
 (defn render [data]

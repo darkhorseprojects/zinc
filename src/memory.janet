@@ -25,9 +25,9 @@
   (def inherited (get-in root [:data :memory_range]))
   (def own (map |($ :id) (array/concat @[] (filter |(<= (bounds :start) ($ :id) (bounds :end)) (store/tree s (root :id))) (store/tree s (task :id)))))
   (store/query s `SELECT * FROM events WHERE (id BETWEEN ? AND ? OR id IN (SELECT value FROM json_each(?)))
-    AND (? OR (json_type(data,'$.text')='text' AND kind IN ('task','context','result','commit','artifact')
+    AND (? OR (json_type(data,'$.text')='text' AND kind IN ('task','context','result','world','artifact')
       AND (kind<>'result' OR json_extract(data,'$.text')<>'' OR json_extract(data,'$.state')<>'done')
-      AND (kind<>'commit' OR json_extract(data,'$.text')<>''))) ORDER BY id`
+      AND (kind<>'world' OR json_extract(data,'$.text')<>''))) ORDER BY id`
     [(max (bounds :start) (inherited :start)) (min (bounds :end) (inherited :end)) (schema/encode own) (if all 1 0)]))
 
 (defn semantic-window [s task anchor rows]
@@ -99,7 +99,7 @@
       (def job (store/start s {:text summary-prompt :request key :summary {:children ids :key key}} (s :config) (task :id)))
       (when-let [result (store/result s (job :id))]
         (when (get-in result [:data :error]) (error (get-in result [:data :error]))))
-      (store/commit s {:wait {:tasks [(job :id)]}})
+      (store/advance s {:wait {:tasks [(job :id)]}})
       (error {:code "Yield" :message "Waiting for a memory summary."}))
     (assert (< (store/estimate (render cached)) (sum (map |(store/estimate (render $)) children))) "summary did not shrink its sources")
     (array/remove nodes 0 (length children))
@@ -140,8 +140,8 @@
     (max 1 (math/floor (/ (sum (map |(store/estimate (render $)) sources)) 4)))))
   (def system {:role "system" :content (string summary-prompt " At most " (* maximum 4) " UTF-8 bytes.")})
   (def room (- (selected :context) maximum 512))
-  (def saved (get-in (store/checkpoint s (task :id)) [:data :checkpoint]))
-  (def progress (merge {:cursor [0 0] :frontier @[] :step 0} saved))
+  (def saved (get-in (store/progress s (task :id)) [:data :progress]))
+  (def progress (merge {:cursor [0 0] :frontier @[] :step 0} (or saved {})))
   (def frontier (progress :frontier))
   (while (or (< ((progress :cursor) 0) (length sources)) (> (length frontier) 1))
     (var [index offset] (progress :cursor))
@@ -167,7 +167,7 @@
     (when reducing (array/pop frontier) (array/pop frontier))
     (array/push frontier [height (response :text)])
     (put progress :cursor [index offset]) (put progress :step (+ 1 (progress :step)))
-    (store/commit s {:checkpoint progress}))
+    (store/advance s {:progress progress}))
   (def text ((frontier 0) 1))
   (def cited (peg/match ~(any (choice (* "[#" (capture (some (range "09"))) "]") 1)) text))
   (assert (not (first (store/query s `WITH RECURSIVE members(id) AS (
