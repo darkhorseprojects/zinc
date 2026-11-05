@@ -92,8 +92,9 @@
    :cygnet-source {:type :string :default "aae2cdb1418c1435558584a91181e1cb94459f2506c16f2be4b00e81428deaff"}})
 
 (def inputs
-  {:text {:type :string} :code {:type :string} :author {:type :string} :at {:type :string}
+  {:text {:type :string} :code {:type :string} :stages {:type :array} :author {:type :string} :at {:type :string}
    :request {:type :string} :memory_range {:type :dictionary} :images {:type :array} :world {:type :string}
+   :deadline {:type :number}
    :parent {:type :integer :minimum 0 :option "parent" :description "History attachment event; 0 selects empty history"}
    :persist {:type :boolean :default true :option "persist" :description "Retain work; false uses a temporary RAM session"}})
 
@@ -108,7 +109,7 @@
       (string "{" (string/join (map (fn [[key item]]
           (assert (or (string? key) (keyword? key)) "JSON keys must be text")
           (string (json/encode (string key)) ":" (encode item seen)))
-        (sorted (pairs value) |(< (string ($0 0)) (string ($1 0))))) ",") "}")
+        (sorted (filter |(not (nil? ($ 1))) (pairs value)) |(< (string ($0 0)) (string ($1 0))))) ",") "}")
       (indexed? value) (string "[" (string/join (map |(encode $ seen) value) ",") "]")
       (do (assert (or (nil? value) (= value :null) (boolean? value) (string? value)
                       (and (number? value) (< (math/abs value) math/inf))) "durable values must be JSON data")
@@ -218,8 +219,8 @@
         (get-in current [:janet key])) "saved selection revoked")))
   (each [name spec] (pairs (saved :imports))
     (def granted (get-in current [:imports name]))
-    (assert (and granted (= (encode (spec :command)) (encode (granted :command)))
-                         (= (encode (spec :exports)) (encode (granted :exports))))
+    (assert (and granted (= (encode (spec :target)) (encode (granted :target)))
+                         (deep= (sorted (keys (spec :exports))) (sorted (keys (granted :exports)))))
             {:code "AuthorityChanged" :message "saved capability changed" :context {:capability (string name)}}))
   (each field [:fs :http :processes :providers]
     (each [name grant] (pairs (saved field))
@@ -238,12 +239,33 @@
     key (if (and (field :unlimited) (= 0 (min (get saved key math/inf) (get current key math/inf))))
           (max (saved key) (current key)) (min (get saved key math/inf) (get current key math/inf))))))
 
+(defn stages [items]
+  (assert (and (indexed? items) (> (length items) 0)) "stages must be a nonempty array")
+  (def known @{})
+  (map (fn [stage]
+    (assert (dictionary? stage) "stage must be an object")
+    (each key (keys stage) (assert (index-of key [:id :after :code :call :arguments]) "unknown stage field"))
+    (def id (stage :id))
+    (assert (and (string? id) (peg/match ~(* (some (set "abcdefghijklmnopqrstuvwxyz0123456789_-")) -1) id)
+      (not (known id))) "stage IDs must be unique lowercase names")
+    (def after (get stage :after []))
+    (assert (and (indexed? after) (= (length after) (length (distinct after)))
+      (every? (map |(and (string? $) (known $)) after))) "dependencies must name earlier stages")
+    (assert (not= (nil? (stage :code)) (nil? (stage :call))) "stage requires exactly one of code or call")
+    (each key (if (stage :call) [:call :arguments] [:code])
+      (assert (and (string? (stage key)) (> (length (stage key)) 0)) "stage source and call must be nonempty strings"))
+    (assert (or (stage :call) (not (has-key? stage :arguments))) "computation stages have no arguments field")
+    (put known id true)
+    (merge stage {:after after})) items))
+
 (defn request [value selected]
   (assert (dictionary? value) "request must be an object")
   (each key (keys value) (assert (index-of key selected) (string "unknown request field " key)))
   (each key [:text :code :request :author :at :world]
     (when (has-key? value key) (assert (and (string? (value key)) (> (length (value key)) 0) (not (string/find "\0" (value key)))) "invalid request text")))
   (each key [:persist] (when (has-key? value key) (assert (boolean? (value key)) "invalid request flag")))
+  (when (has-key? value :deadline)
+    (assert (and (number? (value :deadline)) (< (math/abs (value :deadline)) math/inf)) "invalid deadline"))
   (when (value :images)
     (assert (and (indexed? (value :images)) (<= (length (value :images)) 4)) "invalid images")
     (each image (value :images)

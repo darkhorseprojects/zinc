@@ -1,86 +1,95 @@
 # Zinc
 
-Zinc runs independent Janet tasks with SQLite memory, shared worlds and durable VM continuations.
+Zinc runs Janet tasks and restartable workflows with SQLite history and shared JSON values.
 
 ## Installation
 
-Install under `~/.agents/zinc` or `%LOCALAPPDATA%\agents\zinc`. Each installation owns its source, dependencies,
-assets and private database. Connector is installed separately. Git tracks installed source, not running state.
+Install under `~/.agents/zinc` or `%LOCALAPPDATA%\agents\zinc`. Each installation owns its source,
+dependencies, assets and private database. Install Connector separately.
 
-Use Janet 1.42+, Jpm, a C compiler, OpenSSL headers and trusted CA certificates, Python 3.11+ and Git. Build dependencies
-with `JANET_SYSTEM_SQLITE=0 jpm --local --cflags=-std=c99,-DSQLITE_ENABLE_FTS5,-DSQLITE_USE_URI=1 deps`, then retrieval
-assets with `jpm --local run assets`. MSVC flags are `/nologo,/MD,/DSQLITE_ENABLE_FTS5,/DSQLITE_USE_URI=1`;
-Jsec uses VCPKG_ROOT on Windows and OPENSSL_PREFIX for nonstandard macOS installations.
+Use Janet 1.42+, Jpm, a C compiler, OpenSSL headers and trusted CA certificates, Python 3.11+ and Git.
+Build dependencies with `JANET_SYSTEM_SQLITE=0 jpm --local --cflags=-std=c99,-DSQLITE_ENABLE_FTS5,-DSQLITE_USE_URI=1 deps`,
+then retrieval assets with `jpm --local run assets`. MSVC flags are
+`/nologo,/MD,/DSQLITE_ENABLE_FTS5,/DSQLITE_USE_URI=1`. Jsec uses VCPKG_ROOT on Windows and OPENSSL_PREFIX
+for nonstandard macOS installations. Set JANET_PATH to the installation's jpm_tree/lib.
 
-Set JANET_PATH to the installation's jpm_tree/lib. SQLite must support FTS5, URI filenames and memdb. Native modules
-must match Janet's ABI. Initialize fresh state with `agc init`. No agent executable or shared runtime directory is needed.
+SQLite must support FTS5, URI filenames and memdb. Native modules must match Janet's ABI.
+Initialize a fresh installation with `agc init DIRECTORY`.
+
+`examples/models.ini` is an optional external model-server preset. Provision its server and weights
+separately. Zinc does not read this file or verify those model downloads.
 
 ## Invocation
 
-src/main.janet accepts one version-1 call on stdin. Parameters contain input, config, imports, an optional after cursor and the expected store identity when attaching.
-PA_FRAME_BYTES bounds transport frames. Portable Agents defines only the wire envelopes; Zinc owns these methods.
+src/main.janet accepts one Portable Agents version-1 call on stdin. PA_FRAME_BYTES bounds frames.
+Parameters contain input, config, imports, an optional after cursor and the expected store identity
+when attaching. Connector capability imports require its live request-scoped broker.
 
-self admits full input or attaches to an existing request identity. It emits an admission event, executes or recovers
-work, streams committed presentation and returns an outcome. Disconnecting observation does not cancel execution.
-Repeated admission uses the same request identity. There is no separate run entry.
+self admits :text, :code or :stages work, emits an admission, executes or recovers it, streams committed
+presentation and returns an outcome. Reattachment uses the same request identity and cursor.
+Observation loss does not cancel execution. Admission does not mean completion.
 
-Observation within self uses a read-only connection. status reads an outcome; abort cancels a request tree without undoing effects. Other entries are
-describe, instructions, models, init, record, world, views, render, diagnostics, invalidate and resolve.
+Other entries are describe, instructions, models, init, status, abort, record, world, views, render,
+diagnostics, invalidate and resolve. Abort cancels a request tree without undoing external effects.
 
-## Execution and recovery
+## Durable stages
 
-Ordinary host calls need no operation keys. self returns an independent child's handle; task/wait explicitly suspends
-until its outcome exists. Parent completion neither joins nor cancels independent children.
+A workflow is an immutable ordered array of stages. Each has a unique lowercase id and optional after
+names referring to earlier stages. Unrelated stages can run concurrently. Failed dependencies prevent
+dependent execution; unrelated work continues.
 
-At VM safepoints, Zinc saves the complete reachable task graph: stacks, program counters, locals, closures, output and
-managed async waits. A restart resumes that graph, not the script's source. Managed ev/go, ev/spawn, ev/gather,
-ev/go-gather, ev/sleep, ev/chan, ev/take, ev/give, ev/count, ev/chan-close and ev/cancel use serializable scheduling state.
-Other native ev operations are not exposed. Random-generator state is task-local; host observations are journaled.
-
-Sockets, processes, SQLite connections and thread channels remain outside images. Pure computation since the last
-safepoint may repeat. Unsupported native objects and C stack frames fail snapshotting before new effects dispatch.
-Setup may supply an expander, not a live parser or reader. Images require their original runtime and registry.
-
-An operation admission and its waiting continuation commit together. Dispatch is recorded before external invocation;
-definitive outcomes are stored before resumption. A recorded outcome is reused. Dispatch without an outcome is uncertain,
-not failed. Connector delivery receipts are checked automatically when available. Otherwise inspect external state before
-task/resolve records a verified value/error and evidence. The direct-execution resolve entry also accepts normalized
-model outcomes. Transport errors, lease expiry and missing messages do not establish that an effect never happened.
-
-Current grants are checked again on recovery. Claims fence publication and bound active tasks. Late operation receipts
-may be retained, but stale workers cannot advance continuations or worlds. Deadlines and configured resource quotas
-remain enforced; this is not an OS memory sandbox. HTTP uses bounded Spork/Jsec requests with certificate and hostname
-verification and no redirects. The pinned parser accepts DNS names and IPv4, not IPv6 literals.
-
-## Worlds
-
-world/get reads shared values. world/commit explicitly publishes values or serializable definitions; it is not an execution
-save. Independent tasks exchange snapshots, not live heap pointers. Worlds and task continuations use database-backed
-binary images. There is no world/save or world/fork.
-
-`/world view [point]` inspects a publication; `/world rewind <id|hash>` restores one under direct-execution authority.
-Rewind increments the world epoch and fences unfinished old work. It does not erase history, resurrect old tasks or undo
-external effects. Branches are initialized once from configuration only:
-
-```yaml
-world: main
-worlds:
-  main: {}
-  experiment: { from: "publication-id-or-image-hash" }
+```janet
+(self {:stages [{:id "extract" :code "{:answer 42}"}
+                {:id "publish" :after ["extract"] :call "world/commit"
+                 :arguments "[((input) :extract)]"}]})
 ```
 
-self may select only granted worlds. Changing a branch's from field does not reset it.
+A code stage evaluates pure Janet and saves its JSON result. A call stage evaluates arguments as pure
+Janet, admits one granted host operation, then saves its outcome. Both expressions receive declared
+dependency results through `(input)`, using keyword keys matching stage IDs. Use :null for explicit
+JSON null; nil-valued object fields are omitted. Definitions belong in source, not stored worlds.
 
-## Storage and temporary work
+Recovery reuses completed stages and recorded operation outcomes. Interrupted computation and argument
+construction may repeat before a result or admission commits. Dispatch commits before external invocation.
+A dispatch without an outcome remains uncertain and is not blindly repeated. Discord creation receipts
+can reconcile automatically; otherwise inspect external state and supply an outcome with verification
+evidence through task/resolve or the direct-execution resolve entry. Evidence is the caller's attestation,
+not an independent verifier. Model calls use the same admission/dispatch/outcome distinction.
 
-The core tables are events, images, claims and worlds. Events retain admissions, dispatches, outcomes and world
-publications. Claims retain the latest task image, scheduling state and lease. Superseded unreferenced task images are
-reclaimed. Worlds retain publication heads and rewind epochs. FTS is a derived memory index. No schema/version number
-is increased; incompatible layouts are rejected structurally. Existing JSON checkpoints cannot become VM stacks.
+Ordinary code scripts execute once with journaled host calls. A started script interrupted before its
+result commits fails with ScriptInterrupted on recovery. Zinc does not serialize stacks, closures,
+fibers, channels or native objects, and does not reconstruct remaining source. Use stages when progress
+must survive a crash. self returns an independent child's handle; task/wait can wait for descendants of
+its caller or declared dependencies from a call stage. Parent completion does not cancel descendants.
 
-persist:false uses the same execution machinery in a bounded RAM database, with inherited history and world images.
-It cannot create durable descendants. Observer failure does not cancel it, but losing the owning process loses its
-session. Temporary work is never silently recreated.
+Stored state contains JSON rather than runtime images. Ordinary source changes do not invalidate it by
+file hash. Recovery still checks current grants, task ownership, deadlines and world epochs. Changes to
+public capability contracts require deliberate handling. Historical binary-image stores are unsupported for execution;
+retain their original installation if unfinished work must be recovered. Zinc does not migrate them.
 
-Chronological memory, bounded summaries, retrieval, original records, image budgeting and exact provider requests remain
-inspectable through views, render and memory/expand. Markdown is instruction/data, not executable persistence.
+## Worlds and history
+
+world/get reads shared JSON values by string key. world/commit explicitly publishes values, optionally
+with an expected revision. It does not save execution. Worlds do not isolate memory history.
+
+`/world view [point]` inspects a publication. `/world rewind <id|hash>` restores one under direct-execution
+authority, increments its epoch and fences unfinished old work. Rewind does not undo effects or erase history.
+Branches are initialized once from configuration; changing from does not reset an existing branch.
+
+The core tables are events, images, claims and worlds. Images hold deduplicated JSON values and configuration
+snapshots; claims hold leases, waits and one-shot script admission state. Terminal claims are removed.
+FTS is a derived memory index. views, render and memory/expand expose retained prompts, summaries and records.
+
+## Temporary execution and limits
+
+persist:false selects a bounded RAM database with inherited history and world values. Descendants inherit
+that persistence. Temporary work cannot create durable descendants or reattach after owner loss. Connector
+also keeps its temporary request, diagnostic and delivery state in RAM. External services and explicit
+external effects remain outside this storage guarantee.
+
+Resource and byte limits are enforced, but Zinc is not an OS memory sandbox. Scripts run in an isolated
+Janet thread with a restricted binding environment and native resource restrictions. Custom setup and
+host modules are trusted configuration. Filesystem grants reject traversal and observed links, but are
+not race-safe confinement for directories another process can mutate. Do not grant such directories to
+untrusted work. HTTP verifies certificates and hostnames, follows no redirects, and uses bounded requests.
+The pinned URL parser supports DNS names and IPv4, not IPv6 literals.

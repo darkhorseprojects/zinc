@@ -9,7 +9,7 @@
 
 (defn render [row]
   (def data (row :data))
-  (def text (if (= "model" (data :type)) (model/render data) (get data :text "")))
+  (def text (if (= "model" (data :type)) (model/render data) (get data :text (get row :text ""))))
   (def body (if (and (= "task" (row :kind)) (= "script" (data :type)))
     (let [runs (peg/match ~(any (choice (capture (some "`")) 1)) text)
           fence (string/repeat "`" (max 3 (+ 1 (max 0 ;(map length runs)))))]
@@ -25,7 +25,7 @@
   (def inherited (get-in root [:data :memory_range]))
   (def own (map |($ :id) (array/concat @[] (filter |(<= (bounds :start) ($ :id) (bounds :end)) (store/tree s (root :id))) (store/tree s (task :id)))))
   (store/query s `SELECT * FROM events WHERE (id BETWEEN ? AND ? OR id IN (SELECT value FROM json_each(?)))
-    AND (? OR (json_type(data,'$.text')='text' AND kind IN ('task','context','result','world','artifact')
+    AND (? OR (text IS NOT NULL AND kind IN ('task','context','result','world','artifact')
       AND (kind<>'result' OR json_extract(data,'$.text')<>'' OR json_extract(data,'$.state')<>'done')
       AND (kind<>'world' OR json_extract(data,'$.text')<>''))) ORDER BY id`
     [(max (bounds :start) (inherited :start)) (min (bounds :end) (inherited :end)) (schema/encode own) (if all 1 0)]))
@@ -43,7 +43,7 @@
       (when (> (length terms) 0)
         (def graph (sql/open (string (store/uri (config :cygnet)) "?mode=ro")))
         (defer (sql/close graph)
-          (sql/eval graph "PRAGMA trusted_schema=OFF; PRAGMA query_only=ON;")
+          (sql/eval graph "PRAGMA trusted_schema=OFF; PRAGMA query_only=ON; PRAGMA temp_store=MEMORY;")
           (assert (and (= 1 (((sql/eval graph "PRAGMA user_version") 0) :user_version))
                        (= 1514751817 (((sql/eval graph "PRAGMA application_id") 0) :application_id))
                        (= (config :cygnet-source) (((sql/eval graph "SELECT value FROM metadata WHERE key='source_identity'") 0) :value))) "incompatible Cygnet source")
@@ -128,7 +128,7 @@
     (or (= offset (length text)) (not (<= 0x80 (text offset) 0xbf)))) "invalid UTF-8 page offset")
   (var end (min (length text) (+ offset (min 65536 (math/floor (/ ((s :config) :response-bytes) 4))))))
   (while (and (< end (length text)) (<= 0x80 (text end) 0xbf)) (++ end))
-  {:id id :at (get-in row [:data :at] (os/strftime "%Y-%m-%dT%H:%M:%SZ" (math/floor (row :created)))) :kind (row :kind) :author (get-in row [:data :author] "zinc")
+  {:id id :parent (row :parent) :at (get-in row [:data :at] (os/strftime "%Y-%m-%dT%H:%M:%SZ" (math/floor (row :created)))) :kind (row :kind) :author (get-in row [:data :author] "zinc")
    :text (string/slice text offset end) :children (get-in row [:data :children]) :offset offset :next end :total (length text)})
 
 (defn summarize [s task]

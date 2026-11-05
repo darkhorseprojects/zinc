@@ -6,8 +6,15 @@
 (import ./provider)
 
 (def- tool {:type "function" :function {:name "self"
-  :description "Admit an independent Janet script. Its receipt is not its result. Scripts publish their own database commits; they need not settle before other work continues."
-  :parameters {:type "object" :additionalProperties false :required ["code"] :properties {:code {:type "string"}}}}})
+  :description "Start independent work. Use stages for recovery; code scripts are not replayed after interruption. Returns an admission receipt."
+  :parameters {:type "object" :additionalProperties false :oneOf [{:required ["stages"]} {:required ["code"]}]
+    :properties {:code {:type "string"}
+      :stages {:type "array" :minItems 1 :items {:type "object" :additionalProperties false :required ["id"]
+        :oneOf [{:required ["code"]} {:required ["call" "arguments"]}]
+        :properties {:id {:type "string"} :after {:type "array" :items {:type "string"}}
+          :code {:type "string" :description "Pure Janet; (input) returns declared dependency results."}
+          :call {:type "string" :description "Granted host binding name."}
+          :arguments {:type "string" :description "Pure Janet returning the call's argument array."}}}}}}}})
 
 (defn text [message]
   (def content (message :content))
@@ -46,7 +53,7 @@
 (defn profile [s reference role]
   (assert (string? reference) (string "configure a " role " model"))
   (def config (s :config))
-  (def key [reference role (config :thinking) (config :web-search)])
+  (def key [reference role (config :thinking) (config :web-search) (schema/encode (config :providers))])
   (or ((s :profiles) key)
     (do
       (def split (string/find ":" reference))
@@ -96,7 +103,7 @@
       (when-let [output (capabilities :output)] (assert (and (int? output) (<= 1 output context)) "invalid provider output capacity"))
       (def selected (merge ref capabilities {:context context :protocol (endpoint :protocol)
         :path (endpoint (if (= role :chat) :chat-path :rerank-path))
-        :control (when (capabilities :control) (keyword (capabilities :control)))
+        :control (capabilities :control)
         :tools (array/concat @[] (if (capabilities :tools) [tool] []) (if (and (= role :chat) (config :web-search)) (endpoint :web-tools) []))}))
       (put (s :profiles) key selected) selected)))
 
@@ -177,9 +184,10 @@
                   (do
                     (assert (and (index-of finish ["stop" "tool_calls"]) (= "function" (call :type))
                       (= "self" (get-in call [:function :name])) (index-of tool (input :tools))) "unavailable or incomplete tool")
-                    (def arguments (schema/request (json/decode (get-in call [:function :arguments]) true true) [:code]))
-                    (assert (arguments :code) "missing source")
-                    {:id (call :id) :code (arguments :code)})
+                    (def arguments (schema/request (json/decode (get-in call [:function :arguments]) true true) [:code :stages]))
+                    (assert (not= (nil? (arguments :code)) (nil? (arguments :stages))) "supply code or stages")
+                    (when (arguments :stages) (put arguments :stages (schema/stages (arguments :stages))))
+                    (merge {:id (call :id)} arguments))
                   ([err fiber] {:id (call :id) :error (schema/diagnostic "InvalidToolCall" err fiber)}))) calls))
               (def answer (text message))
               (def status (cond

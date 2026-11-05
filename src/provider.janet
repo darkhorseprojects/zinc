@@ -15,7 +15,7 @@
         (put body :tools (input :tools))
         (when (selected :parallel) (put body :parallel_tool_calls true)))
       (unless (= "default" (config :thinking))
-        (case (selected :control)
+        (case (when (selected :control) (keyword (selected :control)))
           :reasoning (put body :reasoning (if (and (= "none" (config :thinking)) (not= "responses" (selected :protocol))) {:enabled false} {:effort (config :thinking)}))
           :reasoning_effort (put body :reasoning_effort (config :thinking))))
       (when (endpoint :cache-key) (put body :prompt_cache_key (endpoint :cache-key)))

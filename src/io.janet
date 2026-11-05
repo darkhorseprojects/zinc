@@ -50,24 +50,6 @@
   (:write stream bytes)
   (when (get stream :flush) (:flush stream)))
 
-(defn call [spec name args operation limit]
-  (def child (os/spawn (spec :command) :pd {:in :pipe :out :pipe :err stderr}))
-  (defer (do (ev/close (child :in)) (ev/close (child :out))
-    (when (nil? (child :return-code)) (ev/go (fn [] (os/proc-close child)))))
-    (ev/with-deadline (if (= 0 (get spec :timeoutSeconds 0)) math/inf (spec :timeoutSeconds))
-      (send (child :in) {:version 1 :type "call" :method name :params {:arguments args :operation operation}} limit)
-      (ev/close (child :in))
-      (var terminal nil)
-      (each frame (messages (child :out) limit)
-        (assert (not= "call" (frame :type)) "call in response stream")
-        (when (index-of (frame :type) ["result" "error"]) (set terminal frame)))
-      (os/proc-wait child)
-      (when (= "error" (terminal :type))
-        (def failure (terminal :error))
-        (error failure))
-      (assert (= 0 (child :return-code)) "capability process failed; effects may have happened")
-      (terminal :value))))
-
 (defn process [argv environment input limit seconds &opt diagnostics]
   (def child (os/spawn argv :pe (merge environment {:in :pipe :out :pipe :err (if diagnostics :pipe :out)})))
   (defer (do (when (nil? (get child :return-code)) (try (os/proc-kill child) ([err] nil))) (os/proc-close child))
@@ -167,6 +149,22 @@
             (reduce (fn [text secret] (string/replace-all secret "[redacted]" text)) (failure key) secrets))
           {:context (merge (get failure :context {})
             {:outcome (get-in failure [:context :outcome] (if (or (not attempted) received) "failed" "unknown"))})}))))))
+
+(defn call [spec name args operation limit]
+  (def config ((dyn :zinc/call) :config))
+  (def url (os/getenv "AGC_CAPABILITY_URL"))
+  (assert (and url (> (length url) 0)) {:code "CapabilityOwnerLost" :message "Capability owner is unavailable."})
+  (def response (try (request (merge config {:response-bytes (min limit (config :response-bytes))})
+    {:url url :token-env "AGC_CAPABILITY_TOKEN"} "POST" ""
+    (schema/encode {:target (spec :target) :method name :arguments args :operation operation}))
+    ([err]
+      (if (and (= "HttpError" (get err :code)) (= "failed" (get-in err [:context :outcome])))
+        (error {:code "CapabilityOwnerLost" :message "Capability owner is unavailable." :context {:cause err}})
+        (error err)))))
+  (assert (= 200 (response :status)) {:code "CapabilityOwnerLost" :message "Capability owner rejected its bearer."})
+  (def outcome (json/decode (response :body) true true))
+  (when (outcome :error) (error (outcome :error)))
+  (outcome :value))
 
 (defn invoke [config name args]
   (cond

@@ -2,7 +2,7 @@
 (import ./schema)
 (import ./io)
 (import ./store)
-(import ./world)
+(import ./runtime)
 (import ./engine)
 (import ./model)
 (import ./memory)
@@ -29,7 +29,7 @@
       (def value
         (case method
           "describe" (engine/describe config)
-          "instructions" (world/instructions config (world/definitions config engine/bindings))
+          "instructions" (runtime/instructions config (runtime/definitions config engine/bindings))
           "models" (map |{:ref ($ :ref) :name ($ :name)} (model/catalogue config (get input :role "chat")))
           (do
             (when (= method "init")
@@ -44,19 +44,19 @@
                   (assert (= directory (os/realpath directory)) "state directories cannot contain links"))))
             (def readonly (or (index-of method ["diagnostics" "views" "render" "status"])
               (and (= method "world") (= "view" (get input :action "view")))))
-            (def s (store/open config readonly))
+            (def s (store/open config (or readonly (and (= method "self") (= false (get input :persist true))))))
             (defer (store/close s)
               (case method
                 "init" (do (store/configure s) {:store (s :identity) :world (config :world)})
                 "self"
                 (do
                   (schema/request input (keys schema/inputs))
-                  (def attach (not (or (input :text) (input :code))))
+                  (def attach (not (or (input :text) (input :code) (input :stages))))
                   (when (config :ephemeral) (assert (= false (get input :persist true)) "ephemeral profiles require persist:false"))
-                  (each profile (filter identity [config (config :agent)]) (world/definitions profile engine/bindings))
-                  (store/configure s)
+                  (each profile (filter identity [config (config :agent)]) (runtime/definitions profile engine/bindings))
                   (def local (if (= false (get input :persist true)) (store/temporary config) s))
                   (defer (unless (= local s) (store/close local))
+                    (store/configure local)
                     (when (or attach (params :store)) (assert (= (params :store) (local :identity)) "execution store identity changed"))
                     (def task (if attach
                       (do (schema/request input [:request])
