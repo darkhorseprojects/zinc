@@ -11,10 +11,8 @@
    "self/wait" {:arity [1 1] :doc "(self/wait handle) suspends only the calling fiber for a descendant's root outcome. Returns an outcome object; read :value."}
    "self/cancel" {:arity [1 1] :doc "(self/cancel handle) cancels a descendant execution tree without undoing effects."}
    "effect/resolve" {:arity [2 2] :doc "(effect/resolve attempt outcome) resolves an uncertain attempt with exactly one of :value, :error or :retry true, and verification :evidence. Retry reuses the same logical effect."}
-   "world/get" {:arity [1 1] :doc "(world/get key) reads a shared JSON value."}
-   "world/view" {:arity [0 1] :doc "(world/view &opt point) reports a world publication."}
-   "world/commit" {:arity [1 2] :doc "(world/commit values &opt expected-revision) publishes JSON values."}
-   "world/remove" {:arity [1 1] :doc "(world/remove key) removes a shared value."}
+   "world/view" {:arity [0 1] :doc "(world/view &opt point) reports a world publication and its complete defining source."}
+   "world/remove" {:arity [1 1] :doc "(world/remove name) removes a local world binding; name is a symbol."}
    "memory/expand" {:arity [1 2] :doc "(memory/expand id &opt byte-offset) reads an original record within granted history."}
    "fs/list" {:arity [2 2] :resource :fs :permission :read :doc "(fs/list resource relative-path) lists a granted directory."}
    "fs/read" {:arity [2 2] :resource :fs :permission :read :doc "(fs/read resource relative-path) reads granted UTF-8 text."}
@@ -90,7 +88,7 @@
       (def budget @[(config :image-bytes)])
       (def input {:role "user" :content (model/images (get-in inquiry [:data :input])
         (string "Author: " (get-in inquiry [:data :author]) " · Occurred: " (get-in inquiry [:data :at]) "\n\n" (get-in inquiry [:data :input :text])) budget)})
-      (def state {:role "user" :content (string "## Shared state\n\n" (schema/encode ((store/view s (get-in inquiry [:data :world])) :values)))})
+      (def state {:role "user" :content (string "## World source\n\n" ((store/view s (get-in inquiry [:data :world])) :text))})
       (def capacity (min (get config :context-quota math/inf) (selected :context)))
       (def room (- capacity (model/estimate [system input state]) (store/estimate (schema/encode tools)) 512))
       (assert (> room 256) "instructions, inquiry and state exhaust context")
@@ -121,7 +119,7 @@
             (schema/encode {:event (row :id) :parent (row :parent) :script (owner :id)
               :call (get-in owner [:data :call]) :kind (row :kind) :outcome (row :data)
               :effect (when (= "operation" (parent :kind)) {:id (parent :id) :name (get-in parent [:data :name]) :arguments (get-in parent [:data :arguments])})})
-            (when (= "world" (row :kind)) (string "\n" (schema/encode (store/view s (get-in row [:data :world]) (row :id))))))})))
+            (when (= "world" (row :kind)) (string "\n" ((store/view s (get-in row [:data :world]) (row :id)) :text))))})))
       (assert (< (+ (model/estimate messages (selected :reference)) (store/estimate (schema/encode tools))) capacity) "inquiry exchanges exhaust context")
       (model/call s {:turn true :messages messages :tools tools :views views} (string "turn:" rounds) selected)))))
 
@@ -141,9 +139,6 @@
     (def world (get-in effect [:data :world]))
     (case name
       "world/view" (apply store/view s world args)
-      "world/get" (get (store/world-values s world) (first args))
-      "world/commit" (apply store/publish s args)
-      "world/remove" (store/publish s {} nil args)
       "memory/expand" (apply memory/expand s script args)
       "effect/resolve"
       (let [[id outcome] args]
@@ -219,9 +214,8 @@
                     {:code "ContinuationLost" :message "The VM was interrupted. Inspect committed effects and source progress, then continue only the remaining work in a new script. Locals and native waits are unknown; do not replay the original source."
                      :context {:script (execution :id) :progress (get (store/progress s (execution :id)) :data)}})
                   (def returned (store/outcome s (execution :id)))
-                  (store/finish s (execution :id) (if returned (get-in returned [:data :state]) "failed")
-                    (get-in returned [:data :value])
-                    (if returned (get-in returned [:data :error]) {:code "ContinuationLost" :message "Model-directed continuation required."})))
+                  (store/finish s (execution :id) "failed" (get-in returned [:data :value])
+                    {:code "ContinuationLost" :message "VM settlement and world publication were interrupted. Model-directed continuation required."}))
                 (do
                   (store/advance s {:started true :form 0})
                   (def outcome (runtime/run s execution available))
@@ -288,13 +282,17 @@
     (def source (when (and (= "task" (row :kind)) (= "script" (data :type))) (get-in data [:input :code])))
     (def effect (and (= "result" (row :kind)) (= "operation" (get parent :kind))))
     (def terminal (and (= "result" (row :kind)) (= (owner :id) (row :parent))
-      (not (first (store/query s "SELECT id FROM events WHERE parent=? AND kind='return'" [(owner :id)])))))
+      (not (first (store/query s "SELECT id FROM events WHERE parent=? AND kind='return'
+        AND (?='done' OR json_extract(data,'$.state')<>'done')" [(owner :id) (data :state)])))))
     (def body (cond
-      (and (= "result" (row :kind)) (= "model" (data :type)) (not (data :error))) (model/render data)
+      (and (= "result" (row :kind)) (= "model" (data :type)) (not (data :error)))
+      (model/render (if (index-of (data :status) ["complete" "refused" "blocked"])
+        (merge data {:text "" :message (merge (data :message) {:content nil})}) data))
       source source
       effect (schema/encode {:effect (parent :id) :name (get-in parent [:data :name]) :state (data :state) :value (data :value) :error (data :error)})
       (and (= "receipt" (row :kind)) (data :error)) (get-in data [:message :content])
-      (and terminal (or (data :error) (not= "inquiry" (get-in owner [:data :type])))) (data :text)
+      terminal (if (and (= "inquiry" (get-in owner [:data :type])) (not (data :error)))
+        (get-in data [:value :text]) (data :text))
       (index-of (row :kind) ["return" "output" "fiber" "world" "artifact" "diagnostic" "uncertain"]) (data :text)))
     (when (and body (not= "summary" (get-in owner [:data :type])))
       {:kind (cond source "script" effect "effect" (= "model" (data :type)) "model" (= "return" (row :kind)) "result" (row :kind))
@@ -304,6 +302,7 @@
        :reply (if (and (= "script" (get-in owner [:data :type])) (not source)) (owner :id) :null)
        :parent (or (row :parent) :null) :status (if source "accepted" (get data :status (get data :state "complete"))) :world (get-in owner [:data :world])
        :language (cond (or effect (data :error)) "json" source "clojure"
+         (and terminal (= "inquiry" (get-in owner [:data :type]))) :null
          (and (or terminal (= "return" (row :kind))) (not (string? (data :value)))) "json"
          (or terminal (index-of (row :kind) ["return" "output" "fiber"])) "text" :null)
        :persist (not (s :temporary)) :sequence (row :id)
@@ -317,7 +316,8 @@
       (when (and (= (row :parent) (root :id))
         (or (= "return" (row :kind))
           (and (= "result" (row :kind))
-            (not (first (store/query s "SELECT id FROM events WHERE parent=? AND kind='return'" [(root :id)]))))))
+            (not (first (store/query s "SELECT id FROM events WHERE parent=? AND kind='return'
+              AND (?='done' OR json_extract(data,'$.state')<>'done')" [(root :id) (get-in row [:data :state])]))))))
         (emit (merge {:type "outcome" :script (root :id) :store (s :identity)} (row :data))))
       (when-let [frame (presentation s row)] (emit frame))
       (set cursor (row :id)))

@@ -1,7 +1,7 @@
 # Zinc
 
 Zinc runs independent Janet scripts and effects with SQLite history, asynchronous model continuation
-and shared JSON values.
+and native image-based worlds.
 
 ## Installation
 
@@ -10,7 +10,8 @@ dependencies, assets and private database. Install Connector separately.
 
 Use Janet 1.42+, Jpm, a C compiler, OpenSSL headers and trusted CA certificates, Python 3.11+ and Git.
 Build dependencies with `JANET_SYSTEM_SQLITE=0 jpm --local --cflags=-std=c99,-DSQLITE_ENABLE_FTS5,-DSQLITE_USE_URI=1 deps`,
-then retrieval assets with `jpm --local run assets`. MSVC flags are
+then run `jpm --local run tls` to rebuild the pinned TLS dependency with its cancellation cleanup fix,
+and build retrieval assets with `jpm --local run assets`. MSVC flags are
 `/nologo,/MD,/DSQLITE_ENABLE_FTS5,/DSQLITE_USE_URI=1`. Jsec uses VCPKG_ROOT on Windows and OPENSSL_PREFIX
 for nonstandard macOS installations. Set JANET_PATH to the installation's jpm_tree/lib.
 
@@ -51,8 +52,9 @@ Configured parallel limits apply separately to script VMs, effects and inquiry e
 The root return, VM lifetime and external effects have distinct completion boundaries. Output ports
 schedule publication without blocking Janet's non-yieldable output callback. Output is not accumulated
 into the final result. Successful native fiber return values are displayed as Janet text. Root returns
-and host arguments/results are JSON data; return nil after launching fibers rather than returning a
-native fiber/channel object. self/wait explicitly waits for a descendant's root outcome, not its VM drain.
+retain JSON-compatible values on the process boundary; native return values use explicit Janet-type
+descriptors. Host arguments/results remain JSON data. self/wait explicitly waits for a descendant's root
+outcome, not its VM drain or world publication.
 
 Grant native ev/*, self/* and effect/* as appropriate in execution profiles. These replace the former
 public task/* bindings; there are no compatibility aliases.
@@ -79,7 +81,8 @@ engine/run owns scheduling and lease renewal. runtime/run owns native VM lifetim
 not effect execution. store owns admission, claims, outcomes and post-commit notification. engine/infer
 uses the same committed-change query for eligibility and context. model/call journals inference;
 provider encodes and decodes Responses or Chat Completions and preserves native reasoning for replay.
-A model answer is presented immediately; its inquiry remains receptive while descendants are unfinished.
+Reasoning and execution events are presented immediately. Final answer text is presented once, from the
+committed inquiry outcome; the inquiry remains receptive while descendants are unfinished.
 A timer reconciles cross-process writes and leases. Observation is read-only and cannot execute work.
 
 Discord receives exact source in clojure blocks, fenced output and individual effect/root results replying
@@ -115,20 +118,41 @@ before upgrading. New execution does not support workflows or pretend they were 
 
 ## Worlds and history
 
-world/get reads shared JSON values by string key. world/commit explicitly publishes values, optionally
-with an expected revision. It does not save execution. Worlds do not isolate memory history.
+Scripts restore the selected world's native user environment. Successful scripts automatically publish
+changed environments after their fibers settle. Definitions, macros, private bindings, variables, mutations,
+closures and their reachable state persist without rerunning initializers. Native marshaling preserves
+shared references and cycles. Output and discarded expression results are not world bindings. An unchanged
+environment creates no publication. world/remove takes a symbol and removes a local binding.
+
+Freshly granted host bindings, output ports and invocation accessors are rebound on restoration; the image
+does not restore old capability connections. Unsupported reachable values fail publication explicitly,
+without silently discarding state. An early root return does not promise successful world publication:
+settlement failures remain visible even after that return. Native event-loop waits are not restartable.
+
+Each script publishes against the revision it loaded. Conflicting images are retained as inspectable
+world-image artifacts, without replacing the head, merging graphs or replaying effects. Worlds do not
+isolate memory history.
 
 `/world view [point]` inspects a publication. `/world rewind <id|hash>` restores one under direct-execution
 authority, increments its epoch and fences unfinished old work. Rewind does not undo effects or erase history.
 Branches are initialized once from configuration; changing from does not reset an existing branch.
 
-Images hold deduplicated JSON configuration, model input and world values. Claims hold leases, waits and
-source progress. Terminal claims are removed. FTS is a derived index. Root returns are not duplicated by
-VM-drain results in presentation or memory. views, render and memory/expand expose retained originals.
+World inspection shows complete recorded defining forms in clojure blocks, not signatures or JSON.
+These forms are source provenance, not a reconstruction of the current mutable heap and never a replay
+program. The native image holds the actual state. The same defining source is included in model context.
+
+Images hold deduplicated JSON configuration/model input and native world bytes with matching Janet runtime
+metadata. Claims hold leases, waits and source progress. Terminal claims are removed. FTS is a derived
+index. Successful VM-drain results do not duplicate root returns; unsuccessful settlement remains visible
+in presentation and memory. views, render and memory/expand expose retained originals.
+
+Existing JSON-world installations need an explicit offline image conversion before upgrading. Preserve
+the database and store identity; do not reset history or automatically replay historical scripts. No
+schema or version change is required.
 
 ## Temporary execution and limits
 
-persist:false selects a bounded RAM database with inherited history and world values. Descendants inherit
+persist:false selects a bounded RAM database with inherited history and world images. Descendants inherit
 that persistence. Temporary work cannot create durable descendants or reattach after owner loss. Connector
 also keeps its temporary request, diagnostic and delivery state in RAM. External services and explicit
 external effects remain outside this storage guarantee.

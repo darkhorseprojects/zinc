@@ -121,7 +121,8 @@
       e.kind IN ('return','output','fiber','uncertain','world','artifact','diagnostic') OR
       (e.kind='result' AND owner.id<>? AND (
         owner.kind='operation' OR (owner.kind='task' AND json_extract(owner.data,'$.type')<>'summary'
-          AND NOT EXISTS(SELECT 1 FROM events r WHERE r.parent=owner.id AND r.kind='return')))))
+          AND NOT EXISTS(SELECT 1 FROM events r WHERE r.parent=owner.id AND r.kind='return'
+            AND (json_extract(e.data,'$.state')='done' OR json_extract(r.data,'$.state')<>'done'))))))
     ORDER BY e.id` [id after id]))
 
 (defn check [s id &opt token]
@@ -204,7 +205,7 @@
       (settle s effect (merge outcome {:state (if (outcome :error) "failed" "done")}))) row))
 
 (defn point [s value &opt world]
-  (def row (first (query s "SELECT * FROM events WHERE kind IN ('world','rewind') AND (CAST(id AS TEXT)=? OR image=?) AND (? IS NULL OR json_extract(data,'$.world')=?) ORDER BY id DESC LIMIT 1" [(string value) (string value) world world])))
+  (def row (first (query s "SELECT * FROM events WHERE (kind IN ('world','rewind') OR (kind='artifact' AND json_extract(data,'$.type')='world-image')) AND (CAST(id AS TEXT)=? OR image=?) AND (? IS NULL OR json_extract(data,'$.world')=?) ORDER BY id DESC LIMIT 1" [(string value) (string value) world world])))
   (assert row "choose a committed world publication ID or image hash") row)
 
 (defn configure [s]
@@ -214,37 +215,51 @@
       (unless (first (query s "SELECT name FROM worlds WHERE name=?" [(string name)]))
         (def source (when (spec :from) (point s (spec :from))))
         (def row (append s nil "world" {:world (string name) :from (get source :id)} nil
-          (if source (source :image) (image s {}))))
+          (if source (source :image)
+            (image s (marshal [1 janet/version janet/build janet/config-bits [] nil] @{}) true))))
         (query s "INSERT INTO worlds(name,head) VALUES(?,?)" [(string name) (row :id)]))))))
 
-(defn world-values [s world &opt through]
+(defn world-image [s world &opt through]
   (def row (if through (point s through world)
     (event s ((first (query s "SELECT head FROM worlds WHERE name=?" [world])) :head))))
   (assert (= world (get-in row [:data :world])) "publication belongs to another world")
-  (tabseq [[key value] :pairs (restore s (row :image))] (string key) value))
+  (def stored (first (query s "SELECT bytes FROM images WHERE hash=?" [(row :image)])))
+  (assert stored "world image is unavailable")
+  (def snapshot (unmarshal (stored :bytes) @{}))
+  (assert (and (tuple? snapshot) (= 6 (length snapshot)) (= 1 (snapshot 0))
+    (= janet/version (snapshot 1)) (= janet/build (snapshot 2)) (= janet/config-bits (snapshot 3)))
+    "world image requires its original Janet runtime")
+  snapshot)
 
 (defn view [s world &opt through]
   (def row (if through (point s through world) (event s ((first (query s "SELECT head FROM worlds WHERE name=?" [world])) :head))))
-  (def state (world-values s world (row :id)))
-  (def projected state)
-  {:world world :revision (row :id) :hash (row :image) :values projected
-   :summary (string "World " world " · #" (row :id) " · " (row :image)) :text (schema/encode projected)})
+  (def bindings ((world-image s world (row :id)) 4))
+  {:world world :revision (row :id) :hash (row :image) :bindings bindings
+   :summary (string "World " world " · #" (row :id) " · " (row :image))
+   :text (string/join (distinct (map (fn [binding]
+     (assert (string? (binding :source)) (string "source was not recorded for " (binding :name)))
+     (binding :source))
+     (sorted bindings |(< [($0 :script) ($0 :form) ($0 :name)] [($1 :script) ($1 :form) ($1 :name)])))) "\n\n")})
 
-(defn publish [s changes &opt expected remove]
-  (transact s
+(defn publish [s bytes expected]
+  (assert (<= (length bytes) ((s :config) :world-bytes)) "world byte ceiling")
+  (def snapshot (unmarshal bytes @{}))
+  (def row (transact s
     (def current (dyn :zinc/task))
     (def world (get-in current [:data :world]))
     (def head ((first (query s "SELECT head FROM worlds WHERE name=?" [world])) :head))
-    (when expected (assert (= expected head) "world revision changed"))
-    (assert (dictionary? changes) "world publication requires values")
-    (def state (merge (world-values s world)))
-    (each [key value] (pairs changes) (assert (or (string? key) (keyword? key)) "world keys must be text") (put state (string key) value))
-    (each key (or remove []) (assert (string? key) "world keys must be text") (put state key nil))
-    (def bytes (schema/encode state))
-    (assert (<= (length bytes) ((s :config) :world-bytes)) "world byte ceiling")
-    (def row (append s (current :id) "world" {:world world :text ""} nil (image s bytes true)))
-    (query s "UPDATE worlds SET head=? WHERE name=?" [(row :id) world])
-    {:world world :revision (row :id) :hash (row :image)}))
+    (def conflict (not= expected head))
+    (def row (append s (current :id) (if conflict "artifact" "world")
+      {:world world :type "world-image" :expected expected :actual head
+       :text (if conflict "World changed; candidate image retained without replacing the current world."
+         (string "Published " (length (snapshot 4)) " world bindings."))}
+      nil (image s bytes true)))
+    (unless conflict (query s "UPDATE worlds SET head=? WHERE name=?" [(row :id) world]))
+    row))
+  (when (= "artifact" (row :kind))
+    (error {:code "WorldChanged" :message "World changed; candidate image was retained."
+      :context {:candidate (row :id) :hash (row :image)}}))
+  {:world (get-in row [:data :world]) :revision (row :id) :hash (row :image)})
 
 (defn start [s input config &opt parent]
   (assert (or (not (config :ephemeral)) (s :temporary)) "ephemeral profiles require a RAM store")
@@ -329,7 +344,7 @@
   (transact s
     (def selected (point s target world))
     (assert (= world (get-in selected [:data :world])) "publication belongs to another world")
-    (restore s (selected :image))
+    (world-image s world (selected :id))
     (def previous (first (query s "SELECT * FROM worlds WHERE name=?" [world])))
     (each task (query s `SELECT e.* FROM events e WHERE kind IN ('task','operation') AND json_extract(data,'$.world')=?
       AND NOT EXISTS(SELECT 1 FROM events r WHERE r.parent=e.id AND r.kind='result')` [world])

@@ -115,6 +115,22 @@
                       (and (number? value) (< (math/abs value) math/inf))) "durable values must be JSON data")
           (string (json/encode value))))))
 
+(defn transport [value &opt seen]
+  (default seen @{})
+  (cond
+    (nil? value) :null
+    (or (= value :null) (boolean? value) (string? value)
+      (and (number? value) (< (math/abs value) math/inf))) value
+    (or (indexed? value) (and (dictionary? value)
+      (every? (map |(or (string? $) (keyword? $)) (keys value)))))
+    (if (seen value) {:janet-type (string (type value))}
+      (do
+        (put seen value true)
+        (defer (put seen value nil)
+          (if (indexed? value) (map |(transport $ seen) value)
+            (tabseq [[key item] :pairs value] key (transport item seen))))))
+    {:janet-type (string (type value))}))
+
 (defn project [value selected &opt omit]
   (tabseq [[key item] :pairs value :when (if omit (nil? (index-of key selected)) (index-of key selected))] key item))
 

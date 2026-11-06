@@ -32,8 +32,9 @@
     (array/concat @[] (filter |(<= (bounds :start) ($ :id) (bounds :end)) (store/tree s (root :id))) (store/tree s (task :id))))))
   (store/query s `SELECT * FROM events WHERE (id BETWEEN ? AND ? OR id IN (SELECT value FROM json_each(?)))
     AND (? OR (text IS NOT NULL AND kind IN ('task','context','result','return','output','fiber','uncertain','world','artifact')
-      AND (kind<>'result' OR (NOT EXISTS(SELECT 1 FROM events returned WHERE returned.parent=events.parent AND returned.kind='return')
-        AND (json_extract(data,'$.text')<>'' OR json_extract(data,'$.state')<>'done')))
+      AND (kind<>'result' OR ((json_extract(data,'$.text')<>'' OR json_extract(data,'$.state')<>'done')
+        AND NOT EXISTS(SELECT 1 FROM events returned WHERE returned.parent=events.parent AND returned.kind='return'
+          AND (json_extract(events.data,'$.state')='done' OR json_extract(returned.data,'$.state')<>'done'))))
       AND (kind<>'world' OR json_extract(data,'$.text')<>''))) ORDER BY id`
     [(max (bounds :start) (inherited :start)) (min (bounds :end) (inherited :end)) (schema/encode own) (if all 1 0)]))
 

@@ -38,6 +38,7 @@ Jsec and OpenSSL
 Author: llmII <dev@amlegion.org>
 Source: https://github.com/llmII/jsec
 Jsec license: ISC
+Zinc's tls build task corrects cancellation cleanup of embedded TLS async state.
 OpenSSL is provisioned separately. OpenSSL 3.x license: Apache-2.0.
 Source and license: https://openssl-library.org/source/ and https://openssl-library.org/source/license/
 
