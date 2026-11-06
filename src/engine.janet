@@ -8,7 +8,7 @@
 (def bindings
   {"self" {:arity [1 1] :doc "(self request) starts independent :text, :code or :stages work and returns a handle. Descendants inherit persistence."}
    "task/status" {:arity [1 1] :doc "(task/status handle) reads an authorized task's outcome and uncertain operations."}
-   "task/wait" {:arity [1 1] :doc "(task/wait handle) is a workflow call stage. It waits for a descendant or declared dependency and returns its outcome object; read :value for the result. Ordinary scripts cannot wait."}
+   "task/wait" {:arity [1 1] :doc "(task/wait handle) is a workflow call stage. It reads a completed task in this inquiry or waits for a descendant or declared dependency. Returns an outcome object; read :value. Ordinary scripts cannot wait."}
    "task/cancel" {:arity [1 1] :doc "(task/cancel handle) cancels a descendant tree without undoing effects."}
    "task/resolve" {:arity [2 2] :doc "(task/resolve operation outcome) records an uncertain operation's verified :value or :error and :evidence."}
    "world/get" {:arity [1 1] :doc "(world/get key) reads a shared JSON value."}
@@ -36,10 +36,12 @@
         (and (wait :retry) (>= (os/clock) (wait :retry))))
       (wait :changes) (first (store/query s `WITH RECURSIVE members(id) AS (
         SELECT ? UNION ALL SELECT e.id FROM events e JOIN members m ON e.parent=m.id
-      ) SELECT e.id FROM events e JOIN members m ON m.id=e.id WHERE e.id>?
-        AND e.kind IN ('result','world','artifact','diagnostic') AND e.parent<>?
-        AND NOT EXISTS(SELECT 1 FROM events p WHERE p.id=e.parent AND p.kind IN ('model','operation') AND p.parent=?) LIMIT 1`
-        [(task :id) (get-in state [:data :after] 0) (task :id) (task :id)]))
+      ) SELECT e.id FROM events e JOIN members m ON m.id=e.id
+        LEFT JOIN events owner ON owner.id=e.parent WHERE e.id>? AND (
+          (e.kind='result' AND owner.kind='task' AND owner.id<>?
+            AND json_extract(owner.data,'$.type') NOT IN ('stage','summary'))
+          OR e.kind IN ('world','artifact','diagnostic')) LIMIT 1`
+        [(task :id) (get-in state [:data :after] 0) (task :id)]))
       (error "unsupported stored wait condition"))))
 
 (defn- infer [s task available]
@@ -52,25 +54,31 @@
       (store/check s (task :id))
       (def response (pending :data))
       (when (response :error) (error (response :error)))
-      (var admitted false) (var rejected nil)
+      (var admitted false)
       (each tool (get response :tools [])
         (def receipt (try
           (do
             (when (tool :error) (error (tool :error)))
+            (each stage (get tool :stages [])
+              (when-let [name (stage :call)]
+                (def binding (available name))
+                (assert (and binding (not (binding :local)))
+                  {:code "BindingNotGranted" :message (string "Host binding is not granted: " name)
+                   :context {:binding name :stage (stage :id)}})))
             (def child (store/start s (merge (schema/project tool [:code :stages])
-              {:request (string "tool:" (pending :id) ":" (tool :id))}) config (pending :id)))
+              {:request (string "tool:" (pending :id) ":" (tool :id)) :call (tool :id)}) config (pending :id)))
             (set admitted true) {:task (child :id) :status "accepted"})
           ([err fiber] {:status "rejected" :error (schema/diagnostic "AdmissionRejected" err fiber)})))
-        (when (receipt :error) (set rejected (or rejected (receipt :error))))
         (store/append s (pending :id) "receipt"
-          {:tool (tool :id) :message {:role "tool" :tool_call_id (tool :id) :content (schema/encode receipt)}}
+          {:tool (tool :id) :error (receipt :error)
+           :message {:role "tool" :tool_call_id (tool :id) :content (schema/encode receipt)}}
           (string "receipt:" (pending :id) ":" (tool :id))))
       (store/append s (pending :id) "turn" {} (string "turn:" (pending :id)))
       (if (index-of (response :status) ["complete" "refused" "blocked"])
         (store/finish s (task :id) "done" {:text (response :text) :status (response :status)})
         (if admitted
           (store/advance s {:wait {:changes true} :after (get-in (store/event s (pending :parent)) [:data :views :after] 0)})
-          (store/finish s (task :id) "failed" nil rejected))))
+          (store/advance s {}))))
     (label turn (do
       (when-let [unknown (first (store/query s `SELECT m.* FROM events m WHERE m.parent=? AND m.kind='model'
         AND NOT EXISTS(SELECT 1 FROM events r WHERE r.parent=m.id AND r.kind='result') ORDER BY m.id LIMIT 1` [(task :id)]))]
@@ -108,10 +116,15 @@
         (cond
           (and own (= "result" (row :kind)) (= "model" (data :type)) (data :turn)) (array/push messages (data :message))
           (and own (= "receipt" (row :kind))) (array/push messages (data :message))
-          (and (not own) (index-of (row :kind) ["result" "world" "artifact" "diagnostic"])
-            (not= "summary" (get-in owner [:data :type])))
-          (array/push messages {:role "user" :content (string "Task progress:\n" (memory/render row)
-            (when (= "world" (row :kind)) (schema/encode (store/view s (data :world) (row :id)))))})))
+          (and (not own) (not= "summary" (get-in owner [:data :type]))
+            (or (and (= "result" (row :kind)) (= (owner :id) (row :parent))
+                  (not= "stage" (get-in owner [:data :type])))
+                (index-of (row :kind) ["world" "artifact" "diagnostic"])))
+          (array/push messages {:role "user" :content (string "Committed task event:\n"
+            (schema/encode {:event (row :id) :parent (row :parent) :task (owner :id)
+              :request (get-in owner [:data :request]) :call (get-in owner [:data :call])
+              :kind (row :kind) :outcome data})
+            (when (= "world" (row :kind)) (string "\n" (schema/encode (store/view s (data :world) (row :id))))))})))
       (assert (< (+ (model/estimate messages (selected :reference)) (store/estimate (schema/encode tools))) capacity) "inquiry exchanges exhaust context")
       (model/call s {:turn true :messages messages :tools tools :views views} (string "turn:" rounds) selected)))))
 
@@ -120,7 +133,6 @@
     (def name (get-in admission [:data :name]))
     (def args (get-in admission [:data :arguments]))
     (def binding (available name))
-    (assert (and binding (not (binding :local))) "binding is not granted")
     (def local? (or (= name "self") (= name "ev/sleep")
       (string/has-prefix? "world/" name) (string/has-prefix? "task/" name) (= name "memory/expand")))
     (when-let [previous (store/result s (admission :id))]
@@ -141,6 +153,9 @@
       (return handled (reconcile {:code "Blocked" :message "Reconcile the external operation before continuing."})))
     (defn execute []
       (store/check s (task :id))
+      (assert (and binding (not (binding :local)))
+        {:code "BindingNotGranted" :message (string "Host binding is not granted: " name)
+         :context {:binding name :arguments args :operation (admission :id)}})
       (when-let [[minimum maximum] (get binding :arity)]
         (assert (<= minimum (length args) maximum) (string name ": invalid argument count")))
       (def world-name (get-in task [:data :world]))
@@ -173,7 +188,8 @@
             (when (dictionary? handle) (assert (= (handle :store) (s :identity)) "task belongs to another store"))
             (assert (= "task" ((store/event s id) :kind)) "choose a task")
             (assert (= ((store/root s id) :id) ((store/root s (task :id)) :id)) "task is outside this inquiry")
-            (when (not= name "task/status")
+            (when (and (not= name "task/status")
+              (not (and (= name "task/wait") (store/result s id))))
               (assert (some (fn [parent]
                 (and (not= id (task :id)) (find |(= id ($ :id)) (store/tree s parent))))
                 (array/concat @[(task :id)] (get-in task [:data :input :dependencies] [])))
@@ -216,7 +232,8 @@
         :request (string "stage:" (task :id) ":" (stage :id))} (s :config) (task :id)))
       (put children (stage :id) (child :id)))
     (if (every? (map |(store/result s $) (values children)))
-      (let [failed (find |(not= "done" (get-in (store/result s $) [:data :state])) (values children))]
+      (let [failed (find |(not= "done" (get-in (store/result s $) [:data :state]))
+        (map |(children ($ :id)) (get-in task [:data :input :stages])))]
         (if failed (store/finish s (task :id) "failed" nil
           {:code "StageFailed" :message "A workflow stage failed."
            :context {:task failed :cause (get-in (store/result s failed) [:data :error])}})
@@ -228,7 +245,9 @@
     (get-in (store/event s (task :parent)) [:data :input :stages])))
   (def inputs (tabseq [id :in (get-in task [:data :input :dependencies])
     :let [result (store/result s id)]]
-    (do (assert (= "done" (get-in result [:data :state])) "dependency did not succeed")
+    (do (assert (= "done" (get-in result [:data :state]))
+          {:code "DependencyFailed" :message "Declared dependency did not succeed."
+           :context {:task id :cause (get-in result [:data :error])}})
       (keyword (get-in (store/event s id) [:data :input :stage]))) (get-in result [:data :value])))
   (def value (if (spec :code) (runtime/run s task available nil (spec :code) inputs true)
     (let [key (string "stage-call:" (task :id))
@@ -243,15 +262,21 @@
       (invoke s task available admission))))
   (store/finish s (task :id) "done" value))
 
-(defn run [config root-id &opt file]
+(defn run [config root-id file updates]
   (def s (store/open config nil file))
   (def active @{}) (def finished (ev/chan 1))
+  (def wake (ev/chan 1)) (def ticked (ev/chan 1))
+  (put s :signals [wake updates])
+  (def ticker (ev/go (fn [] (while true
+    (ev/sleep store/interval)
+    (each channel (s :signals) (unless (ev/full channel) (ev/give channel true))))) nil ticked))
   (defer (do
+    (ev/cancel ticker :finished) (ev/take ticked) (ev/chan-close ticked)
     (each [id running] (pairs active)
       (store/query s "UPDATE claims SET token=NULL,expires=0 WHERE task=? AND token=?" [id (running :token)])
       (when (fiber/can-resume? (running :fiber)) (ev/cancel (running :fiber) :ownership-lost)))
     (repeat (length active) (ev/take finished))
-    (store/close s) (ev/chan-close finished))
+    (store/close s) (ev/chan-close finished) (ev/chan-close wake))
     (while true
       (def now (os/clock))
       (each [id running] (pairs active)
@@ -276,7 +301,7 @@
               (def saved (store/restore s (task :image)))
               (def current (if (and (saved :inference) (not (config :inference)) (config :agent)) (config :agent) config))
               (def own (store/open current nil (s :file)))
-              (put own :profiles (s :profiles))
+              (put own :profiles (s :profiles)) (put own :signals (s :signals))
               (defer (store/close own)
                 (with-dyns [:zinc/task task :zinc/token (claim :token) :zinc/call own]
                   (try
@@ -311,13 +336,13 @@
               (task :id)) [task claim] finished))
             (put active id {:token (claim :token) :fiber worker :renew (+ now (/ (config :lease-seconds) 3))}))))
       (when (and (= 0 (length tasks)) (= 0 (length active))) (break))
-      (if (> (ev/count finished) 0)
-        (let [[status fiber] (ev/take finished)
-              id (first (find |(= fiber (($ 1) :fiber)) (pairs active)))]
-          (store/query s "UPDATE claims SET token=NULL,expires=0 WHERE task=? AND token=?" [id ((active id) :token)])
-          (put active id nil)
-          (assert (= :ok status) (schema/diagnostic "ExecutorFailed" (fiber/last-value fiber) fiber)))
-        (ev/sleep store/interval)))))
+      (def [_ channel packet] (ev/select finished wake))
+      (when (= channel finished)
+        (def [status fiber] packet)
+        (def id (first (find |(= fiber (($ 1) :fiber)) (pairs active))))
+        (store/query s "UPDATE claims SET token=NULL,expires=0 WHERE task=? AND token=?" [id ((active id) :token)])
+        (put active id nil)
+        (assert (= :ok status) (schema/diagnostic "ExecutorFailed" (fiber/last-value fiber) fiber))))))
 
 (defn presentation [s row]
   (def task (store/task s (row :id)))
@@ -326,25 +351,31 @@
     (def source (when (= "task" (row :kind))
       (case (data :type)
         "script" (get-in data [:input :code])
-        "stage" (let [spec (find |(= ($ :id) (get-in data [:input :stage]))
-          (get-in (store/event s (task :parent)) [:data :input :stages]))]
-          (or (spec :code) (string "(apply " (spec :call) " (do\n" (spec :arguments) "\n))")))
+        "workflow" (schema/encode (get-in data [:input :stages]))
         nil)))
     (def terminal (and (= "result" (row :kind)) (= (task :id) (row :parent))))
     (def body (cond
       (and (= "result" (row :kind)) (= "model" (data :type)) (not (data :error)) (or (data :turn) (not= "summary" (get-in task [:data :type])))) (model/render data)
       source source
+      (and (= "receipt" (row :kind)) (data :error)) (get-in data [:message :content])
       (and terminal (or (data :error) (not= "inquiry" (get-in task [:data :type])))) (data :text)
       (index-of (row :kind) ["world" "artifact" "summary" "diagnostic"]) (data :text)))
-    (when (and body (not= "summary" (get-in task [:data :type])))
+    (when (and body (not= "summary" (get-in task [:data :type]))
+      (or (not= "stage" (get-in task [:data :type])) (= "diagnostic" (row :kind))))
       {:kind (if (= "model" (data :type)) "model" (row :kind)) :task (task :id) :root (root :id) :store (s :identity)
        :agent (get-in s [:config :identity]) :request (get-in root [:data :request])
+       :call (or (data :tool) (get-in task [:data :call]) :null)
+       :reply (if (and terminal (index-of (get-in task [:data :type]) ["script" "workflow"])) (task :id) :null)
        :parent (or (row :parent) :null) :status (if source "accepted" (get data :status (get data :state "complete"))) :world (get-in task [:data :world])
-       :language (cond source "clojure"
-         (and terminal (not (data :error)) (not (string? (data :value)))) "json" :null)
-       :persist (not (s :temporary)) :sequence (row :id) :body body :diagnostic (data :error)})))
+       :language (cond
+         (data :error) "json"
+         (and source (= "workflow" (data :type))) "json"
+         source "clojure"
+         (and terminal (not (string? (data :value)))) "json" :null)
+       :persist (not (s :temporary)) :sequence (row :id)
+       :body (if (data :error) (schema/encode {:error (data :error)}) body) :diagnostic (data :error)})))
 
-(defn observe [s task after emit &opt until-done]
+(defn observe [s task after emit updates &opt until-done]
   (var cursor after)
   (while true
     (def pending (and until-done (first (store/query s `WITH RECURSIVE members(id) AS (
@@ -355,7 +386,7 @@
       (when-let [frame (presentation s row)] (emit frame))
       (set cursor (row :id)))
     (when (and until-done (not pending)) (break))
-    (ev/sleep store/interval))
+    (ev/take updates))
   (merge {:task (task :id) :store (s :identity)} ((store/result s (task :id)) :data)))
 
 (defn describe [config]

@@ -29,6 +29,12 @@ self admits :text, :code or :stages work, emits an admission, executes or recove
 presentation and returns an outcome. Reattachment uses the same request identity and cursor.
 Observation loss does not cancel execution. Admission does not mean completion.
 
+engine/run schedules tasks; engine/infer builds inquiry turns; model/call journals inference;
+provider encodes and decodes Responses or Chat Completions. Provider decoding owns the final-response
+decision and preserves native reasoning for replay. Reranking is a separate request, not a chat turn.
+Committed task outcomes identify their originating call and wake the inquiry, not each internal stage.
+Post-commit channels wake execution and observation; a timer reconciles cross-process writes and leases.
+
 Other entries are describe, instructions, models, init, status, abort, record, world, views, render,
 diagnostics, invalidate and resolve. Abort cancels a request tree without undoing external effects.
 
@@ -60,7 +66,8 @@ Ordinary code scripts execute once with journaled host calls. A started script i
 result commits fails with ScriptInterrupted on recovery. Zinc does not serialize stacks, closures,
 fibers, channels or native objects, and does not reconstruct remaining source. Use stages when progress
 must survive a crash. self returns an independent child's handle; task/wait can wait for descendants of
-its caller or declared dependencies from a call stage. Parent completion does not cancel descendants.
+its caller or declared dependencies from a call stage, or read a completed task in the same inquiry.
+Parent completion does not cancel descendants.
 
 Stored state contains JSON rather than runtime images. Ordinary source changes do not invalidate it by
 file hash. Recovery still checks current grants, task ownership, deadlines and world epochs. Changes to

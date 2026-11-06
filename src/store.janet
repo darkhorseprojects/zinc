@@ -21,13 +21,19 @@
        (sql/eval (s :db) statement (or parameters []))))
 
 (defmacro transact [s & body]
-  ~(if (= (,s :db) (dyn :zinc/transaction)) (do ,;body)
-     (do
-       (,sql/eval (,s :db) "BEGIN IMMEDIATE")
-       (try
-         (let [result (with-dyns [:zinc/transaction (,s :db)] ,;body)]
-           (,sql/eval (,s :db) "COMMIT") result)
-         ([err] (,sql/eval (,s :db) "ROLLBACK") (error err))))))
+  (with-syms [changed result]
+    ~(if (= (,s :db) (dyn :zinc/transaction)) (do ,;body)
+       (do
+         (,sql/eval (,s :db) "BEGIN IMMEDIATE")
+         (def ,changed @[false])
+         (def ,result (try
+           (let [value (with-dyns [:zinc/transaction (,s :db) :zinc/changed ,changed] ,;body)]
+             (,sql/eval (,s :db) "COMMIT") value)
+           ([err] (,sql/eval (,s :db) "ROLLBACK") (error err))))
+         (when (,changed 0)
+           (each channel (get ,s :signals [])
+             (unless (ev/full channel) (ev/give channel true))))
+         ,result))))
 
 (defn open [config &opt readonly file]
   (def file (or file (uri (config :store))))
@@ -58,7 +64,8 @@
   (try
     (do
       (query s (string "PRAGMA max_page_count=" (math/floor (/ (config :journal-bytes) (((query s "PRAGMA page_size") 0) :page_size)))))
-      (query s "ATTACH DATABASE ? AS archive" [(string (uri (config :store)) "?mode=ro")])
+      (query s "ATTACH DATABASE ? AS archive" [(string (uri (config :store)) "?mode=ro&vfs="
+        (if (index-of (os/which) [:windows :mingw]) "win32" "unix"))])
       (transact s
         (query s "INSERT INTO images SELECT * FROM archive.images WHERE hash IN (SELECT image FROM archive.events)")
         (query s "INSERT INTO events(id,parent,key,kind,data,image,created) SELECT id,parent,key,kind,data,image,created FROM archive.events WHERE key IS NOT 'store' ORDER BY id")
@@ -131,7 +138,8 @@
             (assert (<= (+ (estimate (schema/encode data)) (usage :tools)) ((s :config) :tool-quota)) "tool output quota exhausted")))
         (def bytes (schema/encode data))
         (assert (<= (length bytes) (+ ((s :config) :request-bytes) ((s :config) :response-bytes))) "event byte ceiling")
-        (first (query s "INSERT INTO events(parent,key,kind,data,image) VALUES(?,?,?,?,?) RETURNING *" [parent key kind bytes image]))))))
+        (def row (first (query s "INSERT INTO events(parent,key,kind,data,image) VALUES(?,?,?,?,?) RETURNING *" [parent key kind bytes image])))
+        (put (dyn :zinc/changed) 0 true) row))))
 
 (defn advance [s data]
   (transact s
@@ -163,7 +171,7 @@
     (assert (and (dictionary? failure) (string? (failure :code)) (string? (failure :message))) "invalid outcome diagnostic"))
   (unless (outcome :error)
     (assert (if (= "operation" (admission :kind)) (has-key? outcome :value)
-      (and (index-of (outcome :status) ["complete" "refused" "blocked" "tools"])
+      (and (index-of (outcome :status) ["complete" "refused" "blocked" "tools" "continue"])
         (if (= "rerank" (get-in admission [:data :role])) (indexed? (outcome :results))
           (and (= "assistant" (get-in outcome [:message :role]))
             (or (not= "tools" (outcome :status)) (indexed? (outcome :tools))))))) "invalid normalized outcome"))
@@ -251,7 +259,8 @@
         (def deadline (min (if (> (config :run-seconds) 0) (+ (os/clock) (config :run-seconds)) math/inf)
           (or (get-in root [:data :expires]) math/inf) (or (input :deadline) math/inf)))
         (def admitted (append s parent "task" {:type (cond (input :summary) "summary" (input :text) "inquiry" (input :stages) "workflow" (input :stage) "stage" "script") :request key :input input
-          :world world :epoch epoch :memory_range bounds :author (get input :author "self") :at (get input :at (os/strftime "%Y-%m-%dT%H:%M:%SZ"))
+          :world world :epoch epoch :memory_range bounds :call (get input :call (get-in caller [:data :call]))
+          :author (get input :author "self") :at (get input :at (os/strftime "%Y-%m-%dT%H:%M:%SZ"))
           :expires (unless (= deadline math/inf) deadline)} (string "task:" key) (image s config)))
         (when (first (query s "SELECT id FROM events WHERE key=?" [(string "cancel:" key)])) (finish s (admitted :id) "cancelled" nil)) admitted))))
 

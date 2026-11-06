@@ -159,13 +159,14 @@
            :outcome (if confirmed "failed" (get-in failure [:context :outcome] "unknown"))})})))))
 
 (defn decode [selected response]
-  (if (= "responses" (selected :protocol))
+  (def value (if (= "responses" (selected :protocol))
     (do
       (assert (index-of (response :status) ["completed" "incomplete"]) "Responses did not complete")
       (assert (indexed? (response :output)) "invalid Responses output")
       (def text @[]) (def refusal @[]) (def reasoning @[]) (def calls @[])
-      (var phase nil)
+      (var phase nil) (var bottom nil)
       (each item (response :output)
+        (unless (= "reasoning" (item :type)) (set bottom item))
         (case (item :type)
           "message"
           (do
@@ -188,7 +189,8 @@
                  :response {:model (selected :reference) :protocol (selected :protocol) :items (response :output)
                             :phase phase :end-turn (response :end_turn)
                             :reasoning-tokens (get-in response [:usage :output_tokens_details :reasoning_tokens] 0)}}
-       :final (and (not= false (response :end_turn)) (not (index-of phase ["commentary" "partial_answer"])))
+       :final (and (= "message" (get bottom :type)) (not= false (response :end_turn))
+         (not (index-of (get bottom :phase) ["commentary" "partial_answer"])))
        :finish-reason (if (= "completed" (response :status))
                         (if (> (length calls) 0) "tool_calls" "stop")
                         (case (get-in response [:incomplete_details :reason])
@@ -206,8 +208,21 @@
       {:message (merge (choice :message)
                   {:response {:model (selected :reference) :protocol (selected :protocol)
                               :reasoning-tokens (get-in response [:usage :completion_tokens_details :reasoning_tokens] 0)}})
-       :final true :finish-reason (choice :finish_reason)
+       :final (and (= "stop" (choice :finish_reason)) (= 0 (length (get-in choice [:message :tool_calls] []))))
+       :finish-reason (choice :finish_reason)
        :native-finish-reason (choice :native_finish_reason) :usage (response :usage)})))
+  (def finish (value :finish-reason))
+  (def message (value :message))
+  (def status (cond
+    (= "content_filter" finish) "blocked"
+    (> (length (get message :refusal "")) 0) "refused"
+    (and (index-of finish ["stop" "tool_calls"]) (value :final)) "complete"
+    (and (index-of finish ["stop" "tool_calls"]) (> (length (get message :tool_calls [])) 0)) "tools"
+    (= "stop" finish) "continue"
+    (error {:code "IncompleteModelResponse" :message (string "Model response ended with " finish ".")
+      :context {:finish-reason finish :native-finish-reason (value :native-finish-reason)
+        :response-status (response :status) :incomplete-details (response :incomplete_details)}})))
+  (merge (schema/project value [:final] true) {:status status}))
 
 (defn messages [body]
   (if (has-key? body :messages) (body :messages)

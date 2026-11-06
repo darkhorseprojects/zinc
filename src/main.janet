@@ -66,21 +66,23 @@
                     (set admitted true)
                     (def after (get params :after 0))
                     (assert (and (int? after) (>= after 0)) "invalid observation cursor")
-                    (def done (ev/thread-chan 1)) (def completed (ev/chan 1))
-                    (ev/thread (fn [[config id file]] (engine/run config id file))
-                      [config (task :id) (local :file)] :n done)
-                    (def owner (fiber/root))
-                    (ev/go (fn []
-                      (def packet (ev/take done)) (ev/chan-close done) (ev/give completed packet)
-                      (unless (= :ok (packet 0)) (ev/cancel owner (packet 1)))))
-                    (set execution completed)
-                    (def emit (fn [frame] (when observer
-                      (try (io/send stdout {:version 1 :type "event" :value frame} limit) ([err] (set observer false))))))
-                    (emit {:type "admission" :task (task :id) :store (local :identity) :request (get-in task [:data :request]) :persist (not (local :temporary))})
-                    (def reader (store/open config true (local :file)))
-                    (def outcome (defer (store/close reader) (engine/observe reader task after emit true)))
-                    (def [status failure] (ev/take completed))
-                    (ev/chan-close completed) (set execution nil) (assert (= status :ok) failure) outcome))
+                    (def updates (ev/thread-chan 1))
+                    (defer (ev/chan-close updates)
+                      (def done (ev/thread-chan 1)) (def completed (ev/chan 1))
+                      (ev/thread (fn [[config id file updates]] (engine/run config id file updates))
+                        [config (task :id) (local :file) updates] :n done)
+                      (def owner (fiber/root))
+                      (ev/go (fn []
+                        (def packet (ev/take done)) (ev/chan-close done) (ev/give completed packet)
+                        (unless (= :ok (packet 0)) (ev/cancel owner (packet 1)))))
+                      (set execution completed)
+                      (def emit (fn [frame] (when observer
+                        (try (io/send stdout {:version 1 :type "event" :value frame} limit) ([err] (set observer false))))))
+                      (emit {:type "admission" :task (task :id) :store (local :identity) :request (get-in task [:data :request]) :persist (not (local :temporary))})
+                      (def reader (store/open config true (local :file)))
+                      (def outcome (defer (store/close reader) (engine/observe reader task after emit updates true)))
+                      (def [status failure] (ev/take completed))
+                      (ev/chan-close completed) (set execution nil) (assert (= status :ok) failure) outcome)))
                 "status"
                 (do
                   (schema/request input [:request :store]) (assert (= (input :store) (s :identity)) "status store identity changed")

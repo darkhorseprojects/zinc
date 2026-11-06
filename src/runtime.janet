@@ -35,7 +35,8 @@
                      (or (nil? (module :export)) (= (string name) (module :export))))
             (def qualified (if (module :export) (string namespace) (string namespace "/" name)))
             (assert (and (not (available qualified)) (string? (binding :doc))) "invalid or undocumented host binding")
-            (put available qualified binding))))
+            (put available qualified (merge binding
+              {:doc (string/replace-all (string "(" name) (string "(" qualified) (binding :doc))})))))
       (def selected (schema/select (keys available) (get-in config [:janet :bindings])))
       (put (config :janet) :bindings selected)
       (tabseq [name :in selected] name (available name)))))

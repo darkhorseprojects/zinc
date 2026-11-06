@@ -174,36 +174,24 @@
                 (put seen (ranked :index) true))
               (assert (= (length seen) (length (input :documents))) "incomplete rerank results")
               {:results (sorted (value :results) |(> ($0 :relevance_score) ($1 :relevance_score))) :status "complete" :text ""})
-            (let [message (value :message) finish (value :finish-reason) calls (get message :tool_calls [])]
-              (assert (and (dictionary? message) (= "assistant" (message :role)) (not= "error" finish) (indexed? calls)) "invalid assistant response")
+            (let [message (value :message) status (value :status)
+                  calls (if (index-of status ["tools" "complete"]) (get message :tool_calls []) [])]
+              (assert (and (dictionary? message) (= "assistant" (message :role)) (indexed? calls)) "invalid assistant response")
               (def seen @{})
               (def work (map (fn [call]
                 (assert (and (string? (call :id)) (> (length (call :id)) 0) (not (seen (call :id)))) "invalid tool identity")
                 (put seen (call :id) true)
                 (try
                   (do
-                    (assert (and (index-of finish ["stop" "tool_calls"]) (= "function" (call :type))
-                      (= "self" (get-in call [:function :name])) (index-of tool (input :tools))) "unavailable or incomplete tool")
+                    (assert (and (= "function" (call :type))
+                      (= "self" (get-in call [:function :name])) (index-of tool (input :tools))) "unavailable tool")
                     (def arguments (schema/request (json/decode (get-in call [:function :arguments]) true true) [:code :stages]))
                     (assert (not= (nil? (arguments :code)) (nil? (arguments :stages))) "supply code or stages")
                     (when (arguments :stages) (put arguments :stages (schema/stages (arguments :stages))))
                     (merge {:id (call :id)} arguments))
                   ([err fiber] {:id (call :id) :error (schema/diagnostic "InvalidToolCall" err fiber)}))) calls))
-              (def answer (text message))
-              (def status (cond
-                (= "content_filter" finish) "blocked"
-                (> (length (get message :refusal "")) 0) "refused"
-                (and (index-of finish ["stop" "tool_calls"]) (> (length calls) 0)) "tools"
-                (and (= finish "stop") (value :final) (> (length (string/trim answer)) 0)) "complete"
-                (error {:code "IncompleteModelResponse"
-                        :message (string "Model finished with " finish " without a complete answer or executable tool call.")
-                        :context {:finish-reason finish :native-finish-reason (value :native-finish-reason)
-                                  :response-status (raw :status) :incomplete-details (raw :incomplete_details)
-                                  :phase (get-in message [:response :phase]) :end-turn (get-in message [:response :end-turn])
-                                  :text-bytes (length answer) :tool-count (length calls)
-                                  :rejected-tools (length (filter |($ :error) work))
-                                  :reasoning-tokens (get-in message [:response :reasoning-tokens])}})))
-              {:message message :tools (if (= status "tools") work []) :text answer :finish-reason finish :status status})))
+              {:message message :tools work :text (text message)
+               :finish-reason (value :finish-reason) :status status})))
           (merge result {:type "model" :state "done" :role role :turn (get input :turn false) :usage (value :usage) :raw raw
             :reasoning-visible (not= "none" (config :thinking))}))
         ([err fiber]
