@@ -285,7 +285,8 @@
       (not (first (store/query s "SELECT id FROM events WHERE parent=? AND kind='return'
         AND (?='done' OR json_extract(data,'$.state')<>'done')" [(owner :id) (data :state)])))))
     (def body (cond
-      (and (= "result" (row :kind)) (= "model" (data :type)) (not (data :error)))
+      (and (= "result" (row :kind)) (= "model" (data :type))
+        (= "chat" (data :role)) (not (data :error)))
       (model/render (if (index-of (data :status) ["complete" "refused" "blocked"])
         (merge data {:text "" :message (merge (data :message) {:content nil})}) data))
       source source
