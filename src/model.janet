@@ -6,15 +6,9 @@
 (import ./provider)
 
 (def- tool {:type "function" :function {:name "self"
-  :description "Start independent work. Use stages for recovery; code scripts are not replayed after interruption. Returns an admission receipt."
-  :parameters {:type "object" :additionalProperties false :oneOf [{:required ["stages"]} {:required ["code"]}]
-    :properties {:code {:type "string"}
-      :stages {:type "array" :minItems 1 :items {:type "object" :additionalProperties false :required ["id"]
-        :oneOf [{:required ["code"]} {:required ["call" "arguments"]}]
-        :properties {:id {:type "string"} :after {:type "array" :items {:type "string"}}
-          :code {:type "string" :description "Pure Janet; (input) returns declared dependency results."}
-          :call {:type "string" :description "Granted host binding name."}
-          :arguments {:type "string" :description "Pure Janet returning an array or tuple, including for one argument: [((input) :launch)]. (input) returns declared dependency values keyed by keyword stage ID."}}}}}}}})
+  :description "Start an independent Janet script. Parallel calls execute concurrently. Returns an admission receipt; output, effects and the script result arrive independently when committed."
+  :parameters {:type "object" :additionalProperties false :required ["code"]
+    :properties {:code {:type "string" :minLength 1}}}}})
 
 (defn text [message]
   (def content (message :content))
@@ -152,9 +146,8 @@
           (def failure (schema/diagnostic "ProviderFailed" err fiber))
           (def failure (merge failure {:context (merge (get failure :context {}) {:operation (admission :id)})}))
           (when (= "failed" (get-in failure [:context :outcome]))
-            (with-dyns [:zinc/token false]
-              (store/append s (admission :id) "result" {:type "model" :state "failed" :role role :turn (get input :turn false) :error failure}
-                (string "result:" (admission :id)))))
+            (store/append s (admission :id) "result" {:type "model" :state "failed" :role role :turn (get input :turn false) :error failure}
+              (string "result:" (admission :id))))
           (error failure))))
       (def outcome (try
         (do
@@ -185,9 +178,8 @@
                   (do
                     (assert (and (= "function" (call :type))
                       (= "self" (get-in call [:function :name])) (index-of tool (input :tools))) "unavailable tool")
-                    (def arguments (schema/request (json/decode (get-in call [:function :arguments]) true true) [:code :stages]))
-                    (assert (not= (nil? (arguments :code)) (nil? (arguments :stages))) "supply code or stages")
-                    (when (arguments :stages) (put arguments :stages (schema/stages (arguments :stages))))
+                    (def arguments (schema/request (json/decode (get-in call [:function :arguments]) true true) [:code]))
+                    (assert (arguments :code) "missing Janet source")
                     (merge {:id (call :id)} arguments))
                   ([err fiber] {:id (call :id) :error (schema/diagnostic "InvalidToolCall" err fiber)}))) calls))
               {:message message :tools work :text (text message)
@@ -200,8 +192,8 @@
            :error (merge failure {:context (merge (get failure :context {})
              {:operation (admission :id) :provider (selected :provider) :model (selected :id)
               :protocol (selected :protocol) :response-id (raw :id)})})})))
-      (def result (with-dyns [:zinc/token false]
-        (or (store/result s (admission :id)) (store/append s (admission :id) "result" outcome (string "result:" (admission :id))))))
+      (def result
+        (or (store/result s (admission :id)) (store/append s (admission :id) "result" outcome (string "result:" (admission :id)))))
       (when (get-in result [:data :error]) (error (get-in result [:data :error])))
       (merge (result :data) {:event (result :id)}))))
 

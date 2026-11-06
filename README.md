@@ -1,6 +1,7 @@
 # Zinc
 
-Zinc runs Janet tasks and restartable workflows with SQLite history and shared JSON values.
+Zinc runs independent Janet scripts and effects with SQLite history, asynchronous model continuation
+and shared JSON values.
 
 ## Installation
 
@@ -19,60 +20,98 @@ Initialize a fresh installation with `agc init DIRECTORY`.
 `examples/models.ini` is an optional external model-server preset. Provision its server and weights
 separately. Zinc does not read this file or verify those model downloads.
 
-## Invocation
+## Execution
 
 src/main.janet accepts one Portable Agents version-1 call on stdin. PA_FRAME_BYTES bounds frames.
 Parameters contain input, config, imports, an optional after cursor and the expected store identity
 when attaching. Connector capability imports require its live request-scoped broker.
 
-self admits :text, :code or :stages work, emits an admission, executes or recovers it, streams committed
-presentation and returns an outcome. Reattachment uses the same request identity and cursor.
-Observation loss does not cancel execution. Admission does not mean completion.
+self admits :text or :code, emits an admission, executes or recovers admitted work, streams committed
+presentation and returns a terminal outcome. A root outcome event can arrive before the invocation ends:
+root completion does not wait for native fibers, effects or descendants. Reattachment uses the same
+request identity and cursor. Observation loss does not cancel execution. Admission is not completion.
 
-engine/run schedules tasks; engine/infer builds inquiry turns; model/call journals inference;
-provider encodes and decodes Responses or Chat Completions. Provider decoding owns the final-response
-decision and preserves native reasoning for replay. Reranking is a separate request, not a chat turn.
-Committed task outcomes identify their originating call and wake the inquiry, not each internal stage.
-Post-commit channels wake execution and observation; a timer reconciles cross-process writes and leases.
+The model's self tool accepts full Janet source only. Calls in the same response are admitted together
+and execute independently. There is no workflow JSON, stage language or implicit sibling gather.
 
-Other entries are describe, instructions, models, init, status, abort, record, world, views, render,
-diagnostics, invalidate and resolve. Abort cancels a request tree without undoing external effects.
-
-## Durable stages
-
-A workflow is an immutable ordered array of stages. Each has a unique lowercase id and optional after
-names referring to earlier stages. Unrelated stages can run concurrently. Failed dependencies prevent
-dependent execution; unrelated work continues.
-
-```janet
-(self {:stages [{:id "extract" :code "{:answer 42}"}
-                {:id "publish" :after ["extract"] :call "world/commit"
-                 :arguments "[((input) :extract)]"}]})
+```clojure
+(def ctx (discord/context))
+(ev/go (fn [] (discord/add-reaction (ctx :message) "👋") nil))
+(ev/go (fn [] (discord/add-reaction (ctx :message) "✨") nil))
+(print "Reactions started")
+nil
 ```
 
-A code stage evaluates pure Janet and saves its JSON result. A call stage evaluates arguments as pure
-Janet, admits one granted host operation, then saves its outcome. Both expressions receive declared
-dependency results through `(input)`, using keyword keys matching stage IDs. Use :null for explicit
-JSON null; nil-valued object fields are omitted. Definitions belong in source, not stored worlds.
+Native Janet schedules ev fibers, channels, timers and threads. Each script has an isolated evaluator
+thread; blocking host implementations execute in independent worker threads, not the coordinator loop.
+A generic bridge journals each granted host call as an independent effect. Waiting suspends only the
+calling fiber. Each effect commits its own result and wakes inference and observation immediately.
+Configured parallel limits apply separately to script VMs, effects and inquiry execution.
 
-Recovery reuses completed stages and recorded operation outcomes. Interrupted computation and argument
-construction may repeat before a result or admission commits. Dispatch commits before external invocation.
-A dispatch without an outcome remains uncertain and is not blindly repeated. Discord creation receipts
-can reconcile automatically; otherwise inspect external state and supply an outcome with verification
-evidence through task/resolve or the direct-execution resolve entry. Evidence is the caller's attestation,
-not an independent verifier. Model calls use the same admission/dispatch/outcome distinction.
+The root return, VM lifetime and external effects have distinct completion boundaries. Output ports
+schedule publication without blocking Janet's non-yieldable output callback. Output is not accumulated
+into the final result. Successful native fiber return values are displayed as Janet text. Root returns
+and host arguments/results are JSON data; return nil after launching fibers rather than returning a
+native fiber/channel object. self/wait explicitly waits for a descendant's root outcome, not its VM drain.
 
-Ordinary code scripts execute once with journaled host calls. A started script interrupted before its
-result commits fails with ScriptInterrupted on recovery. Zinc does not serialize stacks, closures,
-fibers, channels or native objects, and does not reconstruct remaining source. Use stages when progress
-must survive a crash. self returns an independent child's handle; task/wait can wait for descendants of
-its caller or declared dependencies from a call stage, or read a completed task in the same inquiry.
-Parent completion does not cancel descendants.
+Grant native ev/*, self/* and effect/* as appropriate in execution profiles. These replace the former
+public task/* bindings; there are no compatibility aliases.
 
-Stored state contains JSON rather than runtime images. Ordinary source changes do not invalidate it by
-file hash. Recovery still checks current grants, task ownership, deadlines and world epochs. Changes to
-public capability contracts require deliberate handling. Historical binary-image stores are unsupported for execution;
-retain their original installation if unfinished work must be recovered. Zinc does not migrate them.
+## Ownership and data flow
+
+```text
+model response -> engine/infer -> atomic script admissions and provider receipts
+                                      |
+                                  engine/run
+                                      |
+                                runtime/run VM
+                                      |
+                       generic host-call admission
+                                      |
+                    independently claimed engine/invoke
+                                      |
+                          committed effect outcome
+                         /            |            \
+                 resume caller   wake inference   observe -> Connector -> Discord
+```
+
+engine/run owns scheduling and lease renewal. runtime/run owns native VM lifetime and result delivery,
+not effect execution. store owns admission, claims, outcomes and post-commit notification. engine/infer
+uses the same committed-change query for eligibility and context. model/call journals inference;
+provider encodes and decodes Responses or Chat Completions and preserves native reasoning for replay.
+A model answer is presented immediately; its inquiry remains receptive while descendants are unfinished.
+A timer reconciles cross-process writes and leases. Observation is read-only and cannot execute work.
+
+Discord receives exact source in clojure blocks, fenced output and individual effect/root results replying
+to the source. Model reasoning and footer metadata retain their existing presentation.
+
+Other entries are describe, instructions, models, init, status, abort, record, world, views, render,
+diagnostics, invalidate and resolve. Abort cancels an execution tree without undoing external effects.
+
+## Restart and uncertainty
+
+Admission commits before dispatch. Completed effect results survive independently of their originating VM.
+Restart executes undispatched effects and reports dispatched effects without an outcome as uncertain.
+The model receives the original effect identity, attempt, arguments and operation identity automatically.
+It investigates current external state, then effect/resolve or the direct resolve entry records a verified
+value/error, or an explicitly approved retry, with evidence. Retries retain the logical effect identity.
+A stale decision cannot resolve a newer attempt. Evidence is an attestation, not an independent verifier.
+
+Janet's native event loop is not serialized. Interrupted VMs are marked uncertain with their completed
+source-form count; their source, output and committed effects remain available. Restart never replays
+original source. The model reconstructs only remaining work in a new script, without inventing lost locals
+or native waits. Direct execution can use its configured agent profile for an automatic recovery inquiry;
+without inference authority, uncertainty remains available for inspection rather than expanding authority.
+Interrupted chat turns are continued from committed evidence; uncommitted provider tool calls are never
+admitted. Definitive provider failures retain their diagnostics rather than being automatically retried.
+
+There is no exactly-once promise for arbitrary external systems. If inspection cannot establish a safe
+outcome or retry, uncertainty remains explicit. No operation-specific reconciliation is hidden in the engine.
+
+The existing events, images, claims and worlds tables remain unchanged. Their historical task/operation
+storage names are internal; no schema migration or version bump is required. Historical JSON workflow
+records remain inspectable, but unfinished old workflows must finish under their original installation
+before upgrading. New execution does not support workflows or pretend they were Janet source.
 
 ## Worlds and history
 
@@ -83,9 +122,9 @@ with an expected revision. It does not save execution. Worlds do not isolate mem
 authority, increments its epoch and fences unfinished old work. Rewind does not undo effects or erase history.
 Branches are initialized once from configuration; changing from does not reset an existing branch.
 
-The core tables are events, images, claims and worlds. Images hold deduplicated JSON values and configuration
-snapshots; claims hold leases, waits and one-shot script admission state. Terminal claims are removed.
-FTS is a derived memory index. views, render and memory/expand expose retained prompts, summaries and records.
+Images hold deduplicated JSON configuration, model input and world values. Claims hold leases, waits and
+source progress. Terminal claims are removed. FTS is a derived index. Root returns are not duplicated by
+VM-drain results in presentation or memory. views, render and memory/expand expose retained originals.
 
 ## Temporary execution and limits
 
@@ -94,9 +133,9 @@ that persistence. Temporary work cannot create durable descendants or reattach a
 also keeps its temporary request, diagnostic and delivery state in RAM. External services and explicit
 external effects remain outside this storage guarantee.
 
-Resource and byte limits are enforced, but Zinc is not an OS memory sandbox. Scripts run in an isolated
-Janet thread with a restricted binding environment and native resource restrictions. Custom setup and
-host modules are trusted configuration. Filesystem grants reject traversal and observed links, but are
-not race-safe confinement for directories another process can mutate. Do not grant such directories to
+Resource and byte limits are enforced, but Zinc is not an OS memory sandbox. CPU-bound Janet code can
+occupy its own cooperative VM; it does not execute on the coordinator thread. Custom setup and host
+modules are trusted configuration. Filesystem grants reject traversal and observed links, but are not
+race-safe confinement for directories another process can mutate. Do not grant such directories to
 untrusted work. HTTP verifies certificates and hostnames, follows no redirects, and uses bounded requests.
 The pinned URL parser supports DNS names and IPv4, not IPv6 literals.

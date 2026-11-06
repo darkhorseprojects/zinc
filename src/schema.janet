@@ -92,7 +92,7 @@
    :cygnet-source {:type :string :default "aae2cdb1418c1435558584a91181e1cb94459f2506c16f2be4b00e81428deaff"}})
 
 (def inputs
-  {:text {:type :string} :code {:type :string} :stages {:type :array} :author {:type :string} :at {:type :string}
+  {:text {:type :string} :code {:type :string} :author {:type :string} :at {:type :string}
    :request {:type :string} :memory_range {:type :dictionary} :images {:type :array} :world {:type :string}
    :deadline {:type :number}
    :parent {:type :integer :minimum 0 :option "parent" :description "History attachment event; 0 selects empty history"}
@@ -171,7 +171,7 @@
     (put janet :values (select (seq [[key field] :pairs fields :when (field :visible)] (string key)) (janet :values)))
     (each name (keys (janet :imports))
       (assert (and (peg/match ~(* (some (set "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789_-")) -1) (string name))
-                   (not (index-of name [:core :self :task :fs :http :process :memory :world :zinc]))) "invalid module namespace")))
+                   (not (index-of name [:core :self :effect :ev :fs :http :process :memory :world :zinc]))) "invalid module namespace")))
   (each field [:fs :http :processes]
     (each name (keys (config field))
       (assert (peg/match ~(* (some (set "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789_-")) -1) (string name)) "invalid resource name")))
@@ -238,25 +238,6 @@
     (tabseq [[key field] :pairs fields :when (= :integer (field :type)) :when (or (saved key) (current key))]
     key (if (and (field :unlimited) (= 0 (min (get saved key math/inf) (get current key math/inf))))
           (max (saved key) (current key)) (min (get saved key math/inf) (get current key math/inf))))))
-
-(defn stages [items]
-  (assert (and (indexed? items) (> (length items) 0)) "stages must be a nonempty array")
-  (def known @{})
-  (map (fn [stage]
-    (assert (dictionary? stage) "stage must be an object")
-    (each key (keys stage) (assert (index-of key [:id :after :code :call :arguments]) "unknown stage field"))
-    (def id (stage :id))
-    (assert (and (string? id) (peg/match ~(* (some (set "abcdefghijklmnopqrstuvwxyz0123456789_-")) -1) id)
-      (not (known id))) "stage IDs must be unique lowercase names")
-    (def after (get stage :after []))
-    (assert (and (indexed? after) (= (length after) (length (distinct after)))
-      (every? (map |(and (string? $) (known $)) after))) "dependencies must name earlier stages")
-    (assert (not= (nil? (stage :code)) (nil? (stage :call))) "stage requires exactly one of code or call")
-    (each key (if (stage :call) [:call :arguments] [:code])
-      (assert (and (string? (stage key)) (> (length (stage key)) 0)) "stage source and call must be nonempty strings"))
-    (assert (or (stage :call) (not (has-key? stage :arguments))) "computation stages have no arguments field")
-    (put known id true)
-    (merge stage {:after after})) items))
 
 (defn request [value selected]
   (assert (dictionary? value) "request must be an object")

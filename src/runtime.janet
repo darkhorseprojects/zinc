@@ -13,7 +13,7 @@
             :when (or (not (string/find "/" (string name)))
               (index-of name ['os/clock 'os/date 'os/time 'os/cryptorand])
               (some |(string/has-prefix? $ (string name))
-                ["array/" "buffer/" "tuple/" "table/" "struct/" "string/" "math/" "peg/" "parser/"]))]
+                ["array/" "buffer/" "tuple/" "table/" "struct/" "string/" "math/" "peg/" "parser/" "ev/" "fiber/"]))]
             (cond (= name '*) "core/multiply" (string/find "/" (string name)) (string name) (string "core/" name))
             (if (index-of name ['os/clock 'os/date 'os/time 'os/cryptorand]) (base name) {:local name}))
           imports (get config :imports {})
@@ -56,28 +56,30 @@
       (string "\n\n## Settings and resources\n\n" (schema/encode (public config bindings))
         "\n\n## Host bindings\n\n" (string/join (seq [[_ binding] :in (sorted (pairs bindings)) :unless (binding :local)] (binding :doc)) "\n\n")))))
 
-(defn- evaluate [[code input instructions public bindings setup events inbox stop limit seconds pure]]
+(defn- evaluate [[code input instructions public bindings setup events notices stop limit seconds]]
   (def native (make-env))
   (def env @{:redef true})
-  (def output @"")
-  (put env :out (fn [text] (buffer/push-string output text) (assert (<= (length output) limit) "script output byte ceiling")))
-  (put env :err (env :out))
+  (var output-size 0)
+  (each port [:out :err]
+    (put env port (fn [text]
+      (+= output-size (length text))
+      (assert (<= output-size limit) "script output byte ceiling")
+      (when (> (length text) 0)
+        (ev/go (fn [] (ev/give events {:kind :output :port (string port) :text (string text)}) nil))))))
   (each [name binding] (pairs bindings)
     (put env (or (binding :local) (symbol name))
       (if (binding :local) (native (binding :local))
         @{:doc (binding :doc) :value (fn [& args]
-          (assert (not pure) "computation stages cannot call host bindings")
-          (def reply (debug {:name name :args args}))
-          (when (reply :error) (error (reply :error))) (reply :value))})))
-  (def random @[(math/rng (os/cryptorand 32))])
-  (when (bindings "math/random")
-    (put env 'math/random @{:doc "(math/random) returns a task-local random value." :value (fn [] (math/rng-uniform (random 0)))}))
-  (when (bindings "math/seedrandom")
-    (put env 'math/seedrandom @{:doc "(math/seedrandom seed) resets the task-local random generator."
-      :value (fn [seed] (put random 0 (math/rng seed)) nil)}))
+          (schema/encode args)
+          (def reply (ev/thread-chan 1))
+          (defer (ev/chan-close reply)
+            (ev/give events {:kind :call :name name :args args :reply reply})
+            (def outcome (ev/take reply))
+            (when (outcome :error) (error (outcome :error)))
+            (outcome :value)))})))
   (each [name documentation value]
-    [['input "(input) returns task input or the results of declared stage dependencies." (fn [] input)]
-     ['self/document "(self/document) returns task instructions." (fn [] instructions)]
+    [['input "(input) returns script input." (fn [] input)]
+     ['self/document "(self/document) returns execution instructions." (fn [] instructions)]
      ['settings "(settings) returns exposed settings." (fn [] (public :settings))]
      ['resources "(resources) returns exposed resource grants." (fn [] (public :resources))]]
     (put env name @{:doc documentation :value value}))
@@ -85,57 +87,96 @@
   (each key (keys options) (assert (= key :expander) "setup supports only :expander"))
   (put env *module-paths* []) (put env *module-cache* @{})
   (def forms (parse-all code))
-  (def root (fiber/new (fn []
-    (var value nil)
-    (each form forms
-      (def thunk (compile (if (options :expander) ((options :expander) form) form) env))
-      (when (dictionary? thunk)
-        (error {:code "CompileFailed" :message (thunk :error)
-                :context (schema/project thunk [:line :column])}))
-      (set value (thunk)))
-    value) :a env))
-  (sandbox :fs :net :subprocess :ffi :modules :threads :env :asm :unmarshal :exit :locale :signal :chroot :sandbox)
-  (when (> seconds 0) (ev/deadline seconds (fiber/root) (fiber/root) true))
-  (def owner (fiber/root)) (def stopped (ev/chan 1))
-  (def watcher (ev/go (fn [] (ev/take stop) (ev/cancel owner :execution-ended)) nil stopped))
-  (defer (do (ev/cancel watcher :finished) (ev/take stopped))
-    (var reply nil)
-    (label done (while true
-      (def value (resume root reply))
-      (case (fiber/status root)
-        :dead (do
+  (sandbox :fs :net :subprocess :ffi :modules :env :asm :unmarshal :exit :locale :signal :chroot :sandbox)
+  (def owner (fiber/root))
+  (when (> seconds 0) (ev/deadline seconds owner owner true))
+  (def stopped (ev/chan 1))
+  (def watcher (ev/go (fn []
+    (ev/take stop)
+    (each fiber (ev/all-tasks) (unless (= fiber (fiber/root)) (ev/cancel fiber :execution-ended)))) nil stopped))
+  (defer (do
+    (each fiber (ev/all-tasks)
+      (unless (or (= fiber owner) (= fiber watcher)) (ev/cancel fiber :execution-ended)))
+    (when (fiber/can-resume? watcher) (ev/cancel watcher :finished))
+    (ev/take stopped))
+    (ev/go (fiber/new (fn []
+      (def outcome (try
+        (do
+          (var value nil)
+          (each [index form] (pairs forms)
+            (def thunk (compile (if (options :expander) ((options :expander) form) form) env))
+            (when (dictionary? thunk)
+              (error {:code "CompileFailed" :message (thunk :error)
+                      :context (schema/project thunk [:line :column])}))
+            (set value (thunk))
+            (ev/give events {:kind :progress :form (+ index 1)}))
           (schema/encode value)
-          (def result (if (or pure (= 0 (length output))) value
-            (string output (when (not (nil? value)) (if (string? value) value (string/format "%n" value))))))
-          (assert (<= (length (schema/encode result)) limit) "script result byte ceiling")
-          (return done result))
-        :debug (do (assert (not pure) "computation stages cannot signal host calls")
-          (ev/give events value) (set reply (ev/take inbox)))
-        (error (schema/diagnostic "ExecutionFailed" value root)))))))
+          (assert (<= (length (schema/encode value)) limit) "script result byte ceiling")
+          {:state "done" :value (if (nil? value) :null value)
+           :text (if (string? value) value (schema/encode value))})
+        ([err fiber] {:state "failed" :error (schema/diagnostic "ExecutionFailed" err fiber)
+                      :text (get (schema/diagnostic "ExecutionFailed" err) :message)})))
+      (ev/go (fn [] (ev/give events (merge outcome {:kind :return})) nil)) nil) :t env) nil notices)
+    (while (> (length (ev/all-tasks)) 2) (ev/sleep store/interval))))
 
-(defn run [s task bindings handler source input pure]
+(defn run [s script bindings]
   (def config (s :config))
-  (def events (ev/thread-chan 1)) (def inbox (ev/thread-chan 1))
-  (def stop (ev/thread-chan 1)) (def finished (ev/thread-chan 1))
+  (def events (ev/thread-chan (config :task-quota)))
+  (def notices (ev/thread-chan (config :task-quota)))
+  (def stop (ev/thread-chan 1)) (def finished (ev/chan 1))
+  (def waiting @{})
   (var joined false) (var sequence 0)
   (def seconds (min (if (= 0 (config :seconds)) math/inf (config :seconds))
-    (- (or (get-in task [:data :expires]) math/inf) (os/clock))))
-  (def arguments [source input (instructions config bindings) (public config bindings)
+    (- (or (get-in script [:data :expires]) math/inf) (os/clock))))
+  (def arguments [(get-in script [:data :input :code]) (get-in script [:data :input])
+    (instructions config bindings) (public config bindings)
     (tabseq [[name binding] :pairs bindings] name (schema/project binding [:local :doc]))
-    (get-in config [:janet :setup]) events inbox stop (config :response-bytes)
-    (if (= seconds math/inf) 0 (max 0.001 seconds)) pure])
-  (with-env @{} (ev/thread evaluate arguments :n finished))
-  (defer (do (ev/give stop true) (unless joined (ev/take finished))
-    (each channel [events inbox stop finished] (ev/chan-close channel)))
-    (label done (while true
-      (def [_ channel packet] (ev/select events finished))
-      (if (= channel finished)
-        (do (set joined true) (assert (= :ok (packet 0)) (packet 1)) (return done (packet 1)))
+    (get-in config [:janet :setup]) events notices stop (config :response-bytes)
+    (if (= seconds math/inf) 0 (max 0.001 seconds))])
+  (def worker (ev/go (fn [] (with-env @{} (ev/thread evaluate arguments (keyword "") notices))) nil finished))
+  (def owner (fiber/root)) (def checked (ev/chan 1))
+  (def checker (ev/go (fn []
+    (try (while true (store/check s (script :id)) (ev/sleep store/interval))
+      ([err] (unless (= err :finished) (ev/cancel owner err))))) nil checked))
+  (defer (do
+    (ev/cancel checker :finished) (ev/take checked) (ev/chan-close checked)
+    (unless joined
+      (ev/give stop true)
+      (ev/take finished))
+    (each [fiber done] (pairs waiting)
+      (when (fiber/can-resume? fiber) (ev/cancel fiber :execution-ended))
+      (ev/take done))
+    (each channel [events notices stop finished] (ev/chan-close channel)))
+    (while (or (not joined) (> (ev/count events) 0) (> (ev/count notices) 0))
+      (def [_ channel packet] (ev/select events notices finished))
+      (cond
+        (= channel finished)
+        (do (set joined true)
+          (assert (= :ok (packet 0)) (schema/diagnostic "ExecutorFailed" (fiber/last-value worker) worker)))
+        (= channel notices)
+        (when (or (not= :ok (packet 0)) (not (nil? (packet 1))))
+          (store/append s (script :id) (if (= :ok (packet 0)) "fiber" "diagnostic")
+            (if (= :ok (packet 0)) {:text (string/format "%n" (packet 1))}
+              {:error (schema/diagnostic "FiberFailed" (packet 1)) :text (string/format "%n" (packet 1))})))
+        (= :call (packet :kind))
         (do
           (++ sequence)
-          (def admission (store/append s (task :id) "operation"
-            {:name (packet :name) :arguments (packet :args)} (string "operation:" (task :id) ":" sequence)))
-          (def outcome (try {:value (handler admission)} ([err fiber]
-            (when (index-of (get err :code) ["Yield" "Blocked" "TaskClosed" "TaskReplaced" "CapabilityOwnerLost"]) (error err))
-            {:error (schema/diagnostic "OperationFailed" err fiber)})))
-          (ev/give inbox outcome)))))))
+          (def admission (store/append s (script :id) "operation"
+            (merge (schema/project (script :data) [:world :epoch :expires :memory_range :call])
+              {:name (packet :name) :arguments (packet :args)})
+            (string "operation:" (script :id) ":" sequence) (script :image)))
+          (def done (ev/chan 1))
+          (def waiter (ev/go (fn [[id reply]]
+            (var outcome nil)
+            (while (not (set outcome (store/result s id))) (ev/sleep store/interval))
+            (ev/give reply (outcome :data))) [(admission :id) (packet :reply)] done))
+          (put waiting waiter done))
+        (= :progress (packet :kind))
+        (store/advance s {:started true :form (packet :form)})
+        (= :return (packet :kind))
+        (store/append s (script :id) "return" (schema/project packet [:kind] true) (string "return:" (script :id)))
+        (= :output (packet :kind))
+        (store/append s (script :id) "output" (schema/project packet [:kind] true))))
+    (def returned (store/outcome s (script :id)))
+    (assert returned "VM exited without a root outcome")
+    (returned :data)))

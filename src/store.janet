@@ -105,6 +105,24 @@
 
 (defn result [s id] (first (query s "SELECT * FROM events WHERE parent=? AND kind='result'" [id])))
 (defn progress [s id] (first (query s "SELECT data FROM claims WHERE task=?" [id])))
+(defn outcome [s id] (first (query s "SELECT * FROM events WHERE parent=? AND kind IN ('return','result') ORDER BY id LIMIT 1" [id])))
+
+(defn pending [s id]
+  (query s `WITH RECURSIVE members(id) AS (
+    SELECT ? UNION ALL SELECT e.id FROM events e JOIN members m ON e.parent=m.id
+  ) SELECT e.* FROM events e JOIN members m ON m.id=e.id WHERE e.kind IN ('task','operation')
+    AND NOT EXISTS(SELECT 1 FROM events r WHERE r.parent=e.id AND r.kind='result') ORDER BY e.id` [id]))
+
+(defn changes [s id after]
+  (query s `WITH RECURSIVE members(id) AS (
+    SELECT ? UNION ALL SELECT e.id FROM events e JOIN members m ON e.parent=m.id
+  ) SELECT e.* FROM events e JOIN members m ON m.id=e.id LEFT JOIN events owner ON owner.id=e.parent
+    WHERE e.id>? AND (
+      e.kind IN ('return','output','fiber','uncertain','world','artifact','diagnostic') OR
+      (e.kind='result' AND owner.id<>? AND (
+        owner.kind='operation' OR (owner.kind='task' AND json_extract(owner.data,'$.type')<>'summary'
+          AND NOT EXISTS(SELECT 1 FROM events r WHERE r.parent=owner.id AND r.kind='return')))))
+    ORDER BY e.id` [id after id]))
 
 (defn check [s id &opt token]
   (default token (dyn :zinc/token))
@@ -125,16 +143,16 @@
       (do (assert (and (= parent (previous :parent)) (= kind (previous :kind)) (= image (previous :image))
                        (= (schema/encode data) (schema/encode (previous :data)))) "event key reused with different work") previous)
       (do
-        (when (and (dyn :zinc/token) (index-of kind ["task" "model" "operation" "result"]))
+        (when (and (dyn :zinc/token) (index-of kind ["task" "model" "operation" "result" "return" "output" "fiber"]))
           (def usage (first (query s `WITH RECURSIVE members(id) AS (
             SELECT ? UNION ALL SELECT e.id FROM events e JOIN members m ON e.parent=m.id
           ) SELECT count(CASE WHEN e.kind IN ('task','model','operation') THEN 1 END) work,
-            coalesce(sum(CASE WHEN e.kind IN ('operation','result') AND json_extract(e.data,'$.type') IS NOT 'model'
+            coalesce(sum(CASE WHEN e.kind IN ('operation','result','return','output','fiber') AND json_extract(e.data,'$.type') IS NOT 'model'
               THEN (length(CAST(e.data AS BLOB))+3)/4 ELSE 0 END),0) tools
             FROM events e JOIN members m ON m.id=e.id` [((root s ((dyn :zinc/task) :id)) :id)])))
           (when (index-of kind ["task" "model" "operation"])
             (assert (< (usage :work) ((s :config) :task-quota)) "work quota exhausted"))
-          (when (and (not (data :error)) (index-of kind ["operation" "result"]) (not= "model" (data :type)))
+          (when (and (not (data :error)) (index-of kind ["operation" "result" "return" "output" "fiber"]) (not= "model" (data :type)))
             (assert (<= (+ (estimate (schema/encode data)) (usage :tools)) ((s :config) :tool-quota)) "tool output quota exhausted")))
         (def bytes (schema/encode data))
         (assert (<= (length bytes) (+ ((s :config) :request-bytes) ((s :config) :response-bytes))) "event byte ceiling")
@@ -156,29 +174,34 @@
 
 (defn settle [s admission outcome]
   (transact s
-    (with-dyns [:zinc/token false]
-      (or (result s (admission :id))
-        (append s (admission :id) "result" (merge outcome (if (outcome :error) {} {:value (if (nil? (outcome :value)) :null (outcome :value))})) (string "result:" (admission :id)))))))
+    (def row (or (result s (admission :id))
+      (append s (admission :id) "result"
+        (merge outcome {:value (if (nil? (outcome :value)) :null (outcome :value))
+          :text (if (outcome :error) (get-in outcome [:error :message]) (schema/encode (outcome :value)))})
+        (string "result:" (admission :id)))))
+    (query s "DELETE FROM claims WHERE task=?" [(admission :id)]) row))
 
 (defn resolve [s admission outcome]
-  (assert (and (index-of (admission :kind) ["operation" "model"]) (not (result s (admission :id)))
-    (first (query s "SELECT id FROM events WHERE parent=? AND kind='dispatch'" [(admission :id)]))) "choose a dispatched unresolved operation")
-  (def evidence (get outcome :evidence))
-  (assert (and (dictionary? outcome)
-    (or (and (string? evidence) (> (length (string/trim evidence)) 0))
-      (and (dictionary? evidence) (> (length evidence) 0)))) "outcome requires verification evidence")
-  (when-let [failure (outcome :error)]
-    (assert (and (dictionary? failure) (string? (failure :code)) (string? (failure :message))) "invalid outcome diagnostic"))
-  (unless (outcome :error)
-    (assert (if (= "operation" (admission :kind)) (has-key? outcome :value)
-      (and (index-of (outcome :status) ["complete" "refused" "blocked" "tools" "continue"])
-        (if (= "rerank" (get-in admission [:data :role])) (indexed? (outcome :results))
-          (and (= "assistant" (get-in outcome [:message :role]))
-            (or (not= "tools" (outcome :status)) (indexed? (outcome :tools))))))) "invalid normalized outcome"))
-  (def data (merge outcome {:state (if (outcome :error) "failed" "done")}))
-  (if (= "operation" (admission :kind)) (settle s admission data)
-    (append s (admission :id) "result" (merge data {:type "model" :role (get-in admission [:data :role])
-      :turn (get-in admission [:data :turn])}) (string "result:" (admission :id)))))
+  (transact s
+    (assert (= "attempt" (admission :kind)) "choose an uncertain effect attempt")
+    (def effect (event s (admission :parent)))
+    (assert (and (= "operation" (effect :kind)) (not (result s (effect :id)))
+      (not (result s (admission :id)))
+      (= (admission :id) (get (first (query s "SELECT id FROM events WHERE parent=? AND kind='attempt' ORDER BY id DESC LIMIT 1" [(effect :id)])) :id))
+      (first (query s "SELECT id FROM events WHERE parent=? AND kind='uncertain'" [(admission :id)])))
+      "choose the latest unresolved uncertain attempt")
+    (schema/request outcome [:value :error :retry :evidence])
+    (assert (= 1 (length (filter |(has-key? outcome $) [:value :error :retry]))) "supply value, error or retry")
+    (def evidence (outcome :evidence))
+    (assert (or (and (string? evidence) (> (length (string/trim evidence)) 0))
+      (and (dictionary? evidence) (> (length evidence) 0))) "verification evidence required")
+    (when (has-key? outcome :retry) (assert (= true (outcome :retry)) "retry must be true"))
+    (when (has-key? outcome :error)
+      (def failure (outcome :error))
+      (assert (and (dictionary? failure) (string? (failure :code)) (string? (failure :message))) "invalid outcome diagnostic"))
+    (def row (append s (admission :id) "result" outcome (string "result:" (admission :id))))
+    (unless (outcome :retry)
+      (settle s effect (merge outcome {:state (if (outcome :error) "failed" "done")}))) row))
 
 (defn point [s value &opt world]
   (def row (first (query s "SELECT * FROM events WHERE kind IN ('world','rewind') AND (CAST(id AS TEXT)=? OR image=?) AND (? IS NULL OR json_extract(data,'$.world')=?) ORDER BY id DESC LIMIT 1" [(string value) (string value) world world])))
@@ -225,14 +248,9 @@
 
 (defn start [s input config &opt parent]
   (assert (or (not (config :ephemeral)) (s :temporary)) "ephemeral profiles require a RAM store")
-  (assert (= 1 (length (filter |(not (nil? (input $))) [:text :code :stages :stage]))) "supply exactly one of text, code or stages")
+  (assert (not= (nil? (input :text)) (nil? (input :code))) "supply exactly one of text or code")
   (assert (if (input :text) (config :inference) (config :janet)) "execution is not granted")
-  (def input (if (input :stages)
-    (do (assert (<= (length (input :stages)) (config :task-quota)) "stage quota exhausted")
-      (merge input {:stages (schema/stages (input :stages))})) input))
-  (assert (<= (if (input :stages)
-    (sum (map |(+ (length (get $ :code "")) (length (get $ :arguments ""))) (input :stages)))
-    (length (get input :code ""))) (config :source-bytes)) "source byte ceiling")
+  (assert (<= (length (get input :code "")) (config :source-bytes)) "source byte ceiling")
   (assert (<= (sum (map |(length (base64/decode ($ :data))) (get input :images []))) (config :image-bytes)) "input image byte ceiling")
   (def key (get input :request (uuid)))
   (transact s
@@ -258,19 +276,33 @@
         (assert epoch "configured world is unavailable")
         (def deadline (min (if (> (config :run-seconds) 0) (+ (os/clock) (config :run-seconds)) math/inf)
           (or (get-in root [:data :expires]) math/inf) (or (input :deadline) math/inf)))
-        (def admitted (append s parent "task" {:type (cond (input :summary) "summary" (input :text) "inquiry" (input :stages) "workflow" (input :stage) "stage" "script") :request key :input input
+        (def admitted (append s parent "task" {:type (cond (input :summary) "summary" (input :text) "inquiry" "script") :request key :input input
           :world world :epoch epoch :memory_range bounds :call (get input :call (get-in caller [:data :call]))
           :author (get input :author "self") :at (get input :at (os/strftime "%Y-%m-%dT%H:%M:%SZ"))
           :expires (unless (= deadline math/inf) deadline)} (string "task:" key) (image s config)))
         (when (first (query s "SELECT id FROM events WHERE key=?" [(string "cancel:" key)])) (finish s (admitted :id) "cancelled" nil)) admitted))))
 
+(defn uncertain [s parent failure]
+  (transact s
+    (def row (or (first (query s "SELECT * FROM events WHERE key=?" [(string "uncertain:" parent)]))
+      (append s parent "uncertain" {:error failure :text (failure :message)} (string "uncertain:" parent))))
+    (def owner (root s parent))
+    (def request (string "recovery:" (owner :id)))
+    (when (and (not= "inquiry" (get-in owner [:data :type])) (get-in s [:config :agent :inference])
+      (not (first (query s "SELECT id FROM events WHERE key=?" [(string "task:" request)]))))
+      (start s {:text (string "Recover uncertain execution #" (owner :id)
+          ". Inspect its original source, source progress and all committed execution events. Verify external state before resolving or retrying effects. Do not replay the original source; continue only remaining work.")
+        :request request :recovery true} (get-in s [:config :agent]) (row :id))) row))
+
 (defn claim [s id]
   (transact s
     (first (query s `INSERT INTO claims(task,token,expires)
-      SELECT e.id,?,? FROM events e WHERE e.id=? AND e.kind='task'
+      SELECT e.id,?,? FROM events e WHERE e.id=? AND e.kind IN ('task','operation')
       AND NOT EXISTS(SELECT 1 FROM events r WHERE r.parent=e.id AND r.kind='result')
       AND NOT EXISTS(SELECT 1 FROM claims c WHERE c.task=e.id AND c.expires>?)
-      AND (SELECT count(*) FROM claims WHERE expires>?)<?
+      AND (SELECT count(*) FROM claims c JOIN events owner ON owner.id=c.task WHERE c.expires>?
+        AND CASE WHEN owner.kind='operation' THEN 'effect' ELSE json_extract(owner.data,'$.type') END
+          =CASE WHEN e.kind='operation' THEN 'effect' ELSE json_extract(e.data,'$.type') END)<?
       ON CONFLICT(task) DO UPDATE SET token=excluded.token,expires=excluded.expires WHERE claims.expires<=? RETURNING *`
       [(uuid) (+ (os/clock) ((s :config) :lease-seconds)) id (os/clock) (os/clock) ((s :config) :parallel) (os/clock)]))))
 
@@ -288,10 +320,10 @@
       (append s nil "cancel" {:request request :reason reason} (string "cancel:" request)))
     (def task (first (query s "SELECT id FROM events WHERE key=?" [(string "task:" request)])))
     (when task
-      (each child (filter |(= "task" ($ :kind)) (tree s (task :id)))
+      (each child (filter |(index-of ($ :kind) ["task" "operation"]) (tree s (task :id)))
         (unless (result s (child :id))
           (finish s (child :id) "cancelled" nil))))
-    {:task (get task :id) :state (if (= "done" (get-in (when task (result s (task :id))) [:data :state])) "completed" "cancelled")}))
+    {:script (get task :id) :state (if (= "done" (get-in (when task (result s (task :id))) [:data :state])) "completed" "cancelled")}))
 
 (defn rewind [s world target]
   (transact s
@@ -299,7 +331,7 @@
     (assert (= world (get-in selected [:data :world])) "publication belongs to another world")
     (restore s (selected :image))
     (def previous (first (query s "SELECT * FROM worlds WHERE name=?" [world])))
-    (each task (query s `SELECT e.* FROM events e WHERE kind='task' AND json_extract(data,'$.world')=?
+    (each task (query s `SELECT e.* FROM events e WHERE kind IN ('task','operation') AND json_extract(data,'$.world')=?
       AND NOT EXISTS(SELECT 1 FROM events r WHERE r.parent=e.id AND r.kind='result')` [world])
       (finish s (task :id) "cancelled" nil {:code "WorldRewound" :message "World was rewound."}))
     (def row (append s nil "rewind" {:world world :previous (previous :head) :point (selected :id) :epoch (+ 1 (previous :epoch))} nil (selected :image)))

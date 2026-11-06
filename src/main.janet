@@ -51,7 +51,7 @@
                 "self"
                 (do
                   (schema/request input (keys schema/inputs))
-                  (def attach (not (or (input :text) (input :code) (input :stages))))
+                  (def attach (not (or (input :text) (input :code))))
                   (when (config :ephemeral) (assert (= false (get input :persist true)) "ephemeral profiles require persist:false"))
                   (each profile (filter identity [config (config :agent)]) (runtime/definitions profile engine/bindings))
                   (def local (if (= false (get input :persist true)) (store/temporary config) s))
@@ -78,7 +78,7 @@
                       (set execution completed)
                       (def emit (fn [frame] (when observer
                         (try (io/send stdout {:version 1 :type "event" :value frame} limit) ([err] (set observer false))))))
-                      (emit {:type "admission" :task (task :id) :store (local :identity) :request (get-in task [:data :request]) :persist (not (local :temporary))})
+                      (emit {:type "admission" :script (task :id) :store (local :identity) :request (get-in task [:data :request]) :persist (not (local :temporary))})
                       (def reader (store/open config true (local :file)))
                       (def outcome (defer (store/close reader) (engine/observe reader task after emit updates true)))
                       (def [status failure] (ev/take completed))
@@ -87,7 +87,8 @@
                 (do
                   (schema/request input [:request :store]) (assert (= (input :store) (s :identity)) "status store identity changed")
                   (def task (first (store/query s "SELECT id FROM events WHERE key=?" [(string "task:" (input :request))])))
-                  (assert task "task unavailable") (get (store/result s (task :id)) :data {:state "pending"}))
+                  (assert task "execution unavailable")
+                  (merge {:script (task :id) :store (s :identity)} (get (store/outcome s (task :id)) :data {:state "pending"})))
                 "abort" (do (schema/request input [:request :reason]) (store/abort s (input :request) (input :reason)))
                 "record" (do (schema/request input [:records]) {:events (store/record s (input :records))})
                 "world"
