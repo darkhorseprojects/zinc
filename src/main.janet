@@ -69,7 +69,9 @@
                     (def updates (ev/thread-chan 1))
                     (defer (ev/chan-close updates)
                       (def done (ev/thread-chan 1)) (def completed (ev/chan 1))
-                      (ev/thread (fn [[config id file updates]] (engine/run config id file updates))
+                      (ev/thread (fn [[config id file updates]]
+                        (try (engine/run config id file updates)
+                          ([err fiber] (error (schema/diagnostic "ExecutorFailed" err fiber)))))
                         [config (task :id) (local :file) updates] :n done)
                       (def owner (fiber/root))
                       (ev/go (fn []

@@ -265,7 +265,7 @@
                 (def packet (ev/take done))
                 (assert (= :ok (packet 0)) (packet 1)))
               (execution :id)) [execution claim] finished))
-            (put active id {:token (claim :token) :fiber worker :renew (+ now (/ (config :lease-seconds) 3))}))))
+            (put active id @{:token (claim :token) :fiber worker :renew (+ now (/ (config :lease-seconds) 3))}))))
       (when (and (= 0 (length pending)) (= 0 (length active))) (break))
       (def [_ channel packet] (ev/select finished wake))
       (when (= channel finished)
