@@ -11,10 +11,13 @@
               'curenv 'with-env 'setdyn 'with-dyns 'defdyn 'all-dynamics 'native 'require 'import 'import* 'use])
             :unless (string/has-prefix? "*module" (string name))
             :when (or (not (string/find "/" (string name)))
-              (index-of name ['os/clock 'os/date 'os/time 'os/cryptorand])
+              (index-of name ['/ '/= 'os/clock 'os/date 'os/time 'os/cryptorand])
               (some |(string/has-prefix? $ (string name))
                 ["array/" "buffer/" "tuple/" "table/" "struct/" "string/" "math/" "peg/" "parser/" "ev/" "fiber/"]))]
-            (cond (= name '*) "core/multiply" (string/find "/" (string name)) (string name) (string "core/" name))
+            (cond (= name '*) "core/multiply"
+              (index-of name ['/ '/=]) (string "core/" name)
+              (string/find "/" (string name)) (string name)
+              (string "core/" name))
             (if (index-of name ['os/clock 'os/date 'os/time 'os/cryptorand]) (base name) {:local name}))
           imports (get config :imports {})
           cache (merge module/cache)
@@ -54,7 +57,9 @@
   (string (slurp (config :instructions))
     (when (config :janet)
       (string "\n\n## Settings and resources\n\n" (schema/encode (public config bindings))
-        "\n\n## Host bindings\n\n" (string/join (seq [[_ binding] :in (sorted (pairs bindings)) :unless (binding :local)] (binding :doc)) "\n\n")))))
+        "\n\nUse (doc) to list available bindings and (doc name) to inspect one."
+        "\n\n## Host bindings\n\nJournaled host arguments and results must be JSON data. Use :null for explicit null.\n\n"
+        (string/join (seq [[_ binding] :in (sorted (pairs bindings)) :unless (binding :local)] (binding :doc)) "\n\n")))))
 
 (defn- evaluate [[code id input instructions public bindings setup snapshot events stop limit world-limit seconds]]
   (try (do
@@ -108,7 +113,7 @@
   (def sources (tabseq [binding :in (snapshot 4)] (symbol (binding :name)) binding))
   (def known (tabseq [name :in (all-bindings env true)] name (env name)))
   (def baseline (marshal env reverse))
-  (def forms (parse-all code))
+  (math/seedrandom (os/cryptorand 32))
   (sandbox :fs :net :subprocess :ffi :modules :env :asm :unmarshal :exit :locale :signal :chroot :sandbox)
   (def owner (fiber/root))
   (when (> seconds 0) (ev/deadline seconds owner owner true))
@@ -124,6 +129,8 @@
     (def root (ev/go (fiber/new (fn []
       (def outcome (try
         (do
+          (def forms (try (parse-all code)
+            ([err fiber] (error (schema/diagnostic "ParseFailed" err fiber)))))
           (var value nil)
           (each [index form] (pairs forms)
             (def thunk (compile (if (options :expander) ((options :expander) form) form) env))

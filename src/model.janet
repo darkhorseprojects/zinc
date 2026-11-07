@@ -6,7 +6,7 @@
 (import ./provider)
 
 (def- tool {:type "function" :function {:name "self"
-  :description "Start an independent Janet script. Parallel calls execute concurrently. Returns an admission receipt; output, effects and the script result arrive independently when committed."
+  :description "Admit a Janet script."
   :parameters {:type "object" :additionalProperties false :required ["code"]
     :properties {:code {:type "string" :minLength 1}}}}})
 

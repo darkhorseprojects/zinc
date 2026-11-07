@@ -6,17 +6,17 @@
 (import ./io)
 
 (def bindings
-  {"self" {:arity [1 1] :doc "(self request) starts an independent :text inquiry or :code script and returns its handle. Descendants inherit persistence."}
-   "self/status" {:arity [1 1] :doc "(self/status handle) reads a script's root outcome and unresolved effect attempts. Outcomes arrive automatically; do not poll."}
+  {"self" {:arity [1 1] :doc "(self request) admits an independent execution. Supply exactly one of :text or :code. Returns a handle, not completion. Descendants inherit persistence."}
+   "self/status" {:arity [1 1] :doc "(self/status handle) reads a script's root outcome and unresolved effect attempts."}
    "self/wait" {:arity [1 1] :doc "(self/wait handle) suspends only the calling fiber for a descendant's root outcome. Returns an outcome object; read :value."}
    "self/cancel" {:arity [1 1] :doc "(self/cancel handle) cancels a descendant execution tree without undoing effects."}
-   "effect/resolve" {:arity [2 2] :doc "(effect/resolve attempt outcome) resolves an uncertain attempt with exactly one of :value, :error or :retry true, and verification :evidence. Retry reuses the same logical effect."}
+   "effect/resolve" {:arity [2 2] :doc "(effect/resolve attempt outcome) resolves the latest unresolved uncertain attempt. outcome contains :evidence and exactly one of :value, :error, or :retry true. :error requires string :code and :message fields. :evidence is a nonblank string or nonempty object recording verification. Retry retains the logical effect identity."}
    "world/view" {:arity [0 1] :doc "(world/view &opt point) reports a world publication and its complete defining source."}
    "world/remove" {:arity [1 1] :doc "(world/remove name) removes a local world binding; name is a symbol."}
    "memory/expand" {:arity [1 2] :doc "(memory/expand id &opt byte-offset) reads an original record within granted history."}
-   "fs/list" {:arity [2 2] :resource :fs :permission :read :doc "(fs/list resource relative-path) lists a granted directory."}
-   "fs/read" {:arity [2 2] :resource :fs :permission :read :doc "(fs/read resource relative-path) reads granted UTF-8 text."}
-   "fs/write" {:arity [3 3] :resource :fs :permission :write :doc "(fs/write resource relative-path text) writes granted UTF-8 text."}
+   "fs/list" {:arity [2 2] :resource :fs :permission :read :doc "(fs/list resource relative-path) lists a granted directory. Both arguments are strings. Paths are grant-relative; \".\" selects the grant root. Absolute paths and traversal are rejected."}
+   "fs/read" {:arity [2 2] :resource :fs :permission :read :doc "(fs/read resource relative-path) reads a granted UTF-8 file. Both arguments are strings. Paths are grant-relative; \".\" selects the grant root. Absolute paths and traversal are rejected."}
+   "fs/write" {:arity [3 3] :resource :fs :permission :write :doc "(fs/write resource relative-path text) writes UTF-8 text to a granted file. All arguments are strings. Paths are grant-relative; \".\" selects the grant root. Absolute paths and traversal are rejected."}
    "http/request" {:arity [4 4] :resource :http :doc "(http/request resource method segments body) requests a granted endpoint."}
    "process/run" {:arity [1 1] :resource :processes :doc "(process/run resource) executes granted argv/env."}})
 
@@ -290,7 +290,7 @@
       (model/render (if (index-of (data :status) ["complete" "refused" "blocked"])
         (merge data {:text "" :message (merge (data :message) {:content nil})}) data))
       source source
-      effect (schema/encode {:effect (parent :id) :name (get-in parent [:data :name]) :state (data :state) :value (data :value) :error (data :error)})
+      effect (schema/encode {:effect (parent :id) :name (get-in parent [:data :name]) :state (data :state) :error (data :error)})
       (and (= "receipt" (row :kind)) (data :error)) (get-in data [:message :content])
       terminal (if (and (= "inquiry" (get-in owner [:data :type])) (not (data :error)))
         (get-in data [:value :text]) (data :text))
@@ -300,7 +300,6 @@
        :script (if (= "script" (get-in owner [:data :type])) (owner :id) :null) :root (root :id) :store (s :identity)
        :agent (get-in s [:config :identity]) :request (get-in root [:data :request])
        :call (or (data :tool) (get-in owner [:data :call]) :null)
-       :reply (if (and (= "script" (get-in owner [:data :type])) (not source)) (owner :id) :null)
        :parent (or (row :parent) :null) :status (if source "accepted" (get data :status (get data :state "complete"))) :world (get-in owner [:data :world])
        :language (cond (or effect (data :error)) "json" source "clojure"
          (and terminal (= "inquiry" (get-in owner [:data :type]))) :null

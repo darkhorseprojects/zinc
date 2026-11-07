@@ -56,8 +56,10 @@ retain JSON-compatible values on the process boundary; native return values use 
 descriptors. Host arguments/results remain JSON data. self/wait explicitly waits for a descendant's root
 outcome, not its VM drain or world publication.
 
-Grant native ev/*, self/* and effect/* as appropriate in execution profiles. These replace the former
-public task/* bindings; there are no compatibility aliases.
+Grant core/*, array/*, ev/*, self/* and effect/* as appropriate in execution profiles. Use `(doc)` to
+list available bindings and `(doc name)` to inspect one. Core grants include arithmetic `/` and `/=`.
+Each evaluator seeds its default PRNG from OS entropy; explicit math/rng values can persist in worlds.
+There are no task/* compatibility aliases.
 
 ## Ownership and data flow
 
@@ -85,8 +87,9 @@ Reasoning and execution events are presented immediately. Final answer text is p
 committed inquiry outcome; the inquiry remains receptive while descendants are unfinished.
 A timer reconciles cross-process writes and leases. Observation is read-only and cannot execute work.
 
-Discord receives exact source in clojure blocks, fenced output and individual effect/root results replying
-to the source. Model reasoning and footer metadata retain their existing presentation.
+Discord receives exact source in clojure blocks, fenced output, effect receipts and root results.
+Messages are independent; footers identify their script, call and event. Complete effect values remain
+in execution history and model context.
 
 Other entries are describe, instructions, models, init, status, abort, record, world, views, render,
 diagnostics, invalidate and resolve. Abort cancels an execution tree without undoing external effects.
@@ -99,6 +102,8 @@ The model receives the original effect identity, attempt, arguments and operatio
 It investigates current external state, then effect/resolve or the direct resolve entry records a verified
 value/error, or an explicitly approved retry, with evidence. Retries retain the logical effect identity.
 A stale decision cannot resolve a newer attempt. Evidence is an attestation, not an independent verifier.
+Caught filesystem read and pre-dispatch validation failures settle as failed. Failures after a potentially
+mutating dispatch remain uncertain unless the operation reports a definitive outcome.
 
 Janet's native event loop is not serialized. Interrupted VMs are marked uncertain with their completed
 source-form count; their source, output and committed effects remain available. Restart never replays
@@ -144,7 +149,8 @@ program. The native image holds the actual state. The same defining source is in
 Images hold deduplicated JSON configuration/model input and native world bytes with matching Janet runtime
 metadata. Claims hold leases, waits and source progress. Terminal claims are removed. FTS is a derived
 index. Successful VM-drain results do not duplicate root returns; unsuccessful settlement remains visible
-in presentation and memory. views, render and memory/expand expose retained originals.
+in presentation and memory. views, render and memory/expand expose retained originals. Rerank inference
+identities include the exact query and ordered document excerpts; cached indices never refer to a different input.
 
 Existing JSON-world installations need an explicit offline image conversion before upgrading. Preserve
 the database and store identity; do not reset history or automatically replay historical scripts. No

@@ -81,7 +81,8 @@
               WHERE event_fts MATCH ? AND e.id IN (SELECT value FROM json_each(?)) ORDER BY rank LIMIT ?`
               [expression (schema/encode (map |($ :id) rows)) (config :candidates)])))
           (if (= 0 (length selected)) []
-            (let [outcome (model/call s {:role "rerank" :query anchor :documents (map render selected)} "memory-rerank")]
+            (let [input {:role "rerank" :query anchor :documents (map render selected)}
+                  outcome (model/call s input (string "memory-rerank:" (store/digest (schema/encode input))))]
               (seq [rank :in (outcome :results)]
                 (merge (selected (rank :index)) {:score (rank :relevance_score) :rerank (outcome :event)})))))))))
 

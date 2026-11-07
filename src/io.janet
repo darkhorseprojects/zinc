@@ -167,7 +167,8 @@
   (outcome :value))
 
 (defn invoke [config name args]
-  (cond
+  (var attempted false)
+  (try (cond
     (index-of name ["fs/list" "fs/read" "fs/write"])
     (do
       (assert (= (length args) (if (= name "fs/write") 3 2)) "invalid filesystem arity")
@@ -201,6 +202,7 @@
                       (string bytes)))
         (do (assert (and (string? text) (utf8/is-valid? text) (<= (length text) (config :response-bytes))) "invalid file contents")
           (assert (or (nil? (os/stat target)) (= :file (os/stat target :mode))) "regular file required")
+          (set attempted true)
           (spit target text :wb) nil)))
     (= name "http/request")
     (do
@@ -211,6 +213,7 @@
       (assert (and (indexed? segments) (every? (map |(and (string? $) (not (index-of $ ["." ".."]))
                                                           (peg/match ~(* (some (set "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789_-~.")) -1) $)) segments))) "invalid HTTP path")
       (assert (or (nil? body) (string? body)) "HTTP body must be text or nil")
+      (set attempted true)
       (request config grant method (string/join segments "/") body))
     (= name "process/run")
     (do
@@ -226,6 +229,12 @@
         (try (while true (store/check current (execution :id) token) (ev/sleep store/interval))
           ([err] (unless (= err :finished) (ev/cancel owner err))))) nil stopped))
       (defer (do (ev/cancel watcher :finished) (ev/take stopped) (ev/chan-close stopped))
+        (set attempted true)
         (def result (process (command :argv) (tabseq [[k v] :pairs (command :env)] (string k) v) nil (config :response-bytes) 0))
         (assert (utf8/is-valid? (result :output)) "process output is not UTF-8")
-        result))))
+        result)))
+    ([err fiber]
+      (def failure (schema/diagnostic "OperationFailed" err fiber))
+      (error (merge failure
+        {:context (merge (get failure :context {})
+          {:outcome (get-in failure [:context :outcome] (if attempted "unknown" "failed"))})})))))
