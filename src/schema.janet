@@ -67,6 +67,8 @@
    :web-search {:type :boolean :default false :option "web-search" :description "Permit provider-managed web search"}
    :output {:type :integer :default 0 :minimum 0 :unlimited true}
    :context-quota {:type :integer :optional true :minimum 256}
+   :context-percent {:type :integer :default 50 :minimum 1 :maximum 100 :option "context-percent"
+                     :description "Maximum estimated input percentage of the context window"}
    :summary-quota {:type :integer :default 512 :minimum 128}
    :tool-quota {:type :integer :default 262144 :minimum 1}
    :task-quota {:type :integer :default 4096 :minimum 1}
@@ -99,6 +101,7 @@
   {:text {:type :string} :code {:type :string} :author {:type :string} :at {:type :string}
    :request {:type :string} :memory_range {:type :dictionary} :images {:type :array} :world {:type :string}
    :deadline {:type :number}
+   :notify {:type :integer :minimum 1}
    :parent {:type :integer :minimum 0 :option "parent" :description "History attachment event; 0 selects empty history"}
    :persist {:type :boolean :default true :option "persist" :description "Retain work; false uses a temporary RAM session"}})
 
@@ -216,7 +219,7 @@
       (assert (and (string/has-prefix? "/" suffix) (not (string/has-prefix? "//" suffix))
                    (not (string/find "#" suffix)) (not (string/find "\r" suffix)) (not (string/find "\n" suffix))) "invalid provider path"))
     (each key (keys (provider :parameters))
-      (assert (not (index-of key [:model :messages :input :instructions :tools :stream :stream_options :store :include
+      (assert (not (index-of key [:model :messages :input :instructions :tools :tool_choice :stream :stream_options :store :include
         :max_tokens :max_completion_tokens :max_output_tokens :parallel_tool_calls :reasoning :reasoning_effort :prompt_cache_key])) "managed provider parameter"))
     (each tool (provider :web-tools) (assert (dictionary? tool) "invalid provider web tool"))
     (each [id model] (pairs (get provider :models {}))
@@ -247,7 +250,7 @@
       (assert (= (encode grant) (encode (get-in current [field name])))
               {:code "AuthorityChanged" :message "saved resource changed or revoked"
                :context {:field (string field) :resource (string name)}})))
-  (each [name module] (pairs (get-in saved [:janet :imports]))
+  (each [name module] (pairs (get-in saved [:janet :imports] {}))
     (assert (= (encode module) (encode (get-in current [:janet :imports name])))
             {:code "AuthorityChanged" :message "saved import changed or revoked" :context {:module (string name)}}))
   (when (saved :agent) (assert (current :agent) "agent profile revoked"))

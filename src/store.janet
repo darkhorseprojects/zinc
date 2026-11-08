@@ -113,12 +113,16 @@
   ) SELECT e.* FROM events e JOIN members m ON m.id=e.id WHERE e.kind IN ('task','operation')
     AND NOT EXISTS(SELECT 1 FROM events r WHERE r.parent=e.id AND r.kind='result') ORDER BY e.id` [id]))
 
+(defn busy? [s id]
+  (or (> (length (pending s id)) 1)
+    (first (query s "SELECT id FROM events t WHERE kind='task' AND json_extract(data,'$.input.notify')=? AND NOT EXISTS(SELECT 1 FROM events r WHERE r.parent=t.id AND r.kind='result') LIMIT 1" [id]))))
+
 (defn changes [s id after]
   (query s `WITH RECURSIVE members(id) AS (
     SELECT ? UNION ALL SELECT e.id FROM events e JOIN members m ON e.parent=m.id
   ) SELECT e.* FROM events e JOIN members m ON m.id=e.id LEFT JOIN events owner ON owner.id=e.parent
     WHERE e.id>? AND (
-      e.kind IN ('return','output','fiber','uncertain','world','artifact','diagnostic') OR
+      e.kind IN ('return','output','fiber','uncertain','world','artifact','diagnostic','notice') OR
       (e.kind='result' AND owner.id<>? AND (
         owner.kind='operation' OR (owner.kind='task' AND json_extract(owner.data,'$.type')<>'summary'
           AND NOT EXISTS(SELECT 1 FROM events r WHERE r.parent=owner.id AND r.kind='return'
@@ -158,7 +162,14 @@
         (def bytes (schema/encode data))
         (assert (<= (length bytes) (+ ((s :config) :request-bytes) ((s :config) :response-bytes))) "event byte ceiling")
         (def row (first (query s "INSERT INTO events(parent,key,kind,data,image) VALUES(?,?,?,?,?) RETURNING *" [parent key kind bytes image])))
-        (put (dyn :zinc/changed) 0 true) row))))
+        (put (dyn :zinc/changed) 0 true)
+        (def owner (cond (= kind "task") row
+          (and parent (index-of kind ["return" "result" "world" "artifact"])) (event s parent)))
+        (when-let [target (get-in owner [:data :input :notify])]
+          (when (and (not (result s target))
+            (or (not= kind "result")
+              (not (first (query s "SELECT id FROM events WHERE parent=? AND kind='return' AND (?='done' OR json_extract(data,'$.state')<>'done')" [parent (data :state)])))))
+            (append s target "notice" {:source (row :id)} (string "notice:" target ":" (row :id))))) row))))
 
 (defn advance [s data]
   (transact s
@@ -289,6 +300,11 @@
           (or (= 0 (bounds :end)) (>= (bounds :start) (get-in caller [:data :memory_range :start])))) "child history exceeds caller view"))
         (def world (get input :world (if caller (get-in caller [:data :world]) (config :world))))
         (assert (has-key? (config :worlds) (keyword world)) "world is not granted")
+        (when-let [target (input :notify)]
+          (def inquiry (event s target))
+          (assert (and (not (s :temporary)) (input :code) (not parent) (not (config :inference))
+            (= "inquiry" (get-in inquiry [:data :type]))
+            (= (input :author) (get-in inquiry [:data :author]))) "notification target is outside this execution grant"))
         (def epoch ((first (query s "SELECT epoch FROM worlds WHERE name=?" [world])) :epoch))
         (assert epoch "configured world is unavailable")
         (def deadline (min (if (> (config :run-seconds) 0) (+ (os/clock) (config :run-seconds)) math/inf)
@@ -317,9 +333,9 @@
       SELECT e.id,?,? FROM events e WHERE e.id=? AND e.kind IN ('task','operation')
       AND NOT EXISTS(SELECT 1 FROM events r WHERE r.parent=e.id AND r.kind='result')
       AND NOT EXISTS(SELECT 1 FROM claims c WHERE c.task=e.id AND c.expires>?)
-      AND (SELECT count(*) FROM claims c JOIN events owner ON owner.id=c.task WHERE c.expires>?
+      AND (json_extract(e.data,'$.type')='script' OR (SELECT count(*) FROM claims c JOIN events owner ON owner.id=c.task WHERE c.expires>?
         AND CASE WHEN owner.kind='operation' THEN 'effect' ELSE json_extract(owner.data,'$.type') END
-          =CASE WHEN e.kind='operation' THEN 'effect' ELSE json_extract(e.data,'$.type') END)<?
+          =CASE WHEN e.kind='operation' THEN 'effect' ELSE json_extract(e.data,'$.type') END)<?)
       ON CONFLICT(task) DO UPDATE SET token=excluded.token,expires=excluded.expires WHERE claims.expires<=? RETURNING *`
       [(uuid) (+ (os/clock) ((s :config) :lease-seconds)) id (os/clock) (os/clock) ((s :config) :parallel) (os/clock)]))))
 

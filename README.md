@@ -47,11 +47,13 @@ Native Janet schedules ev fibers, channels, timers and threads. Each script has 
 thread; blocking host implementations execute in independent worker threads, not the coordinator loop.
 A generic bridge journals each granted host call as an independent effect. Waiting suspends only the
 calling fiber. Each effect commits its own result and wakes inference and observation immediately.
-Configured parallel limits apply separately to script VMs, effects and inquiry execution.
+Parallel limits apply separately to effects, inquiries and summaries, not to script lifetimes: a VM
+waiting for a descendant must not occupy that descendant's execution slot.
 
 The root return, VM lifetime and external effects have distinct completion boundaries. Output ports
-schedule publication without blocking Janet's non-yieldable output callback. Output is not accumulated
-into the final result. Successful native fiber return values are displayed as Janet text. Root returns
+schedule publication without blocking Janet's non-yieldable output callback. Writes from one scheduling turn are coalesced by port and flushed before host calls and root return.
+Whitespace-only output is omitted. Print formats structured values as JSON; explicit string conversion
+still follows Janet semantics. Root returns
 retain JSON-compatible values on the process boundary; native return values use explicit Janet-type
 descriptors. Host arguments/results remain JSON data. self/wait explicitly waits for a descendant's root
 outcome, not its VM drain or world publication.
@@ -83,13 +85,16 @@ engine/run owns scheduling and lease renewal. runtime/run owns native VM lifetim
 not effect execution. store owns admission, claims, outcomes and post-commit notification. engine/infer
 uses the same committed-change query for eligibility and context. model/call journals inference;
 provider encodes and decodes Responses or Chat Completions and preserves native reasoning for replay.
-Reasoning and execution events are presented immediately. Final answer text is presented once, from the
-committed inquiry outcome; the inquiry remains receptive while descendants are unfinished.
+Committed model text is presented immediately, including answers produced before descendants settle.
+The inquiry remains receptive while descendants are unfinished; its terminal result does not repeat the answer.
 A timer reconciles cross-process writes and leases. Observation is read-only and cannot execute work.
 
-Discord receives exact source in clojure blocks, fenced output, effect receipts and root results.
-Messages are independent; footers identify their script, call and event. Complete effect values remain
-in execution history and model context.
+Discord receives source, intentional text, direct-user results and failures. Machine-valued agent returns
+and successful effect receipts stay in history and model context rather than becoming chat messages.
+A human-readable footer appears once per event; complete provenance remains in delivery metadata.
+Direct user code never replaces inquiries. In persistent sessions, source, return and publication notices
+reach the active same-author inquiry without making the script its descendant. Separate temporary
+invocations do not share a RAM store and cannot exchange live notifications.
 
 Other entries are describe, instructions, models, init, status, abort, record, world, views, render,
 diagnostics, invalidate and resolve. Abort cancels an execution tree without undoing external effects.
@@ -146,10 +151,28 @@ World inspection shows complete recorded defining forms in clojure blocks, not s
 These forms are source provenance, not a reconstruction of the current mutable heap and never a replay
 program. The native image holds the actual state. The same defining source is included in model context.
 
-Memory summaries inherit the chat model and reasoning setting. `summary: {thinking: medium}` overrides
-reasoning independently; an optional `summary.chat` selects another granted model. Summary calls disable
-web search. Completed summaries are reused across inquiries with matching sources and settings; internal
-summary work is excluded from ordinary memory. Finish active summary executions before upgrading.
+`context-percent` defaults to 50: total estimated input, including instructions, tools and live exchanges,
+is capped at that percentage of the smaller provider window and `context-quota`. Chronological memory
+and retrieved excerpts share the remainder. Estimates are not exact provider token counts; image token
+cost is provider-dependent. Profiles using `output-field: none` cannot enforce a provider output-token limit.
+
+Memory uses bounded UTF-8 source pages and lazily cached binary summaries. Each internal summary has
+two adjacent equal-level children. Invalidations affect that branch's ancestors, not unrelated summaries.
+Closed replay prefixes enter the same pipeline when live exchanges approach the input ceiling; unresolved
+work stays exact. Recent replay remains ordered by committed event ID.
+
+Summaries inherit chat and thinking; `summary: {chat: ..., thinking: ...}` overrides only those settings.
+Each node requires one text-only call, with no tools or web search. Completed nodes are reused across
+inquiries. Internal summary work is excluded from ordinary memory. Finish active summaries before upgrading.
+
+Retrieval searches only eligible originals not already present verbatim, within granted history. Scoped
+FTS, concept expansion and fuzzy terms produce deterministic excerpts. Identical query, model and excerpt
+manifests reuse rerank results across inquiries. Provider scores are not assumed to be probabilities.
+Each candidate records whether it was included, below cutoff, already present, or over budget.
+
+`/render` and `/views` default to the latest chat context. A model result selects its admission; other
+events select the nearest related chat admission by event ID, preferring the earlier on ties. Resolution
+is explicit. Reports show the actual summary graph, recall decisions, usage and exact request.
 
 Images hold deduplicated JSON configuration/model input and native world bytes with matching Janet runtime
 metadata. Claims hold leases, waits and source progress. Terminal claims are removed. FTS is a derived

@@ -57,22 +57,30 @@
   (string (slurp (config :instructions))
     (when (config :janet)
       (string "\n\n## Settings and resources\n\n" (schema/encode (public config bindings))
-        "\n\nUse (doc) to list available bindings and (doc name) to inspect one."
-        "\n\n## Host bindings\n\nJournaled host arguments and results must be JSON data. Use :null for explicit null.\n\n"
-        (string/join (seq [[_ binding] :in (sorted (pairs bindings)) :unless (binding :local)] (binding :doc)) "\n\n")))))
+        "\n\nHost arguments and results must be JSON data. Use :null for explicit null."
+        "\n\nHost bindings: " (string/join (seq [[name binding] :in (sorted (pairs bindings)) :unless (binding :local)] name) ", ")
+        ". Use (doc name) for arguments and behavior."))))
 
 (defn- evaluate [[code id input instructions public bindings setup snapshot events stop limit world-limit seconds]]
   (try (do
   (def native (make-env))
-  (def base @{:redef true})
+  (def base @{:redef true 'doc (native 'doc)})
   (var env nil) (var succeeded false)
   (var output-size 0)
+  (def output @[])
+  (defn flush-output []
+    (while (> (length output) 0)
+      (def packet (first output)) (array/remove output 0)
+      (unless (= "" (string/trim (packet :text))) (ev/give events packet))) nil)
   (each port [:out :err]
     (put base port (fn [text]
       (+= output-size (length text))
       (assert (<= output-size limit) "script output byte ceiling")
       (when (> (length text) 0)
-        (ev/go (fn [] (ev/give events {:kind :output :port (string port) :text (string text)}) nil))))))
+        (if (= (string port) (get (last output) :port))
+          (put (last output) :text (string ((last output) :text) text))
+          (array/push output @{:kind :output :port (string port) :text (string text)}))
+        (ev/go flush-output nil)))))
   (def call (fn [name & args]
     (assert (bindings name) {:code "BindingNotGranted" :message (string "Host binding is not granted: " name)})
     (if (= name "world/remove")
@@ -80,6 +88,7 @@
         (put env (first args) nil))
       (do
         (schema/encode args)
+        (flush-output)
         (def reply (ev/thread-chan 1))
         (defer (ev/chan-close reply)
           (ev/give events {:kind :call :name name :args args :reply reply})
@@ -88,7 +97,12 @@
           (outcome :value))))))
   (each [name binding] (pairs bindings)
     (put base (or (binding :local) (symbol name))
-      (if (binding :local) (native (binding :local))
+      (if (binding :local)
+        (if (= 'print (binding :local))
+          @{:doc "Prints text or JSON data." :value (fn [& values]
+            (apply (module/value native 'print)
+              (map |(if (string? $) $ (schema/encode (schema/transport $))) values)))}
+          (native (binding :local)))
         @{:doc (binding :doc) :value (partial call name)})))
   (each [name documentation value]
     [['input "(input) returns script input." (fn [] input)]
@@ -105,7 +119,7 @@
     (when (symbol? name)
       (def key (symbol "zinc/binding/" name))
       (put reverse binding key) (put forward key binding)
-      (when (index-of name ['input 'self/document 'settings 'resources])
+      (when (index-of name ['input 'self/document 'settings 'resources 'print])
         (def key (symbol "zinc/value/" name))
         (put reverse (binding :value) key) (put forward key (binding :value)))))
   (set env (if (snapshot 5) (unmarshal (snapshot 5) forward) (make-env base)))
@@ -145,6 +159,7 @@
               (when (not= binding (known name))
                 (put sources name {:source (string/format "%j" form) :script id :form index}))
               (put known name binding))
+            (flush-output)
             (ev/give events {:kind :progress :form (+ index 1)}))
           (def projected (schema/transport value))
           (def text (if (string? value) value (schema/encode projected)))
@@ -157,6 +172,7 @@
            :error (merge failure {:context (merge (get failure :context {})
              {:script id :form form-index})})
            :text (failure :message)})))
+      (flush-output)
       (ev/go (fn [] (ev/give events (merge outcome {:kind :return})) nil)) nil) :t env) nil events))
     (while (or (fiber/can-resume? root)
       (some |(and (not= $ owner) (not= $ watcher)) (ev/all-tasks)))
@@ -220,7 +236,8 @@
         (when (or (not= :ok (packet 0)) (not (nil? (packet 1))))
           (when (not= :ok (packet 0)) (set failure (schema/diagnostic "FiberFailed" (packet 1))))
           (store/append s (script :id) (if (= :ok (packet 0)) "fiber" "diagnostic")
-            (if (= :ok (packet 0)) {:text (string/format "%n" (packet 1))}
+            (if (= :ok (packet 0)) (let [value (schema/transport (packet 1))]
+              {:value value :text (if (string? value) value (schema/encode value))})
               {:error failure :text (failure :message)})))
         (= :call (packet :kind))
         (do

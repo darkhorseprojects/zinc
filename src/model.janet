@@ -129,16 +129,18 @@
           (each part (if (indexed? (message :content)) (message :content) [])
             (when (= "image_url" (part :type)) (assert (selected :images) "model does not support images"))))
         (each definition (get input :tools []) (assert (index-of definition (selected :tools)) "model does not support tool")))
+      (def window (min (selected :context) (get config :context-quota math/inf)))
+      (def capacity (math/floor (/ (* window (config :context-percent)) 100)))
       (def maximum (if (= role "rerank") 0
-        (min (or (selected :output) (selected :context)) (- (selected :context) size 256)
+        (min (or (selected :output) window) (- window size 256)
           (if (= 0 (config :output)) math/inf (config :output)) (get input :output math/inf))))
       (unless (= role "rerank")
-        (assert (and (> maximum 0) (<= size (get config :context-quota math/inf))) "model context exhausted"))
+        (assert (and (> maximum 0) (<= size capacity)) "model input ceiling exhausted"))
       (def wire (if prior (get-in prior [:data :request :body]) (provider/encode config selected input maximum)))
       (def admission (store/transact s (or prior (store/append s (task :id) "model"
         {:input (schema/project input [:messages :tools :query :documents :views] true) :views (input :views)
          :request {:method "POST" :url (string (get-in config [:providers (keyword (selected :provider)) :url]) (selected :path)) :body wire}
-         :estimate size :context (selected :context) :output maximum :turn (get input :turn false) :role role} identity
+         :estimate size :context window :capacity capacity :output maximum :turn (get input :turn false) :role role} identity
         (store/image s {:input input :selected selected :key key})))))
       (store/append s (admission :id) "dispatch" {})
       (def raw (try (provider/request config selected (selected :path) wire)
