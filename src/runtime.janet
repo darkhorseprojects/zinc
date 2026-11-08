@@ -127,12 +127,14 @@
     (when (fiber/can-resume? watcher) (ev/cancel watcher :finished))
     (ev/take stopped))
     (def root (ev/go (fiber/new (fn []
+      (var form-index nil)
       (def outcome (try
         (do
           (def forms (try (parse-all code)
             ([err fiber] (error (schema/diagnostic "ParseFailed" err fiber)))))
           (var value nil)
           (each [index form] (pairs forms)
+            (set form-index index)
             (def thunk (compile (if (options :expander) ((options :expander) form) form) env))
             (when (dictionary? thunk)
               (error {:code "CompileFailed" :message (thunk :error)
@@ -149,8 +151,12 @@
           (assert (<= (length (schema/encode projected)) limit) "script result byte ceiling")
           (set succeeded true)
           {:state "done" :value projected :text text})
-        ([err fiber] {:state "failed" :error (schema/diagnostic "ExecutionFailed" err fiber)
-                      :text (get (schema/diagnostic "ExecutionFailed" err) :message)})))
+        ([err fiber]
+          (def failure (schema/diagnostic "ExecutionFailed" err fiber))
+          {:state "failed"
+           :error (merge failure {:context (merge (get failure :context {})
+             {:script id :form form-index})})
+           :text (failure :message)})))
       (ev/go (fn [] (ev/give events (merge outcome {:kind :return})) nil)) nil) :t env) nil events))
     (while (or (fiber/can-resume? root)
       (some |(and (not= $ owner) (not= $ watcher)) (ev/all-tasks)))

@@ -10,6 +10,10 @@ Write complete Janet scripts. Parallel model tool calls execute independently.
 Admission is not completion. Committed output, effect results, fiber results, and
 root outcomes arrive automatically; do not poll for completion.
 
+Quoted strings use Janet escapes. Literal backslashes must be escaped in Janet
+source; JSON tool arguments add a separate encoding layer. Use Janet raw long
+strings for text containing many literal backslashes.
+
 Host calls suspend only the calling fiber. Native ev operations retain Janet
 semantics. A root return neither joins nor cancels other fibers, effects, or
 descendant executions. Disconnecting observation does not cancel execution.
@@ -39,6 +43,11 @@ persist.
 World source records complete defining forms, not the current mutable heap. Do
 not redefine a binding merely to call it. A root return does not confirm
 publication. Report subsequent publication or settlement failures.
+
+Use an immediately invoked function, ((fn [] ...)), for temporary local
+definitions that should not become world bindings. Mutating reachable world
+values can still change persistent state. Independent scripts that change the
+same world can conflict even when they define different names.
 
 Unserializable reachable values fail publication. Publication conflicts retain
 candidate images without replacing the world head. Inspect candidates before

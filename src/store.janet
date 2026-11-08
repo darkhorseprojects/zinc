@@ -258,7 +258,9 @@
     row))
   (when (= "artifact" (row :kind))
     (error {:code "WorldChanged" :message "World changed; candidate image was retained."
-      :context {:candidate (row :id) :hash (row :image)}}))
+      :context {:candidate (row :id) :hash (row :image)
+        :world (get-in row [:data :world]) :expected (get-in row [:data :expected])
+        :actual (get-in row [:data :actual])}}))
   {:world (get-in row [:data :world]) :revision (row :id) :hash (row :image)})
 
 (defn start [s input config &opt parent]

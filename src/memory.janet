@@ -171,8 +171,16 @@
             (if (> (length pages) 0) (break) (do (set bytes (math/floor (/ bytes 2))) (assert (> bytes 0) "summary metadata cannot fit")))))))
     (def response (model/call s {:messages [system {:role "user" :content (string/join pages "\n\n")}] :output maximum}
       (string "summary:" (progress :step)) selected))
-    (assert (and (= "complete" (response :status)) (> (length (response :text)) 0)
-      (<= (store/estimate (response :text)) maximum)) "summary exceeded its bound")
+    (assert (and (= "complete" (response :status)) (> (length (response :text)) 0))
+      {:code "SummaryRejected" :message "Summary response was not a nonempty completion."
+       :context {:event (response :event) :model (selected :reference)
+         :step (progress :step) :status (response :status)
+         :bytes (length (response :text))}})
+    (assert (<= (length (response :text)) (* maximum 4))
+      {:code "SummaryBoundExceeded" :message "Summary exceeded its UTF-8 byte bound."
+       :context {:event (response :event) :model (selected :reference)
+         :step (progress :step) :bytes (length (response :text))
+         :maximum-bytes (* maximum 4) :output-field (selected :output-field)}})
     (when reducing (array/pop frontier) (array/pop frontier))
     (array/push frontier [height (response :text)])
     (put progress :cursor [index offset]) (put progress :step (+ 1 (progress :step)))
