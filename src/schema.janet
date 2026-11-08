@@ -57,6 +57,10 @@
                             :reasoning-required {:type :boolean :optional true}
                             :output-field {:type :string :optional true :choices ["max_tokens" "max_completion_tokens" "max_output_tokens" "none"]}}}}}}}
    :chat {:type :string :optional true :visible true :option "chat" :autocomplete "chat" :description "Chat model"}
+   :summary {:type :dictionary :default {}
+             :fields {:chat {:type :string :optional true}
+                      :thinking {:type :string :optional true
+                                 :choices ["default" "none" "minimal" "low" "medium" "high" "xhigh" "max"]}}}
    :rerank {:type :string :optional true :option "rerank" :autocomplete "rerank" :description "Rerank model"}
    :thinking {:type :string :default "default" :visible true :option "thinking" :description "Reasoning effort"
               :choices ["default" "none" "minimal" "low" "medium" "high" "xhigh" "max"]}

@@ -146,6 +146,11 @@ World inspection shows complete recorded defining forms in clojure blocks, not s
 These forms are source provenance, not a reconstruction of the current mutable heap and never a replay
 program. The native image holds the actual state. The same defining source is included in model context.
 
+Memory summaries inherit the chat model and reasoning setting. `summary: {thinking: medium}` overrides
+reasoning independently; an optional `summary.chat` selects another granted model. Summary calls disable
+web search. Completed summaries are reused across inquiries with matching sources and settings; internal
+summary work is excluded from ordinary memory. Finish active summary executions before upgrading.
+
 Images hold deduplicated JSON configuration/model input and native world bytes with matching Janet runtime
 metadata. Claims hold leases, waits and source progress. Terminal claims are removed. FTS is a derived
 index. Successful VM-drain results do not duplicate root returns; unsuccessful settlement remains visible

@@ -90,8 +90,28 @@
         (string "Author: " (get-in inquiry [:data :author]) " · Occurred: " (get-in inquiry [:data :at]) "\n\n" (get-in inquiry [:data :input :text])) budget)})
       (def state {:role "user" :content (string "## World source\n\n" ((store/view s (get-in inquiry [:data :world])) :text))})
       (def capacity (min (get config :context-quota math/inf) (selected :context)))
-      (def room (- capacity (model/estimate [system input state]) (store/estimate (schema/encode tools)) 512))
-      (assert (> room 256) "instructions, inquiry and state exhaust context")
+      (def scope (store/tree s scope-id))
+      (def exchanges @[])
+      (each row scope
+        (def data (row :data))
+        (when (= (inquiry :id) (get (store/task s (row :id)) :id))
+          (cond
+            (and (= "result" (row :kind)) (= "model" (data :type)) (data :turn)) (array/push exchanges (data :message))
+            (= "receipt" (row :kind)) (array/push exchanges (data :message)))))
+      (each row (store/changes s scope-id 0)
+        (def owner (store/task s (row :id)))
+        (unless (= "summary" (get-in owner [:data :type]))
+          (def parent (store/event s (row :parent)))
+          (array/push exchanges {:role "user" :content (string "Committed execution event:\n"
+            (schema/encode {:event (row :id) :parent (row :parent) :script (owner :id)
+              :call (get-in owner [:data :call]) :kind (row :kind) :outcome (row :data)
+              :effect (when (= "operation" (parent :kind)) {:id (parent :id) :name (get-in parent [:data :name]) :arguments (get-in parent [:data :arguments])})})
+            (when (= "world" (row :kind)) (string "\n" ((store/view s (get-in row [:data :world]) (row :id)) :text))))})))
+      (def room (- capacity (model/estimate (array/concat @[system input state] exchanges) (selected :reference))
+        (store/estimate (schema/encode tools)) 512))
+      (assert (> room 256)
+        {:code "InquiryContextExhausted" :message "Instructions, inquiry, world and live exchanges leave insufficient context."
+         :context {:model (selected :reference) :capacity capacity :remaining room}})
       (def context (memory/context s inquiry room))
       (def messages @[system])
       (def views @{:through (context :through) :records (map |($ :id) (context :nodes))
@@ -103,23 +123,8 @@
           (array/push messages {:role "user" :content (model/images {:images images} (string "## " title "\n\n" (string/join (map memory/render rows))) budget)})))
       (put views :world (length messages)) (array/push messages state)
       (put views :inquiry (length messages)) (array/push messages input)
-      (def scope (store/tree s scope-id))
       (put views :after (if (> (length scope) 0) ((last scope) :id) (inquiry :id)))
-      (each row scope
-        (def data (row :data))
-        (when (= (inquiry :id) (get (store/task s (row :id)) :id))
-          (cond
-            (and (= "result" (row :kind)) (= "model" (data :type)) (data :turn)) (array/push messages (data :message))
-            (= "receipt" (row :kind)) (array/push messages (data :message)))))
-      (each row (store/changes s scope-id 0)
-        (def owner (store/task s (row :id)))
-        (unless (= "summary" (get-in owner [:data :type]))
-          (def parent (store/event s (row :parent)))
-          (array/push messages {:role "user" :content (string "Committed execution event:\n"
-            (schema/encode {:event (row :id) :parent (row :parent) :script (owner :id)
-              :call (get-in owner [:data :call]) :kind (row :kind) :outcome (row :data)
-              :effect (when (= "operation" (parent :kind)) {:id (parent :id) :name (get-in parent [:data :name]) :arguments (get-in parent [:data :arguments])})})
-            (when (= "world" (row :kind)) (string "\n" ((store/view s (get-in row [:data :world]) (row :id)) :text))))})))
+      (array/concat messages exchanges)
       (assert (< (+ (model/estimate messages (selected :reference)) (store/estimate (schema/encode tools))) capacity) "inquiry exchanges exhaust context")
       (model/call s {:turn true :messages messages :tools tools :views views} (string "turn:" rounds) selected)))))
 
@@ -130,7 +135,12 @@
   (assert (and binding (not (binding :local)))
     {:code "BindingNotGranted" :message (string "Host binding is not granted: " name)})
   (when-let [[minimum maximum] (binding :arity)]
-    (assert (<= minimum (length args) maximum) "invalid host argument count"))
+    (assert (<= minimum (length args) maximum)
+      {:code "InvalidHostArguments"
+       :message (string name " expects " (if (= minimum maximum) minimum (string minimum ".." maximum))
+         " arguments; received " (length args) ".")
+       :context {:effect (effect :id) :binding name :expected [minimum maximum]
+         :received (length args) :signature (binding :doc)}}))
   (def local? (or (= name "self") (string/has-prefix? "world/" name)
     (string/has-prefix? "self/" name) (= name "effect/resolve") (= name "memory/expand")))
   (defn execute []
@@ -202,7 +212,8 @@
           (store/check s (execution :id))
           (def current (if (and (saved :inference) (not (config :inference)) (config :agent)) (config :agent) config))
           (put s :config (schema/authorize current saved))
-          (def available (runtime/definitions (s :config) bindings))
+          (def available (unless (= "summary" (get-in execution [:data :type]))
+            (runtime/definitions (s :config) bindings)))
           (if (= "operation" (execution :kind)) (invoke s execution available)
             (case (get-in execution [:data :type])
               "inquiry" (infer s execution available)
