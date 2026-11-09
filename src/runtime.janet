@@ -162,8 +162,9 @@
             (flush-output)
             (ev/give events {:kind :progress :form (+ index 1)}))
           (def projected (schema/transport value))
-          (def text (if (string? value) value (schema/encode projected)))
-          (assert (<= (length (schema/encode projected)) limit) "script result byte ceiling")
+          (def encoded (schema/encode projected))
+          (def text (if (string? value) value encoded))
+          (assert (<= (length encoded) limit) "script result byte ceiling")
           (set succeeded true)
           {:state "done" :value projected :text text})
         ([err fiber]
@@ -200,10 +201,9 @@
   (var joined false) (var sequence 0) (var failure nil)
   (def seconds (min (if (= 0 (config :seconds)) math/inf (config :seconds))
     (- (or (get-in script [:data :expires]) math/inf) (os/clock))))
-  (def [revision snapshot] (store/transact s
-    (def world (get-in script [:data :world]))
-    (def revision ((first (store/query s "SELECT head FROM worlds WHERE name=?" [world])) :head))
-    [revision (store/world-image s world revision)]))
+  (def [publication snapshot] (store/transact s
+    (store/world-image s (get-in script [:data :world]))))
+  (def revision (publication :id))
   (def arguments [(get-in script [:data :input :code]) (script :id) (get-in script [:data :input])
     (instructions config bindings) (public config bindings)
     (tabseq [[name binding] :pairs bindings] name (schema/project binding [:local :doc]))
@@ -255,9 +255,7 @@
         (ev/give (packet :reply) (try
           (do
             (when failure (error failure))
-            (unmarshal ((unmarshal (packet :bytes) @{}) 5)
-              (merge load-image-dict (tabseq [key :in (packet :aliases)] key @{})))
-            {:value (store/publish s (packet :bytes) revision)})
+            {:value (store/publish s (packet :bytes) revision (packet :aliases))})
           ([err fiber] {:error (schema/diagnostic "PublicationFailed" err fiber)})))
         (= :progress (packet :kind))
         (store/advance s {:started true :form (packet :form)})

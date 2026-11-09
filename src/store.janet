@@ -150,10 +150,11 @@
 (defn append [s parent kind data &opt key image]
   (transact s
     (when (dyn :zinc/token) (check s ((dyn :zinc/task) :id)))
+    (def bytes (schema/encode data))
     (def previous (when key (first (query s "SELECT * FROM events WHERE key=?" [key]))))
     (if previous
       (do (assert (and (= parent (previous :parent)) (= kind (previous :kind)) (= image (previous :image))
-                       (= (schema/encode data) (schema/encode (previous :data)))) "event key reused with different work") previous)
+                       (= bytes (schema/encode (previous :data)))) "event key reused with different work") previous)
       (do
         (when (and (dyn :zinc/token) (index-of kind ["task" "model" "operation" "result" "return" "output" "fiber"]))
           (def usage (first (query s `WITH RECURSIVE members(id) AS (
@@ -165,8 +166,7 @@
           (when (index-of kind ["task" "model" "operation"])
             (assert (< (usage :work) ((s :config) :task-quota)) "work quota exhausted"))
           (when (and (not (data :error)) (index-of kind ["operation" "result" "return" "output" "fiber"]) (not= "model" (data :type)))
-            (assert (<= (+ (estimate (schema/encode data)) (usage :tools)) ((s :config) :tool-quota)) "tool output quota exhausted")))
-        (def bytes (schema/encode data))
+            (assert (<= (+ (estimate bytes) (usage :tools)) ((s :config) :tool-quota)) "tool output quota exhausted")))
         (assert (<= (length bytes) (+ ((s :config) :request-bytes) ((s :config) :response-bytes))) "event byte ceiling")
         (def row (first (query s "INSERT INTO events(parent,key,kind,data,image) VALUES(?,?,?,?,?) RETURNING *" [parent key kind bytes image])))
         (put (dyn :zinc/changed) 0 true)
@@ -247,11 +247,11 @@
   (assert (and (tuple? snapshot) (= 6 (length snapshot)) (= 1 (snapshot 0))
     (= janet/version (snapshot 1)) (= janet/build (snapshot 2)) (= janet/config-bits (snapshot 3)))
     "world image requires its original Janet runtime")
-  snapshot)
+  [row snapshot])
 
 (defn view [s world &opt through]
-  (def row (if through (point s through world) (event s ((first (query s "SELECT head FROM worlds WHERE name=?" [world])) :head))))
-  (def bindings ((world-image s world (row :id)) 4))
+  (def [row snapshot] (world-image s world through))
+  (def bindings (snapshot 4))
   {:world world :revision (row :id) :hash (row :image) :bindings bindings
    :summary (string "World " world " · #" (row :id) " · " (row :image))
    :text (string/join (distinct (map (fn [binding]
@@ -259,9 +259,11 @@
      (binding :source))
      (sorted bindings |(< [($0 :script) ($0 :form) ($0 :name)] [($1 :script) ($1 :form) ($1 :name)])))) "\n\n")})
 
-(defn publish [s bytes expected]
+(defn publish [s bytes expected aliases]
   (assert (<= (length bytes) ((s :config) :world-bytes)) "world byte ceiling")
   (def snapshot (unmarshal bytes @{}))
+  (unmarshal (snapshot 5)
+    (merge load-image-dict (tabseq [key :in aliases] key @{})))
   (def row (transact s
     (def current (dyn :zinc/task))
     (def world (get-in current [:data :world]))

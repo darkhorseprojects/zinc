@@ -83,7 +83,8 @@ model response -> engine/infer -> atomic script admissions and provider receipts
 
 engine/run owns scheduling and lease renewal; engine execution workers own claim-liveness monitoring.
 runtime/run owns native VM lifetime and result delivery, not effect execution. store owns admission, claims,
-outcomes and post-commit notification. engine/infer uses the same committed-change query for eligibility and context. model/call journals inference;
+outcomes, world-image validation and publication, and post-commit notification. engine/infer uses the same
+committed-change query for eligibility and context. model/call journals inference;
 provider encodes and decodes Responses or Chat Completions and preserves native reasoning for replay.
 Committed model text is presented immediately, including answers produced before descendants settle.
 The inquiry remains receptive while descendants are unfinished; its terminal result does not repeat the answer.
