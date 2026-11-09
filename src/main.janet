@@ -15,9 +15,7 @@
   (var execution nil) (var method nil) (var admitted false) (var observer true)
   (try
     (do
-      (var call nil)
-      (each frame (io/messages stdin limit)
-        (assert (= "call" (frame :type)) "one call and EOF required") (set call frame))
+      (def call (io/read-call stdin limit))
       (set method (call :method))
       (def params (schema/request (call :params) [:input :config :imports :after :store]))
       (def config (schema/configuration (merge (get params :config {}) {:imports (get params :imports {})}) (= method "describe")))

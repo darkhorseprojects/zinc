@@ -39,20 +39,21 @@ Use concise bullets. Omit repetition. Invent no facts or citations.`)
   (def bounds (get-in task [:data :memory_range]))
   (def root (store/root s (task :id)))
   (def inherited (get-in root [:data :memory_range]))
-  (def own (map |($ :id) (if (get-in task [:data :input :recovery]) (store/tree s (root :id))
-    (array/concat @[] (filter |(<= (bounds :start) ($ :id) (bounds :end)) (store/tree s (root :id))) (store/tree s (task :id))))))
-  (store/query s `WITH RECURSIVE summary_work(id) AS (
+  (store/query s `WITH RECURSIVE family(id,included) AS (
+    SELECT id,id=? FROM events WHERE id=?
+    UNION ALL SELECT e.id,f.included OR e.id=? FROM events e JOIN family f ON e.parent=f.id
+  ), own(id) AS (SELECT id FROM family WHERE included OR ? OR id BETWEEN ? AND ?), summary_work(id) AS (
     SELECT id FROM events WHERE kind='task' AND json_extract(data,'$.type')='summary'
     UNION ALL SELECT e.id FROM events e JOIN summary_work w ON e.parent=w.id
-  ) SELECT * FROM events WHERE (id BETWEEN ? AND ? OR id IN (SELECT value FROM json_each(?))
-    OR id IN (SELECT json_extract(data,'$.source') FROM events WHERE kind='notice' AND id IN (SELECT value FROM json_each(?))))
+  ) SELECT id,parent,key,kind,text,image,created,json_remove(data,'$.raw','$.request','$.message.response') data
+    FROM published events WHERE (id BETWEEN ? AND ? OR id IN own
+    OR id IN (SELECT json_extract(data,'$.source') FROM events WHERE kind='notice' AND id IN own))
     AND (? OR (text IS NOT NULL AND kind IN ('task','context','result','return','output','fiber','uncertain','world','artifact')
       AND id NOT IN summary_work
-      AND (kind<>'result' OR ((json_extract(data,'$.text')<>'' OR json_extract(data,'$.state')<>'done')
-        AND NOT EXISTS(SELECT 1 FROM events returned WHERE returned.parent=events.parent AND returned.kind='return'
-          AND (json_extract(events.data,'$.state')='done' OR json_extract(returned.data,'$.state')<>'done'))))
+      AND (kind<>'result' OR ((json_extract(data,'$.text')<>'' OR json_extract(data,'$.state')<>'done') AND publication IS NOT NULL))
       AND (kind<>'world' OR json_extract(data,'$.text')<>''))) ORDER BY id`
-    [(max (bounds :start) (inherited :start)) (min (bounds :end) (inherited :end)) (schema/encode own) (schema/encode own) (if all 1 0)]))
+    [(task :id) (root :id) (task :id) (if (get-in task [:data :input :recovery]) 1 0) (bounds :start) (bounds :end)
+     (max (bounds :start) (inherited :start)) (min (bounds :end) (inherited :end)) (if all 1 0)]))
 
 (defn- semantic-window [s anchor rows]
   (def config (s :config))
@@ -95,8 +96,12 @@ Use concise bullets. Omit repetition. Invent no facts or citations.`)
             (def text (row :excerpt))
             (var end (min 3072 (length text)))
             (while (and (< end (length text)) (<= 0x80 (text end) 0xbf)) (++ end))
-            (merge row {:data (merge (schema/project (row :data) [:author :at :input]) {:text (string (string/slice text 0 end) "\n[excerpt]")})}))
-            (store/query s `SELECT e.*,snippet(tokens,0,'','',' … ',64) excerpt FROM temp.tokens JOIN events e ON e.id=tokens.rowid
+            (merge (schema/project row [:id :parent :kind :created :excerpt])
+              {:data (merge (schema/project row [:author :at])
+                {:input (when (row :input) (json/decode (row :input) true)) :text (string (string/slice text 0 end) "\n[excerpt]")})}))
+            (store/query s `SELECT e.id,e.parent,e.kind,e.created,json_extract(e.data,'$.author') author,
+              json_extract(e.data,'$.at') at,json_extract(e.data,'$.input') input,snippet(tokens,0,'','',' … ',64) excerpt
+              FROM temp.tokens JOIN events e ON e.id=tokens.rowid
               WHERE tokens MATCH ? ORDER BY rank,e.id LIMIT ?`
               [expression (config :candidates)])))
           (if (= 0 (length selected)) []

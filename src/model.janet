@@ -47,7 +47,7 @@
 (defn profile [s reference role]
   (assert (string? reference) (string "configure a " role " model"))
   (def config (s :config))
-  (def key [reference role (config :thinking) (config :web-search) (schema/encode (config :providers))])
+  (def key [reference role (config :thinking) (config :web-search)])
   (or ((s :profiles) key)
     (do
       (def split (string/find ":" reference))
@@ -101,23 +101,86 @@
         :tools (array/concat @[] (if (capabilities :tools) [tool] []) (if (and (= role :chat) (config :web-search)) (endpoint :web-tools) []))}))
       (put (s :profiles) key selected) selected)))
 
-(defn call [s inquiry key &opt profiled]
-  (def task (dyn :zinc/task))
-  (def config (s :config))
-  (def role (get inquiry :role "chat"))
-  (assert (index-of role ["chat" "rerank"]) "unknown model role")
-  (def identity (string "model:" (task :id) ":" key))
-  (def prior (first (store/query s "SELECT * FROM events WHERE key=?" [identity])))
-  (def recorded (when prior (store/result s (prior :id))))
-  (def saved (when prior (store/restore s (prior :image))))
-  (def input (if saved (saved :input) inquiry))
-  (var selected (if saved (saved :selected) profiled))
+(defn complete [s admission]
+  (def recorded (store/result s (admission :id)))
   (if recorded
     (do (when (get-in recorded [:data :error]) (error (get-in recorded [:data :error])))
         (merge (recorded :data) {:event (recorded :id)}))
     (do
-      (when (and prior (first (store/query s "SELECT id FROM events WHERE parent=? AND kind='dispatch'" [(prior :id)])))
-        (error {:code "Blocked" :message "Dispatched inference has no committed outcome; reconcile before repeating." :context {:operation (prior :id)}}))
+      (when (first (store/query s "SELECT id FROM events WHERE parent=? AND kind='dispatch'" [(admission :id)]))
+        (error {:code "Blocked" :message "Dispatched inference has no committed outcome; reconcile before repeating." :context {:operation (admission :id)}}))
+      (def config (s :config))
+      (def selected (store/restore s (admission :image)))
+      (assert (selected :reference) "finish admitted inference under its original installation before upgrading")
+      (def role (get-in admission [:data :role]))
+      (def turn (get-in admission [:data :turn]))
+      (def checks (get-in admission [:data :checks]))
+      (store/append s (admission :id) "dispatch" {})
+      (def raw (try (provider/request config selected (selected :path) (get-in admission [:data :request :body]))
+        ([err fiber]
+          (def failure (schema/diagnostic "ProviderFailed" err fiber))
+          (def failure (merge failure {:context (merge (get failure :context {}) {:operation (admission :id)})}))
+          (when (= "failed" (get-in failure [:context :outcome]))
+            (store/append s (admission :id) "result" {:type "model" :state "failed" :role role :turn turn :error failure}
+              (string "result:" (admission :id))))
+          (error failure))))
+      (def outcome (try
+        (do
+          (def value (if (= role "rerank") raw (provider/decode selected raw)))
+          (when-let [usage (value :usage)]
+            (assert (dictionary? usage) "invalid usage report")
+            (each key [:prompt_tokens :completion_tokens :total_tokens]
+              (when (has-key? usage key) (assert (and (int? (usage key)) (>= (usage key) 0)) "invalid usage counter"))))
+          (def result (if (= role "rerank")
+            (do
+              (assert (indexed? (value :results)) "invalid rerank results")
+              (def seen @{})
+              (each ranked (value :results)
+                (assert (and (int? (ranked :index)) (<= 0 (ranked :index) (- (checks :documents-count) 1))
+                  (not (seen (ranked :index))) (number? (ranked :relevance_score))
+                  (< (math/abs (ranked :relevance_score)) math/inf)) "invalid rerank result")
+                (put seen (ranked :index) true))
+              (assert (= (length seen) (checks :documents-count)) "incomplete rerank results")
+              {:results (sorted (value :results) |(> ($0 :relevance_score) ($1 :relevance_score))) :status "complete" :text ""})
+            (let [message (value :message) status (value :status)
+                  calls (if (index-of status ["tools" "complete"]) (get message :tool_calls []) [])]
+              (assert (and (dictionary? message) (= "assistant" (message :role)) (indexed? calls)) "invalid assistant response")
+              (def seen @{})
+              (def work (map (fn [call]
+                (assert (and (string? (call :id)) (> (length (call :id)) 0) (not (seen (call :id)))) "invalid tool identity")
+                (put seen (call :id) true)
+                (try
+                  (do
+                    (assert (and (= "function" (call :type))
+                      (= "self" (get-in call [:function :name])) (checks :self-tool)) "unavailable tool")
+                    (def arguments (schema/request (json/decode (get-in call [:function :arguments]) true true) [:code]))
+                    (assert (arguments :code) "missing Janet source")
+                    (merge {:id (call :id)} arguments))
+                  ([err fiber] {:id (call :id) :error (schema/diagnostic "InvalidToolCall" err fiber)}))) calls))
+              {:message message :tools work :text (text message)
+               :finish-reason (value :finish-reason) :status status})))
+          (merge result {:type "model" :state "done" :role role :turn turn :usage (value :usage) :raw raw
+            :reasoning-visible (not= "none" (config :thinking))}))
+        ([err fiber]
+          (def failure (schema/diagnostic "InvalidModelResponse" err fiber))
+          {:type "model" :state "failed" :role role :turn turn :raw raw
+           :error (merge failure {:context (merge (get failure :context {})
+             {:operation (admission :id) :provider (selected :provider) :model (selected :id)
+              :protocol (selected :protocol) :response-id (raw :id)})})})))
+      (def result
+        (or (store/result s (admission :id)) (store/append s (admission :id) "result" outcome (string "result:" (admission :id)))))
+      (when (get-in result [:data :error]) (error (get-in result [:data :error])))
+      (merge (result :data) {:event (result :id)}))))
+
+(defn call [s input key &opt selected]
+  (def task (dyn :zinc/task))
+  (def config (s :config))
+  (def role (get input :role "chat"))
+  (assert (index-of role ["chat" "rerank"]) "unknown model role")
+  (def identity (string "model:" (task :id) ":" key))
+  (def prior (first (store/query s "SELECT * FROM events WHERE key=?" [identity])))
+  (if prior (complete s prior)
+    (do
       (default selected (profile s (get input :model (config (if (= role "rerank") :rerank :chat))) (keyword role)))
       (def size (if (= role "rerank") (store/estimate (schema/encode input))
         (+ (estimate (input :messages) (selected :reference)) (store/estimate (schema/encode (input :tools))))))
@@ -136,68 +199,14 @@
           (if (= 0 (config :output)) math/inf (config :output)) (get input :output math/inf))))
       (unless (= role "rerank")
         (assert (and (> maximum 0) (<= size capacity)) "model input ceiling exhausted"))
-      (def wire (if prior (get-in prior [:data :request :body]) (provider/encode config selected input maximum)))
-      (def admission (store/transact s (or prior (store/append s (task :id) "model"
+      (def admission (store/transact s (store/append s (task :id) "model"
         {:input (schema/project input [:messages :tools :query :documents :views] true) :views (input :views)
-         :request {:method "POST" :url (string (get-in config [:providers (keyword (selected :provider)) :url]) (selected :path)) :body wire}
-         :estimate size :context window :capacity capacity :output maximum :turn (get input :turn false) :role role} identity
-        (store/image s {:input input :selected selected :key key})))))
-      (store/append s (admission :id) "dispatch" {})
-      (def raw (try (provider/request config selected (selected :path) wire)
-        ([err fiber]
-          (def failure (schema/diagnostic "ProviderFailed" err fiber))
-          (def failure (merge failure {:context (merge (get failure :context {}) {:operation (admission :id)})}))
-          (when (= "failed" (get-in failure [:context :outcome]))
-            (store/append s (admission :id) "result" {:type "model" :state "failed" :role role :turn (get input :turn false) :error failure}
-              (string "result:" (admission :id))))
-          (error failure))))
-      (def outcome (try
-        (do
-          (def value (if (= role "rerank") raw (provider/decode selected raw)))
-          (when-let [usage (value :usage)]
-            (assert (dictionary? usage) "invalid usage report")
-            (each key [:prompt_tokens :completion_tokens :total_tokens]
-              (when (has-key? usage key) (assert (and (int? (usage key)) (>= (usage key) 0)) "invalid usage counter"))))
-          (def result (if (= role "rerank")
-            (do
-              (assert (indexed? (value :results)) "invalid rerank results")
-              (def seen @{})
-              (each ranked (value :results)
-                (assert (and (int? (ranked :index)) (<= 0 (ranked :index) (- (length (input :documents)) 1))
-                  (not (seen (ranked :index))) (number? (ranked :relevance_score))
-                  (< (math/abs (ranked :relevance_score)) math/inf)) "invalid rerank result")
-                (put seen (ranked :index) true))
-              (assert (= (length seen) (length (input :documents))) "incomplete rerank results")
-              {:results (sorted (value :results) |(> ($0 :relevance_score) ($1 :relevance_score))) :status "complete" :text ""})
-            (let [message (value :message) status (value :status)
-                  calls (if (index-of status ["tools" "complete"]) (get message :tool_calls []) [])]
-              (assert (and (dictionary? message) (= "assistant" (message :role)) (indexed? calls)) "invalid assistant response")
-              (def seen @{})
-              (def work (map (fn [call]
-                (assert (and (string? (call :id)) (> (length (call :id)) 0) (not (seen (call :id)))) "invalid tool identity")
-                (put seen (call :id) true)
-                (try
-                  (do
-                    (assert (and (= "function" (call :type))
-                      (= "self" (get-in call [:function :name])) (index-of tool (input :tools))) "unavailable tool")
-                    (def arguments (schema/request (json/decode (get-in call [:function :arguments]) true true) [:code]))
-                    (assert (arguments :code) "missing Janet source")
-                    (merge {:id (call :id)} arguments))
-                  ([err fiber] {:id (call :id) :error (schema/diagnostic "InvalidToolCall" err fiber)}))) calls))
-              {:message message :tools work :text (text message)
-               :finish-reason (value :finish-reason) :status status})))
-          (merge result {:type "model" :state "done" :role role :turn (get input :turn false) :usage (value :usage) :raw raw
-            :reasoning-visible (not= "none" (config :thinking))}))
-        ([err fiber]
-          (def failure (schema/diagnostic "InvalidModelResponse" err fiber))
-          {:type "model" :state "failed" :role role :turn (get input :turn false) :raw raw
-           :error (merge failure {:context (merge (get failure :context {})
-             {:operation (admission :id) :provider (selected :provider) :model (selected :id)
-              :protocol (selected :protocol) :response-id (raw :id)})})})))
-      (def result
-        (or (store/result s (admission :id)) (store/append s (admission :id) "result" outcome (string "result:" (admission :id)))))
-      (when (get-in result [:data :error]) (error (get-in result [:data :error])))
-      (merge (result :data) {:event (result :id)}))))
+         :request {:method "POST" :url (string (get-in config [:providers (keyword (selected :provider)) :url]) (selected :path))
+           :body (provider/encode config selected input maximum)}
+         :estimate size :context window :capacity capacity :output maximum :turn (get input :turn false) :role role
+         :checks {:documents-count (when (= role "rerank") (length (input :documents)))
+                  :self-tool (not (nil? (index-of tool (get input :tools []))))}} identity (store/image s selected))))
+      (complete s admission))))
 
 (defn render [data]
   (def message (or (data :message) {}))

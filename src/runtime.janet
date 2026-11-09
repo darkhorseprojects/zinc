@@ -139,7 +139,7 @@
     (each fiber (ev/all-tasks)
       (unless (or (= fiber owner) (= fiber watcher)) (ev/cancel fiber :execution-ended)))
     (when (fiber/can-resume? watcher) (ev/cancel watcher :finished))
-    (ev/take stopped))
+    (ev/take stopped) (ev/chan-close stopped))
     (def root (ev/go (fiber/new (fn []
       (var form-index nil)
       (def outcome (try
@@ -209,29 +209,25 @@
     (tabseq [[name binding] :pairs bindings] name (schema/project binding [:local :doc]))
     (get-in config [:janet :setup]) snapshot events stop (config :response-bytes) (config :world-bytes)
     (if (= seconds math/inf) 0 (max 0.001 seconds))])
-  (def worker (ev/go (fn []
-    (with-env @{} (ev/thread evaluate arguments (keyword "") events))
-    (ev/give events {:kind :joined}) nil) nil finished))
-  (def owner (fiber/root)) (def checked (ev/chan 1))
-  (def checker (ev/go (fn []
-    (try (while true (store/check s (script :id)) (ev/sleep store/interval))
-      ([err] (unless (= err :finished) (ev/cancel owner err))))) nil checked))
+  (ev/go (fn [] (with-env @{} (ev/thread evaluate arguments (keyword "") events))) nil finished)
   (defer (do
-    (ev/cancel checker :finished) (ev/take checked) (ev/chan-close checked)
     (unless joined
-      (ev/chan-close events)
       (ev/give stop true)
-      (ev/take finished))
+      (while (not joined)
+        (def [_ channel packet] (ev/select events finished))
+        (if (= channel finished) (set joined true)
+          (when (and (dictionary? packet) (packet :reply)) (ev/chan-close (packet :reply))))))
     (each [fiber done] (pairs waiting)
       (when (fiber/can-resume? fiber) (ev/cancel fiber :execution-ended))
       (ev/take done))
     (each channel [events stop finished] (ev/chan-close channel)))
     (while (not joined)
-      (def packet (ev/take events))
+      (def [_ channel packet] (ev/select events finished))
       (cond
-        (and (dictionary? packet) (= :joined (packet :kind)))
+        (= channel finished)
         (do (set joined true)
-          (assert (= :ok ((ev/take finished) 0)) (schema/diagnostic "ExecutorFailed" (fiber/last-value worker) worker)))
+          (assert (= :ok (packet 0))
+            (schema/diagnostic "ExecutorFailed" (fiber/last-value (packet 1)) (packet 1))))
         (tuple? packet)
         (when (or (not= :ok (packet 0)) (not (nil? (packet 1))))
           (when (not= :ok (packet 0)) (set failure (schema/diagnostic "FiberFailed" (packet 1))))

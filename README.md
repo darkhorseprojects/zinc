@@ -81,9 +81,9 @@ model response -> engine/infer -> atomic script admissions and provider receipts
                  resume caller   wake inference   observe -> Connector -> Discord
 ```
 
-engine/run owns scheduling and lease renewal. runtime/run owns native VM lifetime and result delivery,
-not effect execution. store owns admission, claims, outcomes and post-commit notification. engine/infer
-uses the same committed-change query for eligibility and context. model/call journals inference;
+engine/run owns scheduling and lease renewal; engine execution workers own claim-liveness monitoring.
+runtime/run owns native VM lifetime and result delivery, not effect execution. store owns admission, claims,
+outcomes and post-commit notification. engine/infer uses the same committed-change query for eligibility and context. model/call journals inference;
 provider encodes and decodes Responses or Chat Completions and preserves native reasoning for replay.
 Committed model text is presented immediately, including answers produced before descendants settle.
 The inquiry remains receptive while descendants are unfinished; its terminal result does not repeat the answer.
@@ -163,7 +163,8 @@ work stays exact. Recent replay remains ordered by committed event ID.
 
 Summaries inherit chat and thinking; `summary: {chat: ..., thinking: ...}` overrides only those settings.
 Each node requires one text-only call, with no tools or web search. Completed nodes are reused across
-inquiries. Internal summary work is excluded from ordinary memory. Finish active summaries before upgrading.
+inquiries. Internal summary work is excluded from ordinary memory. Finish active summaries and admitted inference
+under their original installation before upgrading.
 
 Retrieval searches only eligible originals not already present verbatim, within granted history. Scoped
 FTS, concept expansion and fuzzy terms produce deterministic excerpts. Identical query, model and excerpt
@@ -174,10 +175,11 @@ Each candidate records whether it was included, below cutoff, already present, o
 events select the nearest related chat admission by event ID, preferring the earlier on ties. Resolution
 is explicit. Reports show the actual summary graph, recall decisions, usage and exact request.
 
-Images hold deduplicated JSON configuration/model input and native world bytes with matching Janet runtime
-metadata. Claims hold leases, waits and source progress. Terminal claims are removed. FTS is a derived
-index. Successful VM-drain results do not duplicate root returns; unsuccessful settlement remains visible
-in presentation and memory. views, render and memory/expand expose retained originals. Rerank inference
+Images hold deduplicated JSON configuration/model profiles and native world bytes with matching Janet runtime
+metadata. Model admissions retain their exact provider request once, with a compact response-validation manifest.
+Claims hold leases, waits and source progress. Terminal claims are removed. Retrieval FTS tables are connection-local
+and derived; instance configuration removes the unused persistent FTS index. Successful VM-drain results do not
+duplicate root returns; unsuccessful settlement remains visible in presentation and memory. views, render and memory/expand expose retained originals. Rerank inference
 identities include the exact query and ordered document excerpts; cached indices never refer to a different input.
 
 Existing JSON-world installations need an explicit offline image conversion before upgrading. Preserve

@@ -43,17 +43,20 @@
   (try
     (do
       (query s "PRAGMA foreign_keys=ON; PRAGMA busy_timeout=5000; PRAGMA trusted_schema=OFF; PRAGMA temp_store=MEMORY;")
-      (if readonly (query s "PRAGMA query_only=ON")
-        (do
-          (unless temporary (query s "PRAGMA journal_mode=WAL; PRAGMA synchronous=FULL;"))
-          (transact s
-            (if (first (query s "SELECT name FROM sqlite_schema WHERE name='events'"))
-              (assert (and (first (query s "SELECT name FROM pragma_table_info('events') WHERE name='image'"))
-                           (first (query s "SELECT name FROM pragma_table_xinfo('events') WHERE name='text'"))
-                           (not (first (query s "SELECT name FROM pragma_table_info('claims') WHERE name='image'")))
-                           (not (first (query s "SELECT name FROM pragma_table_info('images') WHERE name='runtime'"))))
-                      "incompatible Zinc store; initialize a fresh database")
-              (do (query s layout) (query s "INSERT INTO events(key,kind,data) VALUES('store','store',?)" [(schema/encode {:id (uuid)})]))))))
+      (unless readonly
+        (unless temporary (query s "PRAGMA journal_mode=WAL; PRAGMA synchronous=FULL;"))
+        (transact s
+          (if (first (query s "SELECT name FROM sqlite_schema WHERE name='events'"))
+            (assert (and (first (query s "SELECT name FROM pragma_table_info('events') WHERE name='image'"))
+                         (first (query s "SELECT name FROM pragma_table_xinfo('events') WHERE name='text'"))
+                         (not (first (query s "SELECT name FROM pragma_table_info('claims') WHERE name='image'")))
+                         (not (first (query s "SELECT name FROM pragma_table_info('images') WHERE name='runtime'"))))
+                    "incompatible Zinc store; initialize a fresh database")
+            (do (query s layout) (query s "INSERT INTO events(key,kind,data) VALUES('store','store',?)" [(schema/encode {:id (uuid)})])))))
+      (query s `CREATE TEMP VIEW published AS SELECT e.*,CASE WHEN e.kind<>'result' OR NOT EXISTS(
+        SELECT 1 FROM events r WHERE r.parent=e.parent AND r.kind='return'
+          AND (json_extract(e.data,'$.state')='done' OR json_extract(r.data,'$.state')<>'done')) THEN e.id END publication FROM events e;`)
+      (when readonly (query s "PRAGMA query_only=ON"))
       (put s :identity (get-in (first (query s "SELECT data FROM events WHERE key='store'")) [:data :id])) s)
     ([err] (sql/close (s :db)) (error err))))
 
@@ -88,10 +91,24 @@
   (def row (first (query s "SELECT * FROM events WHERE id=?" [id])))
   (assert row "event unavailable") row)
 
-(defn tree [s id &opt after]
-  (query s `WITH RECURSIVE members(id) AS (
-    SELECT ? UNION ALL SELECT e.id FROM events e JOIN members m ON e.parent=m.id
-  ) SELECT e.* FROM events e JOIN members m ON m.id=e.id WHERE e.id>? ORDER BY e.id` [id (or after 0)]))
+(defn tree [s id &opt after changes]
+  (query s `WITH RECURSIVE members(id,task) AS (
+    SELECT id,CASE WHEN kind='task' THEN id END FROM events WHERE id=?
+    UNION ALL SELECT e.id,CASE WHEN e.kind='task' THEN e.id ELSE m.task END FROM events e JOIN members m ON e.parent=m.id
+  ) SELECT e.id,e.parent,e.key,e.kind,e.text,e.image,e.created,e.publication,
+    CASE WHEN e.kind='model' THEN json_remove(e.data,'$.request') ELSE json_remove(e.data,'$.raw') END data,
+    m.task,json_extract(owner.data,'$.type') AS "task-type",parent.kind AS "parent-kind",
+    CASE WHEN e.kind='result' AND parent.kind='operation' THEN json_object('arguments',json_extract(parent.data,'$.arguments'),
+      'name',json_extract(parent.data,'$.name')) END operation
+    FROM published e JOIN members m ON m.id=e.id LEFT JOIN events owner ON owner.id=m.task LEFT JOIN events parent ON parent.id=e.parent
+    WHERE e.id>? AND (?=0 OR e.kind IN ('return','output','fiber','uncertain','world','artifact','diagnostic','notice')
+      OR (e.kind='result' AND e.parent<>? AND (parent.kind='operation'
+        OR (parent.kind='task' AND json_extract(parent.data,'$.type')<>'summary' AND e.publication IS NOT NULL))))
+    ORDER BY e.id` [id (or after 0) (if changes 1 0) id]))
+
+(defn owners [s rows]
+  (tabseq [row :in (query s "SELECT id,parent,json_remove(data,'$.input') data FROM events WHERE id IN (SELECT value FROM json_each(?))"
+    [(schema/encode (distinct (map |($ :task) rows)))])] (row :id) row))
 
 (defn task [s id]
   (first (query s `WITH RECURSIVE ancestors AS (
@@ -117,17 +134,7 @@
   (or (> (length (pending s id)) 1)
     (first (query s "SELECT id FROM events t WHERE kind='task' AND json_extract(data,'$.input.notify')=? AND NOT EXISTS(SELECT 1 FROM events r WHERE r.parent=t.id AND r.kind='result') LIMIT 1" [id]))))
 
-(defn changes [s id after]
-  (query s `WITH RECURSIVE members(id) AS (
-    SELECT ? UNION ALL SELECT e.id FROM events e JOIN members m ON e.parent=m.id
-  ) SELECT e.* FROM events e JOIN members m ON m.id=e.id LEFT JOIN events owner ON owner.id=e.parent
-    WHERE e.id>? AND (
-      e.kind IN ('return','output','fiber','uncertain','world','artifact','diagnostic','notice') OR
-      (e.kind='result' AND owner.id<>? AND (
-        owner.kind='operation' OR (owner.kind='task' AND json_extract(owner.data,'$.type')<>'summary'
-          AND NOT EXISTS(SELECT 1 FROM events r WHERE r.parent=owner.id AND r.kind='return'
-            AND (json_extract(e.data,'$.state')='done' OR json_extract(r.data,'$.state')<>'done'))))))
-    ORDER BY e.id` [id after id]))
+(defn changes [s id after] (tree s id after true))
 
 (defn check [s id &opt token]
   (default token (dyn :zinc/token))
@@ -167,8 +174,7 @@
           (and parent (index-of kind ["return" "result" "world" "artifact"])) (event s parent)))
         (when-let [target (get-in owner [:data :input :notify])]
           (when (and (not (result s target))
-            (or (not= kind "result")
-              (not (first (query s "SELECT id FROM events WHERE parent=? AND kind='return' AND (?='done' OR json_extract(data,'$.state')<>'done')" [parent (data :state)])))))
+            (get (first (query s "SELECT publication FROM published WHERE id=?" [(row :id)])) :publication))
             (append s target "notice" {:source (row :id)} (string "notice:" target ":" (row :id))))) row))))
 
 (defn advance [s data]
@@ -221,6 +227,7 @@
 
 (defn configure [s]
   (transact s
+    (query s "DROP TRIGGER IF EXISTS event_index; DROP TABLE IF EXISTS event_words; DROP TABLE IF EXISTS event_fts;")
     (each profile (filter identity [(s :config) (get-in s [:config :agent])])
     (each [name spec] (pairs (profile :worlds))
       (unless (first (query s "SELECT name FROM worlds WHERE name=?" [(string name)]))

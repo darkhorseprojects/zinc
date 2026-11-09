@@ -78,8 +78,7 @@
             {:type "model" :state "done" :role "chat" :turn true :status "continue" :tools [] :text ""
              :message {:role "assistant" :content "[Inference was interrupted before its response was committed. No tool calls from that response were admitted. Continue from committed execution evidence.]"}}
             (string "result:" (unknown :id))))
-          (let [saved (store/restore s (unknown :image))]
-            (return turn (model/call s (saved :input) (saved :key) (saved :selected))))))
+          (return turn (model/complete s unknown))))
       (def rounds (((store/query s "SELECT count(*) n FROM events WHERE parent=? AND kind='model' AND json_extract(data,'$.turn')=1" [(inquiry :id)]) 0) :n))
       (assert (< rounds (config :rounds)) "model round limit exhausted")
       (def selected (model/profile s (config :chat) :chat))
@@ -93,16 +92,14 @@
       (def capacity (math/floor (/ (* window (config :context-percent)) 100)))
       (def scope (store/tree s scope-id))
       (def changes (tabseq [row :in (store/changes s scope-id 0)
-        :unless (= "summary" (get-in (store/task s (row :id)) [:data :type]))] (row :id) true))
+        :unless (= "summary" (row :task-type))] (row :id) true))
       (def replay (seq [row :in scope :let [data (row :data)
         message (cond
           (and (index-of (row :kind) ["result" "receipt"])
-            (= (inquiry :id) (get (store/task s (row :id)) :id))
+            (= (inquiry :id) (row :task))
             (or (= "receipt" (row :kind)) (and (= "model" (data :type)) (data :turn)))) (data :message)
           (changes (row :id)) {:role "user" :content (string "Committed execution event:\n"
-            (memory/render s row)
-            (when (= "result" (row :kind)) (let [effect (store/event s (row :parent))]
-              (when (= "operation" (effect :kind)) (schema/encode (schema/project (effect :data) [:name :arguments]))))))})]
+            (memory/render s row) (row :operation))})]
         :when message] [row message]))
       (sort-by |(let [row ($ 0)] [(if (= "receipt" (row :kind)) (row :parent) (row :id)) (row :id)]) replay)
       (def previous (last (filter |(and (= "model" ($ :kind)) (= (inquiry :id) ($ :parent)) (get-in $ [:data :turn])) scope)))
@@ -223,40 +220,46 @@
     (def saved (store/restore s (execution :image)))
     (put s :signals signals)
     (with-dyns [:zinc/task execution :zinc/token (claim :token) :zinc/call s]
-      (try
-        (do
-          (store/check s (execution :id))
-          (def current (if (and (saved :inference) (not (config :inference)) (config :agent)) (config :agent) config))
-          (put s :config (schema/authorize current saved))
-          (def available (unless (= "summary" (get-in execution [:data :type]))
-            (runtime/definitions (s :config) bindings)))
-          (if (= "operation" (execution :kind)) (invoke s execution available)
-            (case (get-in execution [:data :type])
-              "inquiry" (infer s execution available)
-              "summary" (store/finish s (execution :id) "done" (memory/summarize s execution))
-              "script"
-              (if (get-in (store/progress s (execution :id)) [:data :started])
-                (do
-                  (store/uncertain s (execution :id)
-                    {:code "ContinuationLost" :message "The VM was interrupted. Inspect committed effects and source progress, then continue only the remaining work in a new script. Locals and native waits are unknown; do not replay the original source."
-                     :context {:script (execution :id) :progress (get (store/progress s (execution :id)) :data)}})
-                  (def returned (store/outcome s (execution :id)))
-                  (store/finish s (execution :id) "failed" (get-in returned [:data :value])
-                    {:code "ContinuationLost" :message "VM settlement and world publication were interrupted. Model-directed continuation required."}))
-                (do
-                  (store/advance s {:started true :form 0})
-                  (def outcome (runtime/run s execution available))
-                  (store/finish s (execution :id) (outcome :state) (outcome :value) (outcome :error))))
-              (error "unsupported execution type"))))
-        ([err fiber]
-          (when (and (not (store/result s (execution :id)))
-            (first (store/query s "SELECT task FROM claims WHERE task=? AND token=? AND expires>?" [(execution :id) (claim :token) (os/clock)])))
-            (cond
-              (= "Yield" (get err :code)) (store/advance s {:wait (get-in err [:context :wait])})
-              (and (= "inquiry" (get-in execution [:data :type]))
-                (= "unknown" (get-in err [:context :outcome]))) (store/advance s {})
-              (not (index-of (get err :code) ["TaskClosed" "TaskReplaced"]))
-              (store/finish s (execution :id) "failed" nil (schema/diagnostic "ExecutionFailed" err fiber)))))))))
+      (def owner (fiber/root)) (def checked (ev/chan 1))
+      (def checker (ev/go (fn []
+        (try (while true (store/check s (execution :id)) (ev/sleep store/interval))
+          ([err] (unless (= err :finished) (ev/cancel owner err))))) nil checked))
+      (defer (do
+        (when (fiber/can-resume? checker) (ev/cancel checker :finished))
+        (ev/take checked) (ev/chan-close checked))
+        (try
+          (do
+            (store/check s (execution :id))
+            (def current (if (and (saved :inference) (not (config :inference)) (config :agent)) (config :agent) config))
+            (put s :config (schema/authorize current saved))
+            (def available (unless (= "summary" (get-in execution [:data :type]))
+              (runtime/definitions (s :config) bindings)))
+            (if (= "operation" (execution :kind)) (invoke s execution available)
+              (case (get-in execution [:data :type])
+                "inquiry" (infer s execution available)
+                "summary" (store/finish s (execution :id) "done" (memory/summarize s execution))
+                "script"
+                (if (get-in (store/progress s (execution :id)) [:data :started])
+                  (do
+                    (store/uncertain s (execution :id)
+                      {:code "ContinuationLost" :message "The VM was interrupted. Inspect committed effects and source progress, then continue only the remaining work in a new script. Locals and native waits are unknown; do not replay the original source."
+                       :context {:script (execution :id) :progress (get (store/progress s (execution :id)) :data)}})
+                    (def returned (store/outcome s (execution :id)))
+                    (store/finish s (execution :id) "failed" (get-in returned [:data :value])
+                      {:code "ContinuationLost" :message "VM settlement and world publication were interrupted. Model-directed continuation required."}))
+                  (do
+                    (store/advance s {:started true :form 0})
+                    (def outcome (runtime/run s execution available))
+                    (store/finish s (execution :id) (outcome :state) (outcome :value) (outcome :error))))
+                (error "unsupported execution type"))))
+          ([err fiber]
+            (when (first (store/query s "SELECT task FROM claims WHERE task=? AND token=? AND expires>?" [(execution :id) (claim :token) (os/clock)]))
+              (cond
+                (= "Yield" (get err :code)) (store/advance s {:wait (get-in err [:context :wait])})
+                (and (= "inquiry" (get-in execution [:data :type]))
+                  (= "unknown" (get-in err [:context :outcome]))) (store/advance s {})
+                (not (index-of (get err :code) ["TaskClosed" "TaskReplaced"]))
+                (store/finish s (execution :id) "failed" nil (schema/diagnostic "ExecutionFailed" err fiber))))))))))
 
 (defn run [config root-id file updates]
   (def s (store/open config nil file))
@@ -274,7 +277,7 @@
     (while true
       (def now (os/clock))
       (each [id running] (pairs active)
-        (when (and (not (store/result s id)) (>= now (running :renew)))
+        (when (>= now (running :renew))
           (when (first (store/query s "UPDATE claims SET expires=? WHERE task=? AND token=? AND expires>? RETURNING task"
             [(+ now (config :lease-seconds)) id (running :token) now]))
             (put running :renew (+ now (/ (config :lease-seconds) 3))))))
@@ -283,34 +286,30 @@
         (def id (execution :id))
         (when-let [deadline (get-in execution [:data :expires])]
           (when (<= deadline now) (store/finish s id "failed" nil {:code "DeadlineExceeded" :message "Execution deadline expired."})))
-        (when (and (not (active id)) (not (store/result s id)) (ready? s execution))
+        (when (and (not (active id)) (ready? s execution))
           (when-let [claim (store/claim s id)]
-            (def worker (ev/go (fn [[execution claim]]
+            (ev/go (fiber/new (fn [arguments]
               (def done (ev/thread-chan 1))
               (defer (ev/chan-close done)
-                (with-env @{} (ev/thread execute [config execution claim file (s :signals)] (keyword "") done))
+                (with-env @{} (ev/thread execute arguments (keyword "") done))
                 (def packet (ev/take done))
-                (assert (= :ok (packet 0)) (packet 1)))
-              (execution :id)) [execution claim] finished))
-            (put active id @{:token (claim :token) :fiber worker :renew (+ now (/ (config :lease-seconds) 3))}))))
+                (assert (= :ok (packet 0)) (packet 1)))) :t @{:task-id id})
+              [config execution claim file (s :signals)] finished)
+            (put active id @{:token (claim :token) :renew (+ now (/ (config :lease-seconds) 3))}))))
       (when (and (= 0 (length pending)) (= 0 (length active))) (break))
       (def [_ channel packet] (ev/select finished wake))
       (when (= channel finished)
-        (def [status fiber] packet)
-        (def id (first (find |(= fiber (($ 1) :fiber)) (pairs active))))
+        (def [status fiber id] packet)
         (store/query s "UPDATE claims SET token=NULL,expires=0 WHERE task=? AND token=?" [id ((active id) :token)])
         (put active id nil)
         (assert (= :ok status) (schema/diagnostic "ExecutorFailed" (fiber/last-value fiber) fiber))))))
 
-(defn presentation [s row]
-  (when-let [owner (store/task s (row :id))]
-    (def root (store/root s (owner :id))) (def data (row :data))
-    (def parent (when (row :parent) (store/event s (row :parent))))
+(defn- presentation [s row owner root]
+  (when owner
+    (def data (row :data))
     (def source (when (and (= "task" (row :kind)) (= "script" (data :type))) (get-in data [:input :code])))
-    (def effect (and (= "result" (row :kind)) (= "operation" (get parent :kind))))
-    (def terminal (and (= "result" (row :kind)) (= (owner :id) (row :parent))
-      (not (first (store/query s "SELECT id FROM events WHERE parent=? AND kind='return'
-        AND (?='done' OR json_extract(data,'$.state')<>'done')" [(owner :id) (data :state)])))))
+    (def effect (and (= "result" (row :kind)) (= "operation" (row :parent-kind))))
+    (def terminal (and (= "result" (row :kind)) (= (owner :id) (row :parent)) (row :publication)))
     (def body (cond
       (and (= "result" (row :kind)) (= "model" (data :type))
         (= "chat" (data :role)) (not (data :error)))
@@ -330,24 +329,22 @@
        :call (or (data :tool) (get-in owner [:data :call]) :null)
        :parent (or (row :parent) :null) :status (if source "accepted" (get data :status (get data :state "complete"))) :world (get-in owner [:data :world])
        :language (cond (or effect (data :error)) "json" source "clojure"
-         (and terminal (= "inquiry" (get-in owner [:data :type]))) :null
          (and (or terminal (= "return" (row :kind))) (not (string? (data :value)))) "json"
          (or terminal (index-of (row :kind) ["return" "output" "fiber"])) "text" :null)
        :persist (not (s :temporary)) :sequence (row :id)
-       :body (if (and (data :error) (not effect)) (schema/encode {:error (data :error)}) body) :diagnostic (data :error)})))
+       :body body :diagnostic (data :error)})))
 
 (defn observe [s root after emit updates &opt until-done]
   (var cursor after)
+  (def origin (store/root s (root :id)))
   (while true
     (def pending (and until-done (> (length (store/pending s (root :id))) 0)))
-    (each row (store/tree s (root :id) cursor)
-      (when (and (= (row :parent) (root :id))
-        (or (= "return" (row :kind))
-          (and (= "result" (row :kind))
-            (not (first (store/query s "SELECT id FROM events WHERE parent=? AND kind='return'
-              AND (?='done' OR json_extract(data,'$.state')<>'done')" [(root :id) (get-in row [:data :state])]))))))
+    (def rows (store/tree s (root :id) cursor))
+    (def owners (store/owners s rows))
+    (each row rows
+      (when (and (= (row :parent) (root :id)) (row :publication) (index-of (row :kind) ["return" "result"]))
         (emit (merge {:type "outcome" :script (root :id) :store (s :identity)} (row :data))))
-      (when-let [frame (presentation s row)] (emit frame))
+      (when-let [frame (presentation s row (owners (row :task)) origin)] (emit frame))
       (set cursor (row :id)))
     (when (and until-done (not pending)) (break))
     (ev/take updates))

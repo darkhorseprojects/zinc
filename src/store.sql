@@ -27,9 +27,4 @@ CREATE TABLE worlds(
   head INTEGER NOT NULL REFERENCES events(id),
   epoch INTEGER NOT NULL DEFAULT 0
 ) STRICT;
-CREATE VIRTUAL TABLE event_fts USING fts5(text,content='events',content_rowid='id',tokenize='unicode61 remove_diacritics 0');
-CREATE VIRTUAL TABLE event_words USING fts5vocab(event_fts,'row');
-CREATE TRIGGER event_index AFTER INSERT ON events WHEN new.text IS NOT NULL AND new.text<>'' BEGIN
-  INSERT INTO event_fts(rowid,text) VALUES(new.id,new.text);
-END;
 PRAGMA user_version=1;
