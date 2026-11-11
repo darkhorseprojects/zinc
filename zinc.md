@@ -4,6 +4,14 @@ Admission confirms acceptance, not completion. Execution results arrive automati
 do not poll for them. Host calls suspend only their calling fiber. A root return
 neither waits for nor cancels other fibers or descendants.
 
+Use self/append for non-actionable source information, self/queue for queued
+work, and self for immediate independent work. These return admissions, not
+completion; self/wait explicitly waits for a root outcome.
+
+Use memory/summarize with optional inclusive start/end points and optional actual
+summary text, never generation instructions. memory/expand returns original
+source unchanged; memory/invalidate invalidates the associated summary.
+
 Return structured results. Print user-facing text. To print tables or arrays, use
 `(printf "%j" value)`, not `(string value)`.
 

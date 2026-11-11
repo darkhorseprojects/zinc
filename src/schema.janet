@@ -8,8 +8,8 @@
    :worlds {:type :dictionary :default {:main {}} :values {:type :dictionary :fields {:from {:type :string :optional true}}}}
    :instructions {:type :string :absolute true}
    :identity {:type :string}
+   :deployment {:type :string :optional true}
    :agent {:type :dictionary :optional true}
-   :caller {:type :dictionary :optional true}
    :imports {:type :dictionary :default {}}
    :ephemeral {:type :boolean :default false}
    :inference {:type :boolean :default true}
@@ -77,7 +77,7 @@
    :task-depth {:type :integer :default 8 :minimum 1}
    :seconds {:type :integer :default 120 :minimum 0 :unlimited true}
    :run-seconds {:type :integer :default 0 :minimum 0 :unlimited true}
-   :lease-seconds {:type :integer :default 30 :minimum 3}
+   :pending-requests {:type :integer :default 32 :minimum 1}
    :http-ms {:type :integer :default 600000 :minimum 0 :unlimited true}
    :journal-bytes {:type :integer :default 67108864 :minimum 4096}
    :source-bytes {:type :integer :default 1048576 :minimum 1}
@@ -100,6 +100,7 @@
 (def inputs
   {:text {:type :string} :code {:type :string} :author {:type :string} :at {:type :string}
    :request {:type :string} :memory_range {:type :dictionary} :images {:type :array} :world {:type :string}
+   :lane {:type :string} :queued {:type :boolean} :replace {:type :boolean} :connector {:type :dictionary} :store {:type :string} :session {:type :string}
    :deadline {:type :number}
    :notify {:type :integer :minimum 1}
    :parent {:type :integer :minimum 0 :option "parent" :description "History attachment event; 0 selects empty history"}
@@ -183,7 +184,7 @@
     (assert (> (length matches) 0) (string "unknown selection: " selection)) matches))))
 
 (defn configuration [supplied &opt discovery]
-  (def config (validate fields supplied discovery))
+  (def config (validate fields (json/decode (encode supplied) true) discovery))
   (when (config :context-quota) (assert (<= (config :summary-quota) (config :context-quota)) "summary quota exceeds context quota"))
   (assert (has-key? (config :worlds) (keyword (config :world))) "selected world is not granted")
   (when (config :agent)
@@ -267,7 +268,7 @@
   (each key (keys value) (assert (index-of key selected) (string "unknown request field " key)))
   (each key [:text :code :request :author :at :world]
     (when (has-key? value key) (assert (and (string? (value key)) (> (length (value key)) 0) (not (string/find "\0" (value key)))) "invalid request text")))
-  (each key [:persist] (when (has-key? value key) (assert (boolean? (value key)) "invalid request flag")))
+  (each key [:persist :queued :replace :inspect] (when (has-key? value key) (assert (boolean? (value key)) "invalid request flag")))
   (when (has-key? value :deadline)
     (assert (and (number? (value :deadline)) (< (math/abs (value :deadline)) math/inf)) "invalid deadline"))
   (when (value :images)

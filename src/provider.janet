@@ -1,7 +1,7 @@
 (import spork/json :as json)
 (import spork/utf8 :as utf8)
 (import ./schema)
-(import ./io)
+(import ./effects)
 
 (defn encode [config selected input maximum]
   (def endpoint (get-in config [:providers (keyword (selected :provider))]))
@@ -77,7 +77,7 @@
   (var terminal nil) (var response nil) (var confirmed false)
   (try
     (do
-      (set response (io/request config endpoint (if body "POST" "GET") path body
+      (set response (effects/request config endpoint (if body "POST" "GET") path body
         (when streaming
           (fn [chunk]
             (each byte (string/bytes chunk)

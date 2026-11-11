@@ -6,28 +6,6 @@
 (import ./store)
 (import ./schema)
 
-(defn read-call [stream limit]
-  (assert (and (int? limit) (<= 1 limit 0x7fffffff)) "invalid frame limit")
-  (def bytes @"") (var chunk nil)
-  (while (set chunk (:read stream (min 4096 (+ 1 (- limit (length bytes))))))
-    (buffer/push-string bytes chunk)
-    (assert (<= (length bytes) limit) "frame exceeds byte limit"))
-  (def newline (string/find "\n" bytes))
-  (assert (and newline (= newline (- (length bytes) 1))) "one call and EOF required")
-  (assert (utf8/is-valid? bytes) "invalid UTF-8")
-  (def value (json/decode (string/slice bytes 0 newline) true))
-  (assert (and (dictionary? value)
-    (= (tuple/slice (sorted (keys value))) [:method :params :type :version])
-    (= 1 (value :version)) (= "call" (value :type))
-    (string? (value :method)) (> (length (value :method)) 0)) "invalid call envelope")
-  value)
-
-(defn send [stream value limit]
-  (def bytes (string (schema/encode value) "\n"))
-  (assert (and (<= (length bytes) limit) (utf8/is-valid? bytes)) "frame exceeds byte limit")
-  (:write stream bytes)
-  (when (get stream :flush) (:flush stream)))
-
 (defn process [argv environment input limit seconds &opt diagnostics]
   (def child (os/spawn argv :pe (merge environment {:in :pipe :out :pipe :err (if diagnostics :pipe :out)})))
   (defer (do (when (nil? (get child :return-code)) (try (os/proc-kill child) ([err] nil))) (os/proc-close child))

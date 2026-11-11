@@ -46,13 +46,9 @@
       (unless readonly
         (unless temporary (query s "PRAGMA journal_mode=WAL; PRAGMA synchronous=FULL;"))
         (transact s
-          (if (first (query s "SELECT name FROM sqlite_schema WHERE name='events'"))
-            (assert (and (first (query s "SELECT name FROM pragma_table_info('events') WHERE name='image'"))
-                         (first (query s "SELECT name FROM pragma_table_xinfo('events') WHERE name='text'"))
-                         (not (first (query s "SELECT name FROM pragma_table_info('claims') WHERE name='image'")))
-                         (not (first (query s "SELECT name FROM pragma_table_info('images') WHERE name='runtime'"))))
-                    "incompatible Zinc store; initialize a fresh database")
-            (do (query s layout) (query s "INSERT INTO events(key,kind,data) VALUES('store','store',?)" [(schema/encode {:id (uuid)})])))))
+          (unless (first (query s "SELECT name FROM sqlite_schema WHERE name='events'"))
+            (query s layout)
+            (query s "INSERT INTO events(key,kind,data) VALUES('store','store',?)" [(schema/encode {:id (uuid)})]))))
       (query s `CREATE TEMP VIEW published AS SELECT e.*,CASE WHEN e.kind<>'result' OR NOT EXISTS(
         SELECT 1 FROM events r WHERE r.parent=e.parent AND r.kind='return'
           AND (json_extract(e.data,'$.state')='done' OR json_extract(r.data,'$.state')<>'done')) THEN e.id END publication FROM events e;`)
@@ -73,7 +69,8 @@
         (query s "INSERT INTO images SELECT * FROM archive.images WHERE hash IN (SELECT image FROM archive.events)")
         (query s "INSERT INTO events(id,parent,key,kind,data,image,created) SELECT id,parent,key,kind,data,image,created FROM archive.events WHERE key IS NOT 'store' ORDER BY id")
         (query s "INSERT INTO worlds SELECT * FROM archive.worlds"))
-      (query s "DETACH DATABASE archive") s)
+      (query s "DETACH DATABASE archive")
+      (put s :floor (((query s "SELECT max(id) id FROM events") 0) :id)) s)
     ([err] (close s) (error err))))
 
 (defn image [s value &opt encoded]
@@ -93,7 +90,7 @@
 
 (defn tree [s id &opt after changes]
   (query s `WITH RECURSIVE members(id,task) AS (
-    SELECT id,CASE WHEN kind='task' THEN id END FROM events WHERE id=?
+    SELECT id,CASE WHEN kind='task' THEN id END FROM events WHERE id=? OR (? IS NULL AND parent IS NULL AND kind='task' AND id>?)
     UNION ALL SELECT e.id,CASE WHEN e.kind='task' THEN e.id ELSE m.task END FROM events e JOIN members m ON e.parent=m.id
   ) SELECT e.id,e.parent,e.key,e.kind,e.text,e.image,e.created,e.publication,
     CASE WHEN e.kind='model' THEN json_remove(e.data,'$.request') ELSE json_remove(e.data,'$.raw') END data,
@@ -104,7 +101,7 @@
     WHERE e.id>? AND (?=0 OR e.kind IN ('return','output','fiber','uncertain','world','artifact','diagnostic','notice')
       OR (e.kind='result' AND e.parent<>? AND (parent.kind='operation'
         OR (parent.kind='task' AND json_extract(parent.data,'$.type')<>'summary' AND e.publication IS NOT NULL))))
-    ORDER BY e.id` [id (or after 0) (if changes 1 0) id]))
+    ORDER BY e.id` [id id (get s :floor 0) (or after 0) (if changes 1 0) id]))
 
 (defn owners [s rows]
   (tabseq [row :in (query s "SELECT id,parent,json_remove(data,'$.input') data FROM events WHERE id IN (SELECT value FROM json_each(?))"
@@ -124,11 +121,22 @@
 (defn progress [s id] (first (query s "SELECT data FROM claims WHERE task=?" [id])))
 (defn outcome [s id] (first (query s "SELECT * FROM events WHERE parent=? AND kind IN ('return','result') ORDER BY id LIMIT 1" [id])))
 
-(defn pending [s id]
+(defn handle [s task]
+  {:script (task :id) :store (s :identity) :request (get-in task [:data :request]) :persist (not (s :temporary))})
+
+(defn work [s &opt lane]
+  (query s `SELECT e.* FROM events e WHERE e.kind='task' AND e.parent IS NULL AND e.id>?
+    AND (? IS NULL OR json_extract(e.data,'$.input.lane')=?)
+    AND NOT EXISTS(SELECT 1 FROM events r WHERE r.parent=e.id AND r.kind='result') ORDER BY e.id`
+    [(get s :floor 0) lane lane]))
+
+(defn pending [s &opt id]
   (query s `WITH RECURSIVE members(id) AS (
-    SELECT ? UNION ALL SELECT e.id FROM events e JOIN members m ON e.parent=m.id
+    SELECT id FROM events WHERE id=? OR (? IS NULL AND parent IS NULL AND kind='task' AND id>?)
+    UNION ALL SELECT e.id FROM events e JOIN members m ON e.parent=m.id
   ) SELECT e.* FROM events e JOIN members m ON m.id=e.id WHERE e.kind IN ('task','operation')
-    AND NOT EXISTS(SELECT 1 FROM events r WHERE r.parent=e.id AND r.kind='result') ORDER BY e.id` [id]))
+    AND NOT EXISTS(SELECT 1 FROM events r WHERE r.parent=e.id AND r.kind='result') ORDER BY e.id`
+    [id id (get s :floor 0)]))
 
 (defn busy? [s id]
   (or (> (length (pending s id)) 1)
@@ -136,11 +144,8 @@
 
 (defn changes [s id after] (tree s id after true))
 
-(defn check [s id &opt token]
-  (default token (dyn :zinc/token))
+(defn check [s id]
   (assert (not (result s id)) {:code "TaskClosed" :message "Task ended."})
-  (assert (first (query s "SELECT task FROM claims WHERE task=? AND token=? AND expires>?" [id token (os/clock)]))
-          {:code "TaskReplaced" :message "Execution ownership expired or changed."})
   (def current (event s id))
   (assert (= (get-in current [:data :epoch]) (get (first (query s "SELECT epoch FROM worlds WHERE name=?" [(get-in current [:data :world])])) :epoch))
           {:code "TaskReplaced" :message "World was rewound."})
@@ -149,14 +154,14 @@
 
 (defn append [s parent kind data &opt key image]
   (transact s
-    (when (dyn :zinc/token) (check s ((dyn :zinc/task) :id)))
+    (when (dyn :zinc/task) (check s ((dyn :zinc/task) :id)))
     (def bytes (schema/encode data))
     (def previous (when key (first (query s "SELECT * FROM events WHERE key=?" [key]))))
     (if previous
       (do (assert (and (= parent (previous :parent)) (= kind (previous :kind)) (= image (previous :image))
                        (= bytes (schema/encode (previous :data)))) "event key reused with different work") previous)
       (do
-        (when (and (dyn :zinc/token) (index-of kind ["task" "model" "operation" "result" "return" "output" "fiber"]))
+        (when (and (dyn :zinc/task) (index-of kind ["task" "model" "operation" "result" "return" "output" "fiber"]))
           (def usage (first (query s `WITH RECURSIVE members(id) AS (
             SELECT ? UNION ALL SELECT e.id FROM events e JOIN members m ON e.parent=m.id
           ) SELECT count(CASE WHEN e.kind IN ('task','model','operation') THEN 1 END) work,
@@ -190,15 +195,6 @@
         (if failure {:error failure} {})) (string "result:" id))))
     (query s "DELETE FROM claims WHERE task=?" [id]) outcome))
 
-(defn settle [s admission outcome]
-  (transact s
-    (def row (or (result s (admission :id))
-      (append s (admission :id) "result"
-        (merge outcome {:value (if (nil? (outcome :value)) :null (outcome :value))
-          :text (if (outcome :error) (get-in outcome [:error :message]) (schema/encode (outcome :value)))})
-        (string "result:" (admission :id)))))
-    (query s "DELETE FROM claims WHERE task=?" [(admission :id)]) row))
-
 (defn resolve [s admission outcome]
   (transact s
     (assert (= "attempt" (admission :kind)) "choose an uncertain effect attempt")
@@ -219,7 +215,7 @@
       (assert (and (dictionary? failure) (string? (failure :code)) (string? (failure :message))) "invalid outcome diagnostic"))
     (def row (append s (admission :id) "result" outcome (string "result:" (admission :id))))
     (unless (outcome :retry)
-      (settle s effect (merge outcome {:state (if (outcome :error) "failed" "done")}))) row))
+      (finish s (effect :id) (if (outcome :error) "failed" "done") (outcome :value) (outcome :error))) row))
 
 (defn point [s value &opt world]
   (def row (first (query s "SELECT * FROM events WHERE (kind IN ('world','rewind') OR (kind='artifact' AND json_extract(data,'$.type')='world-image')) AND (CAST(id AS TEXT)=? OR image=?) AND (? IS NULL OR json_extract(data,'$.world')=?) ORDER BY id DESC LIMIT 1" [(string value) (string value) world world])))
@@ -227,7 +223,6 @@
 
 (defn configure [s]
   (transact s
-    (query s "DROP TRIGGER IF EXISTS event_index; DROP TABLE IF EXISTS event_words; DROP TABLE IF EXISTS event_fts;")
     (each profile (filter identity [(s :config) (get-in s [:config :agent])])
     (each [name spec] (pairs (profile :worlds))
       (unless (first (query s "SELECT name FROM worlds WHERE name=?" [(string name)]))
@@ -292,7 +287,12 @@
   (def key (get input :request (uuid)))
   (transact s
     (if-let [previous (first (query s "SELECT * FROM events WHERE key=?" [(string "task:" key)]))]
-      (do (assert (and (= (schema/encode input) (schema/encode (get-in previous [:data :input]))) (= parent (previous :parent))) "request key reused with different work") previous)
+      (do
+        (def transient [:request :store :session :connector :deadline])
+        (assert (and (= parent (previous :parent))
+          (= (schema/encode (schema/project input transient true))
+             (schema/encode (schema/project (get-in previous [:data :input]) transient true)))) "request key reused with different work")
+        previous)
       (do
         (def caller (when parent (task s parent)))
         (def root (when caller (root s (caller :id))))
@@ -335,18 +335,6 @@
       (start s {:text (string "Recover uncertain execution #" (owner :id)
           ". Inspect its original source, source progress and all committed execution events. Verify external state before resolving or retrying effects. Do not replay the original source; continue only remaining work.")
         :request request :recovery true} (get-in s [:config :agent]) (row :id))) row))
-
-(defn claim [s id]
-  (transact s
-    (first (query s `INSERT INTO claims(task,token,expires)
-      SELECT e.id,?,? FROM events e WHERE e.id=? AND e.kind IN ('task','operation')
-      AND NOT EXISTS(SELECT 1 FROM events r WHERE r.parent=e.id AND r.kind='result')
-      AND NOT EXISTS(SELECT 1 FROM claims c WHERE c.task=e.id AND c.expires>?)
-      AND (json_extract(e.data,'$.type')='script' OR (SELECT count(*) FROM claims c JOIN events owner ON owner.id=c.task WHERE c.expires>?
-        AND CASE WHEN owner.kind='operation' THEN 'effect' ELSE json_extract(owner.data,'$.type') END
-          =CASE WHEN e.kind='operation' THEN 'effect' ELSE json_extract(e.data,'$.type') END)<?)
-      ON CONFLICT(task) DO UPDATE SET token=excluded.token,expires=excluded.expires WHERE claims.expires<=? RETURNING *`
-      [(uuid) (+ (os/clock) ((s :config) :lease-seconds)) id (os/clock) (os/clock) ((s :config) :parallel) (os/clock)]))))
 
 (defn record [s records]
   (assert (and (indexed? records) (<= (length records) ((s :config) :history-records))) "invalid context batch")

@@ -36,9 +36,10 @@ Use concise bullets. Omit repetition. Invent no facts or citations.`)
         "\n\n" body "\n\n"))))
 
 (defn- records [s task &opt all]
-  (def bounds (get-in task [:data :memory_range]))
-  (def root (store/root s (task :id)))
-  (def inherited (get-in root [:data :memory_range]))
+  (def bounds (if task (get-in task [:data :memory_range])
+    {:start 0 :end (((store/query s "SELECT coalesce(max(id),0) id FROM events") 0) :id)}))
+  (def root (when task (store/root s (task :id))))
+  (def inherited (get-in root [:data :memory_range] bounds))
   (store/query s `WITH RECURSIVE family(id,included) AS (
     SELECT id,id=? FROM events WHERE id=?
     UNION ALL SELECT e.id,f.included OR e.id=? FROM events e JOIN family f ON e.parent=f.id
@@ -52,7 +53,7 @@ Use concise bullets. Omit repetition. Invent no facts or citations.`)
       AND id NOT IN summary_work
       AND (kind<>'result' OR ((json_extract(data,'$.text')<>'' OR json_extract(data,'$.state')<>'done') AND publication IS NOT NULL))
       AND (kind<>'world' OR json_extract(data,'$.text')<>''))) ORDER BY id`
-    [(task :id) (root :id) (task :id) (if (get-in task [:data :input :recovery]) 1 0) (bounds :start) (bounds :end)
+    [(get task :id) (get root :id) (get task :id) (if (get-in task [:data :input :recovery]) 1 0) (bounds :start) (bounds :end)
      (max (bounds :start) (inherited :start)) (min (bounds :end) (inherited :end)) (if all 1 0)]))
 
 (defn- semantic-window [s anchor rows]
@@ -120,11 +121,40 @@ Use concise bullets. Omit repetition. Invent no facts or citations.`)
               (seq [rank :in (outcome :results)]
                 (merge (selected (rank :index)) {:score (rank :relevance_score) :rerank (outcome :event)})))))))))
 
+(defn- sources [s task ids &opt nodes]
+  (def allowed (tabseq [row :in (records s task true)] (row :id) true))
+  (each id ids (store/event s id))
+  (def rows (store/query s `WITH RECURSIVE members(id) AS (
+    SELECT value FROM json_each(?)
+    UNION SELECT c.value FROM members m JOIN events e ON e.id=m.id,json_each(e.data,'$.children') c WHERE e.kind='summary'
+    UNION SELECT json_extract(e.data,'$.source') FROM members m JOIN events e ON e.id=m.id WHERE e.kind='notice'
+  ) SELECT e.* FROM events e JOIN members m ON e.id=m.id ORDER BY e.id` [(schema/encode ids)]))
+  (def originals (filter |(not (index-of ($ :kind) ["summary" "notice"])) rows))
+  (assert (every? (map |(allowed ($ :id)) originals)) "source outside granted history")
+  (if nodes rows originals))
+
 (defn- valid-summary [s key]
   (first (store/query s `WITH RECURSIVE invalid(id) AS (
     SELECT parent FROM events WHERE kind='invalidate' UNION SELECT e.id FROM events e,json_each(e.data,'$.children') c
     JOIN invalid i ON i.id=c.value WHERE e.kind='summary'
   ) SELECT * FROM events WHERE kind='summary' AND json_extract(data,'$.cache')=? AND id NOT IN invalid ORDER BY id DESC LIMIT 1` [key])))
+
+(defn- save-summary [s task spec text]
+  (assert (and (string? text) (> (length text) 0)) "summary must be nonempty text")
+  (sources s task (spec :children))
+  (or (valid-summary s (spec :key))
+    (store/append s (get task :id) "summary" (merge (schema/project spec [:children :segments :level :manual])
+      {:text text :cache (spec :key)}))))
+
+(defn- require-summary [s task spec &opt text]
+  (or (valid-summary s (spec :key)) (when text (save-summary s task spec text))
+    (do
+      (def generation (((store/query s "SELECT count(*) n FROM events WHERE kind='summary' AND json_extract(data,'$.cache')=?" [(spec :key)]) 0) :n))
+      (def job (store/start s {:text summary-prompt :summary spec
+        :request (string "summary:" (spec :key) ":" (get task :id 0) ":" generation)} (s :config) (get task :id)))
+      (when-let [result (store/result s (job :id))]
+        (when (get-in result [:data :error]) (error (get-in result [:data :error]))))
+      (error {:code "Yield" :message "Waiting for a memory summary." :context {:wait {:tasks [(job :id)]}}}))))
 
 (defn- compact [s task rows limit]
   (def config (s :config))
@@ -176,20 +206,23 @@ Use concise bullets. Omit repetition. Invent no facts or citations.`)
     (assert choice {:code "MemoryContextExhausted" :message "The minimum memory frontier exceeds its allowance."})
     (def [index count entry] choice)
     (def spec (entry :spec))
-    (var cached (valid-summary s (spec :key)))
-    (unless cached
-      (def generation (((store/query s "SELECT count(*) n FROM events WHERE kind='summary' AND json_extract(data,'$.cache')=?" [(spec :key)]) 0) :n))
-      (def job (store/start s {:text summary-prompt
-        :request (string "summary:" (spec :key) ":" (task :id) ":" generation) :summary spec} config (task :id)))
-      (when-let [result (store/result s (job :id))]
-        (when (get-in result [:data :error]) (error (get-in result [:data :error]))))
-      (error {:code "Yield" :message "Waiting for a memory summary." :context {:wait {:tasks [(job :id)]}}}))
+    (def cached (require-summary s task spec))
     (array/remove nodes index count) (array/insert nodes index (merge entry {:row cached})))
   (map |($ :row) nodes))
 
 (defn context [s task limit &opt closed]
   (def rows (array/concat @[] (filter |(< ($ :id) (task :id)) (records s task)) (or closed [])))
-  (def nodes (if (<= (sum (map |(store/estimate (render s $)) rows)) limit) rows (compact s task rows limit)))
+  (def covered @{}) (def selected @[])
+  (def permitted (tabseq [row :in rows] (row :id) true))
+  (each summary (store/query s "SELECT * FROM events WHERE kind='summary' AND json_extract(data,'$.manual')=1 ORDER BY id DESC")
+    (def children (map |($ :id) (sources s nil [(summary :id)])))
+    (when (and (valid-summary s (get-in summary [:data :cache]))
+      (every? (map |(and (permitted $) (not (covered $))) children)))
+      (each id children (put covered id true))
+      (array/push selected (merge summary {:position (first children)}))))
+  (array/concat selected (filter |(not (covered ($ :id))) rows))
+  (sort-by |(get $ :position ($ :id)) selected)
+  (def nodes (if (<= (sum (map |(store/estimate (render s $)) selected)) limit) selected (compact s task selected limit)))
   (def coverage @{})
   (each node nodes
     (if (node :segments)
@@ -209,30 +242,38 @@ Use concise bullets. Omit repetition. Invent no facts or citations.`)
   {:nodes nodes :evidence included
    :eligible (length eligible) :candidates decisions})
 
-(defn expand [s task id &opt offset]
-  (default offset 0)
-  (def allowed (records s task true))
-  (def row (or (find |(= ($ :id) id) allowed)
-    (let [summary (store/event s id)]
-      (when (and (= "summary" (summary :kind))
-        (not (first (store/query s `WITH RECURSIVE members(id) AS (
-          SELECT ? UNION SELECT c.value FROM members m JOIN events e ON e.id=m.id,json_each(e.data,'$.children') c WHERE e.kind='summary'
-        ) SELECT e.id FROM members m JOIN events e ON e.id=m.id WHERE e.kind<>'summary'
-          AND e.id NOT IN (SELECT value FROM json_each(?)) LIMIT 1` [id (schema/encode (map |($ :id) allowed))])))) summary))))
-  (assert row "record outside granted history")
-  (def data (schema/project (row :data) [:config :raw :request] true))
-  (when (data :message)
-    (put data :message (schema/project (data :message)
-      (if (data :reasoning-visible) [:response] [:response :reasoning :reasoning_content :reasoning_details]) true)))
-  (def text (string (render s row) "\n" (schema/encode data)))
-  (assert (and (int? offset) (<= 0 offset (length text))
-    (or (= offset (length text)) (not (<= 0x80 (text offset) 0xbf)))) "invalid UTF-8 page offset")
-  (var end (min (length text) (+ offset (min 65536 (math/floor (/ ((s :config) :response-bytes) 4))))))
-  (while (and (< end (length text)) (<= 0x80 (text end) 0xbf)) (++ end))
-  {:id id :parent (row :parent) :at (get-in row [:data :at] (os/strftime "%Y-%m-%dT%H:%M:%SZ" (math/floor (row :created)))) :kind (row :kind) :author (get-in row [:data :author] "zinc")
-   :text (string/slice text offset end) :children (get-in row [:data :children]) :offset offset :next end :total (length text)})
+(defn expand [s task id]
+  (default id (get (first (store/query s "SELECT id FROM events WHERE kind='summary' ORDER BY id DESC LIMIT 1")) :id
+    (get (last (records s task)) :id)))
+  {:sources (map (fn [row]
+    (def data (schema/project (row :data) [:config :raw :request] true))
+    (when (data :message)
+      (put data :message (schema/project (data :message)
+        (if (data :reasoning-visible) [:response] [:response :reasoning :reasoning_content :reasoning_details]) true)))
+    (merge (schema/project row [:id :parent :kind :text :created :image]) {:data data})) (sources s task [id]))})
 
-(defn summarize [s task]
+(defn summarize [s task &opt start end text]
+  (def rows (records s task))
+  (default start (get (first rows) :id 0))
+  (default end (get (last rows) :id 0))
+  (assert (and (int? start) (int? end) (<= 0 start end)) "invalid source range")
+  (def children (map |($ :id) (filter |(<= start ($ :id) end) rows)))
+  (assert (> (length children) 0) "source range is empty")
+  (def key (store/digest (schema/encode [children text
+    (schema/project (s :config) [:chat :summary :thinking :output :summary-quota :providers]) ])))
+  {:summary ((require-summary s task {:children children :key key :level 0 :manual true} text) :id)})
+
+(defn invalidate [s task point]
+  (var selected nil)
+  (each row (store/query s "SELECT * FROM events WHERE kind='summary' ORDER BY id DESC")
+    (when (and (valid-summary s (get-in row [:data :cache]))
+      (or (nil? point) (= point (row :id)) (find |(= point ($ :id)) (sources s nil [(row :id)]))))
+      (set selected row) (break)))
+  (assert selected "no associated valid summary")
+  (sources s task [(selected :id)])
+  {:summary (selected :id) :event ((store/append s (selected :id) "invalidate" {}) :id)})
+
+(defn complete-summary [s task]
   (def input (get-in task [:data :input :summary]))
   (put s :config (merge (s :config) ((s :config) :summary) {:web-search false}))
   (def config (s :config))
@@ -250,15 +291,10 @@ Use concise bullets. Omit repetition. Invent no facts or citations.`)
      :context {:event (response :event) :maximum-bytes (* maximum 4)}})
   (def text (response :text))
   (def cited (peg/match ~(any (choice (* "[#" (capture (some (range "09"))) "]") 1)) text))
-  (assert (not (first (store/query s `WITH RECURSIVE members(id) AS (
-    SELECT value FROM json_each(?) UNION SELECT c.value FROM members m JOIN events e ON e.id=m.id,json_each(e.data,'$.children') c WHERE e.kind='summary'
-    UNION SELECT json_extract(e.data,'$.source') FROM members m JOIN events e ON e.id=m.id WHERE e.kind='notice'
-  ) SELECT value FROM json_each(?) WHERE CAST(value AS INTEGER) NOT IN members LIMIT 1`
-    [(schema/encode (input :children)) (schema/encode cited)]))) "summary cites unrelated records")
+  (def allowed (tabseq [row :in (sources s task (input :children) true)] (row :id) true))
+  (assert (every? (map |(allowed (scan-number $)) cited)) "summary cites unrelated records")
   (def summary (store/transact s
-    (def row (or (valid-summary s (input :key))
-      (store/append s (task :id) "summary" (merge (schema/project input [:children :segments :level])
-        {:text text :cache (input :key)}))))
+    (def row (save-summary s task input text))
     (assert (< (store/estimate (render s row)) (store/estimate source)) "summary did not shrink its sources") row))
   {:summary (summary :id)})
 

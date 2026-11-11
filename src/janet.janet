@@ -1,6 +1,6 @@
 (import ./schema)
 (import ./store)
-(import ./io)
+(import ./effects)
 
 (defn definitions [config supplied]
   (if-not (config :janet) {}
@@ -19,18 +19,14 @@
               (string/find "/" (string name)) (string name)
               (string "core/" name))
             (if (index-of name ['os/clock 'os/date 'os/time 'os/cryptorand]) (base name) {:local name}))
-          imports (get config :imports {})
-          cache (merge module/cache)
-          paths (array/concat @[] module/paths)]
-      (each [namespace spec] (pairs imports)
-        (put cache (string namespace)
-          (tabseq [[name documentation] :pairs (spec :exports)]
-            (symbol name) @{:doc documentation :value (fn [& args]
-              (io/call spec (string name) args (dyn :zinc/operation) (config :response-bytes)))})))
-      (array/insert paths 0 [(fn [name] (when (get imports (keyword name)) name)) :preload])
-      (put base *module-cache* cache) (put base *module-paths* paths)
-      (put base *module-make-env* (partial make-env base))
+          imports (get config :imports {})]
       (merge-into available supplied)
+      (each [namespace spec] (pairs imports)
+        (each [name documentation] (pairs (spec :exports))
+          (def qualified (if (= (string name) (spec :entry)) (string namespace) (string namespace "/" name)))
+          (assert (not (available qualified)) "duplicate import binding")
+          (put available qualified {:doc documentation :value (fn [& args]
+            (effects/call spec (string name) args (dyn :zinc/operation) (config :response-bytes)))})))
       (each [namespace module] (pairs (get-in config [:janet :imports]))
         (each [name binding] (pairs (with-env base (require (module :module))))
           (when (and (symbol? name) (not (binding :private)) (not (binding :macro))
