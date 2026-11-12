@@ -2,13 +2,16 @@
 (import spork/base64 :as base64)
 (import spork/json :as json)
 
+(def- directory (path/dirname (dyn :source)))
+
 (def fields
   {:store {:type :string :absolute true}
    :world {:type :string :default "main" :visible true}
    :worlds {:type :dictionary :default {:main {}} :values {:type :dictionary :fields {:from {:type :string :optional true}}}}
-   :instructions {:type :string :absolute true}
+   :instructions {:type :string :absolute true :default (path/join directory "zinc.md")}
    :directory {:type :string :absolute true}
    :handle {:type :string}
+   :profile {:type :string}
    :deployment {:type :string :optional true}
    :agent {:type :dictionary :optional true}
    :ephemeral {:type :boolean :default false}
@@ -93,8 +96,8 @@
    :expansion-nodes {:type :integer :default 2048 :minimum 1}
    :language {:type :string :default "en"}
    :score {:type :number :default 0 :option "score" :description "Minimum accepted reranking relevance score"}
-   :cygnet {:type :string :absolute true :optional true}
-   :stopwords {:type :string :absolute true :optional true}
+   :cygnet {:type :string :absolute true :default (path/join directory "assets/cygnet.db")}
+   :stopwords {:type :string :absolute true :default (path/join directory "assets/stopwords.json")}
    :cygnet-source {:type :string :default "aae2cdb1418c1435558584a91181e1cb94459f2506c16f2be4b00e81428deaff"}})
 
 (def inputs
@@ -229,7 +232,7 @@
   config)
 
 (defn authorize [current saved]
-  (each key [:store :directory :handle :instructions :ephemeral]
+  (each key [:store :directory :handle :profile :instructions :ephemeral]
     (assert (= (current key) (saved key)) "saved identity/location changed"))
   (each [name spec] (pairs (saved :worlds))
     (assert (= (encode spec) (encode (get-in current [:worlds name]))) "saved world grant changed or revoked"))

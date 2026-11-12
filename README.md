@@ -23,44 +23,60 @@ Use Janet 1.42+, JPM, a C compiler, OpenSSL headers and trusted CA certificates,
 independently as a normal Janet package; Zinc declares it as a dependency and imports `pa`. PA owns framing and
 envelopes. Zinc contains no duplicate frame codec.
 
-Install packages into JPM's configured system or user prefix, independently of Connector. For a source checkout,
-`jpm deps` installs declared dependencies into that configured prefix. SQLite must support FTS5, URI filenames and
-memdb:
+Install packages into JPM's configured system or user prefix, independently of Connector. Publish the pinned PA commit
+before a fresh remote dependency install; for coordinated local development, install the local PA checkout into that
+same prefix first. SQLite must support FTS5, URI filenames and memdb:
 
 ```sh
 JANET_SYSTEM_SQLITE=0 jpm --cflags=-std=c99,-DSQLITE_ENABLE_FTS5,-DSQLITE_USE_URI=1 deps
-jpm run tls
-jpm run assets
+jpm install
 ```
 
-MSVC flags are `/nologo,/MD,/DSQLITE_ENABLE_FTS5,/DSQLITE_USE_URI=1`. Jsec uses `VCPKG_ROOT` on Windows and
-`OPENSSL_PREFIX` for nonstandard macOS installations. The existing `tls` task rebuilds the pinned native dependency with
-its cancellation cleanup fix. Set `JANET_PATH` to your configured JPM module directory when it is not the runtime
-default. No application searches a sibling checkout for PA at runtime.
+`jpm install` applies the pinned TLS cleanup fix, generates verified retrieval assets and installs Zinc's source modules,
+SQL, instructions and assets under `zinc` in the configured module prefix. It never builds an agent executable.
+Connector loads the installed source with `module: zinc/main`, using Janet's native `janet -t zinc/main` entry mode.
+The source checkout is not required at runtime, and one installation serves multiple repositories. Interrupted asset
+downloads and builds use replaceable staging files; repeated installation does not require deleting partial final files.
 
-Install Connector separately, provision `ac.yaml`, and initialize a fresh store with `agc init DIRECTORY`.
+MSVC flags are `/nologo,/MD,/DSQLITE_ENABLE_FTS5,/DSQLITE_USE_URI=1`. Jsec uses `VCPKG_ROOT` on Windows and
+`OPENSSL_PREFIX` for nonstandard macOS installations. The `tls` task rebuilds the pinned native dependency with
+its cancellation cleanup fix in a child process without changing the installer's working directory. Set `JANET_PATH` to
+your configured JPM module directory when it is not the runtime default. No application searches a sibling checkout for
+PA at runtime.
+
+Install Connector separately, provision one agent per `ac.yaml`, and initialize a fresh store with `agc init DIRECTORY`.
+Keep writable history under `${instance}` and use `${directory}` for the working repository. Installed instructions and
+retrieval assets resolve relative to Zinc's own module; configure `instructions` explicitly for repository-owned text.
+For source development, use `module: /absolute/path/to/zinc/src/main` and explicitly configure instructions, Cygnet and
+stopword paths from that checkout's generated assets.
 `examples/models.ini` is an optional external model-server preset; Zinc neither provisions that server nor reads or
 verifies its model downloads.
 
 ## Host and interfaces
 
-`src/main.janet` owns a live, unversioned Portable Agents connection on stdin/stdout. `PA_FRAME_BYTES` bounds envelopes;
-`PA_HANDLE` supplies the durable author handle from the agent's own `ac.yaml` before readiness. Neither is a credential.
+`zinc/main` owns a live, unversioned Portable Agents connection on stdin/stdout. `PA_FRAME_BYTES` bounds envelopes;
+`PA_HANDLE` supplies the invoker-configured durable author handle before readiness. Connector provisions it in the
+agent's own `ac.yaml`; Zinc does not read that file. Neither environment value is a credential.
 The host authenticates the connection and preserves callers when forwarding. Responses correlate by connection-local
 call IDs, not work or author identities. Committed presentation arrives asynchronously.
 
 The trusted owner connection dispatches `owner/` bindings. Arguments are direct application values, with private
-`config` where needed; flat binding documentation belongs in the call envelope's optional `imports` map. PA validates
-the map. Zinc rejects binding collisions, applies local selections and enforces native resource grants. Connector owns
+`config` and a current named `profiles` configuration map where needed; flat binding documentation belongs in the call
+envelope's optional `imports` map. Profiles share the same durable agent identity and store. Execution snapshots retain
+the selected profile name; workers authorize against that profile's current grants, not the last owner call's settings.
+Direct profiles retain their separately named inquiry delegation. Profile configuration is a Zinc owner interface,
+not a PA envelope field. PA validates only the envelope's import documentation map. Zinc rejects binding collisions,
+applies local selections and enforces native resource grants. Connector owns
 external routing, credentials and resource authorization. Documentation grants no authority.
 
 Owner/local bindings retain admission, append, queues, cancellation, memory, configuration, inspection, continuation and
 explicit uncertain-effect resolution. Owner-only discovery describes command parameters, not peer exports. Native Janet
 retains the same locally granted execution and memory bindings.
 
-Connector's separate peer dispatcher registers only `self`, `status` and `wait`. A configured `research` import installs
-`research`, `research/status` and `research/wait`; the first accepts text or code and optional persistence and returns a
-work handle. The others accept that work handle and require its authenticated author and current grants. There are no
+Connector's separate peer dispatcher registers only `self`, `status` and `wait`. A locally named `research` import installs
+`research`, `research/status` and `research/wait`; the alias need not match any name in the target's own single-agent
+configuration. The first accepts text or code and optional persistence and returns a work handle. The others accept that
+work handle and require its authenticated author and current grants. There are no
 peer memory, queue, cancellation, diagnostics or recovery bindings. Connector uses the target's own configuration and
 grants on its existing live connection.
 
@@ -71,14 +87,14 @@ references are not author handles.
 Immediate inquiries replace eligible unfinished inquiries in their member/policy/channel lane. Queue admissions do not
 replace them. Direct Janet code is independent. Source positions fence late admissions; a temporary position
 participates only in host RAM. Persistent direct scripts can notify an active same-author inquiry without becoming its
-descendants. `pending-requests` bounds admitted roots; `parallel` bounds concurrent effects, inquiries and summaries
-separately. Waiting scripts do not consume their children's execution slots.
+descendants. `pending-requests` bounds admitted roots; each named profile's `parallel` bounds its concurrent effects,
+inquiries and summaries separately. Waiting scripts do not consume their children's execution slots.
 
 ## Concurrency and cancellation
 
 The existing engine is the sole work scheduler. Active ownership is RAM state, not SQL leases. Existing claim rows
 retain source progress and waits; no lease is acquired or renewed. The SQLite schema and its number are unchanged. One
-execution host must own a deployment/store at a time. Idle schedulers release their timers; the live process retains its
+execution host must own an agent/store at a time. Idle schedulers release their timers; the live process retains its
 RAM sessions without continuing an idle work loop.
 
 Each execution worker runs independently; each script has an isolated evaluator thread with Janet's native fibers,
@@ -188,8 +204,10 @@ Filesystem grants reject observed links/traversal but do not provide race-safe c
 mutating directories. TLS verifies certificates and hostnames; HTTP follows no redirects. Custom setup/modules remain
 trusted configuration.
 
-Deploy PA, Zinc and Connector together after finishing/cancelling old work. Preserve the existing database and store
-identity; there is no schema-number or release-number bump, automatic image conversion or legacy execution mode.
+Deploy PA, Zinc and Connector together after finishing/cancelling old work. Preserve the existing database, author handle
+and store identity. Old in-flight snapshots without named-profile authority cannot be silently resumed. Native worlds
+still require matching Janet version, build and configuration. There is no schema-number or release-number bump,
+automatic image conversion or legacy execution mode.
 Connector's retained transport state requires its documented offline ownership cutover. Historical authorship must be
 mapped only from verified evidence; do not relabel ambiguous legacy authors or restore old in-flight snapshots through a
 compatibility path.

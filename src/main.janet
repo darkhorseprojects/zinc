@@ -7,9 +7,10 @@
 (import ./model)
 (import ./memory)
 
-(defn main [executable & args]
-  (assert (= 0 (length args)) "Zinc accepts a live Portable Agents connection on stdin")
-  (unless (index-of (os/which) [:windows :mingw]) (os/sigaction :pipe (fn [])))
+(defn main []
+  (unless (index-of (os/which) [:windows :mingw])
+    (os/umask 8r077)
+    (os/sigaction :pipe (fn [])))
   (def limit (scan-number (os/getenv "PA_FRAME_BYTES")))
   (assert (and (int? limit) (<= 1 limit 0x7fffffff)) "PA_FRAME_BYTES is required")
   (def handle (os/getenv "PA_HANDLE"))
@@ -65,7 +66,7 @@
                 "memory/invalidate" "memory/summarize" "resolve" "diagnostics"]) "unknown owner binding")
               (def params (call :params))
               (assert (dictionary? params) "owner arguments must be an object")
-              (def input (schema/project params [:config] true))
+              (def input (schema/project params [:config :profiles] true))
               (def config (schema/configuration (params :config) (= method "describe")))
               (assert (= handle (config :handle)) "configuration changes author handle")
               (put config :imports (get call :imports {}))
@@ -77,6 +78,16 @@
                 "models" (do (schema/request input [:role])
                   (map |{:ref ($ :ref) :name ($ :name)} (model/catalogue config (get input :role "chat"))))
                 (do
+                  (assert (dictionary? (params :profiles)) "current profiles are required")
+                  (def profiles (tabseq [[name supplied] :pairs (params :profiles)] name
+                    (do
+                      (def profile (schema/configuration supplied))
+                      (assert (= (string name) (profile :profile)) "profile name differs from its definition")
+                      (each key [:store :directory :handle]
+                        (assert (= (config key) (profile key)) "profile changes instance identity"))
+                      (put profile :imports (config :imports))
+                      profile)))
+                  (assert (profiles (keyword (config :profile))) "selected profile is not configured")
                   (when (= method "init")
                     (schema/request input [])
                     (assert (= (config :directory) (os/realpath (config :directory))) "canonical instance directory required")
@@ -105,6 +116,7 @@
                         (set s (stores (config :store))))))
                   (when supplied (assert (= supplied (s :identity)) "execution store is unavailable"))
                   (put s :config config)
+                  (put s :profiles profiles)
                   (put s :connection connection)
                   (store/configure s)
                   (case (cond (index-of method ["self" "queue"]) "invoke"
@@ -146,7 +158,7 @@
                               (when (and (= "inquiry" (get-in old [:data :type]))
                                 (or (get-in old [:data :input :replace]) (store/progress owner (old :id))))
                                 (store/abort owner (get-in old [:data :request]) "replaced by newer inquiry")))))
-                        (when (and (input :code) (not (s :temporary)))
+                        (when (and (input :code) (not (config :inference)) (not (s :temporary)))
                           (when-let [target (find |(and (= "inquiry" (get-in $ [:data :type])) (store/progress s ($ :id))) (store/work s lane))]
                             (put request :notify (target :id)))))
                       (assert (= (not (s :temporary)) (not= false (get input :persist true))) "request persistence differs from its store")

@@ -23,7 +23,8 @@ jobs:
         working-directory: jpm
       - run: JANET_SYSTEM_SQLITE=0 jpm --local --cflags=-std=c99,-DSQLITE_ENABLE_FTS5,-DSQLITE_USE_URI=1 deps
         working-directory: zinc
-      - run: jpm --local run tls
+      - run: jpm --local install
         working-directory: zinc
-      - run: JANET_PATH="$PWD/jpm_tree/lib" janet -e '(import ./src/main)'
-        working-directory: zinc
+      - run: |
+          cd "$HOME"
+          JANET_PATH="$GITHUB_WORKSPACE/zinc/jpm_tree/lib" janet -e '(import zinc/main)'

@@ -1,5 +1,13 @@
 # Release notes
 
+JPM installs Zinc's source modules, SQL, instructions and verified retrieval assets; no agent executable is built.
+Connector uses `janet -t zinc/main` from any configured working repository. Asset staging survives interrupted provisioning,
+and the TLS repair no longer changes the installer's process-wide working directory.
+
+Owner calls supply current named profiles. Execution retains its profile identity and checks that profile's current
+authority, including separately named inquiry delegation. Profiles share one author and store without inheriting the
+last owner's configuration. Finish or cancel old in-flight work before this coordinated update.
+
 The isolated evaluator is vm.janet. PA framing, bidirectional correlation and event envelopes belong to main.janet, not
 the execution engine. Flat call-envelope imports remain documentation; local selections and current resource grants
 govern execution. External capability dispatch no longer sends Zinc operation references.

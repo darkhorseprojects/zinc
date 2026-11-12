@@ -15,14 +15,17 @@
   (def source (string directory "/src/jtls/state_machine.c"))
   (def before "case JANET_ASYNC_EVENT_DEINIT:\n            /* Nothing to do */")
   (def after "case JANET_ASYNC_EVENT_DEINIT:\n            fiber->ev_state = NULL;")
-  (def patched (string/replace-all before after (slurp source)))
+  (def contents (slurp source))
+  (def patched (string/replace-all before after contents))
   (assert (string/find after patched) "TLS cancellation patch does not match the pinned dependency")
-  (spit source patched)
+  (unless (= contents patched) (spit source patched))
   (def flags (map |(string "--" $ "=" (dyn $)) [:modpath :binpath :manpath]))
-  (def cwd (os/cwd))
-  (defer (os/cd cwd)
-    (os/cd directory)
-    (each command ["build" "install"]
-      (assert (= 0 (os/execute (array/concat @["jpm"] flags [command]) :p)) "TLS rebuild failed"))))
+  (os/execute (array/concat @["janet" "-E"
+    `(do (os/cd $0) (each command ["build" "install"]
+       (os/execute (array/concat @["jpm"] $& [command]) :px)))` directory] flags) :px))
 
 (task "assets" [] (os/execute [(or (os/getenv "PYTHON") "python3") "tools/assets.py"] :px))
+
+(declare-source :prefix "zinc" :source (map |(string "src/" $) (os/dir "src")))
+(declare-source :prefix "zinc" :source ["build/assets" "zinc.md"])
+(task "install" ["tls" "assets"])

@@ -20,13 +20,21 @@ cache = root / "build/resources"
 cache.mkdir(parents=True, exist_ok=True)
 archive = cache / "cygnet.db.gz"
 if not archive.exists():
-    urllib.request.urlretrieve(cygnet["source"], archive)
+    download = archive.with_suffix(".downloading")
+    urllib.request.urlretrieve(cygnet["source"], download)
+    with download.open("rb") as stream:
+        assert hashlib.file_digest(stream, "sha256").hexdigest() == cygnet["sha256"], "Cygnet archive checksum mismatch"
+    download.replace(archive)
 with archive.open("rb") as stream:
     assert hashlib.file_digest(stream, "sha256").hexdigest() == cygnet["sha256"], "Cygnet archive checksum mismatch"
 source = cache / "cygnet.db"
 if not source.exists():
-    with gzip.open(archive, "rb") as stream, source.open("xb") as output:
+    extracted = source.with_suffix(".extracting")
+    with gzip.open(archive, "rb") as stream, extracted.open("wb") as output:
         shutil.copyfileobj(stream, output)
+    with extracted.open("rb") as stream:
+        assert hashlib.file_digest(stream, "sha256").hexdigest() == cygnet["database_sha256"], "Cygnet database checksum mismatch"
+    extracted.replace(source)
 with source.open("rb") as stream:
     assert hashlib.file_digest(stream, "sha256").hexdigest() == cygnet["database_sha256"], "Cygnet database checksum mismatch"
 directory = cache / key
@@ -34,6 +42,7 @@ directory.mkdir(exist_ok=True)
 index = directory / "cygnet.db"
 if not index.exists():
     staging = index.with_suffix(".building")
+    staging.unlink(missing_ok=True)
     with staging.open("xb"):
         pass
     with closing(sqlite3.connect(staging)) as db:
@@ -87,6 +96,7 @@ with closing(sqlite3.connect(f"file:{index.as_posix()}?mode=ro", uri=True)) as d
 assets = root / "build/assets"
 assets.mkdir(exist_ok=True)
 staged = assets / "cygnet.db.building"
+staged.unlink(missing_ok=True)
 staged.hardlink_to(index)
 staged.replace(assets / "cygnet.db")
 staged.unlink(missing_ok=True)
