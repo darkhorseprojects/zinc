@@ -31,7 +31,7 @@ Use concise bullets. Omit repetition. Invent no facts or citations.`)
       (string "### #" (row :id) " · " (row :kind) (when (data :state) (string " · " (data :state)))
         (when (row :parent) (string " · parent " (row :parent)))
         (when (data :world) (string " · world " (data :world)))
-        "\n\nAuthor: " (get data :author "zinc") " · Occurred: " (get data :at (os/strftime "%Y-%m-%dT%H:%M:%SZ" (math/floor (row :created))))
+        "\n\nAuthor: " (get data :author ((s :config) :handle)) " · Occurred: " (get data :at (os/strftime "%Y-%m-%dT%H:%M:%SZ" (math/floor (row :created))))
         (when (data :children) (string "\n\nSources: " (schema/encode (data :children))))
         "\n\n" body "\n\n"))))
 

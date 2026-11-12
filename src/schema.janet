@@ -7,10 +7,10 @@
    :world {:type :string :default "main" :visible true}
    :worlds {:type :dictionary :default {:main {}} :values {:type :dictionary :fields {:from {:type :string :optional true}}}}
    :instructions {:type :string :absolute true}
-   :identity {:type :string}
+   :directory {:type :string :absolute true}
+   :handle {:type :string}
    :deployment {:type :string :optional true}
    :agent {:type :dictionary :optional true}
-   :imports {:type :dictionary :default {}}
    :ephemeral {:type :boolean :default false}
    :inference {:type :boolean :default true}
    :janet {:type :dictionary :optional true
@@ -98,7 +98,7 @@
    :cygnet-source {:type :string :default "aae2cdb1418c1435558584a91181e1cb94459f2506c16f2be4b00e81428deaff"}})
 
 (def inputs
-  {:text {:type :string} :code {:type :string} :author {:type :string} :at {:type :string}
+  {:text {:type :string} :code {:type :string} :at {:type :string}
    :request {:type :string} :memory_range {:type :dictionary} :images {:type :array} :world {:type :string}
    :lane {:type :string} :queued {:type :boolean} :replace {:type :boolean} :connector {:type :dictionary} :store {:type :string} :session {:type :string}
    :deadline {:type :number}
@@ -190,7 +190,7 @@
   (when (config :agent)
     (assert (not (get-in config [:agent :agent])) "nested execution profiles are not supported")
     (put config :agent (configuration (config :agent) discovery))
-    (each key [:store :identity] (assert (= (config key) (get-in config [:agent key])) "agent profile changes instance identity")))
+    (each key [:store :directory :handle] (assert (= (config key) (get-in config [:agent key])) "agent profile changes instance identity")))
   (when-let [janet (config :janet)]
     (put janet :values (select (seq [[key field] :pairs fields :when (field :visible)] (string key)) (janet :values)))
     (each name (keys (janet :imports))
@@ -229,7 +229,7 @@
   config)
 
 (defn authorize [current saved]
-  (each key [:store :identity :instructions :ephemeral]
+  (each key [:store :directory :handle :instructions :ephemeral]
     (assert (= (current key) (saved key)) "saved identity/location changed"))
   (each [name spec] (pairs (saved :worlds))
     (assert (= (encode spec) (encode (get-in current [:worlds name]))) "saved world grant changed or revoked"))
@@ -241,11 +241,10 @@
       (assert (find |(or (= $ "*") (= $ name)
         (and (string/has-suffix? "/*" $) (string/has-prefix? (string/slice $ 0 -2) name)))
         (get-in current [:janet key])) "saved selection revoked")))
-  (each [name spec] (pairs (saved :imports))
-    (def granted (get-in current [:imports name]))
-    (assert (and granted (= (encode (spec :target)) (encode (granted :target)))
-                         (deep= (sorted (keys (spec :exports))) (sorted (keys (granted :exports)))))
-            {:code "AuthorityChanged" :message "saved capability changed" :context {:capability (string name)}}))
+  (each name (get-in saved [:janet :bindings] [])
+    (when (has-key? (saved :imports) (keyword name))
+      (assert (has-key? (current :imports) (keyword name))
+        {:code "AuthorityChanged" :message "saved binding revoked" :context {:binding name}})))
   (each field [:fs :http :processes :providers]
     (each [name grant] (pairs (saved field))
       (assert (= (encode grant) (encode (get-in current [field name])))
@@ -257,7 +256,7 @@
   (when (saved :agent) (assert (current :agent) "agent profile revoked"))
   (merge saved {:memory-retrieval (and (saved :memory-retrieval) (current :memory-retrieval))
                 :score (max (saved :score) (current :score))
-                :imports (tabseq [name :in (keys (saved :imports))] name (get-in current [:imports name]))
+                :imports (current :imports)
                 :agent (when (saved :agent) (authorize (current :agent) (saved :agent)))}
     (tabseq [[key field] :pairs fields :when (= :integer (field :type)) :when (or (saved key) (current key))]
     key (if (and (field :unlimited) (= 0 (min (get saved key math/inf) (get current key math/inf))))
@@ -278,3 +277,12 @@
                    (string? (image :data))) "invalid image")
       (base64/decode (image :data))))
   value)
+
+(defn describe [config]
+  {:initialize "init" :history (config :history-records) :profile {:field "agent" :inference "inference"}
+   :parameters (catseq [[target declarations] :in [[:config fields] [:input inputs]]]
+     (seq [[key field] :in (sorted (pairs declarations)) :when (field :option)]
+       (merge (project field [:description :minimum :choices :autocomplete])
+         {:name (field :option) :path (string target "." key) :type (string (field :type))
+          :default (get config key (get field :default "automatic"))}
+         (if (and (= target :config) (= :integer (field :type)) (> (get config key 0) 0)) {:maximum (config key)} {}))))})

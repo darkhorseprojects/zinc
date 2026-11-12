@@ -1,6 +1,5 @@
 (import ./schema)
 (import ./store)
-(import ./effects)
 
 (defn definitions [config supplied]
   (if-not (config :janet) {}
@@ -21,19 +20,22 @@
             (if (index-of name ['os/clock 'os/date 'os/time 'os/cryptorand]) (base name) {:local name}))
           imports (get config :imports {})]
       (merge-into available supplied)
-      (each [namespace spec] (pairs imports)
-        (each [name documentation] (pairs (spec :exports))
-          (def qualified (if (= (string name) (spec :entry)) (string namespace) (string namespace "/" name)))
-          (assert (not (available qualified)) "duplicate import binding")
-          (put available qualified {:doc documentation :value (fn [& args]
-            (effects/call spec (string name) args (dyn :zinc/operation) (config :response-bytes)))})))
+      (each [name documentation] (pairs imports)
+        (def qualified (string name))
+        (assert (and (not (available qualified))
+          (not (find |(= (symbol qualified) ($ :local)) (values available)))
+          (not (index-of qualified ["input" "doc" "settings" "resources" "self/document"]))) "duplicate import binding")
+        (put available qualified {:doc documentation :arity [1 1] :import true}))
       (each [namespace module] (pairs (get-in config [:janet :imports]))
         (each [name binding] (pairs (with-env base (require (module :module))))
           (when (and (symbol? name) (not (binding :private)) (not (binding :macro))
                      (index-of (type (binding :value)) [:function :cfunction])
                      (or (nil? (module :export)) (= (string name) (module :export))))
             (def qualified (if (module :export) (string namespace) (string namespace "/" name)))
-            (assert (and (not (available qualified)) (string? (binding :doc))) "invalid or undocumented host binding")
+            (assert (and (not (available qualified))
+              (not (find |(= (symbol qualified) ($ :local)) (values available)))
+              (not (index-of qualified ["input" "doc" "settings" "resources" "self/document"]))
+              (string? (binding :doc))) "invalid or undocumented host binding")
             (put available qualified (merge binding
               {:doc (string/replace-all (string "(" name) (string "(" qualified) (binding :doc))})))))
       (def selected (schema/select (keys available) (get-in config [:janet :bindings])))

@@ -4,7 +4,7 @@
   :description "Host-owned Janet execution, effects and memory"
   :license "AGPL-3.0-only"
   :dependencies
-  [{:repo "https://github.com/darkhorseprojects/portable-agents.git" :tag "2d91bf3fbddc120966d83260a0bcf8d86049d122"}
+  [{:repo "https://github.com/darkhorseprojects/portable-agents.git" :tag "af081d778037aee40332d4db4f5933c63cfda0fe"}
    {:repo "sqlite3" :tag "9126fe46ff1c7e42ca3d7bb9c8aed95a8236a32c"}
    {:repo "https://github.com/llmII/jsec.git" :tag "08a92f6336f283097298c0f0f917a0fabd2040c8"}
    {:repo "spork" :tag "8a87c5ae1cbbf3a0037eeac7f172bd45da4d9910"}])

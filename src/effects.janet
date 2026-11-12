@@ -99,22 +99,6 @@
         {:context (merge (get failure :context {})
           {:outcome (get-in failure [:context :outcome] (if (or (not attempted) received) "failed" "unknown"))})})))))
 
-(defn call [spec name args operation limit]
-  (def config ((dyn :zinc/call) :config))
-  (def url (os/getenv "AGC_CAPABILITY_URL"))
-  (assert (and url (> (length url) 0)) {:code "CapabilityOwnerLost" :message "Capability owner is unavailable."})
-  (def response (try (request (merge config {:response-bytes (min limit (config :response-bytes))})
-    {:url url :token-env "AGC_CAPABILITY_TOKEN"} "POST" ""
-    (schema/encode {:target (spec :target) :method name :arguments args :operation operation}))
-    ([err]
-      (if (and (= "HttpError" (get err :code)) (= "failed" (get-in err [:context :outcome])))
-        (error {:code "CapabilityOwnerLost" :message "Capability owner is unavailable." :context {:cause err}})
-        (error err)))))
-  (assert (= 200 (response :status)) {:code "CapabilityOwnerLost" :message "Capability owner rejected its bearer."})
-  (def outcome (json/decode (response :body) true true))
-  (when (outcome :error) (error (outcome :error)))
-  (outcome :value))
-
 (defn invoke [config name args]
   (var attempted false)
   (try (cond

@@ -2,7 +2,7 @@
 (import ./model)
 (import ./memory)
 (import ./schema)
-(import ./janet)
+(import ./vm)
 (import ./effects)
 
 (def bindings
@@ -87,7 +87,7 @@
       (assert (< rounds (config :rounds)) "model round limit exhausted")
       (def selected (model/profile s (config :chat) :chat))
       (def tools (filter |(or (config :janet) (not= "function" ($ :type))) (selected :tools)))
-      (def system {:role "system" :content (janet/instructions config available)})
+      (def system {:role "system" :content (vm/instructions config available)})
       (def budget @[(config :image-bytes)])
       (def input {:role "user" :content (model/images (get-in inquiry [:data :input])
         (string "Author: " (get-in inquiry [:data :author]) " · Occurred: " (get-in inquiry [:data :at]) "\n\n" (get-in inquiry [:data :input :text])) budget)})
@@ -197,9 +197,17 @@
               {:script id :uncertain (filter |(and (= "uncertain" ($ :kind)) (not (store/result s ($ :parent)))) (store/tree s id))})
             (or (get (store/outcome s id) :data)
               (error {:code "Yield" :message "Waiting for a descendant." :context {:wait {:tasks [id]}}}))))
-        (with-dyns [:zinc/operation (string (s :identity) "/" (effect :id))]
-          (if (index-of name ["fs/list" "fs/read" "fs/write" "http/request" "process/run"])
-            (effects/invoke (s :config) name args) (apply (binding :value) args))))))
+        (cond
+          (binding :import)
+          (let [reply (ev/thread-chan 1)]
+            (defer (ev/chan-close reply)
+              (ev/give (s :connection) {:method name :params (first args) :reply reply})
+              (def outcome (ev/take reply))
+              (when (outcome :error) (error (outcome :error)))
+              (outcome :value)))
+          (index-of name ["fs/list" "fs/read" "fs/write" "http/request" "process/run"])
+          (effects/invoke (s :config) name args)
+          (apply (binding :value) args)))))
   (if local?
     (try (store/transact s (store/finish s (effect :id) "done" (execute)))
       ([err fiber]
@@ -210,7 +218,7 @@
         (do
           (store/uncertain s (prior :id)
             {:code "EffectUncertain" :message "Inspect this effect before resolving it or approving another attempt."
-             :context {:effect (effect :id) :attempt (prior :id) :name name :arguments args :operation (string (s :identity) "/" (effect :id))}})
+             :context {:effect (effect :id) :attempt (prior :id) :name name :arguments args}})
           (store/advance s {:wait {:operations [(prior :id)]}}))
         (let [attempt (store/append s (effect :id) "attempt" {} (string "attempt:" (effect :id) ":" (get prior :id 0)))]
           (store/append s (attempt :id) "dispatch" {})
@@ -223,13 +231,14 @@
                 (do
                   (store/uncertain s (attempt :id)
                     (merge failure {:context (merge (get failure :context {})
-                      {:effect (effect :id) :attempt (attempt :id) :name name :arguments args :operation (string (s :identity) "/" (effect :id))})}))
+                      {:effect (effect :id) :attempt (attempt :id) :name name :arguments args})}))
                   (store/advance s {:wait {:operations [(attempt :id)]}}))))))))))
 
-(defn- execute [[config execution file signals]]
+(defn- execute [[config execution file signals connection]]
   (def s (store/open config nil file))
   (defer (store/close s)
     (put s :signals signals)
+    (put s :connection connection)
     (with-dyns [:zinc/task execution :zinc/call s]
       (def owner (fiber/root)) (def finished (ev/chan 1))
       (def checker (ev/go (fn []
@@ -242,11 +251,10 @@
           (do
             (store/check s (execution :id))
             (def saved (store/restore s (execution :image)))
-            (if (saved :deployment)
-              (do (assert (= (saved :deployment) (config :deployment)) "deployment authority changed") (put s :config saved))
-              (let [current (if (and (saved :inference) (not (config :inference)) (config :agent)) (config :agent) config)]
-                (put s :config (schema/authorize current saved))))
-            (def available (unless (= "summary" (get-in execution [:data :type])) (janet/definitions (s :config) bindings)))
+            (when (saved :deployment) (assert (= (saved :deployment) (config :deployment)) "deployment authority changed"))
+            (def current (if (and (saved :inference) (not (config :inference)) (config :agent)) (config :agent) config))
+            (put s :config (schema/authorize current saved))
+            (def available (unless (= "summary" (get-in execution [:data :type])) (vm/definitions (s :config) bindings)))
             (if (= "operation" (execution :kind)) (invoke s execution available)
               (case (get-in execution [:data :type])
                 "inquiry" (infer s execution available)
@@ -261,7 +269,7 @@
                       {:code "ContinuationLost" :message "VM settlement or world publication was interrupted."}))
                   (do
                     (store/advance s {:started true :form 0})
-                    (def outcome (janet/run s execution available))
+                    (def outcome (vm/run s execution available))
                     (store/finish s (execution :id) (outcome :state) (outcome :value) (outcome :error))))
                 (error "unsupported execution type"))))
           ([err fiber]
@@ -293,7 +301,7 @@
     (when (and body (not= "summary" (get-in owner [:data :type])))
       {:kind (cond source "script" effect "effect" (= "model" (data :type)) "model" (row :kind))
        :script (if (= "script" (get-in owner [:data :type])) (owner :id) :null) :root (root :id) :store (s :identity)
-       :agent (get-in s [:config :identity]) :request (get-in root [:data :request])
+       :agent (get-in s [:config :handle]) :request (get-in root [:data :request])
        :call (or (data :tool) (get-in owner [:data :call]) :null)
        :parent (or (row :parent) :null) :status (if source "accepted" (get data :status (get data :state "complete"))) :world (get-in owner [:data :world])
        :language (cond (or effect (data :error)) "json" source "clojure"
@@ -302,7 +310,7 @@
        :persist (not (s :temporary)) :sequence (row :id)
        :body body :diagnostic (data :error)})))
 
-(defn run [s frames]
+(defn run [s publications]
   (def active @{}) (def finished (ev/chan 1))
   (def wake (ev/thread-chan 1)) (def ticked (ev/chan 1))
   (put s :signals [wake])
@@ -333,13 +341,13 @@
               (with-env @{} (ev/thread execute arguments (keyword "") done))
               (def packet (ev/take done))
               (assert (= :ok (packet 0)) (packet 1)))) :t @{:task-id id})
-            [(s :config) execution (s :file) (s :signals)] finished)))
+            [(s :config) execution (s :file) (s :signals) (s :connection)] finished)))
       (def rows (store/tree s nil (get s :cursor (get s :floor 0))))
       (def owners (store/owners s rows))
       (each row rows
         (def root (store/root s (row :id)))
         (when-let [frame (presentation s row (owners (row :task)) root)]
-          (ev/give frames {:version 1 :type "event" :value {:frame frame :origin (get-in root [:data :input :connector])}}))
+          (ev/give publications {:frame frame :origin (get-in root [:data :input :connector])}))
         (put s :cursor (row :id)))
       (when (and (= 0 (length active)) (= 0 (length (store/pending s))))
         (put s :running nil) (put s :signals []) (break))
@@ -349,22 +357,8 @@
         (put active id nil)
         (assert (= :ok status) (schema/diagnostic "ExecutorFailed" (fiber/last-value fiber) fiber))))))
 
-(defn start [s frames]
+(defn start [s publications]
   (unless (s :running)
     (put s :running true)
-    (ev/go (fn [] (try (run s frames)
+    (ev/go (fn [] (try (run s publications)
       ([err fiber] (eprint (schema/encode (schema/diagnostic "ExecutorFailed" err fiber))) (os/exit 1 true)))))))
-
-(defn describe [config]
-  {:contract "inquiry-v1" :initialize "init" :history (config :history-records) :profile {:field "agent" :inference "inference"}
-   :import {:entry "self" :exports {"self" "Invoke independent work now; returns an admission handle."
-     "append" "Append non-actionable source records." "queue" "Queue actionable work without replacing an inquiry."
-     "status" "Read a work outcome." "wait" "Wait for a root outcome." "cancel" "Cancel owned work without undoing effects."
-     "memory/summarize" "Summarize source; supplied text is the summary, not instructions."
-     "memory/expand" "Return original source unchanged." "memory/invalidate" "Invalidate an associated summary."}}
-   :parameters (catseq [[target declarations] :in [[:config schema/fields] [:input schema/inputs]]]
-     (seq [[key field] :in (sorted (pairs declarations)) :when (field :option)]
-       (merge (schema/project field [:description :minimum :choices :autocomplete])
-         {:name (field :option) :path (string target "." key) :type (string (field :type))
-          :default (get config key (get field :default "automatic"))}
-         (if (and (= target :config) (= :integer (field :type)) (> (get config key 0) 0)) {:maximum (config key)} {}))))})

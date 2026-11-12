@@ -10,7 +10,7 @@ self(request)       ──► admitted work ──► eligible immediately withi
                               │
                          engine.janet
                          /          \
-                 inference          janet.janet ──isolated VM + native fibers
+                 inference          vm.janet ──isolated VM + native fibers
                          \          /                  │
                            effects ◄──journaled host calls
                               │
@@ -42,27 +42,31 @@ Install Connector separately, provision `ac.yaml`, and initialize a fresh store 
 `examples/models.ini` is an optional external model-server preset; Zinc neither provisions that server nor reads or
 verifies its model downloads.
 
-## Host and contract
+## Host and interfaces
 
-`src/main.janet` accepts a live Portable Agents version-1 connection on stdin/stdout. `PA_FRAME_BYTES` bounds envelopes.
-Requests carry `input`, `config` and capability `imports`; readiness is connection-wide, responses correlate by call ID,
-and committed presentation is asynchronous. No one-call/EOF compatibility mode exists. `describe` advertises the normal
-`self` import entry and available operations.
+`src/main.janet` owns a live, unversioned Portable Agents connection on stdin/stdout. `PA_FRAME_BYTES` bounds envelopes;
+`PA_HANDLE` supplies the durable author handle from the agent's own `ac.yaml` before readiness. Neither is a credential.
+The host authenticates the connection and preserves callers when forwarding. Responses correlate by connection-local
+call IDs, not work or author identities. Committed presentation arrives asynchronously.
 
-- `self(request)` admits `text` or `code` and returns a handle, not completion.
-- `append(records)` adds authenticated, non-actionable information without invoking an agent; native Janet uses
-  `self/append`.
-- `queue(request)` admits actionable work without inquiry replacement; native Janet uses `self/queue`.
-- `status(handle)`, `wait(handle)`, `cancel(handle)` inspect, await or cancel work.
-- `memory/summarize`, `memory/expand`, `memory/invalidate` provide the same memory semantics to commands, Janet and
-  imported agents.
-- `init`, `resume`, `instructions`, `models`, `work`, `world`, `views`, `render`, `diagnostics` and `resolve` retain
-  initialization, host continuation, inspection and explicit uncertain-effect resolution.
+The trusted owner connection dispatches `owner/` bindings. Arguments are direct application values, with private
+`config` where needed; flat binding documentation belongs in the call envelope's optional `imports` map. PA validates
+the map. Zinc rejects binding collisions, applies local selections and enforces native resource grants. Connector owns
+external routing, credentials and resource authorization. Documentation grants no authority.
 
-Connector imports a deployment by its configured name: `(research request)`, not `(research/self request)`. Related
-operations are `research/wait`, `research/status` and `research/cancel`. Connector reuses the live connection and the
-target's directory, configuration and grants. There is no additional proxy service, router, generated forwarding module
-or detached executor.
+Owner/local bindings retain admission, append, queues, cancellation, memory, configuration, inspection, continuation and
+explicit uncertain-effect resolution. Owner-only discovery describes command parameters, not peer exports. Native Janet
+retains the same locally granted execution and memory bindings.
+
+Connector's separate peer dispatcher registers only `self`, `status` and `wait`. A configured `research` import installs
+`research`, `research/status` and `research/wait`; the first accepts text or code and optional persistence and returns a
+work handle. The others accept that work handle and require its authenticated author and current grants. There are no
+peer memory, queue, cancellation, diagnostics or recovery bindings. Connector uses the target's own configuration and
+grants on its existing live connection.
+
+An agent's durable handle survives renames, moves and credential changes; these changes may still revoke authority.
+Users retain authenticated provider identities. Store IDs, paths, configured names, deployment revisions and work
+references are not author handles.
 
 Immediate inquiries replace eligible unfinished inquiries in their member/policy/channel lane. Queue admissions do not
 replace them. Direct Janet code is independent. Source positions fence late admissions; a temporary position
@@ -83,8 +87,8 @@ root return neither gathers nor cancels siblings, effects or descendants. Explic
 root outcome, not VM drain or world publication.
 
 ```janet
-(ev/go (fn [] (discord/add-reaction ((discord/context) :message) "👋") nil))
-(ev/go (fn [] (discord/add-reaction ((discord/context) :message) "✨") nil))
+(ev/go (fn [] (discord/add-reaction {:channel "123456789012345678" :message "234567890123456789" :emoji "👋"}) nil))
+(ev/go (fn [] (discord/add-reaction {:channel "123456789012345678" :message "234567890123456789" :emoji "✨"}) nil))
 (print "Reactions started")
 nil
 ```
@@ -99,7 +103,9 @@ Cancellation fences commits and interrupts cooperative execution; it cannot undo
 interrupt arbitrary CPU-bound/native code. Connector closes the host connection on exit and may terminate the process
 after `stop_ms`. Zinc exits immediately on stdin EOF, including when Connector is lost while an evaluator is
 uncooperative. Persistent work then follows interruption recovery; temporary sessions disappear. An observation timeout
-alone is not a work-cancellation request. No external effect or disconnected RPC is silently retried.
+alone is not a work-cancellation request. Capability arguments identify resources explicitly; no Zinc operation identity
+crosses the capability boundary. Work cancellation does not guarantee interruption of an already dispatched external
+action. No external effect or disconnected RPC is silently retried.
 
 ## Failure and replay
 
@@ -120,7 +126,7 @@ Responses retain their provider-native reasoning replay.
 
 ## Memory
 
-One implementation serves commands, native Janet and agent imports:
+One implementation serves authorized owner commands and locally granted native Janet:
 
 ```janet
 (memory/summarize start end "The actual summary text")
@@ -184,4 +190,6 @@ trusted configuration.
 
 Deploy PA, Zinc and Connector together after finishing/cancelling old work. Preserve the existing database and store
 identity; there is no schema-number or release-number bump, automatic image conversion or legacy execution mode.
-Connector's old SQL transport state requires its documented offline cutover.
+Connector's retained transport state requires its documented offline ownership cutover. Historical authorship must be
+mapped only from verified evidence; do not relabel ambiguous legacy authors or restore old in-flight snapshots through a
+compatibility path.

@@ -288,8 +288,9 @@
   (transact s
     (if-let [previous (first (query s "SELECT * FROM events WHERE key=?" [(string "task:" key)]))]
       (do
-        (def transient [:request :store :session :connector :deadline])
+        (def transient [:request :store :session :connector :deadline :author])
         (assert (and (= parent (previous :parent))
+          (= (get input :author (config :handle)) (get-in previous [:data :author]))
           (= (schema/encode (schema/project input transient true))
              (schema/encode (schema/project (get-in previous [:data :input]) transient true)))) "request key reused with different work")
         previous)
@@ -318,9 +319,9 @@
         (assert epoch "configured world is unavailable")
         (def deadline (min (if (> (config :run-seconds) 0) (+ (os/clock) (config :run-seconds)) math/inf)
           (or (get-in root [:data :expires]) math/inf) (or (input :deadline) math/inf)))
-        (def admitted (append s parent "task" {:type (cond (input :summary) "summary" (input :text) "inquiry" "script") :request key :input input
+        (def admitted (append s parent "task" {:type (cond (input :summary) "summary" (input :text) "inquiry" "script") :request key :input (schema/project input [:author] true)
           :world world :epoch epoch :memory_range bounds :call (get input :call (get-in caller [:data :call]))
-          :author (get input :author "self") :at (get input :at (os/strftime "%Y-%m-%dT%H:%M:%SZ"))
+          :author (get input :author (config :handle)) :at (get input :at (os/strftime "%Y-%m-%dT%H:%M:%SZ"))
           :expires (unless (= deadline math/inf) deadline)} (string "task:" key) (image s config)))
         (when (first (query s "SELECT id FROM events WHERE key=?" [(string "cancel:" key)])) (finish s (admitted :id) "cancelled" nil)) admitted))))
 
