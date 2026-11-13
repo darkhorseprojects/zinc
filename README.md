@@ -19,42 +19,52 @@ self(request)       ──► admitted work ──► eligible immediately withi
 
 ## Installation
 
-Use Janet 1.42+, JPM, a C compiler, OpenSSL headers and trusted CA certificates, Python 3.11+ and Git. PA is installed
-independently as a normal Janet package; Zinc declares it as a dependency and imports `pa`. PA owns framing and
-envelopes. Zinc contains no duplicate frame codec.
+Use Janet 1.42+, JPM, a C compiler, OpenSSL headers and trusted CA certificates, Python 3.11+ and Git. Install PA from
+the local `portable-agents` checkout into JPM's configured system or user module directory. Zinc imports `pa`; PA owns
+framing and envelopes. Zinc contains no duplicate frame codec.
 
-Install packages into JPM's configured system or user prefix, independently of Connector. Publish the pinned PA commit
-before a fresh remote dependency install; for coordinated local development, install the local PA checkout into that
-same prefix first. SQLite must support FTS5, URI filenames and memdb:
+Install Zinc's third-party dependencies into that same module directory. SQLite must support FTS5, URI filenames and
+memdb:
 
 ```sh
 JANET_SYSTEM_SQLITE=0 jpm --cflags=-std=c99,-DSQLITE_ENABLE_FTS5,-DSQLITE_USE_URI=1 deps
-jpm install
+jpm build
 ```
 
-`jpm install` applies the pinned TLS cleanup fix, generates verified retrieval assets and installs Zinc's source modules,
-SQL, instructions and assets under `zinc` in the configured module prefix. It never builds an agent executable.
-Connector loads the installed source with `module: zinc/main`, using Janet's native `janet -t zinc/main` entry mode.
-The source checkout is not required at runtime, and one installation serves multiple repositories. Interrupted asset
-downloads and builds use replaceable staging files; repeated installation does not require deleting partial final files.
+`jpm build` applies the pinned TLS cleanup fix and generates verified retrieval assets. Zinc is an agent, not a Janet
+library. Do not use `jpm install` for Zinc. Install its runtime files into a fresh agent directory:
+
+```sh
+install -d -m 700 "$HOME/.agents/zinc"
+install -m 644 src/*.janet src/store.sql zinc.md LICENSE NOTICE "$HOME/.agents/zinc/"
+cp -R build/assets "$HOME/.agents/zinc/assets"
+```
+
+Use `%USERPROFILE%\.agents\zinc` and equivalent file-copy operations on Windows. See
+[PA's filesystem conventions](https://github.com/darkhorseprojects/portable-agents#filesystem-conventions) for platform
+locations. Place `ac.yaml` in the agent directory and configure `module: ./main.janet`. Connector resolves that entry
+relative to `ac.yaml`, independently of the working repository selected by `directory`. The source checkout is not required at
+runtime. Interrupted asset downloads and builds use replaceable staging files; repeated builds do not require deleting
+partial final files.
 
 MSVC flags are `/nologo,/MD,/DSQLITE_ENABLE_FTS5,/DSQLITE_USE_URI=1`. Jsec uses `VCPKG_ROOT` on Windows and
 `OPENSSL_PREFIX` for nonstandard macOS installations. The `tls` task rebuilds the pinned native dependency with
 its cancellation cleanup fix in a child process without changing the installer's working directory. Set `JANET_PATH` to
-your configured JPM module directory when it is not the runtime default. No application searches a sibling checkout for
-PA at runtime.
+your configured JPM module directory when it is not the runtime default. Janet, PA, SQLite, Spork and Jsec remain in
+their configured runtime and library locations. Do not install a dependency tree inside the agent directory. No
+application searches a sibling checkout for PA at runtime.
 
 Install Connector separately, provision one agent per `ac.yaml`, and initialize a fresh store with `agc init DIRECTORY`.
-Keep writable history under `${instance}` and use `${directory}` for the working repository. Installed instructions and
-retrieval assets resolve relative to Zinc's own module; configure `instructions` explicitly for repository-owned text.
-For source development, use `module: /absolute/path/to/zinc/src/main` and explicitly configure instructions, Cygnet and
-stopword paths from that checkout's generated assets.
+Keep writable history under `${instance}` and use `${directory}` for the working repository. Agent-local instructions
+and retrieval assets resolve relative to Zinc's own modules; configure `instructions` explicitly for repository-owned
+text. For source development, use `module: /absolute/path/to/zinc/src/main.janet` and explicitly configure instructions,
+Cygnet and stopword paths from that checkout's generated assets.
 `examples/models.ini` is an optional external model-server preset; Zinc neither provisions that server nor reads or
 verifies its model downloads.
 
 ## Host and interfaces
 
-`zinc/main` owns a live, unversioned Portable Agents connection on stdin/stdout. `PA_FRAME_BYTES` bounds envelopes;
+`main.janet` owns a live, unversioned Portable Agents connection on stdin/stdout. `PA_FRAME_BYTES` bounds envelopes;
 `PA_HANDLE` supplies the invoker-configured durable author handle before readiness. Connector provisions it in the
 agent's own `ac.yaml`; Zinc does not read that file. Neither environment value is a credential.
 The host authenticates the connection and preserves callers when forwarding. Responses correlate by connection-local
@@ -204,9 +214,12 @@ Filesystem grants reject observed links/traversal but do not provide race-safe c
 mutating directories. TLS verifies certificates and hostnames; HTTP follows no redirects. Custom setup/modules remain
 trusted configuration.
 
-Deploy PA, Zinc and Connector together after finishing/cancelling old work. Preserve the existing database, author handle
-and store identity. Old in-flight snapshots without named-profile authority cannot be silently resumed. Native worlds
-still require matching Janet version, build and configuration. There is no schema-number or release-number bump,
+Deploy PA, Zinc and Connector together after finishing/cancelling old work. For an upgrade retaining history, preserve
+the existing database, author handle and store identity. For an explicit fresh-history reset, archive the stopped agent's
+entire directory, install into a fresh directory and port only `ac.yaml`; retain the handle for the same author and let
+`agc init` create a new store identity. Do not copy old history or Connector state into that fresh installation. Old
+in-flight snapshots without named-profile authority cannot be silently resumed. Native worlds still require matching
+Janet version, build and configuration. There is no schema-number or release-number bump,
 automatic image conversion or legacy execution mode.
 Connector's retained transport state requires its documented offline ownership cutover. Historical authorship must be
 mapped only from verified evidence; do not relabel ambiguous legacy authors or restore old in-flight snapshots through a
