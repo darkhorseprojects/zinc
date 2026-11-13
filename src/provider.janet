@@ -164,9 +164,9 @@
       (assert (index-of (response :status) ["completed" "incomplete"]) "Responses did not complete")
       (assert (indexed? (response :output)) "invalid Responses output")
       (def text @[]) (def refusal @[]) (def reasoning @[]) (def calls @[])
-      (var phase nil) (var bottom nil)
+      (var phase nil)
+      (def bottom (last (response :output)))
       (each item (response :output)
-        (unless (= "reasoning" (item :type)) (set bottom item))
         (case (item :type)
           "message"
           (do
@@ -175,7 +175,7 @@
             (when phase (assert (index-of phase ["commentary" "partial_answer" "final_answer"]) "unsupported Responses message phase"))
             (each part (item :content)
               (case (part :type)
-                "output_text" (unless (index-of phase ["commentary" "partial_answer"]) (array/push text (part :text)))
+                "output_text" (array/push text (part :text))
                 "refusal" (array/push refusal (part :refusal)))))
           "reasoning" (each part (get item :summary []) (array/push reasoning (part :text)))
           "function_call" (do
@@ -189,8 +189,12 @@
                  :response {:model (selected :reference) :protocol (selected :protocol) :items (response :output)
                             :phase phase :end-turn (response :end_turn)
                             :reasoning-tokens (get-in response [:usage :output_tokens_details :reasoning_tokens] 0)}}
-       :final (and (= "message" (get bottom :type)) (not= false (response :end_turn))
-         (not (index-of (get bottom :phase) ["commentary" "partial_answer"])))
+       :final (and (= "completed" (response :status)) (= 0 (length calls))
+         (= "message" (get bottom :type)) (= "completed" (get bottom :status "completed"))
+         (not= false (response :end_turn))
+         (not (index-of (get bottom :phase) ["commentary" "partial_answer"]))
+         (some |(and (= "output_text" ($ :type)) (string? ($ :text))
+           (> (length (string/trim ($ :text))) 0)) (get bottom :content [])))
        :finish-reason (if (= "completed" (response :status))
                         (if (> (length calls) 0) "tool_calls" "stop")
                         (case (get-in response [:incomplete_details :reason])
@@ -208,16 +212,20 @@
       {:message (merge (choice :message)
                   {:response {:model (selected :reference) :protocol (selected :protocol)
                               :reasoning-tokens (get-in response [:usage :completion_tokens_details :reasoning_tokens] 0)}})
-       :final (and (= "stop" (choice :finish_reason)) (= 0 (length (get-in choice [:message :tool_calls] []))))
+       :final (and (= "stop" (choice :finish_reason)) (= 0 (length (get-in choice [:message :tool_calls] [])))
+         (let [content (get-in choice [:message :content])]
+           (if (string? content) (> (length (string/trim content)) 0)
+             (and (indexed? content) (some |(and (= "text" ($ :type)) (string? ($ :text))
+               (> (length (string/trim ($ :text))) 0)) content)))))
        :finish-reason (choice :finish_reason)
        :native-finish-reason (choice :native_finish_reason) :usage (response :usage)})))
   (def finish (value :finish-reason))
   (def message (value :message))
   (def status (cond
     (= "content_filter" finish) "blocked"
-    (> (length (get message :refusal "")) 0) "refused"
-    (and (index-of finish ["stop" "tool_calls"]) (value :final)) "complete"
+    (and (index-of finish ["stop" "tool_calls"]) (> (length (or (message :refusal) "")) 0)) "refused"
     (and (index-of finish ["stop" "tool_calls"]) (> (length (get message :tool_calls [])) 0)) "tools"
+    (and (index-of finish ["stop" "tool_calls"]) (value :final)) "complete"
     (= "stop" finish) "continue"
     (error {:code "IncompleteModelResponse" :message (string "Model response ended with " finish ".")
       :context {:finish-reason finish :native-finish-reason (value :native-finish-reason)

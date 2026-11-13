@@ -95,9 +95,9 @@ not a PA envelope field. PA validates only the envelope's import documentation m
 applies local selections and enforces native resource grants. Connector owns
 external routing, credentials and resource authorization. Documentation grants no authority.
 
-Owner/local bindings retain admission, append, queues, cancellation, memory, configuration, inspection, continuation and
-explicit uncertain-effect resolution. Owner-only discovery describes command parameters, not peer exports. Native Janet
-retains the same locally granted execution and memory bindings.
+Owner/local bindings retain admission, append, queues, cancellation, memory, configuration, inspection and continuation.
+Owner-only discovery describes command parameters, not peer exports. Native Janet retains the same locally granted
+execution and memory bindings.
 
 Connector's separate peer dispatcher registers only `self`, `status` and `wait`. A locally named `research` import installs
 `research`, `research/status` and `research/wait`; the alias need not match any name in the target's own single-agent
@@ -135,11 +135,18 @@ root outcome, not VM drain or world publication.
 nil
 ```
 
-Model responses admit sibling scripts and their receipts atomically. Each effect commits its own outcome and wakes
-waiting execution immediately. Blocking custom bindings do not run on the host's scheduling loop. Native output
-callbacks coalesce writes by port, schedule publication, and flush before host calls and root returns. Whitespace-only
-output is omitted. Structured `print` values use JSON; explicit `string` conversion retains Janet semantics. Native
-return values that are not JSON receive Janet-type descriptors.
+Model responses admit sibling scripts and their receipts atomically. Each effect, script return and output commits its
+own response and readies its nearest inquiry. A completed assistant response ends that model loop immediately, without
+waiting for descendant drain or scanning for unseen results. The inquiry becomes idle unless another response has
+readied it; later responses resume the same inquiry. Existing claim rows hold this ready/idle state, not a separate queue.
+Successful script settlement after a root return produces neither another response nor a wakeup. Concurrent responses
+coalesce into readiness; each inquiry has at most one active inference. Nested inquiries run independently and return
+answers to their callers without injecting their intermediate execution into parent exchanges.
+
+Blocking custom bindings do not run on the host's scheduling loop. Native output callbacks coalesce writes by port,
+schedule publication, and flush before host calls and root returns. Whitespace-only output is omitted. Standard Janet
+bindings, including `print`, retain their native behavior and documentation. Native return values that are not JSON
+receive Janet-type descriptors.
 
 Cancellation fences commits and interrupts cooperative execution; it cannot undo an external effect or forcibly
 interrupt arbitrary CPU-bound/native code. Connector closes the host connection on exit and may terminate the process
@@ -151,22 +158,26 @@ action. No external effect or disconnected RPC is silently retried.
 
 ## Failure and replay
 
-Admission commits before dispatch. Explicitly persistent effects and source progress survive ordinary SQLite
-persistence. On a later host start, undispatched work may execute; a dispatched effect without an outcome is uncertain.
-Its operation identity, attempt, arguments and source remain available.
+Admission commits before dispatch. Persistent effects and source progress survive ordinary SQLite persistence. On a
+later host start, undispatched work may execute; a dispatched effect without a committed response ends with an
+outcome-unknown diagnostic. Its operation, attempt, arguments and source remain available. Unknown does not mean
+unperformed. No resolution binding, evidence submission or retry-approval state blocks execution. The owning inquiry
+can investigate through ordinary tools and choose fresh actions; subsequent observations do not rewrite the old outcome.
 
-Use `effect/resolve` or the direct `resolve` entry to record a verified value/error, or approve a retry, with evidence.
-Only the latest unresolved attempt can be resolved. Retry retains the logical effect identity. Evidence is an
-attestation, not an independent verifier. Definitive failures retain their originating diagnostics; a potentially
-mutating dispatch is not classified as definitely unperformed.
-
-Interrupted Janet VMs retain completed source-form progress but not locals or native waits. Zinc never replays their
-original source to reconstruct a continuation. Recovery inquiries inspect committed evidence and construct only
-remaining work. Without inference authority, uncertainty stays inspectable instead of expanding grants. Interrupted
-model turns continue from committed evidence; uncommitted provider tool calls are never admitted. Chat Completions and
-Responses retain their provider-native reasoning replay.
+Interrupted Janet VMs retain completed source-form progress but not locals or native waits. Zinc records the interruption
+rather than replaying source to reconstruct a continuation. Interrupted model turns continue from committed evidence;
+uncommitted provider tool calls are never admitted. Chat Completions and Responses retain provider-native reasoning
+replay. Both protocols continue on reasoning-only output or tool calls and finish only on an assistant answer, refusal
+or filter outcome; truncated responses are failures, not successful answers.
 
 ## Memory
+
+`events.parent` records execution ownership. An input's `parent` selects a historical endpoint; these are separate
+relationships. `memory_range: {start, end}` selects inclusive historical event IDs. Without an explicit range, all history
+through the selected point is available; `parent: 0` selects `[0,0]`. The execution's subsequent responses enter its live
+context normally. Ranges may contain sibling work; they are not ancestral-path selectors. Memory, retrieval, summaries
+and expansion use the same source membership. Recursive `self` calls create durable child inquiries with their own
+ranges and loops. Multiple continuations from one historical point are forks, not separately registered branches.
 
 One implementation serves authorized owner commands and locally granted native Janet:
 

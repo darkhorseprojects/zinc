@@ -17,7 +17,7 @@
               (index-of name ['/ '/=]) (string "core/" name)
               (string/find "/" (string name)) (string name)
               (string "core/" name))
-            (if (index-of name ['os/clock 'os/date 'os/time 'os/cryptorand]) (base name) {:local name}))
+            {:local name})
           imports (get config :imports {})]
       (merge-into available supplied)
       (each [name documentation] (pairs imports)
@@ -96,11 +96,7 @@
   (each [name binding] (pairs bindings)
     (put base (or (binding :local) (symbol name))
       (if (binding :local)
-        (if (= 'print (binding :local))
-          @{:doc "Prints text or JSON data." :value (fn [& values]
-            (apply (module/value native 'print)
-              (map |(if (string? $) $ (schema/encode (schema/transport $))) values)))}
-          (native (binding :local)))
+        (native (binding :local))
         @{:doc (binding :doc) :value (partial call name)})))
   (each [name documentation value]
     [['input "(input) returns script input." (fn [] input)]
@@ -117,7 +113,7 @@
     (when (symbol? name)
       (def key (symbol "zinc/binding/" name))
       (put reverse binding key) (put forward key binding)
-      (when (index-of name ['input 'self/document 'settings 'resources 'print])
+      (when (index-of name ['input 'self/document 'settings 'resources])
         (def key (symbol "zinc/value/" name))
         (put reverse (binding :value) key) (put forward key (binding :value)))))
   (set env (if (snapshot 5) (unmarshal (snapshot 5) forward) (make-env base)))

@@ -108,7 +108,7 @@
         (merge (recorded :data) {:event (recorded :id)}))
     (do
       (when (first (store/query s "SELECT id FROM events WHERE parent=? AND kind='dispatch'" [(admission :id)]))
-        (error {:code "Blocked" :message "Dispatched inference has no committed outcome; reconcile before repeating." :context {:operation (admission :id)}}))
+        (error {:code "Blocked" :message "Dispatched inference has no committed outcome." :context {:operation (admission :id)}}))
       (def config (s :config))
       (def selected (store/restore s (admission :image)))
       (assert (selected :reference) "finish admitted inference under its original installation before upgrading")

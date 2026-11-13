@@ -6,18 +6,42 @@
 (import ./effects)
 
 (def bindings
-  {"self" {:arity [1 1] :doc "(self request) admits an independent execution. Supply exactly one of :text or :code. Returns a handle, not completion. Descendants inherit persistence."}
-   "self/append" {:arity [1 1] :doc "(self/append records) appends non-actionable source information without invoking work."}
-   "self/queue" {:arity [1 1] :doc "(self/queue request) queues actionable descendant work; sibling queued work runs in admission order."}
-   "self/status" {:arity [1 1] :doc "(self/status handle) reads a script's root outcome and unresolved effect attempts."}
-   "self/wait" {:arity [1 1] :doc "(self/wait handle) suspends only the calling fiber for a descendant's root outcome. Returns an outcome object; read :value."}
-   "self/cancel" {:arity [1 1] :doc "(self/cancel handle) cancels a descendant execution tree without undoing effects."}
-   "effect/resolve" {:arity [2 2] :doc "(effect/resolve attempt outcome) resolves the latest unresolved uncertain attempt. outcome contains :evidence and exactly one of :value, :error, or :retry true. :error requires string :code and :message fields. :evidence is a nonblank string or nonempty object recording verification. Retry retains the logical effect identity."}
+  {"self" {:arity [1 1] :doc `(self request)
+Starts an independent child inquiry (:text) or Janet script (:code). request must be an object with exactly one of :text or :code, both strings.
+Optional :parent selects a historical event (0 means empty history); omitted uses the caller's current point. Optional :memory_range {:start first-id :end last-id} selects inclusive history; omitted includes all history through :parent. Optional :world selects a granted world. Descendants inherit persistence.
+Returns {:script id :store store-id :request request-id :persist boolean} immediately, not completion. :script identifies either a script or an inquiry. Pass the handle to self/status, self/wait, or self/cancel.
+Examples: (self {:text "Investigate source A."}); (self {:code "(+ 1 2)"}); (self {:text "Reconsider." :parent 140 :memory_range {:start 20 :end 100}}).
+For concurrent children, admit them with self before waiting for any of them.`}
+   "self/append" {:arity [1 1] :doc `(self/append records)
+Adds source information without executing it or creating child work. records is an array of objects containing exactly :key, :author, :at, and :text, all nonempty strings. :key identifies the source record; :at is its timestamp. Returns {:events [event-id ...]}.
+Example: (self/append [{:key "report:42" :author "analyst" :at "2026-11-13T01:00:00Z" :text "Three services were affected."}]).`}
+   "self/queue" {:arity [1 1] :doc `(self/queue request)
+Queues child work in admission order among queued siblings from this script. Returns an admission handle immediately; does not wait for completion.
+request must be an object with exactly one of :text (child inquiry) or :code (Janet source), both strings. Optional :parent, :memory_range {:start first-id :end last-id}, and :world have the same meanings as self. Descendants inherit persistence.
+Returns {:script id :store store-id :request request-id :persist boolean}. Use self/wait for the root outcome. Use self instead when queue ordering is unnecessary.
+Examples: (self/queue {:text "Check the next source."}); (self/queue {:code "(+ 1 2)"}). A string alone, :task, and :request are not work instructions.`}
+   "self/status" {:arity [1 1] :doc `(self/status handle)
+Reads an authorized script or inquiry's root outcome without waiting. Accepts its admission handle or numeric :script ID. Returns :script and :state ("pending" until an outcome exists). Available outcomes include :value, :text, and optionally :error.
+An inquiry's outcome is its latest completed response. A script's root return does not imply background fibers have drained or world changes have been published.
+Example: (self/status child).`}
+   "self/wait" {:arity [1 1] :doc `(self/wait handle)
+Suspends only the calling fiber until a descendant's root outcome is available. Other fibers, scripts, and effects continue. Accepts its admission handle or numeric :script ID. An already available authorized outcome returns immediately.
+Returns an outcome object, not the value directly. Check :state and :error before reading :value; child failures are returned as data. Does not wait for background fibers or world publication.
+Example: (let [child (self {:code "(+ 1 2)"}) outcome (self/wait child)] (if (= "done" (outcome :state)) (outcome :value) outcome)).`}
+   "self/cancel" {:arity [1 1] :doc `(self/cancel handle)
+Cancels a descendant execution tree. Accepts its admission handle or numeric :script ID. Completed effects are not undone; an already dispatched external action may still finish.
+Example: (self/cancel child).`}
    "world/view" {:arity [0 1] :doc "(world/view &opt point) reports a world publication and its complete defining source."}
    "world/remove" {:arity [1 1] :doc "(world/remove name) removes a local world binding; name is a symbol."}
-   "memory/summarize" {:arity [0 3] :doc "(memory/summarize &opt start end text) summarizes an inclusive source range. Supplied text is the summary itself; omitted text uses the summary model."}
-   "memory/expand" {:arity [1 1] :doc "(memory/expand point-or-summary) returns original underlying source text unchanged."}
-   "memory/invalidate" {:arity [1 1] :doc "(memory/invalidate point-or-summary) invalidates its associated summary and dependent ancestors."}
+   "memory/summarize" {:arity [0 3] :doc `(memory/summarize &opt start end text)
+Summarizes accessible source events in an inclusive event-ID range. Omitted bounds select the available source range. Supplied text is the actual summary to store, not generation instructions; without text the summary model generates it. Returns {:summary summary-event-id}.
+Examples: (memory/summarize 20 80); (memory/summarize 20 80 "Source A confirms X; source B disputes Y.").`}
+   "memory/expand" {:arity [1 1] :doc `(memory/expand point-or-summary)
+Accepts an event or summary event ID. Returns {:sources [...]} containing original accessible source records; read their :text and :data. Recursively expands summaries without generating or paraphrasing source text.
+Example: (memory/expand 140).`}
+   "memory/invalidate" {:arity [1 1] :doc `(memory/invalidate point-or-summary)
+Accepts a summary event ID or a source event covered by a summary. Invalidates its associated summary and dependent summaries, without deleting source records. Returns {:summary summary-event-id :event invalidation-event-id}.
+Example: (memory/invalidate 140).`}
    "fs/list" {:arity [2 2] :resource :fs :permission :read :doc "(fs/list resource relative-path) lists a granted directory. Both arguments are strings. Paths are grant-relative; \".\" selects the grant root. Absolute paths and traversal are rejected."}
    "fs/read" {:arity [2 2] :resource :fs :permission :read :doc "(fs/read resource relative-path) reads a granted UTF-8 file. Both arguments are strings. Paths are grant-relative; \".\" selects the grant root. Absolute paths and traversal are rejected."}
    "fs/write" {:arity [3 3] :resource :fs :permission :write :doc "(fs/write resource relative-path text) writes UTF-8 text to a granted file. All arguments are strings. Paths are grant-relative; \".\" selects the grant root. Absolute paths and traversal are rejected."}
@@ -27,26 +51,21 @@
 (defn- ready? [s execution]
   (def state (store/progress s (execution :id)))
   (def wait (get-in state [:data :wait]))
-  (def scope (if (get-in execution [:data :input :recovery]) ((store/root s (execution :id)) :id) (execution :id)))
   (cond
     (nil? wait) true
     (wait :tasks) (every? (map |(store/outcome s $) (wait :tasks)))
-    (wait :operations) (every? (map |(store/result s $) (wait :operations)))
-    (wait :changes) (or (first (store/changes s scope (get-in state [:data :after] 0)))
-      (and (get-in state [:data :final]) (not (store/busy? s scope))))
+    (wait :changes) (store/turn s (execution :id))
     (error "unsupported stored wait condition")))
 
 (defn- infer [s inquiry available]
   (def config (s :config))
-  (def scope-id (if (get-in inquiry [:data :input :recovery]) ((store/root s (inquiry :id)) :id) (inquiry :id)))
-  (def pending (first (store/query s `SELECT r.* FROM events m JOIN events r ON r.parent=m.id
-    WHERE m.parent=? AND m.kind='model' AND r.kind='result' AND json_extract(m.data,'$.turn')=1
-      AND NOT EXISTS(SELECT 1 FROM events a WHERE a.parent=r.id AND a.kind='turn') ORDER BY r.id LIMIT 1` [(inquiry :id)])))
+  (def scope-id (inquiry :id))
+  (def admission (store/turn s scope-id))
+  (def pending (when admission (store/result s (admission :id))))
   (if pending
     (store/transact s
       (store/check s (inquiry :id))
       (def response (pending :data))
-      (when (response :error) (error (response :error)))
       (var admitted false)
       (each tool (get response :tools [])
         (def receipt (try
@@ -61,22 +80,12 @@
            :message {:role "tool" :tool_call_id (tool :id) :content (schema/encode receipt)}}
           (string "receipt:" (pending :id) ":" (tool :id))))
       (store/append s (pending :id) "turn" {} (string "turn:" (pending :id)))
-      (def after (get-in (store/event s (pending :parent)) [:data :views :after] 0))
-      (def final (index-of (response :status) ["complete" "refused" "blocked"]))
-      (if (and final (not (store/busy? s scope-id))
-        (= 0 (length (store/changes s scope-id after))))
-        (store/finish s (inquiry :id) "done" {:text (response :text) :status (response :status)})
-        (if (or admitted final)
-          (store/advance s (merge {:wait {:changes true} :after after}
-            (if final {:final {:text (response :text) :status (response :status)}} {})))
-          (store/advance s {}))))
+      (case (response :status)
+        "continue" (store/advance s {})
+        "tools" (unless admitted (store/advance s {}))
+        nil))
     (label turn (do
-      (def state (get (store/progress s (inquiry :id)) :data))
-      (when (and (state :final) (not (store/busy? s scope-id))
-        (= 0 (length (store/changes s scope-id (state :after)))))
-        (return turn (store/finish s (inquiry :id) "done" (state :final))))
-      (when-let [unknown (first (store/query s `SELECT m.* FROM events m WHERE m.parent=? AND m.kind='model' AND json_extract(m.data,'$.turn')=1
-        AND NOT EXISTS(SELECT 1 FROM events r WHERE r.parent=m.id AND r.kind='result') ORDER BY m.id LIMIT 1` [(inquiry :id)]))]
+      (when-let [unknown admission]
         (if (first (store/query s "SELECT id FROM events WHERE parent=? AND kind='dispatch'" [(unknown :id)]))
           (return turn (store/append s (unknown :id) "result"
             {:type "model" :state "done" :role "chat" :turn true :status "continue" :tools [] :text ""
@@ -94,14 +103,17 @@
       (def state {:role "user" :content (string "## World source\n\n" ((store/view s (get-in inquiry [:data :world])) :text))})
       (def window (min (get config :context-quota math/inf) (selected :context)))
       (def capacity (math/floor (/ (* window (config :context-percent)) 100)))
-      (def scope (store/tree s scope-id))
+      (def scope (store/transact s
+        (store/advance s {:wait {:changes true}})
+        (store/tree s scope-id)))
       (def changes (tabseq [row :in (store/changes s scope-id 0)
         :unless (= "summary" (row :task-type))] (row :id) true))
       (def replay (seq [row :in scope :let [data (row :data)
         message (cond
           (and (index-of (row :kind) ["result" "receipt"])
             (= (inquiry :id) (row :task))
-            (or (= "receipt" (row :kind)) (and (= "model" (data :type)) (data :turn)))) (data :message)
+            (or (= "receipt" (row :kind)) (and (= "model" (data :type)) (data :turn))))
+          (or (data :message) (when (data :error) {:role "user" :content (memory/render s row)}))
           (changes (row :id)) {:role "user" :content (string "Committed execution event:\n"
             (memory/render s row) (row :operation))})]
         :when message] [row message]))
@@ -110,7 +122,8 @@
       (var closed (get-in previous [:data :views :closed] 0))
       (when (>= (+ (model/estimate (array/concat @[system input state] (map |($ 1) (filter |(> (($ 0) :id) closed) replay))) (selected :reference))
         (store/estimate (schema/encode tools)) 768) capacity)
-        (def pending (filter |(and (not= (inquiry :id) ($ :id)) (not= "summary" (get-in $ [:data :type]))) (store/pending s scope-id)))
+        (def pending (filter |(and (not= (inquiry :id) ($ :id)) (not= "summary" (get-in $ [:data :type]))
+          (not (store/outcome s ($ :id)))) (store/pending s scope-id)))
         (each row scope
           (when (and (= "model" (row :kind)) (= (inquiry :id) (row :parent)) (get-in row [:data :turn])
             (not (find |(< ($ :id) (row :id)) pending))) (set closed (row :id))))
@@ -118,10 +131,6 @@
       (def exchanges (map |($ 1) (filter |(> (($ 0) :id) closed) replay)))
       (def room (- capacity (model/estimate (array/concat @[system input state] exchanges) (selected :reference))
         (store/estimate (schema/encode tools)) 512))
-      (when (<= room 256)
-        (when-let [settling (find |(and (not= (inquiry :id) ($ :id)) (store/outcome s ($ :id))) (store/pending s scope-id))]
-          (error {:code "Yield" :message "Waiting for a returned script to settle before compacting its exchange."
-            :context {:wait {:operations [(settling :id)]}}})))
       (assert (> room 256)
         {:code "InquiryContextExhausted" :message "Instructions, inquiry, world and live exchanges leave insufficient context."
          :context {:model (selected :reference) :capacity capacity :remaining room}})
@@ -159,7 +168,7 @@
        :context {:effect (effect :id) :binding name :expected [minimum maximum]
          :received (length args) :signature (binding :doc)}}))
   (def local? (or (= name "self") (string/has-prefix? "world/" name)
-    (string/has-prefix? "self/" name) (= name "effect/resolve") (string/has-prefix? "memory/" name)))
+    (string/has-prefix? "self/" name) (string/has-prefix? "memory/" name)))
   (defn execute []
     (store/check s (effect :id))
     (def script (store/task s (effect :id)))
@@ -169,16 +178,15 @@
       "memory/summarize" (apply memory/summarize s script args)
       "memory/expand" (apply memory/expand s script args)
       "memory/invalidate" (apply memory/invalidate s script args)
-      "effect/resolve"
-      (let [[id outcome] args]
-        (assert (= ((store/root s id) :id) ((store/root s (effect :id)) :id)) "attempt is outside this inquiry")
-        (store/resolve s (store/event s id) outcome) outcome)
       "self/append"
       (let [ids (store/record s (first args))]
         (each id ids (store/append s (script :id) "notice" {:source id}))
         {:events ids})
       "self"
-      (let [input (merge (schema/request (first args) [:text :code :parent :memory_range :world])
+      (let [_ (assert (and (dictionary? (first args))
+                (not= (nil? (get (first args) :text)) (nil? (get (first args) :code))))
+                "supply an object with exactly one of :text or :code; e.g. {:text \"Investigate source A.\"}")
+            input (merge (schema/request (first args) [:text :code :parent :memory_range :world])
               {:request (effect :key) :queued (= name "self/queue")
                :lane (when (= name "self/queue") (string "script:" (script :id)))})
             config (if (input :text) (get (s :config) :agent (s :config)) (s :config))
@@ -193,8 +201,7 @@
             (assert (and (not= id (script :id)) (find |(= id ($ :id)) (store/tree s (script :id)))) "choose a descendant"))
           (case name
             "self/cancel" (store/abort s (get-in (store/event s id) [:data :request]) "cancelled by caller")
-            "self/status" (merge (get (store/outcome s id) :data {:state "pending"})
-              {:script id :uncertain (filter |(and (= "uncertain" ($ :kind)) (not (store/result s ($ :parent)))) (store/tree s id))})
+            "self/status" (merge (get (store/outcome s id) :data {:state "pending"}) {:script id})
             (or (get (store/outcome s id) :data)
               (error {:code "Yield" :message "Waiting for a descendant." :context {:wait {:tasks [id]}}}))))
         (cond
@@ -209,30 +216,25 @@
           (effects/invoke (s :config) name args)
           (apply (binding :value) args)))))
   (if local?
-    (try (store/transact s (store/finish s (effect :id) "done" (execute)))
+    (try (store/finish s (effect :id) "done" (execute))
       ([err fiber]
         (when (index-of (get err :code) ["Yield" "TaskClosed" "TaskReplaced" "DeadlineExceeded"]) (error err))
         (store/finish s (effect :id) "failed" nil (schema/diagnostic "OperationFailed" err fiber))))
     (let [prior (first (store/query s "SELECT * FROM events WHERE parent=? AND kind='attempt' ORDER BY id DESC LIMIT 1" [(effect :id)]))]
-      (if (and prior (not (store/result s (prior :id))))
-        (do
-          (store/uncertain s (prior :id)
-            {:code "EffectUncertain" :message "Inspect this effect before resolving it or approving another attempt."
-             :context {:effect (effect :id) :attempt (prior :id) :name name :arguments args}})
-          (store/advance s {:wait {:operations [(prior :id)]}}))
-        (let [attempt (store/append s (effect :id) "attempt" {} (string "attempt:" (effect :id) ":" (get prior :id 0)))]
+      (if (and prior (first (store/query s "SELECT id FROM events WHERE parent=? AND kind='dispatch'" [(prior :id)])))
+        (store/finish s (effect :id) "failed" nil
+          {:code "EffectOutcomeUnknown" :message "The effect was dispatched without a committed response; it may have completed."
+           :context {:outcome "unknown" :effect (effect :id) :attempt (prior :id) :name name :arguments args}})
+        (let [attempt (or prior (store/append s (effect :id) "attempt" {} (string "attempt:" (effect :id))))]
           (store/append s (attempt :id) "dispatch" {})
           (try (store/finish s (effect :id) "done" (execute))
             ([err fiber]
               (when (index-of (get err :code) ["TaskClosed" "TaskReplaced" "DeadlineExceeded"]) (error err))
               (def failure (schema/diagnostic "OperationFailed" err fiber))
-              (if (= "failed" (get-in failure [:context :outcome]))
-                (store/finish s (effect :id) "failed" nil failure)
-                (do
-                  (store/uncertain s (attempt :id)
-                    (merge failure {:context (merge (get failure :context {})
-                      {:effect (effect :id) :attempt (attempt :id) :name name :arguments args})}))
-                  (store/advance s {:wait {:operations [(attempt :id)]}}))))))))))
+              (store/finish s (effect :id) "failed" nil
+                (merge failure {:context (merge (get failure :context {})
+                  {:outcome (get-in failure [:context :outcome] "unknown")
+                   :effect (effect :id) :attempt (attempt :id) :name name :arguments args})})))))))))
 
 (defn- execute [[config profiles execution file signals connection]]
   (def s (store/open config nil file))
@@ -264,12 +266,9 @@
                 "summary" (store/finish s (execution :id) "done" (memory/complete-summary s execution))
                 "script"
                 (if (get-in (store/progress s (execution :id)) [:data :started])
-                  (do
-                    (store/uncertain s (execution :id) {:code "ContinuationLost"
-                      :message "The VM was interrupted. Inspect source progress and committed effects; continue remaining work in a new script, never replay lost locals or waits."
-                      :context {:script (execution :id) :progress (get (store/progress s (execution :id)) :data)}})
-                    (store/finish s (execution :id) "failed" (get-in (store/outcome s (execution :id)) [:data :value])
-                      {:code "ContinuationLost" :message "VM settlement or world publication was interrupted."}))
+                  (store/finish s (execution :id) "failed" (get-in (store/outcome s (execution :id)) [:data :value])
+                    {:code "ContinuationLost" :message "The VM was interrupted; committed effects may have completed. Locals and waits were not retained."
+                     :context {:outcome "unknown" :script (execution :id) :progress (get (store/progress s (execution :id)) :data)}})
                   (do
                     (store/advance s {:started true :form 0})
                     (def outcome (vm/run s execution available))
@@ -279,37 +278,47 @@
             (unless (store/result s (execution :id))
               (cond
                 (= "Yield" (get err :code)) (store/advance s {:wait (get-in err [:context :wait])})
+                (and (= "inquiry" (get-in execution [:data :type]))
+                  (get-in (store/result s (get (store/turn s (execution :id)) :id)) [:data :error])) nil
                 (and (= "inquiry" (get-in execution [:data :type])) (= "unknown" (get-in err [:context :outcome]))) (store/advance s {})
                 (not (index-of (get err :code) ["TaskClosed" "TaskReplaced"]))
                 (store/finish s (execution :id) "failed" nil (schema/diagnostic "ExecutionFailed" err fiber))))))))))
 
 (defn- presentation [s row owner root]
-  (when owner
+  (when (and owner (not= "summary" (get-in owner [:data :type]))
+    (not (and (= "result" (row :kind)) (= "task" (row :parent-kind)) (nil? (row :publication)))))
     (def data (row :data))
     (def source (when (and (= "task" (row :kind)) (= "script" (data :type))) (get-in data [:input :code])))
     (def effect (and (= "result" (row :kind)) (= "operation" (row :parent-kind))))
-    (def terminal (and (= "result" (row :kind)) (= (owner :id) (row :parent)) (row :publication)))
+    (def terminal (and (= "result" (row :kind)) (= (owner :id) (row :parent))))
     (def body (cond
-      (and (= "result" (row :kind)) (= "model" (data :type))
-        (= "chat" (data :role)) (not (data :error)))
-      (model/render data)
+      (and (= "result" (row :kind)) (= "model" (data :type)) (= "chat" (data :role)) (not (data :error))) (model/render data)
       source source
       (data :error) (schema/encode {:error (data :error)})
-      effect nil
+      effect (data :text)
       (or terminal (index-of (row :kind) ["return" "fiber"]))
-      (when (and (not= "inquiry" (get-in owner [:data :type]))
-        (not= :null (data :value))
-        (or (string? (data :value)) (nil? (owner :parent)))) (data :text))
-      (index-of (row :kind) ["output" "world" "artifact" "uncertain"]) (data :text)))
-    (when (and body (not= "summary" (get-in owner [:data :type])))
-      {:kind (cond source "script" effect "effect" (= "model" (data :type)) "model" (row :kind))
-       :script (if (= "script" (get-in owner [:data :type])) (owner :id) :null) :root (root :id) :store (s :identity)
+      (when (and (not= "inquiry" (get-in owner [:data :type])) (not= :null (data :value))) (data :text))
+      (index-of (row :kind) ["output" "artifact"]) (data :text)))
+    (when (and body (not= "" (string/trim body)))
+      (def inquiry (row :inquiry))
+      (def model (when inquiry (first (store/query s `WITH RECURSIVE ancestors AS (
+        SELECT * FROM events WHERE id=? UNION ALL SELECT e.* FROM events e JOIN ancestors a ON e.id=a.parent
+      ) SELECT * FROM ancestors WHERE kind='model' AND parent=? AND json_extract(data,'$.turn')=1 ORDER BY id DESC LIMIT 1`
+        [(row :id) inquiry]))))
+      (def round (when model (((store/query s "SELECT count(*) n FROM events WHERE parent=? AND kind='model' AND json_extract(data,'$.turn')=1 AND id<=?"
+        [inquiry (model :id)]) 0) :n)))
+      {:root (root :id) :store (s :identity)
        :agent (get-in s [:config :handle]) :request (get-in root [:data :request])
-       :call (or (data :tool) (get-in owner [:data :call]) :null)
-       :parent (or (row :parent) :null) :status (if source "accepted" (get data :status (get data :state "complete"))) :world (get-in owner [:data :world])
-       :language (cond (or effect (data :error)) "json" source "clojure"
-         (and (or terminal (= "return" (row :kind))) (not (string? (data :value)))) "json"
-         (or terminal (index-of (row :kind) ["return" "output" "fiber"])) "text" :null)
+       :inquiry (or inquiry :null) :loop (or round :null)
+       :reply (or (cond source (when (owner :parent)
+           (def parent (store/event s (owner :parent)))
+           (if (= "model" (get-in parent [:data :type])) (parent :id) (get (store/task s (parent :id)) :id)))
+         (= "script" (get-in owner [:data :type])) (owner :id)
+         (owner :parent) (get (store/task s (owner :parent)) :id)) :null)
+       :status (if source "accepted" (get data :status (get data :state "done")))
+       :language (cond (data :error) "json" source "clojure"
+         (and (or effect terminal (index-of (row :kind) ["return" "fiber"])) (not (string? (data :value)))) "json"
+         (or effect terminal (index-of (row :kind) ["return" "output" "fiber" "artifact"])) "text" :null)
        :persist (not (s :temporary)) :sequence (row :id)
        :body body :diagnostic (data :error)})))
 
@@ -336,9 +345,9 @@
         (def queued (get-in execution [:data :input :queued]))
         (when (and (not (active id)) (not (store/result s id)) (ready? s execution)
           (or (= kind "script") (nil? current) (< (length (filter |(= category $) (values active))) (current :parallel)))
-          (or (not queued) (not (find |(and (not= id ($ :id))
+          (or (not queued) (not (find |(and (< ($ :id) id)
             (= "task" ($ :kind)) (= lane (get-in $ [:data :input :lane]))
-            (or (< ($ :id) id) (not (get-in $ [:data :input :queued])))) pending))))
+            (not (store/outcome s ($ :id)))) pending))))
           (store/query s "INSERT OR IGNORE INTO claims(task) VALUES(?)" [id])
           (put active id category)
           (ev/go (fiber/new (fn [arguments]

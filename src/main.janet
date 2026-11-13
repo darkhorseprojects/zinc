@@ -63,7 +63,7 @@
               (def method (string/slice (call :method) 6))
               (assert (index-of method ["describe" "instructions" "models" "init" "resume" "append" "self" "queue"
                 "work" "status" "wait" "cancel" "authorize" "world" "views" "render" "memory/expand"
-                "memory/invalidate" "memory/summarize" "resolve" "diagnostics"]) "unknown owner binding")
+                "memory/invalidate" "memory/summarize" "diagnostics"]) "unknown owner binding")
               (def params (call :params))
               (assert (dictionary? params) "owner arguments must be an object")
               (def input (schema/project params [:config :profiles] true))
@@ -163,7 +163,14 @@
                             (put request :notify (target :id)))))
                       (assert (= (not (s :temporary)) (not= false (get input :persist true))) "request persistence differs from its store")
                       (when previous (put request :notify (get-in previous [:data :input :notify])))
-                      (def task (store/start s request config))
+                      (def task (store/transact s
+                        (def sources (if (request :records)
+                          (store/record s (filter |(not (first (store/query s "SELECT id FROM events WHERE key=?"
+                            [(string "task:" ($ :key))]))) (request :records))) []))
+                        (def admitted (store/start s request config))
+                        (each id sources
+                          (store/append s (admitted :id) "notice" {:source id} (string "notice:" (admitted :id) ":" id)))
+                        admitted))
                       (engine/start s publications)
                       (store/handle s task))
                     "work" (do (schema/request input [:lane])
@@ -217,8 +224,6 @@
                         (set summary (try (memory/summarize s nil (input :start) (input :end) (input :text))
                           ([err] (if (= "Yield" (get err :code)) (do (engine/start s publications) (ev/sleep store/interval) nil) (error err))))))
                       summary)
-                    "resolve" (do (schema/request input [:event :outcome]) (assert (and (not (config :inference)) (config :janet)) "resolution requires direct execution")
-                      {:event ((store/resolve s (store/event s (input :event)) (input :outcome)) :id)})
                     "diagnostics"
                     (let [task (first (store/query s "SELECT id FROM events WHERE key=?" [(string "task:" (input :request))]))]
                       (schema/request input [:request])

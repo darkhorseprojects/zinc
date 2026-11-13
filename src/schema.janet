@@ -102,7 +102,7 @@
 
 (def inputs
   {:text {:type :string} :code {:type :string} :at {:type :string}
-   :request {:type :string} :memory_range {:type :dictionary} :images {:type :array} :world {:type :string}
+   :request {:type :string} :memory_range {:type :dictionary} :images {:type :array} :world {:type :string} :records {:type :array}
    :lane {:type :string} :queued {:type :boolean} :replace {:type :boolean} :connector {:type :dictionary} :store {:type :string} :session {:type :string}
    :deadline {:type :number}
    :notify {:type :integer :minimum 1}

@@ -50,8 +50,10 @@
             (query s layout)
             (query s "INSERT INTO events(key,kind,data) VALUES('store','store',?)" [(schema/encode {:id (uuid)})]))))
       (query s `CREATE TEMP VIEW published AS SELECT e.*,CASE WHEN e.kind<>'result' OR NOT EXISTS(
-        SELECT 1 FROM events r WHERE r.parent=e.parent AND r.kind='return'
-          AND (json_extract(e.data,'$.state')='done' OR json_extract(r.data,'$.state')<>'done')) THEN e.id END publication FROM events e;`)
+        SELECT 1 FROM events r WHERE r.parent=e.parent AND (
+          (r.kind='return' AND (json_extract(e.data,'$.state')='done' OR json_extract(r.data,'$.state')<>'done'))
+          OR (r.kind='diagnostic' AND json_extract(r.data,'$.error')=json_extract(e.data,'$.error'))))
+        THEN e.id END publication FROM events e;`)
       (when readonly (query s "PRAGMA query_only=ON"))
       (put s :identity (get-in (first (query s "SELECT data FROM events WHERE key='store'")) [:data :id])) s)
     ([err] (sql/close (s :db)) (error err))))
@@ -88,20 +90,40 @@
   (def row (first (query s "SELECT * FROM events WHERE id=?" [id])))
   (assert row "event unavailable") row)
 
-(defn tree [s id &opt after changes]
-  (query s `WITH RECURSIVE members(id,task) AS (
-    SELECT id,CASE WHEN kind='task' THEN id END FROM events WHERE id=? OR (? IS NULL AND parent IS NULL AND kind='task' AND id>?)
-    UNION ALL SELECT e.id,CASE WHEN e.kind='task' THEN e.id ELSE m.task END FROM events e JOIN members m ON e.parent=m.id
+(defn inquiry [s id]
+  (first (query s `WITH RECURSIVE ancestors AS (
+    SELECT * FROM events WHERE id=? UNION ALL SELECT e.* FROM events e JOIN ancestors a ON e.id=a.parent
+  ) SELECT * FROM ancestors WHERE kind='task' AND json_extract(data,'$.type')='inquiry' ORDER BY id DESC LIMIT 1` [id])))
+
+(defn tree [s id &opt after mode]
+  (def scope (when id (inquiry s id)))
+  (def caller (when scope (inquiry s (scope :parent))))
+  (query s `WITH RECURSIVE members(id,task,inquiry,caller) AS (
+    SELECT id,CASE WHEN kind='task' THEN id END,
+      CASE WHEN kind='task' AND json_extract(data,'$.type')='inquiry' THEN id ELSE ? END,?
+      FROM events WHERE id=? OR (? IS NULL AND parent IS NULL AND kind='task' AND id>?)
+    UNION ALL SELECT e.id,CASE WHEN e.kind='task' THEN e.id ELSE m.task END,
+      CASE WHEN e.kind='task' AND json_extract(e.data,'$.type')='inquiry' THEN e.id ELSE m.inquiry END,
+      CASE WHEN e.kind='task' AND json_extract(e.data,'$.type')='inquiry' THEN m.inquiry ELSE m.caller END
+      FROM events e JOIN members m ON e.parent=m.id
   ) SELECT e.id,e.parent,e.key,e.kind,e.text,e.image,e.created,e.publication,
     CASE WHEN e.kind='model' THEN json_remove(e.data,'$.request') ELSE json_remove(e.data,'$.raw') END data,
-    m.task,json_extract(owner.data,'$.type') AS "task-type",parent.kind AS "parent-kind",
+    m.task,m.inquiry,m.caller,json_extract(owner.data,'$.type') AS "task-type",parent.kind AS "parent-kind",
     CASE WHEN e.kind='result' AND parent.kind='operation' THEN json_object('arguments',json_extract(parent.data,'$.arguments'),
       'name',json_extract(parent.data,'$.name')) END operation
     FROM published e JOIN members m ON m.id=e.id LEFT JOIN events owner ON owner.id=m.task LEFT JOIN events parent ON parent.id=e.parent
-    WHERE e.id>? AND (?=0 OR e.kind IN ('return','output','fiber','uncertain','world','artifact','diagnostic','notice')
-      OR (e.kind='result' AND e.parent<>? AND (parent.kind='operation'
-        OR (parent.kind='task' AND json_extract(parent.data,'$.type')<>'summary' AND e.publication IS NOT NULL))))
-    ORDER BY e.id` [id id (get s :floor 0) (or after 0) (if changes 1 0) id]))
+    WHERE e.id>? AND (?=0 OR m.inquiry IS ? OR m.inquiry IS NULL
+      OR (m.caller IS ? AND e.kind='result' AND (
+        (parent.kind='model' AND json_extract(e.data,'$.turn')=1
+          AND (json_extract(e.data,'$.status') IN ('complete','refused','blocked') OR json_type(e.data,'$.error')='object'))
+        OR (parent.kind='task' AND e.parent=m.inquiry))))
+    AND (?=0 OR (json_extract(owner.data,'$.type')<>'summary' AND e.publication IS NOT NULL AND (
+      e.kind IN ('return','output','fiber','artifact','diagnostic','notice')
+      OR (e.kind='result' AND e.parent<>? AND (parent.kind IN ('operation','task')
+        OR (parent.kind='model' AND m.caller IS ? AND json_extract(e.data,'$.turn')=1
+          AND (json_extract(e.data,'$.status') IN ('complete','refused','blocked') OR json_type(e.data,'$.error')='object')))))))
+    ORDER BY e.id` [(get scope :id) (get caller :id) id id (get s :floor 0) (or after 0)
+      (if mode 1 0) (get scope :id) (get scope :id) (if (= mode :changes) 1 0) id (get scope :id)]))
 
 (defn owners [s rows]
   (tabseq [row :in (query s "SELECT id,parent,json_remove(data,'$.input') data FROM events WHERE id IN (SELECT value FROM json_each(?))"
@@ -119,30 +141,48 @@
 
 (defn result [s id] (first (query s "SELECT * FROM events WHERE parent=? AND kind='result'" [id])))
 (defn progress [s id] (first (query s "SELECT data FROM claims WHERE task=?" [id])))
-(defn outcome [s id] (first (query s "SELECT * FROM events WHERE parent=? AND kind IN ('return','result') ORDER BY id LIMIT 1" [id])))
+(defn turn [s id]
+  (first (query s `SELECT m.* FROM events m WHERE m.parent=? AND m.kind='model' AND json_extract(m.data,'$.turn')=1
+    AND NOT EXISTS(SELECT 1 FROM events r JOIN events t ON t.parent=r.id AND t.kind='turn'
+      WHERE r.parent=m.id AND r.kind='result') ORDER BY m.id LIMIT 1` [id])))
+
+(defn outcome [s id]
+  (or (first (query s "SELECT * FROM events WHERE parent=? AND kind IN ('return','result') ORDER BY id LIMIT 1" [id]))
+    (when-let [response (first (query s `SELECT r.* FROM events m JOIN events r ON r.parent=m.id AND r.kind='result'
+      WHERE m.parent=? AND m.kind='model' AND json_extract(m.data,'$.turn')=1
+      AND (json_extract(r.data,'$.status') IN ('complete','refused','blocked') OR json_type(r.data,'$.error')='object')
+      AND EXISTS(SELECT 1 FROM events t WHERE t.parent=r.id AND t.kind='turn') ORDER BY r.id DESC LIMIT 1` [id]))]
+      (merge response {:data (merge {:state (get-in response [:data :state])
+        :text (get-in response [:data :text] (get-in response [:data :error :message]))
+        :value (if (get-in response [:data :error]) :null (schema/project (response :data) [:text :status]))}
+        (schema/project (response :data) [:error]))}))))
 
 (defn handle [s task]
   {:script (task :id) :store (s :identity) :request (get-in task [:data :request]) :persist (not (s :temporary))})
-
-(defn work [s &opt lane]
-  (query s `SELECT e.* FROM events e WHERE e.kind='task' AND e.parent IS NULL AND e.id>?
-    AND (? IS NULL OR json_extract(e.data,'$.input.lane')=?)
-    AND NOT EXISTS(SELECT 1 FROM events r WHERE r.parent=e.id AND r.kind='result') ORDER BY e.id`
-    [(get s :floor 0) lane lane]))
 
 (defn pending [s &opt id]
   (query s `WITH RECURSIVE members(id) AS (
     SELECT id FROM events WHERE id=? OR (? IS NULL AND parent IS NULL AND kind='task' AND id>?)
     UNION ALL SELECT e.id FROM events e JOIN members m ON e.parent=m.id
   ) SELECT e.* FROM events e JOIN members m ON m.id=e.id WHERE e.kind IN ('task','operation')
-    AND NOT EXISTS(SELECT 1 FROM events r WHERE r.parent=e.id AND r.kind='result') ORDER BY e.id`
+    AND NOT EXISTS(SELECT 1 FROM events r WHERE r.parent=e.id AND r.kind='result')
+    AND (json_extract(e.data,'$.type') IS NOT 'inquiry'
+      OR NOT EXISTS(SELECT 1 FROM claims c WHERE c.task=e.id AND json_extract(c.data,'$.wait.changes')=1)
+      OR EXISTS(SELECT 1 FROM events m WHERE m.parent=e.id AND m.kind='model' AND json_extract(m.data,'$.turn')=1
+        AND NOT EXISTS(SELECT 1 FROM events r JOIN events t ON t.parent=r.id AND t.kind='turn'
+          WHERE r.parent=m.id AND r.kind='result'))) ORDER BY e.id`
     [id id (get s :floor 0)]))
 
+(defn work [s &opt lane]
+  (def roots (distinct (map |((root s ($ :id)) :id) (pending s))))
+  (query s `SELECT * FROM events WHERE id IN (SELECT value FROM json_each(?))
+    AND (? IS NULL OR json_extract(data,'$.input.lane')=?) ORDER BY id` [(schema/encode roots) lane lane]))
+
 (defn busy? [s id]
-  (or (> (length (pending s id)) 1)
+  (or (find |(not= id ($ :id)) (pending s id))
     (first (query s "SELECT id FROM events t WHERE kind='task' AND json_extract(data,'$.input.notify')=? AND NOT EXISTS(SELECT 1 FROM events r WHERE r.parent=t.id AND r.kind='result') LIMIT 1" [id]))))
 
-(defn changes [s id after] (tree s id after true))
+(defn changes [s id after] (tree s id after :changes))
 
 (defn check [s id]
   (assert (not (result s id)) {:code "TaskClosed" :message "Task ended."})
@@ -175,12 +215,23 @@
         (assert (<= (length bytes) (+ ((s :config) :request-bytes) ((s :config) :response-bytes))) "event byte ceiling")
         (def row (first (query s "INSERT INTO events(parent,key,kind,data,image) VALUES(?,?,?,?,?) RETURNING *" [parent key kind bytes image])))
         (put (dyn :zinc/changed) 0 true)
-        (def owner (cond (= kind "task") row
-          (and parent (index-of kind ["return" "result" "world" "artifact"])) (event s parent)))
-        (when-let [target (get-in owner [:data :input :notify])]
-          (when (and (not (result s target))
-            (get (first (query s "SELECT publication FROM published WHERE id=?" [(row :id)])) :publication))
-            (append s target "notice" {:source (row :id)} (string "notice:" target ":" (row :id))))) row))))
+        (def owner (when parent (task s parent)))
+        (def response (and owner (not= "summary" (get-in owner [:data :type]))
+          (get (first (query s "SELECT publication FROM published WHERE id=?" [(row :id)])) :publication)
+          (or (index-of kind ["return" "output" "fiber" "artifact" "diagnostic" "notice"])
+            (and (= kind "result") (not= "model" (data :type)))
+            (and (= kind "result") (data :turn)
+              (or (data :error) (index-of (data :status) ["complete" "refused" "blocked"]))))))
+        (when response
+          (def target (inquiry s (if (or (= "model" (data :type))
+            (and (= kind "result") (= "inquiry" (get-in owner [:data :type])) (= parent (owner :id)))) (owner :parent) parent)))
+          (when target
+            (query s `INSERT INTO claims(task,data) SELECT ?,'{}'
+              WHERE NOT EXISTS(SELECT 1 FROM events WHERE parent=? AND kind='result')
+              ON CONFLICT(task) DO UPDATE SET data=json_remove(claims.data,'$.wait')` [(target :id) (target :id)]))
+          (when-let [notify (get-in owner [:data :input :notify])]
+            (unless (result s notify)
+              (append s notify "notice" {:source (row :id)} (string "notice:" notify ":" (row :id)))))) row))))
 
 (defn advance [s data]
   (transact s
@@ -194,28 +245,6 @@
       (merge {:state state :value (if (nil? value) :null value) :text (cond failure (string (failure :code) ": " (failure :message)) (string? value) value (schema/encode value))}
         (if failure {:error failure} {})) (string "result:" id))))
     (query s "DELETE FROM claims WHERE task=?" [id]) outcome))
-
-(defn resolve [s admission outcome]
-  (transact s
-    (assert (= "attempt" (admission :kind)) "choose an uncertain effect attempt")
-    (def effect (event s (admission :parent)))
-    (assert (and (= "operation" (effect :kind)) (not (result s (effect :id)))
-      (not (result s (admission :id)))
-      (= (admission :id) (get (first (query s "SELECT id FROM events WHERE parent=? AND kind='attempt' ORDER BY id DESC LIMIT 1" [(effect :id)])) :id))
-      (first (query s "SELECT id FROM events WHERE parent=? AND kind='uncertain'" [(admission :id)])))
-      "choose the latest unresolved uncertain attempt")
-    (schema/request outcome [:value :error :retry :evidence])
-    (assert (= 1 (length (filter |(has-key? outcome $) [:value :error :retry]))) "supply value, error or retry")
-    (def evidence (outcome :evidence))
-    (assert (or (and (string? evidence) (> (length (string/trim evidence)) 0))
-      (and (dictionary? evidence) (> (length evidence) 0))) "verification evidence required")
-    (when (has-key? outcome :retry) (assert (= true (outcome :retry)) "retry must be true"))
-    (when (has-key? outcome :error)
-      (def failure (outcome :error))
-      (assert (and (dictionary? failure) (string? (failure :code)) (string? (failure :message))) "invalid outcome diagnostic"))
-    (def row (append s (admission :id) "result" outcome (string "result:" (admission :id))))
-    (unless (outcome :retry)
-      (finish s (effect :id) (if (outcome :error) "failed" "done") (outcome :value) (outcome :error))) row))
 
 (defn point [s value &opt world]
   (def row (first (query s "SELECT * FROM events WHERE (kind IN ('world','rewind') OR (kind='artifact' AND json_extract(data,'$.type')='world-image')) AND (CAST(id AS TEXT)=? OR image=?) AND (? IS NULL OR json_extract(data,'$.world')=?) ORDER BY id DESC LIMIT 1" [(string value) (string value) world world])))
@@ -302,12 +331,14 @@
             SELECT * FROM events WHERE id=? UNION ALL SELECT e.* FROM events e JOIN ancestors a ON e.id=a.parent
           ) SELECT count(*) n FROM ancestors WHERE kind='task'` [parent]) 0) :n) (config :task-depth)) "task depth exhausted"))
         (def last (get input :parent (or parent (((query s "SELECT coalesce(max(id),0) id FROM events") 0) :id))))
-        (def bounds (get input :memory_range {:start (if (= last 0) 0 (if caller (max 1 (get-in caller [:data :memory_range :start])) 1)) :end last}))
-        (assert (and (int? (bounds :start)) (int? (bounds :end)) (<= 0 (bounds :start) (bounds :end))
+        (assert (and (int? last) (>= last 0)) "parent must be a nonnegative event ID")
+        (when (> last 0) (event s last))
+        (def bounds (get input :memory_range {:start (if (= last 0) 0 1) :end last}))
+        (assert (and (dictionary? bounds) (= (tuple/slice (sorted (keys bounds))) [:end :start])
+          (int? (bounds :start)) (int? (bounds :end)) (<= 0 (bounds :start) (bounds :end) last)
           (= (= 0 (bounds :start)) (= 0 (bounds :end)))) "invalid memory range")
         (when (> (bounds :end) 0) (event s (bounds :end)))
-        (when caller (assert (and (<= (bounds :end) parent)
-          (or (= 0 (bounds :end)) (>= (bounds :start) (get-in caller [:data :memory_range :start])))) "child history exceeds caller view"))
+        (when (and caller (not (input :summary))) (assert (<= last parent) "child history exceeds its admission point"))
         (def world (get input :world (if caller (get-in caller [:data :world]) (config :world))))
         (assert (has-key? (config :worlds) (keyword world)) "world is not granted")
         (when-let [target (input :notify)]
@@ -323,19 +354,9 @@
           :world world :epoch epoch :memory_range bounds :call (get input :call (get-in caller [:data :call]))
           :author (get input :author (config :handle)) :at (get input :at (os/strftime "%Y-%m-%dT%H:%M:%SZ"))
           :expires (unless (= deadline math/inf) deadline)} (string "task:" key) (image s config)))
+        (when (= "inquiry" (get-in admitted [:data :type]))
+          (query s "INSERT INTO claims(task) VALUES(?)" [(admitted :id)]))
         (when (first (query s "SELECT id FROM events WHERE key=?" [(string "cancel:" key)])) (finish s (admitted :id) "cancelled" nil)) admitted))))
-
-(defn uncertain [s parent failure]
-  (transact s
-    (def row (or (first (query s "SELECT * FROM events WHERE key=?" [(string "uncertain:" parent)]))
-      (append s parent "uncertain" {:error failure :text (failure :message)} (string "uncertain:" parent))))
-    (def owner (root s parent))
-    (def request (string "recovery:" (owner :id)))
-    (when (and (not= "inquiry" (get-in owner [:data :type])) (get-in s [:config :agent :inference])
-      (not (first (query s "SELECT id FROM events WHERE key=?" [(string "task:" request)]))))
-      (start s {:text (string "Recover uncertain execution #" (owner :id)
-          ". Inspect its original source, source progress and all committed execution events. Verify external state before resolving or retrying effects. Do not replay the original source; continue only remaining work.")
-        :request request :recovery true} (get-in s [:config :agent]) (row :id))) row))
 
 (defn record [s records]
   (assert (and (indexed? records) (<= (length records) ((s :config) :history-records))) "invalid context batch")

@@ -38,12 +38,8 @@ Use concise bullets. Omit repetition. Invent no facts or citations.`)
 (defn- records [s task &opt all]
   (def bounds (if task (get-in task [:data :memory_range])
     {:start 0 :end (((store/query s "SELECT coalesce(max(id),0) id FROM events") 0) :id)}))
-  (def root (when task (store/root s (task :id))))
-  (def inherited (get-in root [:data :memory_range] bounds))
-  (store/query s `WITH RECURSIVE family(id,included) AS (
-    SELECT id,id=? FROM events WHERE id=?
-    UNION ALL SELECT e.id,f.included OR e.id=? FROM events e JOIN family f ON e.parent=f.id
-  ), own(id) AS (SELECT id FROM family WHERE included OR ? OR id BETWEEN ? AND ?), summary_work(id) AS (
+  (def live (when task (store/tree s (task :id) 0 :local)))
+  (store/query s `WITH RECURSIVE own(id) AS (SELECT value FROM json_each(?)), summary_work(id) AS (
     SELECT id FROM events WHERE kind='task' AND json_extract(data,'$.type')='summary'
     UNION ALL SELECT e.id FROM events e JOIN summary_work w ON e.parent=w.id
   ) SELECT id,parent,key,kind,text,image,created,json_remove(data,'$.raw','$.request','$.message.response') data
@@ -53,8 +49,8 @@ Use concise bullets. Omit repetition. Invent no facts or citations.`)
       AND id NOT IN summary_work
       AND (kind<>'result' OR ((json_extract(data,'$.text')<>'' OR json_extract(data,'$.state')<>'done') AND publication IS NOT NULL))
       AND (kind<>'world' OR json_extract(data,'$.text')<>''))) ORDER BY id`
-    [(get task :id) (get root :id) (get task :id) (if (get-in task [:data :input :recovery]) 1 0) (bounds :start) (bounds :end)
-     (max (bounds :start) (inherited :start)) (min (bounds :end) (inherited :end)) (if all 1 0)]))
+    [(schema/encode (if task (array/concat @[(task :id)] (map |($ :id) live)) []))
+     (bounds :start) (bounds :end) (if all 1 0)]))
 
 (defn- semantic-window [s anchor rows]
   (def config (s :config))
@@ -150,7 +146,8 @@ Use concise bullets. Omit repetition. Invent no facts or citations.`)
   (or (valid-summary s (spec :key)) (when text (save-summary s task spec text))
     (do
       (def generation (((store/query s "SELECT count(*) n FROM events WHERE kind='summary' AND json_extract(data,'$.cache')=?" [(spec :key)]) 0) :n))
-      (def job (store/start s {:text summary-prompt :summary spec
+      (sources s task (spec :children))
+      (def job (store/start s {:text summary-prompt :summary spec :parent (max ;(spec :children))
         :request (string "summary:" (spec :key) ":" (get task :id 0) ":" generation)} (s :config) (get task :id)))
       (when-let [result (store/result s (job :id))]
         (when (get-in result [:data :error]) (error (get-in result [:data :error]))))
@@ -304,10 +301,11 @@ Use concise bullets. Omit repetition. Invent no facts or citations.`)
   (def row (cond
     (= "model" (get requested :kind)) requested
     (= "model" (get-in requested [:data :type])) (store/event s (requested :parent))
-    id (first (store/query s `WITH RECURSIVE members(id) AS (
-      SELECT ? UNION ALL SELECT e.id FROM events e JOIN members m ON e.parent=m.id
-    ) SELECT e.* FROM events e JOIN members m ON m.id=e.id WHERE e.kind='model' AND json_extract(e.data,'$.turn')=1
-      ORDER BY abs(e.id-?),e.id LIMIT 1` [(let [root (store/root s id)] (get (store/root s (get-in root [:data :input :notify] (get root :id))) :id)) id]))
+    id (first (store/query s `WITH RECURSIVE ancestors AS (
+      SELECT * FROM events WHERE id=? UNION ALL SELECT e.* FROM events e JOIN ancestors a ON e.id=a.parent
+    ) SELECT e.* FROM events e WHERE e.parent=? AND e.kind='model' AND json_extract(e.data,'$.turn')=1
+      ORDER BY e.id NOT IN (SELECT id FROM ancestors),abs(e.id-?),e.id LIMIT 1`
+      [id (let [owner (store/task s id)] (get (store/inquiry s id) :id (get-in owner [:data :input :notify] (get owner :id)))) id]))
     (first (store/query s "SELECT * FROM events WHERE kind='model' AND json_extract(data,'$.turn')=1 ORDER BY id DESC LIMIT 1"))))
   (assert row "No chat prompt in this execution; omit point to select the latest context.")
   (def resolution (cond (nil? id) "latest" (= id (row :id)) "exact"
