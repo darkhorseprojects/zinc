@@ -2,7 +2,7 @@
 (import spork/base64 :as base64)
 (import spork/json :as json)
 
-(def- directory (path/dirname (dyn :source)))
+(def- directory (path/join (path/dirname (dyn :source)) ".."))
 
 (def fields
   {:store {:type :string :absolute true}
@@ -96,8 +96,8 @@
    :expansion-nodes {:type :integer :default 2048 :minimum 1}
    :language {:type :string :default "en"}
    :score {:type :number :default 0 :option "score" :description "Minimum accepted reranking relevance score"}
-   :cygnet {:type :string :absolute true :default (path/join directory "assets/cygnet.db")}
-   :stopwords {:type :string :absolute true :default (path/join directory "assets/stopwords.json")}
+   :cygnet {:type :string :absolute true :default (path/join directory "build/assets/cygnet.db")}
+   :stopwords {:type :string :absolute true :default (path/join directory "build/assets/stopwords.json")}
    :cygnet-source {:type :string :default "aae2cdb1418c1435558584a91181e1cb94459f2506c16f2be4b00e81428deaff"}})
 
 (def inputs

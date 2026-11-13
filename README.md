@@ -23,29 +23,36 @@ Use Janet 1.42+, JPM, a C compiler, OpenSSL headers and trusted CA certificates,
 the local `portable-agents` checkout into JPM's configured system or user module directory. Zinc imports `pa`; PA owns
 framing and envelopes. Zinc contains no duplicate frame codec.
 
-Install Zinc's third-party dependencies into that same module directory. SQLite must support FTS5, URI filenames and
-memdb:
+Install the complete Zinc repository into your user agent directory:
+
+```sh
+mkdir -p "$HOME/.agents"
+git clone /path/to/zinc "$HOME/.agents/zinc"
+cd "$HOME/.agents/zinc"
+```
+
+The installed agent is this checkout. Preserve the repository layout; there is no separate runtime distribution or
+development install. A linked Git worktree can supply the checkout instead of a clone.
+
+Install Zinc's third-party dependencies into JPM's configured module directory, then build in the agent checkout.
+SQLite must support FTS5, URI filenames and memdb:
 
 ```sh
 JANET_SYSTEM_SQLITE=0 jpm --cflags=-std=c99,-DSQLITE_ENABLE_FTS5,-DSQLITE_USE_URI=1 deps
 jpm build
 ```
 
-`jpm build` applies the pinned TLS cleanup fix and generates verified retrieval assets. Zinc is an agent, not a Janet
-library. Do not use `jpm install` for Zinc. Install its runtime files into a fresh agent directory:
+`jpm build` applies the pinned TLS cleanup fix and generates retrieval assets under `build/assets/`. Zinc is an agent,
+not a Janet library; do not use `jpm install` for Zinc.
 
-```sh
-install -d -m 700 "$HOME/.agents/zinc"
-install -m 644 src/*.janet src/store.sql zinc.md LICENSE NOTICE "$HOME/.agents/zinc/"
-cp -R build/assets "$HOME/.agents/zinc/assets"
-```
-
-Use `%USERPROFILE%\.agents\zinc` and equivalent file-copy operations on Windows. See
+Use `%USERPROFILE%\.agents\zinc` on Windows. See
 [PA's filesystem conventions](https://github.com/darkhorseprojects/portable-agents#filesystem-conventions) for platform
-locations. Place `ac.yaml` in the agent directory and configure `module: ./main.janet`. Connector resolves that entry
-relative to `ac.yaml`, independently of the working repository selected by `directory`. The source checkout is not required at
-runtime. Interrupted asset downloads and builds use replaceable staging files; repeated builds do not require deleting
-partial final files.
+locations. Place `ac.yaml` at the checkout root and configure `module: ./src/main.janet`. Connector resolves that entry
+relative to `ac.yaml`, independently of the working repository selected by `directory`. Instructions default to
+repository-root `zinc.md`; retrieval assets default to `build/assets/`.
+
+Interrupted asset downloads and builds use replaceable staging files; repeated builds do not require deleting partial
+final files.
 
 MSVC flags are `/nologo,/MD,/DSQLITE_ENABLE_FTS5,/DSQLITE_USE_URI=1`. Jsec uses `VCPKG_ROOT` on Windows and
 `OPENSSL_PREFIX` for nonstandard macOS installations. The `tls` task rebuilds the pinned native dependency with
@@ -57,14 +64,23 @@ application searches a sibling checkout for PA at runtime.
 Install Connector separately, provision one agent per `ac.yaml`, and initialize a fresh store with `agc init DIRECTORY`.
 Keep writable history under `${instance}` and use `${directory}` for the working repository. Agent-local instructions
 and retrieval assets resolve relative to Zinc's own modules; configure `instructions` explicitly for repository-owned
-text. For source development, use `module: /absolute/path/to/zinc/src/main.janet` and explicitly configure instructions,
-Cygnet and stopword paths from that checkout's generated assets.
+text. `ac.yaml`, `private/`, `.agc/` and generated `build/` files are ignored by Git.
 `examples/models.ini` is an optional external model-server preset; Zinc neither provisions that server nor reads or
 verifies its model downloads.
 
+To create another agent from the same repository, use another clone or a worktree:
+
+```sh
+git -C "$HOME/.agents/zinc" worktree add -b research "$HOME/.agents/research" HEAD
+```
+
+Build in that checkout, give it its own `ac.yaml` without copying an existing agent's handle, and initialize its store.
+Worktrees share Git objects, not configuration, databases or generated build files. Runtime dependencies remain in
+the configured shared library directory.
+
 ## Host and interfaces
 
-`main.janet` owns a live, unversioned Portable Agents connection on stdin/stdout. `PA_FRAME_BYTES` bounds envelopes;
+`src/main.janet` owns a live, unversioned Portable Agents connection on stdin/stdout. `PA_FRAME_BYTES` bounds envelopes;
 `PA_HANDLE` supplies the invoker-configured durable author handle before readiness. Connector provisions it in the
 agent's own `ac.yaml`; Zinc does not read that file. Neither environment value is a credential.
 The host authenticates the connection and preserves callers when forwarding. Responses correlate by connection-local

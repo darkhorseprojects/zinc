@@ -36,11 +36,11 @@ jobs:
             jpm deps
             jpm install
           )
+          install -d -m 700 "$HOME/.agents"
+          git worktree add --detach "$HOME/.agents/zinc" HEAD
+          cd "$HOME/.agents/zinc"
           JANET_SYSTEM_SQLITE=0 jpm --cflags=-std=c99,-DSQLITE_ENABLE_FTS5,-DSQLITE_USE_URI=1 deps
           jpm build
-          install -d -m 700 "$HOME/.agents/zinc"
-          install -m 644 src/*.janet src/store.sql zinc.md LICENSE NOTICE "$HOME/.agents/zinc/"
-          cp -R build/assets "$HOME/.agents/zinc/assets"
           cd "$HOME"
-          janet -e "(import $HOME/.agents/zinc/main.janet)"
+          janet -e "(import $HOME/.agents/zinc/src/main.janet)"
         working-directory: zinc
