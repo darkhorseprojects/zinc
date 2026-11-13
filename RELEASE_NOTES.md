@@ -1,29 +1,20 @@
 # Release notes
 
-JPM installs Zinc's source modules, SQL, instructions and verified retrieval assets; no agent executable is built.
-Connector uses `janet -t zinc/main` from any configured working repository. Asset staging survives interrupted provisioning,
-and the TLS repair no longer changes the installer's process-wide working directory.
+## Single-journal rewrite
 
-Owner calls supply current named profiles. Execution retains its profile identity and checks that profile's current
-authority, including separately named inquiry delegation. Profiles share one author and store without inheriting the
-last owner's configuration. Finish or cancel old in-flight work before this coordinated update.
+All runtime source has been replaced. Complete managed Janet machines checkpoint fibers, locals, shared references and
+waits. A single append-only journal retains admissions, checkpoints, dispatches, receipts, worlds, explicit memory views
+and output. Queue eligibility and heads are derived; no dependency column, queue table, reference table or cache table
+is maintained.
 
-The isolated evaluator is vm.janet. PA framing, bidirectional correlation and event envelopes belong to main.janet, not
-the execution engine. Flat call-envelope imports remain documentation; local selections and current resource grants
-govern execution. External capability dispatch no longer sends Zinc operation references.
+The recursive agent loop uses the same runtime as scripts. Model tools await actual script results. Child paths can be
+continued explicitly, while local tasks settle with their request. Lost processes resume saved continuations; ambiguous
+dispatched effects receive unknown outcomes without replay. Worlds compare revisions and retain conflicting candidates.
+Rewind creates a new revision rather than cancelling unrelated work or undoing effects.
 
-Admissions retain authenticated authors; internally authored tasks use the agent's durable configured handle. Store
-identity, deployment revisions, locations and work references remain separate. Peer interfaces expose only self, status
-and wait. Owner/local interfaces retain memory, queues, cancellation, configuration and recovery.
+Chronological memory uses immutable pages and lazy binary summaries. Semantic memory retains Cygnet/FTS/fuzzy retrieval
+and reranking against the same explicit membership. Model protocol adapters retain native replay for Chat Completions
+and Responses. Connector consumes generic application manifests and output, not Zinc's internal state model.
 
-Model tools execute full Janet scripts with native ev concurrency. Scripts, their root returns and their independent
-host effects have separate lifetimes. Output and individual results publish as soon as they commit; parallel calls never
-gather sibling outcomes implicitly. Discord shows clojure source blocks and fenced, source-correlated results.
-
-Restart discovers unfinished execution without replaying original source. Lost VM continuations and ambiguous effects
-become explicit uncertainty for model-led inspection and continuation. Evidence-backed resolution can settle an effect
-or approve a new attempt under the same identity.
-
-World metadata and configuration remain JSON; heap environments use native images. Temporary roots and descendants
-remain RAM-only. The database layout and version are unchanged. Finish unfinished workflows under their original
-installation before upgrading; select local self/_, effect/_ and ev/* grants as appropriate.
+This is a fresh-store and fresh-transport-state cutover. Archive old state and stop old work first. Legacy continuations
+are not converted. Existing author handles may be retained for the same author. Release and schema numbers are unchanged.

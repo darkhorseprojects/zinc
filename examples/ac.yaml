@@ -1,0 +1,39 @@
+version: 1
+module: ./src/main.janet
+directory: .
+transport: { frame-bytes: 16777216, admission-seconds: 10 }
+limits: { stop_ms: 5000, grant_lifetime_ms: 86400000 }
+profile: assistant
+profiles:
+  assistant: { accept: [text], inspect: true }
+  direct: { accept: [code], inspect: true, rewind: true }
+imports:
+  exa: true
+  discord:
+    images: true
+    options: [chat, thinking, rounds, queue, path, from, memory]
+config:
+  directory: "${instance}"
+  store: "${instance}/private/history.db"
+  world: main
+  worlds: [main]
+  bindings: ["*"]
+  queue: true
+  memory-retrieval: false
+  providers:
+    llamacpp:
+      url: http://127.0.0.1:8080
+      protocol: chat-completions
+      catalogue: { chat: /v1/models }
+      properties: /props?model={model}
+      parameters: { reasoning_format: deepseek }
+  chat: llamacpp:YOUR_MODEL_ID
+  thinking: default
+routes:
+  members:
+    "111111111111111111": { profile: assistant, execute: direct }
+  channels:
+    "222222222222222222":
+      profile: assistant
+      methods: [get-message, create-message, add-reaction]
+  guilds: {}
