@@ -106,7 +106,7 @@
       (if (= protocol "responses")
         (merge-into body {:input wire :stream true :store false :include ["reasoning.encrypted_content"]})
         (merge-into body {:messages wire :stream true}))))
-  {:provider (selected :provider) :selected selected :rerank rerank :summary (input :summary) :round (input :round) :manifest (input :manifest)
+  {:provider (selected :provider) :selected selected :rerank rerank :summary (input :summary) :manifest (input :manifest)
    :path (get endpoint (if rerank :rerank-path :chat-path) (if rerank "/v1/rerank" (if (= protocol "responses") "/v1/responses" "/v1/chat/completions")))
    :body (config/encode body)})
 
@@ -121,19 +121,31 @@
       (put seen (r :index) true))
     (assert (= count (length seen)) "incomplete rerank results")
     (break (sorted (raw :results) |(> ($0 :relevance_score) ($1 :relevance_score)))))
-  (def parts @[]) (def calls @[]) (var refusal "") (var final false) (var stop nil) (var native nil)
+  (def parts @[]) (def calls @[]) (def outputs @[]) (def base (prepared :output))
+  (var refusal "") (var final false) (var stop nil) (var native nil)
   (if (= protocol "responses")
     (do
       (def output (raw :output)) (assert (indexed? output) "missing Responses output")
-      (each item output
+      (each [i item] (pairs output)
         (case (item :type)
           "message" (do
             (assert (and (= "assistant" (item :role)) (or (not (item :phase)) (index-of (item :phase) ["commentary" "partial_answer" "final_answer"]))) "invalid assistant message")
-            (each p (item :content)
-              (case (p :type) "output_text" (array/push parts {:type "text" :text (p :text)}) "refusal" (set refusal (p :refusal)))))
+            (each [j p] (pairs (item :content))
+              (case (p :type)
+                "output_text" (array/push parts {:type "text" :text (p :text)})
+                "refusal" (set refusal (p :refusal)))
+              (when (index-of (p :type) ["output_text" "refusal"])
+                (array/push outputs {:id (string base "/response/" i "/" j)
+                  :type "response" :format "markdown" :text (or (p :text) (p :refusal))}))))
+          "reasoning" (each [j p] (pairs (get item :summary []))
+            (when (= "summary_text" (p :type))
+              (array/push outputs {:id (string base "/reasoning/" i "/" j)
+                :type "reasoning" :format "quote" :text (p :text)})))
           "function_call" (do
             (assert (= "completed" (get item :status "completed")) "unfinished function call")
-            (array/push calls @{:id (item :call_id) :name (item :name) :arguments (item :arguments)}))))
+            (array/push calls @{:id (item :call_id) :name (item :name) :arguments (item :arguments)})
+            (array/push outputs {:id (string base "/tool/" i) :type "tool-call"
+              :format "code" :language "json" :text (item :arguments)}))))
       (def last-item (last output))
       (set final (and (= "completed" (raw :status)) (= "message" (get last-item :type))
         (= "completed" (get last-item :status "completed")) (not= false (raw :end_turn)) (not (index-of (get last-item :phase) ["commentary" "partial_answer"]))
@@ -148,7 +160,17 @@
       (array/concat parts (if (string? content) [{:type "text" :text content}] (or content [])))
       (set refusal (get m :refusal "")) (set stop (choice :finish_reason))
       (set final (> (length (string/trim (text parts))) 0))
-      (each call (get m :tool_calls []) (array/push calls (merge (call :function) {:id (call :id)})))
+      (def reasoning (or (m :reasoning_content) (m :reasoning)
+        (string/join (map |(or ($ :text) ($ :summary) "") (get m :reasoning_details [])) "")))
+      (when (> (length reasoning) 0)
+        (array/push outputs {:id (string base "/reasoning") :type "reasoning" :format "quote" :text reasoning}))
+      (def content-text (if (> (length refusal) 0) refusal (text parts)))
+      (when (> (length content-text) 0)
+        (array/push outputs {:id (string base "/response") :type "response" :format "markdown" :text content-text}))
+      (each [i call] (pairs (get m :tool_calls []))
+        (array/push calls (merge (call :function) {:id (call :id)}))
+        (array/push outputs {:id (string base "/tool/" i) :type "tool-call"
+          :format "code" :language "json" :text (get-in call [:function :arguments])}))
       (set native {:message m})))
   (def seen @{})
   (each call calls
@@ -163,7 +185,10 @@
   (def status (cond (= stop "content_filter") "blocked"
     (not (index-of stop ["stop" "tool_calls"])) "incomplete"
     (> (length refusal) 0) "refused" (> (length calls) 0) "tools" final "answer" "continue"))
+  (when (and (not (prepared :summary)) (empty? outputs))
+    (array/push outputs {:id (string base "/response") :type "response" :format "markdown" :text ""}))
   {:stop status :text (if (> (length refusal) 0) refusal (text parts)) :calls calls :usage (raw :usage)
+   :output (unless (prepared :summary) base) :outputs (if (prepared :summary) [] outputs)
    :message {:role "assistant" :parts parts :calls calls :replay (merge native {:model (selected :ref) :protocol protocol})}})
 
 (defn events [response maximum]
@@ -194,19 +219,8 @@
             (buffer/push-byte line b)))))
     (assert (and (= 0 (length line)) (= 0 (length data))) "incomplete SSE frame")))
 
-(defn receive [prepared response maximum updates]
+(defn receive [prepared response maximum]
   (def protocol (get-in prepared [:selected :protocol]))
-  (def base (prepared :output))
-  (def shown @{}) (def opened @{})
-  (def publish (fn [id type format text &opt done]
-    (unless (prepared :summary)
-      (assert (not (get-in opened [id :done])) "provider updated a completed message")
-      (def output (merge {:id id :type type :format format :text text :done (not (not done))}
-        (if (= type "tool-call") {:language "json"} {})))
-      (unless (shown id) (put shown id @""))
-      (buffer/push-string (shown id) text)
-      (put opened id output)
-      (ev/give updates {:type "output" :output output}))))
   (def message @{:role "assistant" :content ""}) (def calls @{}) (def items @{}) (def details @{})
   (var finish nil) (var usage nil) (var raw nil) (var terminal false)
   (each event (events response maximum)
@@ -233,28 +247,15 @@
                 (when value
                   (assert (string? value) "invalid reasoning delta")
                   (put (details index) field (string (get (details index) field "") value)))
-                (put (details index) field value)))
-            (unless (or (delta :reasoning_content) (delta :reasoning))
-              (when-let [text (or (detail :text) (detail :summary))]
-                (when (> (length text) 0) (publish (string base "/reasoning") "reasoning" "quote" text)))))
+                (put (details index) field value))))
           (each field [:reasoning_content :reasoning :content :refusal]
             (when-let [text (delta field)]
               (assert (string? text) "unsupported assistant delta")
-              (put message field (string (get message field "") text))
-              (when (> (length text) 0)
-                (def reasoning (index-of field [:reasoning_content :reasoning]))
-                (def reason-id (string base "/reasoning"))
-                (when (and (not reasoning) (opened reason-id) (not (get-in opened [reason-id :done])))
-                  (publish reason-id "reasoning" "quote" "" true))
-                (publish (string base (cond reasoning "/reasoning" (= field :refusal) "/refusal" "/response"))
-                  (if reasoning "reasoning" "response") (if reasoning "quote" "markdown") text))))
+              (put message field (string (get message field "") text))))
           (when (delta :annotations)
             (unless (message :annotations) (put message :annotations @[]))
             (array/concat (message :annotations) (delta :annotations)))
           (each call (get delta :tool_calls [])
-            (def reason-id (string base "/reasoning"))
-            (when (and (opened reason-id) (not (get-in opened [reason-id :done])))
-              (publish reason-id "reasoning" "quote" "" true))
             (def index (call :index))
             (assert (and (int? index) (>= index 0)) "invalid tool index")
             (unless (calls index) (put calls index @{:id "" :type "function" :function @{:name "" :arguments ""}}))
@@ -264,42 +265,19 @@
             (each field [:name :arguments]
               (when-let [part (get-in call [:function field])]
                 (assert (string? part) "invalid tool delta")
-                (put (target :function) field (string (get-in target [:function field]) part))
-                (when (and (= field :arguments) (> (length part) 0))
-                  (publish (string base "/tool/" index) "tool-call" "code" part)))))
+                (put (target :function) field (string (get-in target [:function field]) part)))))
           (when (choice :finish_reason)
             (set finish (choice :finish_reason)))))
-      (let [type (event :type) index (event :output_index)]
-        (case type
-          "response.output_text.delta"
-          (publish (string base "/response/" index "/" (event :content_index)) "response" "markdown" (event :delta))
-          "response.refusal.delta"
-          (publish (string base "/response/" index "/" (event :content_index)) "response" "markdown" (event :delta))
-          "response.reasoning_summary_text.delta"
-          (publish (string base "/reasoning/" index "/" (event :summary_index)) "reasoning" "quote" (event :delta))
-          "response.reasoning_summary_text.done"
-          (let [id (string base "/reasoning/" index "/" (event :summary_index))]
-            (when (opened id) (publish id "reasoning" "quote" "" true)))
-          "response.function_call_arguments.delta"
-          (publish (string base "/tool/" index) "tool-call" "code" (event :delta))
-          "response.output_item.done"
-          (do
-            (assert (and (int? index) (>= index 0) (not (has-key? items index))) "invalid finalized output item")
-            (def item (event :item))
-            (put items index item)
-            (case (item :type)
-              "function_call" (let [id (string base "/tool/" index)]
-                (assert (= (item :arguments) (string (get shown id ""))) "tool presentation disagrees with response")
-                (when (opened id) (publish id "tool-call" "code" "" true)))
-              "message" (when (index-of (item :phase) ["commentary" "partial_answer"])
-                (each [j part] (pairs (item :content))
-                  (def id (string base "/response/" index "/" j))
-                  (when (opened id) (publish id "response" "markdown" "" true))))))
-          (when (index-of type ["response.completed" "response.incomplete"])
-            (def status (if (= type "response.completed") "completed" "incomplete"))
-            (assert (= status (get-in event [:response :status] status)) "inconsistent terminal status")
-            (set raw (merge (event :response) {:status status}))
-            (set terminal true)))))
+      (case (event :type)
+        "response.output_item.done"
+        (let [index (event :output_index)]
+          (assert (and (int? index) (>= index 0) (not (has-key? items index))) "invalid finalized output item")
+          (put items index (event :item)))
+        (when (index-of (event :type) ["response.completed" "response.incomplete"])
+          (def status (if (= "response.completed" (event :type)) "completed" "incomplete"))
+          (assert (= status (get-in event [:response :status] status)) "inconsistent terminal status")
+          (set raw (merge (event :response) {:status status}))
+          (set terminal true))))
     (when terminal (break)))
   (assert terminal {:code "IncompleteModelStream" :message "Model stream has no terminal response."})
   (if (= protocol "chat-completions")
@@ -315,20 +293,4 @@
       (def output @[])
       (each i (sorted (keys items)) (assert (= i (length output)) "missing output item") (array/push output (items i)))
       (put raw :output output)))
-  (def result (decode prepared raw))
-  (each [id output] (pairs opened)
-    (when (and (= "reasoning" (output :type)) (not (output :done)))
-      (publish id "reasoning" "quote" "" true)))
-  (unless (prepared :summary)
-    (if (= protocol "chat-completions")
-      (do
-        (assert (= (result :text) (string (get shown (string base (if (> (length (get message :refusal "")) 0) "/refusal" "/response")) ""))) "assistant presentation disagrees with response")
-        (each [i call] (pairs (get message :tool_calls []))
-          (assert (= (get-in call [:function :arguments]) (string (get shown (string base "/tool/" i) ""))) "tool presentation disagrees with response")))
-      (each [i item] (pairs (raw :output))
-        (case (item :type)
-          "message" (each [j part] (pairs (item :content))
-            (when (index-of (part :type) ["output_text" "refusal"])
-              (assert (= (or (part :text) (part :refusal)) (string (get shown (string base "/response/" i "/" j) ""))) "assistant presentation disagrees with response")))
-          "function_call" (assert (= (item :arguments) (string (get shown (string base "/tool/" i) ""))) "tool presentation disagrees with response")))))
-  (merge result {:output (unless (prepared :summary) base)}))
+  (decode prepared raw))

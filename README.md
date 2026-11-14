@@ -29,7 +29,8 @@ root. References are local to a store, not permissions.
 ```
 
 `self` admits work; `self/result` reads its receipt; `self/cancel` cancels unfinished descendants. `async` and `await`
-manage local tasks. `:path` continues the latest heap; `:from` forks an exact point. They are mutually exclusive.
+manage local tasks; `sleep` records durable delays. Native `ev/*` bindings are unavailable. `:path` continues the latest
+heap; `:from` forks an exact point. They are mutually exclusive.
 New input does not resume historical instructions. Recovery resumes saved fibers. Busy paths require `:queue true`.
 
 Without a prompt, `/agent from:POINT memory:POINT` only updates the RAM overlay. Later inquiries use it until changed or
@@ -57,9 +58,13 @@ Byte limits are exact; token estimates are not. Retrieval uses FTS, term expansi
 ## Models and recovery
 
 Providers use `chat-completions` or `responses`, explicit capabilities or catalogues, and `token-env` or an absolute
-`credential-command`. References are `provider:id`; `summary` may override chat/thinking. Both protocols stream completed
-tool calls. Native replay stays in checkpoints. Internal summaries and encrypted reasoning are not public output.
-Script prints commit at managed suspension boundaries; public output includes typed deltas and boundary footers.
+`credential-command`. References are `provider:id`; `summary` may override chat/thinking. Provider streams are assembled
+before publication. Native replay stays in checkpoints. Internal summaries and encrypted reasoning are not public output.
+Each completed typed message commits as one output event with an optional boundary footer. Script prints commit at managed
+suspension boundaries. Footer `(↻N)` is the store-wide inquiry admission index, including child inquiries, not a model round.
+
+Imported effects require both Connector authorization and matching Zinc binding selections. Discord additionally requires
+explicit channel-method grants; enabling its import or image support alone does not grant message operations.
 
 Checkpoints require the original Janet build and runtime source. Archive incompatible stores before fresh initialization;
 there is no migration. Saved grants are rechecked on resume. Dispatched effects without receipts become `unknown`, never

@@ -69,7 +69,7 @@
 
 (defn selected? [name selections]
   (some |(or (= $ "*") (= $ name)
-    (and (string/has-suffix? "/*" $) (string/has-prefix? (string/slice $ 0 -1) name))) selections))
+    (and (string/has-suffix? "/*" $) (string/has-prefix? (string/slice $ 0 -2) name))) selections))
 
 (defn registry [c imports]
   (def result (merge bindings)) (def native (make-env))

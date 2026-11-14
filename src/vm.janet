@@ -16,7 +16,7 @@
         os/clock os/time os/cryptorand math/random math/seedrandom])
       (def base (tabseq [name :in (all-bindings native) :unless (or (get (native name) :private)
         (index-of name forbidden) (string/has-prefix? "*module" (string name)))
-        :when (or (not (string/find "/" (string name)))
+        :when (or (= name '/) (not (string/find "/" (string name)))
           (some |(string/has-prefix? $ (string name)) ["array/" "buffer/" "tuple/" "table/" "struct/" "string/" "math/" "peg/" "parser/"]))]
         name (native name)))
       (put base :redef true)

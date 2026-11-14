@@ -3,10 +3,10 @@
 (defn run [input invoke evaluate context rounds]
   (label answer
   (var exchanges @[])
-  (for round 1 (+ rounds 1)
+  (repeat rounds
     (def messages (context invoke input exchanges))
     (set exchanges (messages :exchanges))
-    (def response (invoke "model/chat" [{:messages (messages :messages) :tools true :round round :manifest (messages :manifest)}]))
+    (def response (invoke "model/chat" [{:messages (messages :messages) :tools true :manifest (messages :manifest)}]))
     (def start (length exchanges))
     (array/push exchanges (response :message))
     (case (response :stop)
@@ -21,7 +21,7 @@
         (each [i task] (pairs tasks)
           (def value (invoke "await" [task]))
           (invoke "presentation/tool" [{:id (string (response :output) "/result/" i) :type "tool-result"
-            :format "json" :text (config/encode value) :done false}
+            :format "json" :text (config/encode value)}
             (if (and (dictionary? value) (value :error)) "error" "ok")])
           (array/push exchanges {:role "tool" :call (((response :calls) i) :id)
             :parts [{:type "text" :text (config/encode value)}]})))
