@@ -20,6 +20,8 @@ config:
   bindings: ["*"]
   queue: true
   memory-retrieval: false
+  summary-bytes: 512
+  summary-max-bytes: 4096
   providers:
     llamacpp:
       url: http://127.0.0.1:8080

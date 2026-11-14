@@ -30,5 +30,6 @@
       "refused" (do (invoke "presentation/result" [(response :output)]) (return answer (response :text)))
       "blocked" (error {:code "ModelBlocked" :message "The provider blocked this request."})
       (error {:code "IncompleteModelResponse" :message "The model did not finish its response."}))
-    (invoke "memory/record" [{:text (config/encode (array/slice exchanges start))}]))
+    (invoke "memory/record" [{:text (config/encode
+      (map |(tabseq [[k v] :pairs $ :unless (= k :replay)] k v) (array/slice exchanges start)))}]))
   (error {:code "RoundLimit" :message "Model round limit exhausted."})))

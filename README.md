@@ -1,92 +1,67 @@
 # Zinc
 
-A durable Janet machine with checkpointed fibers, recursive work, explicit memory, and journaled effects. It implements
-Portable Agents' [application contract](https://github.com/darkhorseprojects/portable-agents/blob/main/interaction.md).
-The host owns routing and delivery; Zinc owns execution and presentation meaning.
+A Janet runtime with saved execution, effects, worlds, and memory in SQLite.
 
-## Build and run
+## Build
 
-Requires Janet 1.42+, JPM, a C compiler, OpenSSL headers, trusted CA certificates, Python 3.11+, and Git. Install the
-local PA library with `jpm deps && jpm install`. Set `JANET_PATH` to its shared module directory when needed.
+Requires Janet 1.42+, JPM, the installed `pa` module, a C compiler, OpenSSL headers, CA certificates, Python 3.11+, and Git.
+Set `JANET_PATH` to the shared module directory when needed.
 
 ```sh
 JANET_SYSTEM_SQLITE=0 jpm --cflags=-std=c99,-DSQLITE_ENABLE_FTS5,-DSQLITE_USE_URI=1 deps
 jpm build
 ```
 
-SQLite needs FTS5. Windows uses `/nologo,/MD,/DSQLITE_ENABLE_FTS5,/DSQLITE_USE_URI=1` and Jsec's `VCPKG_ROOT`;
-nonstandard macOS OpenSSL installs use `OPENSSL_PREFIX`. The build prepares retrieval assets and the existing Jsec TLS
-cancellation fix. Spork is unmodified.
-
-Run the complete checkout, not a `jpm install` of Zinc. A PA host launches `janet -t src/main.janet` with `PA_HANDLE`
-and `PA_FRAME_BYTES`, then calls `app/open`. `examples/ac.yaml` contains deployment settings; choose actual models and
-grants. The host expands `${instance}` and `${directory}`. Store writable history under the canonical instance
-directory. New agents need new handles and stores; moving an existing agent preserves its identity, not its permissions.
+Windows uses `/nologo,/MD,/DSQLITE_ENABLE_FTS5,/DSQLITE_USE_URI=1` and `VCPKG_ROOT`; macOS can use `OPENSSL_PREFIX`.
+The build prepares retrieval assets and patches TLS cancellation. Run the checkout with `janet -t src/main.janet`.
+The owner supplies `PA_HANDLE`/`PA_FRAME_BYTES` and calls `app/open`. Configure models and grants with `examples/ac.yaml`.
+Keep history inside the canonical instance directory. New instances need new handles and fresh stores.
 
 ## Execution
 
-- **Path:** durable address for evolving work. **Point:** immutable checkpoint of a path.
-- **Request:** admitted input with one terminal receipt. **Task:** managed fiber within a request.
-- **Effect:** operation outside the checkpointed machine. **World:** pinned heap revision. **View:** memory membership.
-
-One owner commits the append-only SQLite journal. Workers return complete images or effect receipts. `async` starts a
-local task; `await` returns its value or raises its failure. Tasks share a heap and settle with their request. Child
-requests are independent unless explicitly awaited. `(doc name)`, `(input)`, `(settings)`, and `(resources)` expose
-grants. Raw I/O, FFI, module loading, and event-loop handles are not script capabilities. Trusted native functions use
-`modules`.
-
-## Recursion and continuation
+A path is an integer handle to a mutable head. A point is an immutable checkpoint with a parent, machine image, and memory
+root. References are local to a store, not permissions.
 
 ```janet
-(let [child (self {:code "(var findings @[]) (array/push findings 1) (length findings)"})]
+(let [child (self {:code "(var findings @[]) (array/push findings 1)"})]
   (await child)
-  (sleep 30)
-  (await (self {:path (child :path)
-               :code "(array/push findings 2) (length findings)"
-               :queue true})))
+  (await (self {:path (child :path) :code "(array/push findings 2) (length findings)"})))
 ```
 
-```text
-parent ──self──► child request A ──finish──► saved child heap
-   │                   │                         │
-   └──await A◄──────────┘                         │
-   └──later self {:path child}────────────────────┘
-                                  └──► child request B ──► parent resumes
-```
+`self` admits work; `self/result` reads its receipt; `self/cancel` cancels unfinished descendants. `async` and `await`
+manage local tasks. `:path` continues the latest heap; `:from` forks an exact point. They are mutually exclusive.
+New input does not resume historical instructions. Recovery resumes saved fibers. Busy paths require `:queue true`.
 
-`self` runs this agent, not a peer. `path` submits new work to an existing saved heap; `from` forks an immutable point
-and runs new input. Neither resumes historical instructions. Recovery resumes the actual suspended fibers and waits.
-`queue true` orders existing-path requests or new queued siblings; it does not inject input into a suspended fiber. Busy
-paths reject unqueued submissions. `result` reads a receipt; `cancel` includes descendants but never undoes effects.
+Without a prompt, `/agent from:POINT memory:POINT` only updates the RAM overlay. Later inquiries use it until changed or
+`/reset`. Inquiry-specific fields do not persist. Reset clears overrides and navigation without deleting history or
+cancelling work. Commands only inspect: `world-point`, `world-view`, `world-inspect`, `memory-expand`, and `models`.
 
-## Worlds, memory, and models
+Changed heaps publish against a pinned world revision. Conflicts return `WorldChanged` with a retained candidate.
+`world/point` returns the checkpoint; `world/view` renders completed Janet forms; `world/remove` removes a binding.
+`world/rewind point` publishes into the current world. Ordinary rewind uses `:from`. Source rendering is not a heap export,
+worlds are not confidentiality boundaries, and restoration never undoes external effects.
 
-Changed environments publish by comparing the pinned world revision. A child or concurrent path can advance that world
-and make a later parent publication fail with `WorldChanged`; the candidate is retained. Keep bookkeeping lexical when
-it need not become a world definition. Shared worlds are not confidentiality boundaries. `world/set` creates a revision
-from a point; it does not resume instructions, cancel work, or roll back effects.
+## Memory
 
-`memory/view` selects authorized sources; `memory/expand` returns originals. Summaries are lazy, source-keyed, and
-invalidatable. Manual summary text is unchanged; generated summaries must shrink their inputs. Retrieval uses scoped
-FTS, Cygnet expansion, fuzzy terms, and reranking. Configure `rerank` before enabling `memory-retrieval`.
+Points share persistent, weight-balanced binary trees. Leaves reference source byte ranges; branches contain two child
+handles and leaf count. There are no separate views or lanes. `:memory point` reuses its evidence independently of execution;
+scripts can compose arrays of point/source/summary references. `memory/expand` returns originals. `memory/invalidate`
+invalidates a summary on subsequent points. `memory/summarize {:point optional-point :text optional-text}` saves or generates
+one explicitly.
 
-Providers select `chat-completions` or `responses`, a URL, explicit capabilities or catalogue paths, and one credential
-source: `token-env` or absolute `credential-command`. Model references are `provider:id`. Both protocols stream SSE;
-only validated terminal tool calls execute. Native replay stays model/protocol-specific. Internal summaries and
-encrypted reasoning are not public output. `summary` may override chat/thinking. Saved grants are rechecked on resume.
+Lazy summary budgets are `min(summary-max-bytes, summary-bytes * (1 + floor(log2(leaves))))`, with defaults 4096 and 512.
+Every summary must also be at most half its actual input. Oversized or incomplete output fails without truncation.
+Caches include recipe, invalidations, and enforced limit. The frontier and retrieval still share one context allowance.
+Byte limits are exact; token estimates are not. Retrieval uses FTS, term expansion, and reranking; configure `rerank` first.
 
-Zinc publishes committed response, reasoning, tool-call, and tool-result deltas. Footers appear once per model-loop or
-result boundary, never per token or split: `#start (↻round) → #point · status`. Numbers are journal display labels, not
-permissions. Loop status describes model completion, not request settlement; later failures appear without repeating
-that loop's footer. The host buffers until explicit completion or a destination-size split. Script prints commit at
-managed suspension boundaries, not during uninterrupted pure computation.
+## Models and recovery
 
-## Recovery
+Providers use `chat-completions` or `responses`, explicit capabilities or catalogues, and `token-env` or an absolute
+`credential-command`. References are `provider:id`; `summary` may override chat/thinking. Both protocols stream completed
+tool calls. Native replay stays in checkpoints. Internal summaries and encrypted reasoning are not public output.
+Script prints commit at managed suspension boundaries; public output includes typed deltas and boundary footers.
 
-Checkpoints require the original Janet version/build/configuration and runtime source. Pure computation since the last
-boundary may repeat. Unsupported reachable values fail before an uncommitted operation dispatches. Undispatched effects
-may execute after restart; dispatched effects without receipts become `unknown`, never automatically retried. Deadlines
-and completed receipts survive. EOF stops the process; ephemeral journals disappear, external actions do not.
-
-Checkpointing is not an OS sandbox. Filesystem link checks do not provide race-safe confinement; HTTP verifies TLS and
-does not redirect. Archive incompatible history before a fresh initialization; continuations are not migrated or erased.
+Checkpoints require the original Janet build and runtime source. Archive incompatible stores before fresh initialization;
+there is no migration. Saved grants are rechecked on resume. Dispatched effects without receipts become `unknown`, never
+automatically retried. EOF stops the process. Ephemeral journals disappear; external actions remain. Checkpointing is not
+an OS sandbox; filesystem link checks are not race-safe confinement.

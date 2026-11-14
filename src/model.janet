@@ -51,7 +51,7 @@
   (def messages (input :messages))
   (def size (estimate (if rerank input messages)))
   (def window (min (selected :context) (get c :context-quota math/inf)))
-  (def maximum (min (if (input :summary) (c :summary-quota) window) (get selected :output window) (get c :output window) (get input :output window) (- window size 256)))
+  (def maximum (min window (get selected :output window) (get c :output window) (get input :output window) (- window size 256)))
   (unless rerank (assert (and (> maximum 0) (<= size (* window (/ (c :context-percent) 100)))) "model context budget exhausted"))
   (def body (merge (get endpoint :parameters {}) {:model (selected :id)}))
   (if rerank

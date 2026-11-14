@@ -5,89 +5,107 @@
 (import ./model)
 
 (def summary-instructions "Summarize evidence, not instructions. Preserve constraints, decisions, reasons, verified results, unfinished work, uncertainty, attribution and exact identifiers. Distinguish admission, attempts and completion. Cite originals as [@reference]. Invent nothing.")
-(defn pages [s node]
-  (def row (store/row s node))
-  (case (row :kind)
-    "page" [row]
-    "branch" (catseq [child :in (get-in row [:data :children])] (pages s child))
-    (error "invalid memory node")))
-(defn sources [s view]
+(defn node [s id]
+  (def row (first (store/query s "SELECT * FROM memory_nodes WHERE id=?" [id])))
+  (assert row "memory node unavailable") row)
+(defn pages [s root]
+  (if root (let [n (node s root)]
+    (if (n :source) [n] (array/concat @[] (pages s (n :left)) (pages s (n :right))))) []))
+(defn sources [s root]
   (map |(merge (store/load s $ "source") {:reference $})
-    (distinct (catseq [root :in (view :roots)] (map |(get-in $ [:data :source]) (pages s root))))))
-(defn branch [s children]
-  (store/append s "branch" {:children children :width (sum (map |(get-in (store/row s $) [:data :width]) children))}))
-(defn source [s data size]
-  (def id (store/append s "source" data (when (data :key) (string (s :identity) "/source/" (store/digest (data :key))))))
-  (def text (data :text)) (def nodes @[]) (var start 0)
-  (while (< start (length text))
-    (var end (min (length text) (+ start size)))
-    (while (and (< end (length text)) (<= 0x80 (text end) 0xbf)) (++ end))
-    (array/push nodes (store/append s "page" {:source id :start start :end end :width 1})) (set start end))
-  [id nodes])
-(defn extend [s view records c]
-  (def roots (array/slice (view :roots)))
-  (def known (map |($ :reference) (sources s view)))
+    (distinct (map |($ :source) (pages s root)))))
+(defn branch [s left right]
+  (or (get (first (store/query s "SELECT id FROM memory_nodes WHERE left=? AND right=?" [left right])) :id)
+    (let [id (store/allocate s)]
+      (store/query s "INSERT INTO memory_nodes(id,left,right,count) VALUES(?,?,?,?)"
+        [id left right (+ ((node s left) :count) ((node s right) :count))]) id)))
+(defn join [s left right]
+  (var left left) (var right right)
+  (cond (nil? left) right (nil? right) left
+    (do
+      (var l (node s left)) (var r (node s right))
+      (when (> (l :count) (* 3 (r :count)))
+        (set right (join s (l :right) right)) (set left (l :left)))
+      (when (> (r :count) (* 3 (l :count)))
+        (set left (join s left (r :left))) (set right (r :right)))
+      (set l (node s left)) (set r (node s right))
+      (cond
+        (> (l :count) (* 3 (r :count)))
+        (if (< ((node s (l :right)) :count) (* 2 ((node s (l :left)) :count)))
+          (branch s (l :left) (branch s (l :right) right))
+          (let [middle (node s (l :right))]
+            (branch s (branch s (l :left) (middle :left)) (branch s (middle :right) right))))
+        (> (r :count) (* 3 (l :count)))
+        (if (< ((node s (r :left)) :count) (* 2 ((node s (r :right)) :count)))
+          (branch s (branch s left (r :left)) (r :right))
+          (let [middle (node s (r :left))]
+            (branch s (branch s left (middle :left)) (branch s (middle :right) (r :right)))))
+        (branch s left right)))))
+(defn extend [s root records c]
+  (var root root)
+  (def known (map |($ :reference) (sources s root)))
   (each record records
     (assert (and (string? (record :text)) (> (length (record :text)) 0)) "source text must be nonempty")
-    (def [id nodes] (source s record (c :page-bytes)))
-    (unless (index-of id known)
-      (array/push known id)
-      (each node nodes
-        (array/push roots node)
-        (while (and (> (length roots) 1)
-          (= (get-in (store/row s (last roots)) [:data :width])
-            (get-in (store/row s (roots (- (length roots) 2))) [:data :width])))
-          (def merged (branch s (array/slice roots (- (length roots) 2))))
-          (array/remove roots (- (length roots) 2) 2) (array/push roots merged)))))
-  (store/append s "view" {:roots roots :invalid (get view :invalid [])}))
+    (def source (store/append s "source" record (when (record :key) (string "source:" (record :key)))))
+    (unless (index-of source known)
+      (array/push known source)
+      (def text (record :text)) (var start 0)
+      (while (< start (length text))
+        (var end (min (length text) (+ start (c :page-bytes))))
+        (while (and (< end (length text)) (<= 0x80 (text end) 0xbf)) (++ end))
+        (def leaf (or (get (first (store/query s "SELECT id FROM memory_nodes WHERE source=? AND start=? AND end=?" [source start end])) :id)
+          (let [id (store/allocate s)]
+            (store/query s "INSERT INTO memory_nodes(id,source,start,end,count) VALUES(?,?,?,?,1)" [id source start end]) id)))
+        (set root (join s root leaf)) (set start end)))) root)
 (defn resolve [s reference]
-  (def r (store/row s reference))
+  (def r (or (store/head s "point" reference) (store/row s reference)))
   (case (r :kind)
-    "view" (r :data)
-    "point" (store/load s (get-in r [:data :view]) "view")
-    "summary" {:roots [(get-in r [:data :spec :node])] :invalid []}
-    "source" (let [[_ nodes] (source s (r :data) (get-in s [:config :page-bytes]))] {:roots nodes :invalid []})
-    (error "choose a point, view, source, or summary")))
-(defn subset [s view allowed]
+    "point" (get-in r [:data :memory])
+    "summary" (get-in r [:data :spec :node])
+    (error "choose a point or summary")))
+(defn subset [s root allowed]
   (def permitted (map |($ :reference) (sources s allowed)))
-  (assert (every? (map |(index-of ($ :reference) permitted) (sources s view))) "memory outside authorized membership") view)
-(defn view [s references]
-  (def views (map |(resolve s $) references))
-  (def rows (catseq [v :in views] (sources s v)))
-  (def ref (extend s {:roots [] :invalid []} (map |(tabseq [[k v] :pairs $ :unless (= k :reference)] k v) rows) (s :config)))
-  (store/append s "view" (merge (store/load s ref "view") {:invalid (distinct (catseq [v :in views] (v :invalid)))})))
-(defn render [s node]
-  (string/join (map (fn [page]
-    (def p (page :data)) (def r (store/load s (p :source) "source"))
+  (assert (every? (map |(index-of ($ :reference) permitted) (sources s root))) "memory outside authorized membership") root)
+(defn render [s root]
+  (string/join (map (fn [p]
+    (def r (store/load s (p :source) "source"))
     (string "[@" (p :source) "] " (r :author) " · " (r :at) "\n" (string/slice (r :text) (p :start) (p :end))))
-    (pages s node)) "\n\n"))
-(defn spec [s node invalid c &opt manual]
-  (def original (distinct (map |(get-in $ [:data :source]) (pages s node))))
+    (pages s root)) "\n\n"))
+(defn spec [s root invalid c &opt text]
+  (def original (distinct (map |($ :source) (pages s root))))
   (def affected (filter (fn [id]
     (def old (store/load s id "summary"))
     (some |(index-of $ original) (get-in old [:spec :sources]))) invalid))
-  (def recipe (store/digest (config/encode [summary-instructions (c :summary) (c :chat) (c :thinking) (c :summary-quota) (c :providers)])))
-  {:node node :sources original :manual manual :recipe recipe :invalid affected
-   :key (store/digest (config/encode [node recipe affected]))})
+  (def budget (min (c :summary-max-bytes) (* (c :summary-bytes) (+ 1 (math/floor (math/log2 ((node s root) :count)))))))
+  (def recipe (store/digest (config/encode [summary-instructions (c :summary) (c :chat) (c :thinking) budget (c :providers)])))
+  (def specification {:node root :sources original :recipe recipe :invalid affected :budget budget})
+  (if text (let [limit (min budget (math/floor (/ (length text) 2)))]
+    (assert (> limit 0) "summary has no room")
+    (merge specification {:text text :limit limit})) specification))
 (defn cached [s spec]
-  (first (store/query s "SELECT * FROM journal WHERE kind='summary' AND json_extract(data,'$.spec.key')=? ORDER BY sequence DESC LIMIT 1" [(spec :key)])))
-(defn representation [s node invalid c]
-  (def cached (cached s (spec s node invalid c)))
-  @{:node node :text (if cached (get-in cached [:data :text]) (render s node)) :summary (get cached :key)})
-(defn need [s node invalid c]
-  (def children (get-in (store/row s node) [:data :children]))
+  (first (store/query s `SELECT * FROM journal WHERE kind='summary'
+    AND json_extract(data,'$.spec.node')=? AND json_extract(data,'$.spec.recipe')=?
+    AND json_extract(data,'$.spec.invalid')=? AND json_extract(data,'$.spec.limit')<=?
+    ORDER BY sequence DESC LIMIT 1` [(spec :node) (spec :recipe) (config/encode (spec :invalid)) (spec :budget)])))
+(defn representation [s root invalid c]
+  (def cached (cached s (spec s root invalid c)))
+  @{:node root :text (if cached (get-in cached [:data :text]) (render s root)) :summary (get cached :key)})
+(defn need [s root invalid c]
+  (def n (node s root))
   (def selected (model/select (merge c (c :summary)) "chat"))
-  (def ceiling (* 4 (- (* (min (selected :context) (get c :context-quota math/inf)) (/ (c :context-percent) 100)) 768)))
-  (def parts (if children (map |(representation s $ invalid c) children) [{:text (render s node)}]))
-  (if (and children (> (sum (map |(length ($ :text)) parts)) ceiling))
-    (do (def next (find |(not ($ :summary)) parts))
+  (def ceiling (* 4 (- (* (min (selected :context) (get c :context-quota math/inf)) (/ (c :context-percent) 100)) 1024)))
+  (def parts (if (n :source) [{:text (render s root)}]
+    (map |(representation s $ invalid c) [(n :left) (n :right)])))
+  (if (> (sum (map |(length ($ :text)) parts)) ceiling)
+    (do (def next (find |(and ($ :node) (not ($ :summary))) parts))
       (assert next "summary sources exhaust context") (need s (next :node) invalid c))
-    (merge (spec s node invalid c) {:text (string/join (map |($ :text) parts) "\n\n")})))
+    (spec s root invalid c (string/join (map |($ :text) parts) "\n\n"))))
 (defn save [s spec text c]
-  (assert (and (string? text) (> (length (string/trim text)) 0)
-    (or (spec :manual) (and (< (length text) (length (spec :text))) (<= (length text) (* 4 (c :summary-quota)))))) "summary must be nonempty and shrink its sources")
+  (assert (and (string? text) (> (length (string/trim text)) 0) (<= (length text) (spec :limit))
+    (<= (spec :limit) (spec :budget) (c :summary-max-bytes)) (<= (* 2 (length text)) (length (spec :text))))
+    "summary must fit its byte limit and compact its input by at least half")
   (def cited (peg/match ~(any (choice (* "[@" (capture (some (if-not "]" 1))) "]") 1)) text))
-  (each id cited (assert (index-of id (spec :sources)) "summary cites unrelated evidence"))
+  (each id cited (assert (index-of (scan-number id) (spec :sources)) "summary cites unrelated evidence"))
   (store/append s "summary" {:spec (tabseq [[k v] :pairs spec :unless (= k :text)] k v) :text text}))
 (defn candidates [s rows query c]
   (if (or (not (c :memory-retrieval)) (= 0 (length rows))) []
@@ -129,15 +147,13 @@
 
 (defn plan [s p c input exchanges &opt manual]
   (label planned
-  (def v (store/load s (or (input :view) (p :view)) "view"))
-  (subset s v (store/load s (p :view) "view"))
-  (def roots (array/slice (v :roots)))
+  (def root (if (input :point) (resolve s (input :point)) (p :memory)))
+  (subset s root (p :memory))
+  (def invalid (get p :invalid []))
   (when manual
-    (assert (> (length roots) 0) "empty memory view")
-    (def node (if (= 1 (length roots)) (first roots) (branch s roots)))
-    (return planned {:summary (if (input :text)
-      (merge (spec s node (v :invalid) c true) {:text (render s node)})
-      (merge (need s node (v :invalid) c) {:manual true}))}))
+    (assert root "empty memory")
+    (return planned {:memory root :summary (if (input :text)
+      (spec s root invalid c (render s root)) (need s root invalid c))}))
   (def selected (model/select c "chat"))
   (def capacity (math/floor (* (min (selected :context) (get c :context-quota math/inf)) (/ (c :context-percent) 100))))
   (def parts @[{ :type "text" :text (get input :text "")}])
@@ -150,22 +166,23 @@
   (def room (- capacity (model/estimate [base live model/tool]) 768))
   (assert (> room 128) "instructions and live exchanges exhaust context")
   (def budget (if (c :memory-retrieval) (math/floor (* room 0.7)) room))
-  (def nodes (map |(representation s $ (v :invalid) c) roots))
+  (def summary-config (merge c {:summary-max-bytes (min (c :summary-max-bytes) (math/floor (* budget 2)))}))
+  (def roots @[]) (var next root)
+  (while next
+    (def n (node s next))
+    (if (n :source) (do (array/push roots next) (set next nil))
+      (do (array/push roots (n :left)) (set next (n :right)))))
+  (def nodes (map |(representation s $ invalid summary-config) roots))
   (while (> (model/estimate (map |($ :text) nodes)) budget)
-    (def entry (find |(not ($ :summary)) nodes))
-    (unless entry
-      (assert (> (length nodes) 1) "minimum memory frontier exceeds budget")
-      (def node (branch s (map |($ :node) (array/slice nodes 0 2))))
-      (array/remove nodes 0 2) (array/insert nodes 0 @{:node node :text (render s node)}))
-    (def chosen (or entry (first nodes)))
-    (def summary (cached s (spec s (chosen :node) (v :invalid) c)))
-    (unless summary (return planned {:summary (need s (chosen :node) (v :invalid) c)}))
-    (put chosen :summary (summary :key)) (put chosen :text (get-in summary [:data :text])))
+    (def chosen (first (sorted (filter |(not ($ :summary)) nodes) |(> (length ($0 :text)) (length ($1 :text))))))
+    (when chosen (return planned {:summary (need s (chosen :node) invalid summary-config)}))
+    (assert (> (length nodes) 1) "minimum memory summary exceeds budget")
+    (array/clear nodes) (array/push nodes (representation s root invalid summary-config)))
   (def covered @{})
   (each n nodes (unless (n :summary) (each page (pages s (n :node))
-    (def d (page :data)) (put covered (d :source) (+ (get covered (d :source) 0) (- (d :end) (d :start)))))))
-  (def eligible (filter |(< (get covered ($ :reference) 0) (length ($ :text))) (sources s v)))
-  {:view (p :view) :base base :exchanges live :nodes nodes :room room :eligible (length eligible)
+    (put covered (page :source) (+ (get covered (page :source) 0) (- (page :end) (page :start)))))))
+  (def eligible (filter |(< (get covered ($ :reference) 0) (length ($ :text))) (sources s root)))
+  {:memory root :base base :exchanges live :nodes nodes :room room :eligible (length eligible)
    :query (input :text) :candidates (candidates s eligible (get input :text "") c)}))
 
 (defn finish [plan ranks c]
@@ -185,22 +202,25 @@
     (array/push messages {:role "user" :parts [{:type "text" :text (string "Retrieved evidence:\n" (string/join (map |(string "[@" ($ :reference) "] " ($ :text)) evidence) "\n\n"))}]}))
   (array/push messages ((plan :base) 1)) (array/concat messages (plan :exchanges))
   {:messages messages :exchanges (plan :exchanges)
-   :manifest {:view (plan :view) :nodes (plan :nodes) :eligible (plan :eligible) :retrieval decisions}})
+   :manifest {:memory (plan :memory) :nodes (plan :nodes) :eligible (plan :eligible) :retrieval decisions}})
 
 (defn summarize [invoke request]
-  (def plan (invoke "memory/plan" [request [] true]))
-  (def spec (plan :summary))
-  (def response (unless (request :text)
-    (invoke "model/chat" [{:summary true :messages
-      [{:role "system" :parts [{:type "text" :text summary-instructions}]} {:role "user" :parts [{:type "text" :text (spec :text)}]}]}])))
-  (when response (assert (= "answer" (response :stop)) "summary generation did not finish"))
-  (invoke "memory/save" [spec (or (request :text) (response :text))]))
+  (label summarized
+    (while true
+      (def plan (invoke "memory/plan" [request [] true]))
+      (def spec (plan :summary))
+      (def response (unless (request :text)
+        (invoke "model/chat" [{:summary true :output (spec :limit) :messages
+          [{:role "system" :parts [{:type "text" :text (string summary-instructions " Limit: " (spec :limit) " UTF-8 bytes, including citations.")}]} {:role "user" :parts [{:type "text" :text (spec :text)}]}]}])))
+      (when response (assert (= "answer" (response :stop)) "summary generation did not finish"))
+      (def saved (invoke "memory/save" [spec (or (request :text) (response :text))]))
+      (when (= (spec :node) (plan :memory)) (return summarized saved)))))
 (defn context [invoke input exchanges]
   (var plan (invoke "memory/plan" [input exchanges]))
   (while (plan :summary)
     (def spec (plan :summary))
-    (def response (invoke "model/chat" [{:summary true :messages
-      [{:role "system" :parts [{:type "text" :text summary-instructions}]} {:role "user" :parts [{:type "text" :text (spec :text)}]}]}]))
+    (def response (invoke "model/chat" [{:summary true :output (spec :limit) :messages
+      [{:role "system" :parts [{:type "text" :text (string summary-instructions " Limit: " (spec :limit) " UTF-8 bytes, including citations.")}]} {:role "user" :parts [{:type "text" :text (spec :text)}]}]}]))
     (assert (= "answer" (response :stop)) "summary generation did not finish")
     (invoke "memory/save" [spec (response :text)])
     (set plan (invoke "memory/plan" [input exchanges])))

@@ -7,17 +7,16 @@
   {"async" {:arity [1 1] :class "machine" :doc "(async thunk) starts a managed local task; returns a task reference."}
    "await" {:arity [1 1] :class "machine" :doc "(await reference) suspends this task until a local task or request completes; returns its value or raises its failure."}
    "sleep" {:arity [1 1] :class "local" :doc "(sleep seconds) durably waits until a recorded deadline."}
-   "self" {:arity [1 1] :class "local" :doc "(self request) starts recursive work and returns {:path p :request r}. Supply exactly one of :text or :code. :path continues an existing path; :from forks a point. :memory selects a view. :queue true orders new children after queued siblings, or appends input to a busy existing path. Recursion uses this same agent, not a peer."}
-   "result" {:arity [1 1] :class "local" :doc "(result reference) returns a terminal receipt, or nil while pending."}
-   "cancel" {:arity [1 1] :class "local" :doc "(cancel reference) cancels a request and its descendants; returns whether unfinished work was cancelled. External actions are not undone."}
-   "path/point" {:arity [0 0] :class "local" :doc "(path/point) returns the caller's committed point."}
-   "world/view" {:arity [0 0] :class "local" :doc "(world/view) returns the pinned world revision and recorded definitions, not a reconstruction of mutable values."}
-   "world/set" {:arity [1 1] :class "local" :doc "(world/set request) creates a new world revision from :point for granted :world. Existing requests retain their pinned revision; effects are not undone."}
+   "self" {:arity [1 1] :class "local" :doc "(self request) starts work and returns {:path p :request r}. Supply :text or :code. :path continues a path; :from forks a point; :memory selects a point's evidence or an array of point/source/summary references. :queue true orders work on busy paths or queued siblings."}
+   "self/result" {:arity [1 1] :class "local" :doc "(self/result reference) returns the request receipt, or nil while pending."}
+   "self/cancel" {:arity [1 1] :class "local" :doc "(self/cancel reference) cancels unfinished work and descendants; external effects are not undone."}
+   "world/point" {:arity [0 0] :class "local" :doc "(world/point) returns this path's committed checkpoint."}
+   "world/view" {:arity [0 0] :class "machine" :doc "(world/view) renders recorded Janet forms in order; it is not a heap export."}
+   "world/rewind" {:arity [1 1] :class "local" :doc "(world/rewind point) publishes that checkpoint into this path's world. Existing work stays pinned; effects are not undone. To branch execution, use self with :from."}
    "world/remove" {:arity [1 1] :class "machine" :doc "(world/remove symbol) removes a local world binding."}
-   "memory/view" {:arity [1 1] :class "local" :doc "(memory/view {:include [point-or-source ...]}) freezes authorized evidence membership; no event-ID ranges."}
    "memory/expand" {:arity [1 1] :class "local" :doc "(memory/expand reference) returns original accessible source records without generation."}
    "memory/invalidate" {:arity [1 1] :class "local" :doc "(memory/invalidate summary) invalidates that summary and dependent representations in this path; returns true when changed."}
-   "memory/summarize" {:arity [1 1] :class "managed" :doc "(memory/summarize {:view optional-view :text optional-summary}) stores supplied summary text unchanged, or generates a summary."}
+   "memory/summarize" {:arity [1 1] :class "managed" :doc "(memory/summarize {:point optional-point :text optional-summary}) saves or generates a summary within its subtree byte budget; it must compact its input by at least half."}
    "memory/plan" {:arity [2 3] :class "local" :private true}
    "memory/save" {:arity [2 2] :class "local" :private true}
    "memory/finish" {:arity [2 2] :class "local" :private true}
@@ -40,7 +39,7 @@
    :providers {} :thinking "default" :summary {} :web-search false :rounds 128 :parallel 4 :tasks 4096 :depth 8
    :seconds 120 :run-seconds 0 :pending 32 :http-ms 600000 :source-bytes 1048576 :image-bytes 4194304
    :response-bytes 8388608 :world-bytes 16777216 :journal-bytes 67108864 :history-records 1024
-   :context-percent 50 :summary-quota 256 :page-bytes 4096 :memory-retrieval true :language "en"
+   :context-percent 50 :summary-bytes 512 :summary-max-bytes 4096 :page-bytes 4096 :memory-retrieval true :language "en"
    :terms 64 :candidates 16 :expansion-depth 1 :expansion-nodes 2048 :score 0
    :cygnet (path/join directory "build/assets/cygnet.db")
    :stopwords (path/join directory "build/assets/stopwords.json")
@@ -95,7 +94,7 @@
     (when (or (boolean? v) (number? v))
       (assert (= (type v) (type (c k))) (string "invalid setting " k))
       (when (number? v) (assert (and (< (math/abs (c k)) math/inf) (or (= k :score) (>= (c k) 0))) "invalid numeric setting"))))
-  (each k [:parallel :tasks :depth :pending :response-bytes :world-bytes :journal-bytes :history-records :page-bytes :summary-quota]
+  (each k [:parallel :tasks :depth :pending :response-bytes :world-bytes :journal-bytes :history-records :page-bytes :summary-bytes :summary-max-bytes]
     (assert (and (int? (c k)) (> (c k) 0)) (string "positive integer required: " k)))
   (assert (and (<= 1 (c :context-percent) 100) (index-of (c :world) (c :worlds))) "invalid context/world selection")
   (each kind (c :accept) (assert (index-of kind ["text" "code"]) "invalid input kind"))
@@ -126,7 +125,7 @@
     :inspect (and (saved :inspect) (current :inspect)) :rewind (and (saved :rewind) (current :rewind))
     :memory-retrieval (and (saved :memory-retrieval) (current :memory-retrieval))
     :score (max (saved :score) (current :score))}
-    (tabseq [k :in [:parallel :tasks :depth :pending :response-bytes :world-bytes :journal-bytes :history-records]]
+    (tabseq [k :in [:parallel :tasks :depth :pending :response-bytes :world-bytes :journal-bytes :history-records :summary-bytes :summary-max-bytes]]
       k (min (saved k) (current k)))))
 
 (def parameters
@@ -134,17 +133,13 @@
    {:name "thinking" :type "string" :description "Reasoning effort" :choices ["default" "none" "minimal" "low" "medium" "high" "xhigh" "max"]}
    {:name "rounds" :type "integer" :description "Maximum model rounds" :minimum 1}
    {:name "queue" :type "boolean" :description "Queue behind earlier work"}
-   {:name "path" :type "string" :description "Continue this execution path"}
-   {:name "from" :type "string" :description "Fork this immutable point"}
-   {:name "memory" :type "string" :description "Use this immutable memory view"}])
+   {:name "path" :type "integer" :minimum 1 :description "Continue this path"}
+   {:name "from" :type "integer" :minimum 1 :description "Fork this immutable point"}
+   {:name "memory" :type "integer" :minimum 1 :description "Use this point's memory"}])
 
 (def commands
-  [{:name "point" :description "Show this session's committed point" :parameters []}
-   {:name "memory-view" :description "Select explicit evidence membership" :parameters [{:name "include" :type "string" :description "JSON array of point or source references"}]}
-   {:name "memory-expand" :description "Read original source records" :parameters [{:name "reference" :type "string" :description "Point, view, or summary reference"}]}
-   {:name "memory-summarize" :description "Summarize selected evidence" :parameters [{:name "view" :type "string" :description "Memory view"} {:name "text" :type "string" :description "Actual summary text; omit to generate"}]}
-   {:name "memory-invalidate" :description "Invalidate a selected summary" :parameters [{:name "reference" :type "string" :description "Summary reference"}]}
-   {:name "world" :description "Inspect the pinned world" :parameters []}
-   {:name "rewind" :description "Create a world revision from a point" :parameters [{:name "point" :type "string" :description "Historical point"}]}
-   {:name "inspect" :description "Read an exact request, receipt, or checkpoint" :parameters [{:name "reference" :type "string" :description "Reference to inspect"}]}
+  [{:name "world-point" :description "Show the selected checkpoint" :parameters []}
+   {:name "world-view" :description "Render recorded Janet source" :parameters []}
+   {:name "world-inspect" :description "Read an exact execution record" :parameters [{:name "reference" :type "integer" :minimum 1 :description "Record reference"}]}
+   {:name "memory-expand" :description "Read original evidence" :parameters [{:name "reference" :type "integer" :minimum 1 :description "Point, source, or summary reference"}]}
    {:name "models" :description "List available models" :parameters [{:name "role" :type "string" :description "Model role" :choices ["chat" "rerank"]}]}])

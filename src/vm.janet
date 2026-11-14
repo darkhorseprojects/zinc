@@ -20,7 +20,7 @@
           (some |(string/has-prefix? $ (string name)) ["array/" "buffer/" "tuple/" "table/" "struct/" "string/" "math/" "peg/" "parser/"]))]
         name (native name)))
       (put base :redef true)
-      (var env nil) (var sources nil)
+      (var env nil) (var script nil)
       (def output @"")
       (each port [:out :err]
         (put base port (fn [text]
@@ -35,12 +35,10 @@
       (def evaluate (fn [code]
         (var result nil)
         (each form (parse-all code)
-          (def before (tabseq [name :in (all-bindings env true)] name (env name)))
           (def thunk (compile form env))
           (when (dictionary? thunk) (error {:code "CompileFailed" :message (thunk :error)}))
           (set result (thunk))
-          (each name (all-bindings env true)
-            (when (not= (before name) (env name)) (put sources name (string/format "%j" form))))) result))
+          (array/push script (string/format "%j" form))) result))
       (each [name spec] (pairs bindings) (unless (spec :private)
         (put base (symbol name) @{:doc (spec :doc) :value
           (if (= name "memory/summarize") (partial memory/summarize invoke)
@@ -61,12 +59,12 @@
         (when (binding :value)
           (def value-alias (symbol "zinc/value/" name))
           (put reverse (binding :value) value-alias) (put forward value-alias (binding :value)))))
-      (def machine (if image (unmarshal image forward) @{:env (make-env base) :sources @{}}))
-      (set env (machine :env)) (set sources (machine :sources))
+      (def machine (if image (unmarshal image forward) @{:env (make-env base) :script @[]}))
+      (set env (machine :env)) (set script (machine :script))
       (assert (= base (table/getproto env)) "invalid checkpoint environment")
       (when starting
         (put machine :result-output nil)
-        (put machine :baseline (store/digest (marshal @{:env env :sources sources} reverse)))
+        (put machine :baseline (store/digest (marshal env reverse)))
         (put machine :tasks @[@{:fiber (fiber/new (fn []
           (if (input :code) (evaluate (input :code))
             (agent/run input invoke evaluate memory/context (c :rounds)))) :a env)}])
@@ -111,7 +109,7 @@
               "await" (do
                 (assert (= 1 (length args)) "await expects one reference")
                 (def ref (first args))
-                (assert (or (string? ref) (and (dictionary? ref) (or (has-key? ref :task) (string? (ref :request))))) "await expects a task or request reference")
+                (assert (or (int? ref) (and (dictionary? ref) (or (has-key? ref :task) (int? (ref :request))))) "await expects a task or request reference")
                 (put task :wait (if (and (dictionary? ref) (has-key? ref :task)) ref
                   (if (dictionary? ref) (ref :request) ref)))
                 (assert (not= (task :wait) request) "cannot await this request")
@@ -125,9 +123,10 @@
                 (assert (and (= i 0) (= 1 (length args)) (string? (first args))) "invalid result presentation")
                 (put machine :result-output (first args))
                 (put task :inbox {:status "ok" :value true}))
+              "world/view" (put task :inbox {:status "ok" :value (string/join script "\n\n")})
               "world/remove" (do
                 (assert (and (= 1 (length args)) (symbol? (first args))) "world/remove expects a symbol")
-                (put env (first args) nil) (put sources (first args) nil)
+                (put env (first args) nil)
                 (put task :inbox {:status "ok" :value true}))
               (do (config/encode args) (put task :wait ticket)
                 (set operation {:binding (value :binding) :arguments args}))))
@@ -145,9 +144,10 @@
       (when settled (config/encode settled))
       (def bytes (marshal machine reverse))
       (assert (<= (length bytes) (c :world-bytes)) "checkpoint image limit")
-      (def world-image (when settled (marshal @{:env env :sources sources} reverse)))
-      {:image bytes :world-image world-image :changed (and settled (not= (machine :baseline) (store/digest world-image)))
-       :definitions (map |{:name (string ($ 0)) :source ($ 1)} (sorted (pairs sources)))
+      (def world-image (when settled (marshal @{:env env :script script} reverse)))
+      {:image bytes :world-image world-image
+       :changed (and settled (not= (machine :baseline) (store/digest (marshal env reverse))))
+       :script (string/join script "\n\n")
        :ready ready :waits (distinct waits) :operation operation :output (string output) :settled settled
        :result-output (machine :result-output)})
     ([err fiber] {:failure (config/diagnostic err fiber)})))

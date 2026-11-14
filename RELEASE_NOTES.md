@@ -1,12 +1,8 @@
 # Release notes
 
-Both model protocols now stream through unmodified Spork. Typed presentation updates commit through the journal owner;
-public reasoning, tool calls, results, and boundary footers remain separate from native replay and internal summaries.
-Final-answer identity prevents duplicate settlement output. Cancellation and failure close unfinished presentation.
+Paths now have integer handles and explicit heads. Points share persistent binary memory trees instead of standalone
+views. Lazy summaries use subtree-sized byte budgets and must compact their input by at least half.
 
-The single journal retains complete fibers, waits, effects, receipts, worlds, and memory membership. Existing primitives
-support both recovery of interrupted instructions and later submissions to a completed child path. Shared-world
-publication can still conflict. Dispatched effects without receipts remain unknown and are not retried.
-
-Native checkpoints require their exact runtime source. Archive incompatible history before fresh initialization. No
-continuations are migrated, no uncertain actions replayed, and no version or schema number changed.
+Work controls are `self/result` and `self/cancel`. World operations use `world/*`; normal rewind remains an entrance with
+`:from`. Source inspection renders recorded Janet forms. Commands only read data. Inquiry-free configuration stays in RAM
+until reset. Archive incompatible stores before fresh initialization; existing continuations are not migrated.
