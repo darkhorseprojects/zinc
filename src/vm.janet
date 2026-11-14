@@ -65,6 +65,7 @@
       (set env (machine :env)) (set sources (machine :sources))
       (assert (= base (table/getproto env)) "invalid checkpoint environment")
       (when starting
+        (put machine :result-output nil)
         (put machine :baseline (store/digest (marshal @{:env env :sources sources} reverse)))
         (put machine :tasks @[@{:fiber (fiber/new (fn []
           (if (input :code) (evaluate (input :code))
@@ -120,6 +121,10 @@
                   (assert (and (= request (next :scope)) (int? id) (<= 0 id (- (length tasks) 1))) "invalid task reference")
                   (assert (and (not= id i) (not (seen id))) {:code "WaitCycle" :message "Local task await would create a cycle."})
                   (put seen id true) (set next (get-in tasks [id :wait]))))
+              "presentation/result" (do
+                (assert (and (= i 0) (= 1 (length args)) (string? (first args))) "invalid result presentation")
+                (put machine :result-output (first args))
+                (put task :inbox {:status "ok" :value true}))
               "world/remove" (do
                 (assert (and (= 1 (length args)) (symbol? (first args))) "world/remove expects a symbol")
                 (put env (first args) nil) (put sources (first args) nil)
@@ -143,5 +148,6 @@
       (def world-image (when settled (marshal @{:env env :sources sources} reverse)))
       {:image bytes :world-image world-image :changed (and settled (not= (machine :baseline) (store/digest world-image)))
        :definitions (map |{:name (string ($ 0)) :source ($ 1)} (sorted (pairs sources)))
-       :ready ready :waits (distinct waits) :operation operation :output (string output) :settled settled})
+       :ready ready :waits (distinct waits) :operation operation :output (string output) :settled settled
+       :result-output (machine :result-output)})
     ([err fiber] {:failure (config/diagnostic err fiber)})))

@@ -42,8 +42,6 @@
   (r :image))
 (defn receipt [s ref]
   (get (first (query s "SELECT data FROM journal WHERE key=?" [(string "receipt:" ref)])) :data))
-(defn finish [s ref value]
-  (or (receipt s ref) (do (append s "receipt" (merge value {:call ref}) (string "receipt:" ref)) value)))
 (defn unfinished [s &opt kind]
   (query s `SELECT j.* FROM journal j WHERE j.kind IN ('input','effect') AND (? IS NULL OR j.kind=?)
     AND NOT EXISTS(SELECT 1 FROM journal r WHERE r.key='receipt:'||j.key) ORDER BY j.sequence` [kind kind]))
@@ -87,7 +85,10 @@
           (append s "identity" {:id (s :identity) :handle (c :handle)} "identity")))
       (def identity (load s "identity" "identity"))
       (assert (= (identity :handle) (c :handle)) "store belongs to another agent")
+      (assert (not (first (query s "SELECT key FROM journal WHERE kind='policy' AND json_extract(data,'$.runtime') IS NOT ? LIMIT 1" [(c :runtime)])))
+        {:code "RuntimeChanged" :message "Store requires its original runtime; archive incompatible history before fresh initialization."})
       (put s :identity (identity :id))
+      (query s "CREATE INDEX IF NOT EXISTS journal_output ON journal(json_extract(data,'$.output.id'),sequence) WHERE kind='output'")
       (each world (c :worlds) (unless (head s "world" world)
         (append s "world" {:world world} (string (s :identity) "/world/" (nonce))))) s)
     ([err] (sql/close (s :db)) (when lock (sql/close lock)) (error err))))
@@ -149,18 +150,80 @@
         (def p ((head s "point" (get-in r [:data :path])) :data))
         (some |(depends? s $ target seen)
           (array/concat (blocked-by s r) (if (= from (p :active)) (p :waits) [])))))))
-(defn emit [s request body &opt language state]
+(defn emit [s request output &opt state]
   (def a (load s request "input"))
-  (def id (string (s :identity) "/output/" (nonce)))
+  (def key (string (s :identity) "/output/" (nonce)))
+  (def id (get output :id key))
+  (def previous (first (query s
+    "SELECT data FROM journal WHERE kind='output' AND json_extract(data,'$.output.id')=? ORDER BY sequence DESC LIMIT 1" [id])))
+  (def old (get-in previous [:data :output]))
+  (when old
+    (assert (= request (get-in previous [:data :work :request])) "output belongs to another request")
+    (assert (not (old :done)) "output is already complete")
+    (unless (= "metadata" (output :type))
+      (unless (= "metadata" (old :type))
+        (each k [:type :format :language :reply] (assert (= (old k) (output k)) "output format changed")))))
+  (when (= "metadata" (output :type))
+    (assert (and old (not= "metadata" (old :type))) "metadata requires an open message"))
   (def value {:context (a :context) :work {:path (a :path) :request request} :state state
-    :retain (not (get-in s [:config :ephemeral])) :output {:id id :text body :language language
-      :footer (string (a :path) " · " request)}})
-  (assert (< (length (config/encode {:type "event" :value (merge value {:stream (s :identity) :cursor id})})) (s :frame-limit))
+    :retain (not ((load s (a :policy) "policy") :ephemeral))
+    :output (merge output {:id id :revision (+ 1 (get old :revision -1))})})
+  (assert (< (length (config/encode {:type "event" :value (merge value {:stream (s :identity) :cursor key})})) (s :frame-limit))
     {:code "OutputLimit" :message "Committed output would exceed PA_FRAME_BYTES."})
-  (append s "output" value id))
+  (append s "output" value key) id)
+(defn close-output [s request outcome &opt prefix state]
+  (var status outcome)
+  (when (and status (nil? prefix))
+    (def previous (get (first (query s `SELECT r.data FROM journal e LEFT JOIN journal r ON r.key='receipt:'||e.key
+      WHERE e.kind='effect' AND json_extract(e.data,'$.owner')=? AND json_extract(e.data,'$.binding')='model/chat'
+      AND json_extract(e.data,'$.arguments[0].round') IS NOT NULL ORDER BY e.sequence DESC LIMIT 1` [request])) :data))
+    (when (and (= "ok" (get previous :status)) (index-of (get-in previous [:value :stop]) ["tools" "continue" "answer" "refused"]))
+      (set status nil)))
+  (var messages (filter (fn [r]
+    (def o (get-in r [:data :output]))
+    (and (not (o :done)) (or (nil? prefix) (= prefix (o :id)) (string/has-prefix? (string prefix "/") (o :id)))))
+    (query s `SELECT data FROM (
+      SELECT data,sequence,row_number() OVER (PARTITION BY json_extract(data,'$.output.id') ORDER BY sequence DESC) n
+      FROM journal WHERE kind='output' AND json_extract(data,'$.work.request')=?
+      AND json_extract(data,'$.output.type')!='metadata') WHERE n=1 ORDER BY sequence` [request])))
+  (when (and status (empty? messages))
+    (def id (emit s request {:type "response" :format "markdown" :text "" :done false}))
+    (set messages [{:data {:output {:id id :type "response" :format "markdown" :text ""}}}]))
+  (when (and status (not (empty? messages)))
+    (def a (row s request "input"))
+    (def start (first (query s "SELECT sequence FROM journal WHERE kind='point' AND json_extract(data,'$.active')=? ORDER BY sequence LIMIT 1" [request])))
+    (def origin (when prefix (get (first (query s `SELECT sequence FROM journal WHERE kind='effect'
+      AND json_extract(data,'$.owner')=? AND (?=key OR substr(?,1,length(key)+1)=key||'/')
+      ORDER BY sequence DESC LIMIT 1` [request prefix prefix])) :sequence)))
+    (def round (get (first (query s `SELECT json_extract(data,'$.arguments[0].round') round FROM journal
+      WHERE kind='effect' AND json_extract(data,'$.owner')=? AND json_extract(data,'$.binding')='model/chat'
+      AND json_extract(data,'$.arguments[0].round') IS NOT NULL AND (? IS NULL OR sequence<=?)
+      ORDER BY sequence DESC LIMIT 1` [request origin origin])) :round 1))
+    (def end (head s "point" (get-in a [:data :path])))
+    (emit s request {:id (get-in (last messages) [:data :output :id]) :type "metadata"
+      :text (string "#" (get start :sequence (a :sequence)) " (↻" round ") → #" (end :sequence) " · "
+        (if (= status "error") "failed" status))}))
+  (each r messages
+    (emit s request (merge (get-in r [:data :output]) {:text "" :done true}) state)))
+(defn finish [s ref value]
+  (or (receipt s ref)
+    (do
+      (append s "receipt" (merge value {:call ref}) (string "receipt:" ref))
+      (def r (row s ref)) (def owner (get-in r [:data :owner]))
+      (when (and (= "effect" (r :kind)) (not (receipt s owner))
+        (first (query s "SELECT key FROM journal WHERE kind='output' AND json_extract(data,'$.output.id')=? LIMIT 1" [(string ref "/call")])))
+        (emit s owner {:id (string ref "/result") :type "tool-result" :format "json" :text (config/encode value) :done false})
+        (close-output s owner (value :status) (string ref "/result")))
+      value)))
 (defn cancel [s id]
   (def rows (query s "SELECT * FROM journal WHERE kind IN ('input','effect') ORDER BY sequence")) (def owned @{id true})
   (each row rows (when (owned (get-in row [:data :owner])) (put owned (row :key) true)))
   (def selected (filter |(and (owned ($ :key)) (not (receipt s ($ :key)))) rows))
-  (each r selected (finish s (r :key) {:status "cancelled" :error {:code "Cancelled" :message "Work cancelled; dispatched actions are not undone."}}))
+  (def result {:status "cancelled" :error {:code "Cancelled" :message "Work cancelled; dispatched actions are not undone."}})
+  (each kind ["effect" "input"]
+    (each r selected (when (= kind (r :kind))
+      (finish s (r :key) result)
+      (when (= kind "input")
+        (emit s (r :key) {:type "response" :format "json" :text (config/encode result) :done false})
+        (close-output s (r :key) "cancelled")))))
   (> (length selected) 0))

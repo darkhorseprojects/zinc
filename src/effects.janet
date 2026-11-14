@@ -20,7 +20,7 @@
         (os/proc-wait child))))
     (assert (utf8/is-valid? output) "process output is not UTF-8") {:exit exit :output (string output)}))
 
-(defn request [c endpoint method suffix &opt body]
+(defn request [c endpoint method suffix &opt body prepared updates]
   (def headers (merge {:Content-Type "application/json" :Accept "application/json, text/event-stream"} (get endpoint :headers {})))
   (def secrets @[]) (var connection nil) (var secure false) (var attempted false)
   (try
@@ -49,12 +49,17 @@
               (tls/connect host port {:verify true :hostname host :verify-hostname host :alpn ["http/1.1"]})
               (net/connect host port))))
             (set attempted true) connection)))
-        (def bytes @"")
-        (each chunk (:blocks response 4096)
-          (assert (<= (+ (length bytes) (length chunk)) (c :response-bytes)) "HTTP response limit")
-          (buffer/push-string bytes chunk))
-        (assert (utf8/is-valid? bytes) "HTTP response is not UTF-8")
-        {:status (response :status) :headers (response :headers) :body (string bytes)}))
+        (if prepared
+          (do
+            (assert (<= 200 (response :status) 299) {:code "ProviderRejected" :message (string "Provider returned HTTP " (response :status))})
+            (model/receive prepared response (c :response-bytes) updates))
+          (do
+            (def bytes @"")
+            (each chunk (:blocks response 4096)
+              (assert (<= (+ (length bytes) (length chunk)) (c :response-bytes)) "HTTP response limit")
+              (buffer/push-string bytes chunk))
+            (assert (utf8/is-valid? bytes) "HTTP response is not UTF-8")
+            {:status (response :status) :headers (response :headers) :body (string bytes)}))))
     ([err fiber]
       (def d (config/diagnostic err fiber))
       (each k [:message :detail] (when (d k)
@@ -80,14 +85,16 @@
         (put properties (string name ":" id) (json/decode (response :body) true true)))))
   (model/catalogue c records properties))
 
-(defn invoke [c spec binding args]
+(defn invoke [c spec binding args &opt updates]
   (cond
     (spec :module) (apply (module/value (require (get-in spec [:module :module])) (symbol (get-in spec [:module :export]))) args)
     (index-of binding ["model/chat" "model/rerank"])
-    (let [prepared (first args) endpoint (get-in c [:providers (keyword (prepared :provider))])
-      response (request c endpoint "POST" (prepared :path) (prepared :body))]
-      (assert (<= 200 (response :status) 299) {:code "ProviderRejected" :message (string "Provider returned HTTP " (response :status))})
-      (model/decode prepared (response :body)))
+    (let [prepared (first args) endpoint (get-in c [:providers (keyword (prepared :provider))])]
+      (if (prepared :rerank)
+        (let [response (request c endpoint "POST" (prepared :path) (prepared :body))]
+          (assert (<= 200 (response :status) 299) {:code "ProviderRejected" :message (string "Provider returned HTTP " (response :status))})
+          (model/decode prepared (json/decode (response :body) true true)))
+        (request c endpoint "POST" (prepared :path) (prepared :body) prepared updates)))
     (index-of binding ["fs/list" "fs/read" "fs/write"])
     (do
       (assert (= (length args) (if (= binding "fs/write") 3 2)) "invalid filesystem arguments")

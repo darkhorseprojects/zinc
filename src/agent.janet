@@ -3,10 +3,10 @@
 (defn run [input invoke evaluate context rounds]
   (label answer
   (var exchanges @[])
-  (repeat rounds
+  (for round 1 (+ rounds 1)
     (def messages (context invoke input exchanges))
     (set exchanges (messages :exchanges))
-    (def response (invoke "model/chat" [{:messages (messages :messages) :tools true :manifest (messages :manifest)}]))
+    (def response (invoke "model/chat" [{:messages (messages :messages) :tools true :round round :manifest (messages :manifest)}]))
     (def start (length exchanges))
     (array/push exchanges (response :message))
     (case (response :stop)
@@ -20,11 +20,14 @@
               ([err] {:error (config/diagnostic err)})))])) (response :calls)))
         (each [i task] (pairs tasks)
           (def value (invoke "await" [task]))
+          (invoke "presentation/tool" [{:id (string (response :output) "/result/" i) :type "tool-result"
+            :format "json" :text (config/encode value) :done false}
+            (if (and (dictionary? value) (value :error)) "error" "ok")])
           (array/push exchanges {:role "tool" :call (((response :calls) i) :id)
             :parts [{:type "text" :text (config/encode value)}]})))
       "continue" nil
-      "answer" (return answer (response :text))
-      "refused" (return answer (response :text))
+      "answer" (do (invoke "presentation/result" [(response :output)]) (return answer (response :text)))
+      "refused" (do (invoke "presentation/result" [(response :output)]) (return answer (response :text)))
       "blocked" (error {:code "ModelBlocked" :message "The provider blocked this request."})
       (error {:code "IncompleteModelResponse" :message "The model did not finish its response."}))
     (invoke "memory/record" [{:text (config/encode (array/slice exchanges start))}]))

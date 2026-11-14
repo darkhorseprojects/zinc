@@ -22,6 +22,8 @@
    "memory/save" {:arity [2 2] :class "local" :private true}
    "memory/finish" {:arity [2 2] :class "local" :private true}
    "memory/record" {:arity [1 1] :class "local" :private true}
+   "presentation/result" {:arity [1 1] :class "machine" :private true}
+   "presentation/tool" {:arity [2 2] :class "local" :private true}
    "model/chat" {:arity [1 1] :class "external" :private true}
    "model/rerank" {:arity [1 1] :class "external" :private true}
    "time/now" {:arity [0 0] :class "local" :doc "(time/now) records the current Unix time."}

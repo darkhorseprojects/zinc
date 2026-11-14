@@ -79,6 +79,10 @@
       (if (index-of id (v :invalid)) false
         (do (put p :view (store/append s "view" (merge v {:invalid (array/concat @[] (v :invalid) [id])})))
           (store/append s "invalidate" {:path (p :path) :summary id}) true)))
+    "presentation/tool" (do
+      (def output (first args))
+      (store/emit s request output)
+      (store/close-output s request (args 1) (output :id)) true)
     "memory/record" (do
       (put p :view (memory/extend s (store/load s (p :view) "view")
         [(merge (first args) {:author (c :handle) :at (os/clock)})] c)) true)
@@ -103,7 +107,8 @@
       (store/finish s request {:status "error" :error failure})
       (when (= request (p :active)) (put p :active nil) (put p :ready false) (put p :waits []))
       (store/checkpoint s p (old :image) (old :key))
-      (store/emit s request (config/encode failure) "json" {:path (p :path)}))))
+      (store/emit s request {:type "response" :format "json" :text (config/encode failure) :done false})
+      (store/close-output s request "error" nil {:path (p :path)}))))
 
 (defn commit-step [host s old request packet ticket]
   (unless (store/receipt s request)
@@ -127,12 +132,15 @@
           (set expected (store/checkpoint s p (packet :image) expected)))
         (def spec ((definitions host c) binding)) (assert spec "binding revoked")
         (def payload (cond (index-of binding ["model/chat" "model/rerank"])
-          [(model/prepare c (first args) (= binding "model/rerank"))]
+          [(merge (model/prepare c (first args) (= binding "model/rerank")) (if (= binding "model/chat") {:output ticket} {}))]
           (= binding "sleep") (do (assert (and (= 1 (length args)) (number? (first args)) (<= 0 (first args) 31536000)) "invalid sleep duration") [(+ (os/clock) (first args))])
           args))
         (def cache (when (= binding "model/rerank")
           (store/digest (config/encode [payload (get-in c [:providers (keyword ((first payload) :provider))])]))))
         (store/append s "effect" {:path (p :path) :owner request :binding binding :arguments payload :cache cache} ticket)
+        (when (and (= "external" (spec :class)) (not (spec :private)))
+          (store/emit s request {:id (string ticket "/call") :type "tool-call" :format "json"
+            :text (config/encode {:binding binding :arguments args}) :done true}))
         (when cache
           (when-let [prior (first (store/query s `SELECT r.data FROM journal e JOIN journal r ON r.key='receipt:'||e.key
             WHERE e.kind='effect' AND json_extract(e.data,'$.cache')=? AND json_extract(r.data,'$.status')='ok'
@@ -145,7 +153,8 @@
       (when (> (length (packet :output)) 0)
         (put p :view (memory/extend s (store/load s (p :view) "view")
           [{:author (c :handle) :at (os/clock) :text (packet :output)}] c))
-        (store/emit s request (packet :output) "text"))
+        (store/emit s request {:type "response" :format "markdown" :text (packet :output) :done true}))
+      (var terminal nil)
       (when (packet :settled)
         (var outcome (packet :settled))
         (when (and (packet :changed) (= "ok" (outcome :status)))
@@ -159,9 +168,14 @@
         (put p :view (memory/extend s (store/load s (p :view) "view")
           [{:key (string request ":result") :author (c :handle) :at (os/clock) :text (config/encode outcome)}] c))
         (store/finish s request outcome) (put p :active nil) (put p :ready false) (put p :waits [])
-        (def value (if (= "ok" (outcome :status)) (outcome :value) (outcome :error)))
-        (store/emit s request (if (string? value) value (config/encode value)) (if (string? value) "text" "json") {:path (p :path)}))
-      (store/checkpoint s p (packet :image) expected))))
+        (set terminal (outcome :status))
+        (unless (and (= "ok" terminal) (packet :result-output))
+          (def value (if (= "ok" terminal) (outcome :value) (outcome :error)))
+          (store/emit s request {:type "response" :format (if (string? value) "markdown" "json")
+            :text (if (string? value) value (config/encode value)) :done false})))
+      (store/checkpoint s p (packet :image) expected)
+      (when terminal
+        (store/close-output s request (unless (and (= terminal "ok") (packet :result-output)) terminal) nil {:path (p :path)})))))
 
 (defn commit-receipt [host s id receipt]
   (store/transact s
@@ -175,7 +189,11 @@
       (def old (store/head s "point" (effect :path))) (def p (merge (old :data)))
       (put p :view (memory/extend s (store/load s (p :view) "view")
         [{:author (c :handle) :at (os/clock) :text (config/encode {:binding (effect :binding) :arguments (effect :arguments) :receipt receipt})}] c))
-      (store/checkpoint s p (old :image) (old :key)))))
+      (store/checkpoint s p (old :image) (old :key)))
+    (when (and (not prior) (not (store/receipt s (effect :owner)))
+      (= "model/chat" (effect :binding)) (not (get-in effect [:arguments 0 :summary]))
+      (= "ok" (receipt :status)) (index-of (get-in receipt [:value :stop]) ["tools" "continue" "answer" "refused"]))
+      (store/close-output s (effect :owner) (get-in receipt [:value :stop]) id))))
 
 (defn schedule [host]
   (var pending false)
@@ -245,14 +263,20 @@
                           (ev/give (host :outgoing) {:type "call" :id transport :caller (host :handle) :method (d :binding) :params ((d :arguments) 0)})
                           (defer (ev/chan-close reply)
                             (def response (ev/take reply)) (when (response :error) (error (response :error))) (response :value)))
-                        (let [reply (ev/thread-chan 1)]
+                        (let [reply (ev/thread-chan 16)]
                           (defer (ev/chan-close reply)
                             (ev/thread (fn [[c spec binding args reply]]
-                              (def packet (try (let [value (effects/invoke c spec binding args)]
+                              (def packet (try (let [value (effects/invoke c spec binding args reply)]
                                 (config/encode value) {:value value})
                                 ([err fiber] {:error (config/diagnostic err fiber)})))
                               (ev/give reply packet)) [c spec (d :binding) (d :arguments) reply] :n)
-                            (def packet (ev/take reply)) (when (packet :error) (error (packet :error))) (packet :value)))))
+                            (var packet nil)
+                            (while (nil? packet)
+                              (def update (ev/take reply))
+                              (if (= "output" (update :type))
+                                (ev/give (host :events) {:type "output" :store s :effect id :output (update :output)})
+                                (set packet update)))
+                            (when (packet :error) (error (packet :error))) (packet :value)))))
                       (assert (<= (length (config/encode value)) (c :response-bytes)) "effect response limit")
                       {:status "ok" :value value})
                       ([err fiber] {:status (get-in err [:context :outcome] "error") :error (config/diagnostic err fiber)})))
@@ -393,6 +417,11 @@
         (try (commit-step host (message :store) (message :old) (message :request) (message :packet) (message :ticket))
           ([err fiber] (unless (= "ReferenceChanged" (get err :code))
             (fail (message :store) (message :request) (config/diagnostic err fiber))))))
+      "output" (do
+        (def s (message :store)) (def effect (store/load s (message :effect) "effect"))
+        (unless (or (store/receipt s (message :effect)) (store/receipt s (effect :owner)))
+          (try (store/transact s (store/emit s (effect :owner) (message :output)))
+            ([err fiber] (fail s (effect :owner) (config/diagnostic err fiber))))))
       "receipt" (do (put (host :effects) (message :id) nil)
         (commit-receipt host (message :store) (message :id) (message :receipt)))
       "tick" (put host :timer nil)
