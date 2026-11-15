@@ -1,41 +1,41 @@
 version: 1
-module: ./src/main.janet
-directory: .
-transport: { frame-bytes: 16777216, admission-seconds: 10 }
-limits: { stop_ms: 5000, grant_lifetime_ms: 86400000 }
-profile: assistant
-profiles:
-  assistant: { accept: [text], inspect: true }
-  direct: { accept: [code], inspect: true, rewind: true }
-imports:
-  exa: true
-  discord:
-    images: true
-    options: [chat, thinking, rounds, queue, path, from, memory]
-config:
-  directory: "${instance}"
-  store: "${instance}/private/history.db"
-  world: main
-  worlds: [main]
-  bindings: ["*"]
-  queue: true
-  memory-retrieval: false
-  summary-bytes: 512
-  summary-max-bytes: 4096
-  providers:
-    llamacpp:
-      url: http://127.0.0.1:8080
-      protocol: chat-completions
-      catalogue: { chat: /v1/models }
-      properties: /props?model={model}
-      parameters: { reasoning_format: deepseek }
-  chat: llamacpp:YOUR_MODEL_ID
-  thinking: default
+policies:
+  assistant:
+    module: ./src/main.janet
+    directory: .
+    transport: { frame-bytes: 16777216, admission-seconds: 10 }
+    limits: { stop_ms: 5000, grant_lifetime_ms: 86400000 }
+    imports:
+      exa: true
+      discord:
+        images: true
+        options: [chat, thinking, rounds, queue, path, from, memory, temporary]
+        methods: [list-messages, get-message, create-message, add-reaction]
+        channels: []
+    config:
+      directory: "${instance}"
+      store: "${instance}/private/history.db"
+      accept: [text, code]
+      inspect: true
+      rewind: true
+      world: main
+      worlds: [main]
+      bindings: ["*"]
+      queue: true
+      memory-retrieval: false
+      summary-bytes: 512
+      summary-max-bytes: 4096
+      providers:
+        llamacpp:
+          url: http://127.0.0.1:8080
+          protocol: chat-completions
+          catalogue: { chat: /v1/models }
+          properties: /props?model={model}
+          parameters: { reasoning_format: deepseek }
+      chat: llamacpp:YOUR_MODEL_ID
+      thinking: default
 routes:
   members:
-    "111111111111111111": { profile: assistant, execute: direct }
-  channels:
-    "222222222222222222":
-      profile: assistant
-      methods: [get-message, create-message, add-reaction]
+    "111111111111111111": assistant
+  channels: {}
   guilds: {}

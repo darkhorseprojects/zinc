@@ -51,7 +51,7 @@
             (set attempted true) connection)))
         (if prepared
           (do
-            (assert (<= 200 (response :status) 299) {:code "ProviderRejected" :message (string "Provider returned HTTP " (response :status))})
+            (assert (<= 200 (response :status) 299) {:code "ProviderRejected" :message (string "Provider returned HTTP " (response :status)) :context {:outcome "error"}})
             (model/receive prepared response (c :response-bytes)))
           (do
             (def bytes @"")
@@ -64,7 +64,7 @@
       (def d (config/diagnostic err fiber))
       (each k [:message :detail] (when (d k)
         (put d k (reduce (fn [text secret] (string/replace-all secret "[redacted]" text)) (d k) secrets))))
-      (put d :context (merge (or (d :context) {}) {:outcome (if attempted "unknown" "error")})) (error d))))
+      (put d :context (merge (or (d :context) {}) {:outcome (get-in d [:context :outcome] (if attempted "unknown" "error"))})) (error d))))
 
 (defn catalogue [c]
   (def records @{}) (def properties @{})
@@ -86,13 +86,15 @@
   (model/catalogue c records properties))
 
 (defn invoke [c spec binding args]
-  (cond
-    (spec :module) (apply (module/value (require (get-in spec [:module :module])) (symbol (get-in spec [:module :export]))) args)
+  (var attempted false)
+  (try (cond
+    (spec :module) (do (set attempted true) (apply (module/value (require (get-in spec [:module :module])) (symbol (get-in spec [:module :export]))) args))
     (index-of binding ["model/chat" "model/rerank"])
     (let [prepared (first args) endpoint (get-in c [:providers (keyword (prepared :provider))])]
+      (set attempted true)
       (if (prepared :rerank)
         (let [response (request c endpoint "POST" (prepared :path) (prepared :body))]
-          (assert (<= 200 (response :status) 299) {:code "ProviderRejected" :message (string "Provider returned HTTP " (response :status))})
+          (assert (<= 200 (response :status) 299) {:code "ProviderRejected" :message (string "Provider returned HTTP " (response :status)) :context {:outcome "error"}})
           (model/decode prepared (json/decode (response :body) true true)))
         (request c endpoint "POST" (prepared :path) (prepared :body) prepared)))
     (index-of binding ["fs/list" "fs/read" "fs/write"])
@@ -113,6 +115,7 @@
         (when (index-of (os/which) [:windows :mingw])
           (def attrs (ffi/call (ffi/lookup (ffi/native "kernel32.dll") "GetFileAttributesA") (ffi/signature :default :uint32 :string) target))
           (assert (or (= attrs 0xffffffff) (= 0 (band attrs 0x400))) "filesystem reparse points are not permitted")))
+      (set attempted true)
       (case binding
         "fs/list" (do (assert (= :directory (os/stat target :mode)) "directory required") (sorted (os/dir target)))
         "fs/read" (do (assert (= :file (os/stat target :mode)) "regular file required")
@@ -127,9 +130,11 @@
       (assert (and (= 4 (length args)) grant (index-of method (grant :methods))) "HTTP permission denied")
       (each segment segments (assert (and (string? segment) (not (index-of segment ["." ".."]))
         (peg/match ~(* (some (set "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789_-~.")) -1) segment)) "invalid HTTP segment"))
-      (request c grant method (string/join segments "/") body))
+      (set attempted true) (request c grant method (string/join segments "/") body))
     (= binding "process/run")
     (let [command (get-in c [:processes (keyword (first args))])]
       (assert (and (= 1 (length args)) command (path/abspath? ((command :argv) 0))) "process permission denied")
-      (process (command :argv) (get command :env {}) (c :response-bytes) (c :seconds)))
-    (error "unknown external binding")))
+      (set attempted true) (process (command :argv) (get command :env {}) (c :response-bytes) (c :seconds)))
+    (error "unknown external binding"))
+    ([err fiber] (def d (config/diagnostic err fiber))
+      (put d :context (merge (get d :context {}) {:outcome (get-in d [:context :outcome] (if attempted "unknown" "error"))})) (error d))))
