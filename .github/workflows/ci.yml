@@ -9,10 +9,6 @@ jobs:
           path: zinc
       - uses: actions/checkout@v4
         with:
-          repository: darkhorseprojects/portable-agents
-          path: portable-agents
-      - uses: actions/checkout@v4
-        with:
           repository: janet-lang/janet
           ref: e1963cdfe0148f83601907727e00bd672d798115
           path: janet
@@ -31,16 +27,10 @@ jobs:
           export JANET_MANPATH="$HOME/.local/share/man"
           export JANET_PATH="$JANET_MODPATH"
           install -d "$JANET_MODPATH" "$JANET_BINPATH" "$JANET_MANPATH"
-          (
-            cd ../portable-agents
-            jpm deps
-            jpm install
-          )
           install -d -m 700 "$HOME/.agents"
           git worktree add --detach "$HOME/.agents/zinc" HEAD
           cd "$HOME/.agents/zinc"
-          jpm run setup
-          jpm run init
+          jpm build
           cd "$HOME"
           janet -e "(import $HOME/.agents/zinc/src/main.janet)"
         working-directory: zinc

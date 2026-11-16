@@ -5,8 +5,8 @@ Zinc knows PA, not a connector or policy engine.
 
 ## Install
 
-Zinc owns its installation, configuration, initialization and model-server setup.
-AGC connects an installed agent; it is not an agent package manager.
+Build Zinc with JPM. AGC connects an installed agent; it is not an agent package
+manager. Neither project generates or manages OS services.
 
 Keep the complete repository in the chosen agent directory, conventionally
 `~/.agents/zinc` (`%USERPROFILE%\\.agents\\zinc` on Windows):
@@ -14,20 +14,26 @@ Keep the complete repository in the chosen agent directory, conventionally
 ```sh
 git clone https://github.com/darkhorseprojects/zinc.git ~/.agents/zinc
 cd ~/.agents/zinc
-jpm run setup
+jpm build
 ```
 
-Source setup requires Janet 1.42+, JPM, a C compiler, OpenSSL headers, trusted CA
-certificates, Python 3.11+ and Git. It installs pinned dependencies including PA
-into the shared user Janet module directory, builds TLS and retrieval assets,
-and creates `ac.json`, `ac.rego` and `models.ini` in this directory. Existing
-configuration is never overwritten. Dependencies are not copied into the agent.
-`JANET_MODPATH`, `JANET_BINPATH` and `JANET_MANPATH` select other shared locations.
-Windows selects MSVC flags automatically and requires `VCPKG_ROOT`; macOS can
-use `OPENSSL_PREFIX`. `PYTHON` selects the Python executable.
+Source builds require Janet 1.42+, JPM, a C compiler, OpenSSL headers, trusted
+CA certificates, Python 3.11+ and Git. `jpm build` installs pinned dependencies,
+including PA, into the shared user Janet module directory and builds TLS and
+retrieval assets. No separate dependency-installation command is needed.
+Dependencies are not copied into the agent. `JANET_MODPATH`, `JANET_BINPATH` and
+`JANET_MANPATH` select other shared locations. Windows selects MSVC flags and
+requires `VCPKG_ROOT`; macOS can use `OPENSSL_PREFIX`. `PYTHON` selects Python.
 
-Edit the Discord user ID in both `callers` and `routes.members` in `ac.json`,
-and select your providers and models. Then initialize the store offline:
+Builds do not create, copy or rewrite configuration, credentials or history.
+Updating an existing installation needs only `jpm build`.
+
+For a new agent directory, place your `ac.json`, `ac.rego` and `models.ini` beside
+`project.janet`; `examples/` contains starting points. In the JSON, replace
+`${directory}` with the canonical absolute agent directory, `${handle}` with a
+stable unique agent handle, and `YOUR_USER_ID` in both `callers` and
+`routes.members` with your Discord user ID. Select your providers and models.
+Initialize a genuinely new database once:
 
 ```sh
 jpm run init
@@ -41,31 +47,17 @@ policies merely to install Zinc. Keep its handle across renames, moves and
 credential rotation. Configuration, Rego, model presets and history are local
 files ignored by Git; software updates must preserve them.
 
-`examples/ac.json` and `examples/ac.rego` are Zinc's deployment templates. Paths
-in generated JSON are absolute. Core Zinc only receives the opaque `config`
-value; it does not load AGC configuration or implement policy routing.
+Core Zinc only receives the opaque `config` value; it does not load AGC
+configuration or implement policy routing. Runtime paths in JSON must be
+canonical and absolute.
 
 ## Start
 
-Install AGC separately and reuse the installed OPA executable. No OPA build is
-needed. With `agc`, `opa` and optionally `llama-server` on PATH:
+Install AGC separately and reuse the installed OPA and llama-server executables.
+No OPA build is needed. Connect a new bot once with `agc connect .`; existing
+credentials do not need reconnecting after a build or reinstall.
 
-```sh
-agc connect .
-python3 tools/setup.py services --models
-```
-
-On Windows use `python` instead of `python3`. Omit `--models` if a model server
-is already managed elsewhere. Zinc installs user systemd units, launchd plists
-or on-demand Windows scheduled tasks, and prints native startup commands.
-Nothing is started or enabled at login by the setup command. macOS plists are
-written under `build/services`, not the login-loaded LaunchAgents directory.
-Linux's Connector
-unit depends on its OPA and selected model unit, so its printed start command
-starts the deployment. macOS and Windows print dependency startup commands in
-order. Windows foreground runs expose diagnostics in the invoking terminal.
-
-For a foreground deployment, start each in a separate terminal:
+Run each process independently in a separate terminal:
 
 ```sh
 opa run --server --addr=127.0.0.1:8181 --watch --log-level=error ac.rego ac.json

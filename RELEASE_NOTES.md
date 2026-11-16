@@ -1,11 +1,10 @@
 # Release notes
 
-Zinc owns setup, initialization and deployment files. `jpm run setup` installs pinned dependencies into a shared user module
-directory, builds the agent, and creates agent-local `ac.json`, `ac.rego` and `models.ini` without overwriting them.
-`jpm run init` initializes a fresh store offline, with no Connector, OPA or model server. One policy is sufficient.
+`jpm build` installs pinned dependencies into the shared user module directory and builds Zinc. PA does not need a
+separate installation. `jpm run init` initializes a genuinely new database offline and refuses to overwrite one.
 
-Zinc's setup tool can install native user services on Linux, macOS and Windows without starting them. OPA and AGC are
-existing executables, not dependencies built by Zinc. Model-server service installation is explicit.
+The setup wrapper and all service generation are removed. Build and initialization do not generate configuration.
+Agent-local `ac.json`, `ac.rego`, `models.ini`, credentials and history remain operator-owned. Run OPA, llama-server
+and AGC independently.
 
-Terminal failures remain journaled and are raised to the caller without duplicate output. Initialization does not fetch
-model catalogues. Resource names exposed to the model are JSON strings. PA, schema and version numbers are unchanged.
+Terminal errors, scoped capabilities, PA framing, identities, versions and persistence schemas are unchanged.
