@@ -46,7 +46,7 @@
   (when (and changed (= "ok" (outcome :status)) (not= (run :expected) (world :point)))
     (set outcome {:status "error" :error {:code "WorldChanged" :message "World changed; local bindings retained, effects not repeated."}}))
   (def value (if (= "ok" (outcome :status)) (outcome :value) (outcome :error)))
-  (def output (unless (and (= "ok" (outcome :status)) (run :final))
+  (def output (when (and (= "ok" (outcome :status)) (not (run :final)))
     {:type "response" :format (if (string? value) "markdown" "json") :text (if (string? value) value (config/encode value))}))
   (store/transact s
     (def r (record s h a (if output "message" "result") (get output :text "") output image outcome))
@@ -305,9 +305,10 @@
   (def c (config/parse supplied (host :handle) runtime))
   (put c :registry (tabseq [role :in [:user :agent]] role (config/registry c role imports)))
   (put c :instructions-text (string (slurp (c :instructions))))
-  (put c :catalogue (effects/catalogue c)) (put host :config c)
+  (put host :config c)
   (def s (storage host c (c :initialize))) (put s :config c)
   (when (c :initialize) (break true))
+  (put c :catalogue (effects/catalogue c))
   (def session [(s :identity) caller (c :conversation)])
   (def operation (c :operation)) (def args (c :arguments))
   (case operation

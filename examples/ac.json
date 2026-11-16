@@ -1,0 +1,39 @@
+{
+  "opa": "http://127.0.0.1:8181",
+  "revision": "zinc",
+  "policies": {
+    "zinc": {
+      "handle": "${handle}",
+      "callers": ["discord:user:YOUR_USER_ID"],
+      "janet": {
+        "module": "${directory}/src/main.janet",
+        "directory": "${directory}",
+        "transport": { "frame-bytes": 33554432, "admission-seconds": 10 },
+        "imports": { "exa": false, "tinyfish": false, "discord": true }
+      },
+      "limits": { "stop_ms": 5000 },
+      "config": {
+        "directory": "${directory}",
+        "store": "${directory}/private/history.db",
+        "inspect": true,
+        "rewind": true,
+        "providers": {
+          "llama": {
+            "url": "http://127.0.0.1:8000",
+            "models": {
+              "chat": { "role": "chat", "context": 131072, "tools": true },
+              "rerank": { "role": "rerank", "context": 4096 }
+            }
+          }
+        },
+        "chat": "llama:chat",
+        "rerank": "llama:rerank"
+      }
+    }
+  },
+  "routes": {
+    "members": { "discord:user:YOUR_USER_ID": "zinc" },
+    "channels": {},
+    "guilds": {}
+  }
+}

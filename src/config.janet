@@ -98,7 +98,7 @@
 (defn expose [c role]
   (def registry (get-in c [:registry role]))
   {:settings (tabseq [k :in [:chat :rerank :thinking :rounds :context-percent :score :queue :temporary]] k (c k))
-   :resources (tabseq [k :in [:fs :http :processes]] k (keys (get-in c [:vm role k])))
+   :resources (tabseq [k :in [:fs :http :processes]] k (map string (keys (get-in c [:vm role k]))))
    :bindings (sorted (keys registry))
    :documentation (string/join (seq [[name spec] :in (sorted (pairs registry)) :when (spec :doc)] (spec :doc)) "\n")})
 

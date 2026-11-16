@@ -4,7 +4,8 @@
   :description "Durable Janet execution, binding worlds and selected memory"
   :license "AGPL-3.0-only"
   :dependencies
-  [{:repo "sqlite3" :tag "9126fe46ff1c7e42ca3d7bb9c8aed95a8236a32c"}
+  [{:repo "https://github.com/darkhorseprojects/portable-agents.git" :tag "f2a634dac92c20d8524233477912cbdca9ce28bb"}
+   {:repo "sqlite3" :tag "9126fe46ff1c7e42ca3d7bb9c8aed95a8236a32c"}
    {:repo "https://github.com/llmII/jsec.git" :tag "08a92f6336f283097298c0f0f917a0fabd2040c8"}
    {:repo "spork" :tag "8a87c5ae1cbbf3a0037eeac7f172bd45da4d9910"}])
 
@@ -23,6 +24,10 @@
     `(do (os/cd $0) (each command ["build" "install"]
        (os/execute (array/concat @["jpm"] $& [command]) :px)))` directory] flags) :px))
 
-(task "assets" [] (os/execute [(or (os/getenv "PYTHON") "python3") "tools/assets.py"] :px))
+(def python (or (os/getenv "PYTHON") (if (index-of (os/which) [:windows :mingw]) "python" "python3")))
+(task "assets" [] (os/execute [python "tools/assets.py"] :px))
 
 (task "build" ["tls" "assets"])
+
+(task "setup" [] (os/execute [python "tools/setup.py" "setup"] :px))
+(task "init" [] (os/execute [python "tools/setup.py" "init"] :px))

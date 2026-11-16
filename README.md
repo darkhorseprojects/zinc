@@ -3,30 +3,91 @@
 Janet execution with granular recovery, shared bindings and selected memory.
 Zinc knows PA, not a connector or policy engine.
 
-## Build and invoke
+## Install
 
-Requires Janet 1.42+, JPM, the installed `pa` module, a C compiler, OpenSSL
-headers, CA certificates, Python 3.11+ and Git.
+Zinc owns its installation, configuration, initialization and model-server setup.
+AGC connects an installed agent; it is not an agent package manager.
+
+Keep the complete repository in the chosen agent directory, conventionally
+`~/.agents/zinc` (`%USERPROFILE%\\.agents\\zinc` on Windows):
 
 ```sh
-JANET_SYSTEM_SQLITE=0 jpm --cflags=-std=c99,-DSQLITE_ENABLE_FTS5,-DSQLITE_USE_URI=1 deps
-jpm build
+git clone https://github.com/darkhorseprojects/zinc.git ~/.agents/zinc
+cd ~/.agents/zinc
+jpm setup
 ```
 
-Windows uses `/nologo,/MD,/DSQLITE_ENABLE_FTS5,/DSQLITE_USE_URI=1` and
-`VCPKG_ROOT`; macOS can use `OPENSSL_PREFIX`. The build prepares retrieval
-assets and TLS cancellation. Run `janet -t src/main.janet` with `PA_HANDLE` and
-`PA_FRAME_BYTES`. The agent exports `invoke(input, config, imports)`. The
-process entry point receives ordinary PA `invoke` calls, decodes base64 input,
-and builds callable Janet imports. It retains one active top-level invocation;
-managed tasks may overlap. There is no application discovery or profile
-catalogue.
+Source setup requires Janet 1.42+, JPM, a C compiler, OpenSSL headers, trusted CA
+certificates, Python 3.11+ and Git. It installs pinned dependencies including PA
+into the shared user Janet module directory, builds TLS and retrieval assets,
+and creates `ac.json`, `ac.rego` and `models.ini` in this directory. Existing
+configuration is never overwritten. Dependencies are not copied into the agent.
+`JANET_MODPATH`, `JANET_BINPATH` and `JANET_MANPATH` select other shared locations.
+Windows selects MSVC flags automatically and requires `VCPKG_ROOT`; macOS can
+use `OPENSSL_PREFIX`. `PYTHON` selects the Python executable.
 
-`examples/config.json` is Zinc configuration, independent of any host's
-deployment schema. Paths must be canonical and absolute. `initialize: true`
-explicitly creates a fresh store; it never overwrites one. Handles are
-provisioned by the connection owner and remain stable across configuration
-changes, credential rotation, and relocation.
+Edit the Discord user ID in both `callers` and `routes.members` in `ac.json`,
+and select your providers and models. Then initialize the store offline:
+
+```sh
+jpm init
+```
+
+Initialization creates a fresh store and refuses to overwrite an existing one.
+It does not need OPA, credentials, model servers or a running Connector. All
+policies in one directory must share the same agent handle, directory and store.
+One `zinc` policy is sufficient; do not create initialization or direct-code
+policies merely to install Zinc. Keep its handle across renames, moves and
+credential rotation. Configuration, Rego, model presets and history are local
+files ignored by Git; software updates must preserve them.
+
+`examples/ac.json` and `examples/ac.rego` are Zinc's deployment templates. Paths
+in generated JSON are absolute. Core Zinc only receives the opaque `config`
+value; it does not load AGC configuration or implement policy routing.
+
+## Start
+
+Install AGC separately and reuse the installed OPA executable. No OPA build is
+needed. With `agc`, `opa` and optionally `llama-server` on PATH:
+
+```sh
+agc connect .
+python3 tools/setup.py services --models
+```
+
+On Windows use `python` instead of `python3`. Omit `--models` if a model server
+is already managed elsewhere. Zinc installs user systemd units, launchd plists
+or on-demand Windows scheduled tasks, and prints native startup commands.
+Nothing is started or enabled at login by the setup command. macOS plists are
+written under `build/services`, not the login-loaded LaunchAgents directory.
+Linux's Connector
+unit depends on its OPA and selected model unit, so its printed start command
+starts the deployment. macOS and Windows print dependency startup commands in
+order. Windows foreground runs expose diagnostics in the invoking terminal.
+
+For a foreground deployment, start each in a separate terminal:
+
+```sh
+opa run --server --addr=127.0.0.1:8181 --watch --log-level=error ac.rego ac.json
+llama-server --host 127.0.0.1 --port 8000 --models-preset models.ini
+agc run .
+```
+
+`models.ini` belongs beside `ac.json`, not in AGC's configuration directory.
+The preset has `chat` and `rerank` models. Zinc never starts or downloads models
+on invocation. For Codex or another remote chat provider, retain only the
+reranker preset if local chat is unnecessary. `agc login codex` stores its
+credentials; configure an absolute `credential-command` pointing to
+`["/path/to/agc", "credential", "codex"]` for that provider. Secrets remain in
+the keyring, never in JSON or Rego.
+
+## Agent entry point
+
+Run `janet -t src/main.janet` with `PA_HANDLE` and `PA_FRAME_BYTES` only when
+hosting Zinc through PA. The agent exports `invoke(input, config, imports)`.
+Its entry point receives ordinary PA `invoke` calls, decodes base64 input, and
+builds callable Janet imports. One top-level invocation is active; managed
+tasks may overlap. There is no application discovery or profile catalogue.
 
 ## Configuration and input
 
@@ -58,7 +119,8 @@ Completed output is published through a supplied `output` function when present.
 `publish` selects Zinc output categories (default: `["response"]`). Zinc renders
 their Markdown and boundary footers itself; the host need not understand those
 categories. Without `output`, invocation returns its terminal value. Failures
-raise diagnostics. There is no detached publication stream, preview protocol, or
+raise diagnostics without also publishing a duplicate terminal error message.
+There is no detached publication stream, preview protocol, or
 progress subscription.
 
 ## VMs and imports

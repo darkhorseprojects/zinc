@@ -1,17 +1,11 @@
 # Release notes
 
-Zinc exports `invoke(input, config, imports)` and owns its configuration,
-navigation, operations and presentation. It no longer implements a shared
-application discovery/profile contract or persists host routing context.
-Imported functions are live invocation attachments; unfinished work resumes only
-through an explicitly authorized reattachment.
+Zinc owns setup, initialization and deployment files. `jpm setup` installs pinned dependencies into a shared user module
+directory, builds the agent, and creates agent-local `ac.json`, `ac.rego` and `models.ini` without overwriting them.
+`jpm init` initializes a fresh store offline, with no Connector, OPA or model server. One policy is sufficient.
 
-User and agent VM configuration are separate. Managed tasks inherit their role,
-and retained closures cannot carry a privileged import into a less-privileged
-task. Journal records distinguish ownership from authorship. A metadata record
-persists the store identity independently of its path, using the existing
-two-table schema and unchanged schema version.
+Zinc's setup tool can install native user services on Linux, macOS and Windows without starting them. OPA and AGC are
+existing executables, not dependencies built by Zinc. Model-server service installation is explicit.
 
-There is no migration, package/schema version bump, or automatic deletion.
-Existing histories lacking identity metadata need an explicitly authorized
-fresh-history cutover; unfinished machines still require their original runtime.
+Terminal failures remain journaled and are raised to the caller without duplicate output. Initialization does not fetch
+model catalogues. Resource names exposed to the model are JSON strings. PA, schema and version numbers are unchanged.

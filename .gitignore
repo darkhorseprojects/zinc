@@ -6,6 +6,8 @@
 /models/
 user.md
 /.lux/
-/ac.yaml
+/ac.json
+/ac.rego
+/models.ini
 /.agc/
 /private/
