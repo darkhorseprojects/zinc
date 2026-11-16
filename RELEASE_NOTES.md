@@ -1,11 +1,17 @@
 # Release notes
 
-History now contains actual inputs, completed messages and evidence. A two-table store keeps one replaceable running graph
-per durable path; checkpoints, private operations and memory nodes no longer consume historical IDs. Recovery reuses known
-outcomes and reports dispatched-without-outcome calls as unknown. Temporary invocations stay in RAM.
+Zinc exports `invoke(input, config, imports)` and owns its configuration,
+navigation, operations and presentation. It no longer implements a shared
+application discovery/profile contract or persists host routing context.
+Imported functions are live invocation attachments; unfinished work resumes only
+through an explicitly authorized reattachment.
 
-VM grants and prompt assembly are centralized. Worlds retain binding images and definition source rather than script logs.
-Owner inspection supports nearest earlier references; execution remains exact. Binary memory uses event-local nodes and
-bounded lazy summaries. Streaming previews and progress are volatile; completed messages remain the durable output units.
+User and agent VM configuration are separate. Managed tasks inherit their role,
+and retained closures cannot carry a privileged import into a less-privileged
+task. Journal records distinguish ownership from authorship. A metadata record
+persists the store identity independently of its path, using the existing
+two-table schema and unchanged schema version.
 
-Existing stores require an explicit fresh-history cutover. No migration, version bump or automatic deletion is provided.
+There is no migration, package/schema version bump, or automatic deletion.
+Existing histories lacking identity metadata need an explicitly authorized
+fresh-history cutover; unfinished machines still require their original runtime.

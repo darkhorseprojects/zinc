@@ -15,17 +15,19 @@
       (some |(definition $ name) form))))
 (defn step [p]
   (try (do
-    (def c (p :config)) (def bindings (p :bindings)) (def input (p :input)) (def request (p :request))
+    (def c (p :config)) (def input (p :input)) (def request (p :request))
+    (def bindings (merge (get-in c [:registry :user]) (get-in c [:registry :agent])))
+    (var role :agent)
     (def base @{:redef true}) (def native (make-env)) (var env nil) (var definitions nil)
     (def output @"")
     (each port [:out :err] (put base port (fn [text]
       (assert (<= (+ (length output) (length text)) (c :response-bytes)) "script output limit") (buffer/push-string output text))))
     (def invoke (fn [name args]
       (when (string? name)
-        (assert (bindings name) {:code "BindingNotGranted" :message (string "Binding is not granted: " name)})
-        (when-let [[minimum maximum] (get-in bindings [name :arity])]
+        (assert (get-in c [:registry role name]) {:code "BindingNotGranted" :message (string "Binding is not granted: " name)})
+        (when-let [[minimum maximum] (get-in c [:registry role name :arity])]
           (assert (<= minimum (length args) maximum) "wrong argument count")))
-      (def r (yield {:binding name :arguments args}))
+      (def r (yield {:binding name :arguments args :role role}))
       (if (= "ok" (r :status)) (r :value) (error (r :error)))))
     (def evaluate (fn [code]
       (var value nil)
@@ -40,8 +42,11 @@
       (put base (symbol name) (case (spec :class)
         "native" (native (spec :native))
         "macro" @{:macro true :value config/gather :doc (spec :doc)}
-        @{:doc (spec :doc) :value (if (= name "memory/summarize") (partial agent/manual invoke)
-          (fn [& args] (invoke name args)))})))
+        @{:doc (spec :doc) :value (fn [& args]
+          (if (= name "memory/summarize")
+            (do (assert (get-in c [:registry role name]) "binding is not granted") (agent/manual invoke (first args)))
+            (invoke name args)))})))
+    (def installed (merge base))
     (def reverse (merge make-image-dict {base 'zinc/base invoke 'zinc/invoke evaluate 'zinc/evaluate}))
     (def forward (merge load-image-dict {'zinc/base base 'zinc/invoke invoke 'zinc/evaluate evaluate}))
     (each [module namespace] modules (each [name binding] (pairs module)
@@ -60,7 +65,7 @@
       [name (module/value env name true) (definitions name)]) reverse))
     (when (p :starting)
       (put machine :tasks @[@{:fiber (fiber/new (fn [] (if (input :code) (evaluate (input :code))
-        (agent/run input invoke evaluate (c :rounds)))) :a env)}]) (put machine :cursor 0))
+        (agent/run input invoke evaluate (c :rounds)))) :a env) :role (if (input :code) (c :role) :agent)}]) (put machine :cursor 0))
     (def tasks (machine :tasks))
     (when-let [[index response] (p :reply)] (put (tasks index) :wait nil) (put (tasks index) :inbox response))
     (sandbox :fs :net :subprocess :ffi :modules :env :asm :unmarshal :exit :locale :signal :threads :sandbox)
@@ -83,6 +88,9 @@
       (unless chosen (break))
       (def [i task response] chosen) (put machine :cursor (mod (+ i 1) (length tasks)))
       (put task :wait nil) (put task :inbox nil)
+      (set role (task :role))
+      (each [name binding] (pairs installed) (when (symbol? name)
+        (put base name (when (get-in c [:registry role (string name)]) binding))))
       (def fiber (task :fiber)) (def value (resume fiber (unless (= :new (fiber/status fiber)) response)))
       (case (fiber/status fiber)
         :dead (put task :outcome {:status "ok" :value value})
@@ -91,11 +99,11 @@
           (def name (value :binding)) (def args (value :arguments))
           (case name
             "input" (put task :inbox {:status "ok" :value input})
-            "settings" (put task :inbox {:status "ok" :value ((config/expose c bindings) :settings)})
-            "resources" (put task :inbox {:status "ok" :value ((config/expose c bindings) :resources)})
+            "settings" (put task :inbox {:status "ok" :value ((config/expose c role) :settings)})
+            "resources" (put task :inbox {:status "ok" :value ((config/expose c role) :resources)})
             "ev/go" (do (assert (function? (first args)) "ev/go expects a Janet function")
               (assert (< (length tasks) (c :tasks)) "task limit")
-              (def id (length tasks)) (array/push tasks @{:fiber (fiber/new (first args) :a env)})
+              (def id (length tasks)) (array/push tasks @{:fiber (fiber/new (first args) :a env) :role role})
               (put task :inbox {:status "ok" :value {:scope request :task id}}))
             "ev/sleep" (do (assert (and (number? (first args)) (<= 0 (first args) 31536000)) "invalid sleep duration")
               (put task :wait {:timer (+ (p :now) (first args))}))
@@ -114,7 +122,7 @@
             "world/remove" (do (assert (symbol? (first args)) "world/remove expects a symbol")
               (put env (first args) nil) (put definitions (first args) nil) (put task :inbox {:status "ok" :value true}))
             (do (config/encode args) (set operation value) (set host-task i)
-              (put task :wait (if (or (index-of name [:chat :rerank]) (= "external" (get-in bindings [name :class])))
+              (put task :wait (if (or (index-of name [:chat :rerank]) (= "external" (get-in c [:registry role name :class])))
                 {:call (length (p :calls))} {:host true})))) )
         (error "unsupported fiber suspension")))
     (def settled (when (every? (map |($ :outcome) tasks))
@@ -126,6 +134,6 @@
     (def after (marshal (seq [name :in (sorted (all-bindings env true))]
       [name (module/value env name true) (definitions name)]) reverse))
     {:image image :changed (not= (string before) (string after)) :bindings projected
-     :operation operation :task host-task :output (string output) :settled settled
+     :operation operation :role (when host-task ((tasks host-task) :role)) :task host-task :output (string output) :settled settled
      :waits (seq [task :in tasks :unless (task :outcome) :when (task :wait)] (task :wait))})
     ([err fiber] {:failure (config/diagnostic err fiber)})))

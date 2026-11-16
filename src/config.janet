@@ -30,8 +30,10 @@
    "process/run" {:arity [1 1] :class "external" :doc "(process/run grant) executes granted argv/env."}})
 
 (def defaults
-  {:world "main" :worlds ["main"] :bindings ["*"] :accept ["text"] :inspect false :rewind false
-   :instructions (path/join directory "zinc.md") :temporary false :queue true :fs {} :http {} :processes {} :modules {}
+  {:world "main" :worlds ["main"] :input "text" :operation "submit" :conversation "default" :initialize false :inspect false :rewind false
+   :vm {:user {:bindings ["*"] :fs {} :http {} :processes {} :modules {}}
+        :agent {:bindings ["*"] :fs {} :http {} :processes {} :modules {}}}
+   :instructions (path/join directory "zinc.md") :temporary false :queue true :publish ["response"] :arguments {}
    :providers {} :thinking "default" :summary {} :web-search false :rounds 128 :parallel 4 :tasks 4096 :depth 8
    :seconds 120 :run-seconds 0 :pending 32 :http-ms 600000 :source-bytes 1048576 :image-bytes 4194304
    :response-bytes 8388608 :world-bytes 16777216 :journal-bytes 67108864 :history-records 1024
@@ -77,30 +79,31 @@
   apply partial comp complement identity juxt constantly take drop seq tabseq catseq collect generate coro yield-to
   quote quasiquote unquote splice comment doc gensym assert-type assert-arity])
 (defmacro gather [& forms] ~(map await [,;(map |~(ev/go (fn [] ,$)) forms)]))
-(defn registry [c imports]
+(defn registry [c role imports]
+  (def settings (get-in c [:vm role]))
   (def native (make-env))
   (def result (tabseq [name :in (all-bindings native) :unless (or (get (native name) :private) (index-of name '[math/random math/seedrandom]))
     :when (or (index-of name core) (some |(string/has-prefix? $ (string name)) ["array/" "buffer/" "tuple/" "table/" "struct/" "string/" "math/" "peg/" "parser/"]))]
     (string name) {:class "native" :native name}))
   (merge-into result bindings)
-  (each [name documentation] (pairs imports)
-    (assert (and (not (has-key? result (string name))) (not (native (symbol name)))
-      (not (index-of (string name) ["input" "settings" "resources"]))) "binding collision")
-    (put result (string name) {:class "external" :arity [1 1] :import true :doc documentation}))
-  (each [name spec] (pairs (c :modules))
+  (each [name binding] (pairs imports)
+    (assert (and (symbol? name) (not (has-key? result (string name))) (not (native name))) "binding collision")
+    (put result (string name) {:class "external" :arity [1 1] :import true :doc (binding :doc)}))
+  (each [name spec] (pairs (settings :modules))
     (assert (and (not (has-key? result (string name))) (not (native (symbol name)))
       (not (index-of (string name) ["input" "settings" "resources"]))) "binding collision")
     (assert (and (string? (spec :module)) (string? (spec :export)) (string? (spec :doc))) "invalid module effect")
     (put result (string name) {:class "external" :module spec :doc (spec :doc)}))
-  (tabseq [[name spec] :pairs result :when (or (= "native" (spec :class)) (selected? name (c :bindings)))] name spec))
-(defn expose [c registry]
+  (tabseq [[name spec] :pairs result :when (or (= "native" (spec :class)) (selected? name (settings :bindings)))] name spec))
+(defn expose [c role]
+  (def registry (get-in c [:registry role]))
   {:settings (tabseq [k :in [:chat :rerank :thinking :rounds :context-percent :score :queue :temporary]] k (c k))
-   :resources (tabseq [k :in [:fs :http :processes]] k (keys (c k)))
+   :resources (tabseq [k :in [:fs :http :processes]] k (keys (get-in c [:vm role k])))
    :bindings (sorted (keys registry))
    :documentation (string/join (seq [[name spec] :in (sorted (pairs registry)) :when (spec :doc)] (spec :doc)) "\n")})
 
-(defn parse [supplied handle profile runtime]
-  (def allowed (array/concat @[:store :directory :chat :rerank :context-quota :output] (keys defaults)))
+(defn parse [supplied handle runtime]
+  (def allowed (array/concat @[:store :directory :chat :rerank :context-quota :output :request :path :from :memory :work] (keys defaults)))
   (each k (keys supplied) (assert (index-of k allowed) (string "unknown setting " k)))
   (def c (json/decode (encode (merge defaults supplied)) true true))
   (each k [:store :directory :instructions :cygnet :stopwords]
@@ -112,9 +115,19 @@
   (each k [:parallel :tasks :depth :pending :response-bytes :world-bytes :journal-bytes :history-records :page-bytes :summary-bytes :summary-max-bytes]
     (assert (and (int? (c k)) (> (c k) 0)) (string "positive integer required: " k)))
   (assert (and (<= 1 (c :context-percent) 100) (index-of (c :world) (c :worlds))) "invalid context/world selection")
-  (each kind (c :accept) (assert (index-of kind ["text" "code"]) "invalid input kind"))
-  (each k [:worlds :bindings :accept] (assert (and (indexed? (c k)) (every? (map string? (c k)))) "expected an array of strings"))
-  (each k [:fs :http :processes :modules :providers :summary] (assert (dictionary? (c k)) "expected a configuration object"))
+  (assert (index-of (c :input) ["text" "code" "json"]) "invalid input encoding")
+  (each k [:worlds :publish] (assert (and (indexed? (c k)) (every? (map string? (c k)))) "expected an array of strings"))
+  (each k [:vm :providers :summary :arguments] (assert (dictionary? (c k)) "expected a configuration object"))
+  (each role (keys (c :vm)) (assert (index-of role [:user :agent]) "unknown VM role"))
+  (each role [:user :agent]
+    (def settings (merge (get-in defaults [:vm role]) (get-in c [:vm role])))
+    (put-in c [:vm role] settings)
+    (each k (keys settings) (assert (index-of k [:bindings :fs :http :processes :modules]) "unknown VM setting"))
+    (assert (and (indexed? (settings :bindings)) (every? (map string? (settings :bindings)))) "invalid VM bindings")
+    (each k [:fs :http :processes :modules] (assert (dictionary? (settings k)) "invalid VM resources"))
+    (each resource (values (settings :fs)) (assert (path/abspath? (resource :root)) "filesystem grant root must be absolute"))
+    (each endpoint (values (settings :http))
+      (assert (and (string? (endpoint :url)) (string/has-suffix? "/" (endpoint :url)) (indexed? (endpoint :methods))) "invalid HTTP grant")))
   (each [name provider] (pairs (c :providers))
     (assert (and (string? (provider :url)) (index-of (get provider :protocol "chat-completions") ["chat-completions" "responses"])
       (not (and (provider :token-env) (provider :credential-command)))) "invalid provider")
@@ -122,40 +135,24 @@
     (each key (keys (get provider :parameters {}))
       (assert (not (index-of key [:model :messages :input :instructions :tools :tool_choice :stream :stream_options :store :include
         :max_tokens :max_completion_tokens :max_output_tokens :parallel_tool_calls :reasoning :reasoning_effort :prompt_cache_key])) "managed provider parameter")))
-  (each [name resource] (pairs (c :fs)) (assert (path/abspath? (resource :root)) "filesystem grant root must be absolute"))
-  (each [name endpoint] (pairs (c :http)) (assert (and (string? (endpoint :url)) (string/has-suffix? "/" (endpoint :url))) "HTTP grant base must end in /")
-    (assert (indexed? (endpoint :methods)) "HTTP grant needs explicit methods"))
-  (merge c {:handle handle :profile profile :runtime runtime}))
+  (merge c {:handle handle :runtime runtime}))
 
 (defn authorize [current saved]
-  (each k [:store :directory :handle :profile :runtime :instructions]
+  (each k [:store :directory :handle :runtime :instructions]
     (assert (= (current k) (saved k)) {:code "AuthorityChanged" :message (string "saved " k " changed")}))
-  (each k [:fs :http :processes :modules :providers]
-    (each [name spec] (pairs (saved k))
-      (assert (= (encode spec) (encode (get-in current [k name])))
-        {:code "AuthorityChanged" :message (string "resource changed or revoked: " k "/" name)})))
+  (each [name spec] (pairs (saved :providers))
+    (assert (= (encode spec) (encode (get-in current [:providers name]))) "provider changed or revoked"))
+  (def vm (merge (saved :vm)))
+  (each role [:user :agent]
+    (each k [:fs :http :processes :modules]
+      (each [name spec] (pairs (get-in saved [:vm role k]))
+        (assert (= (encode spec) (encode (get-in current [:vm role k name]))) "VM resource changed or revoked")))
+    (put vm role (merge (get-in saved [:vm role])
+      {:bindings (filter |(selected? $ (get-in current [:vm role :bindings])) (keys (get-in saved [:registry role])))})))
   (each name (saved :worlds) (assert (index-of name (current :worlds)) "world grant revoked"))
-  (merge saved {:bindings (filter |(selected? $ (current :bindings)) (saved :granted))
-    :granted (filter |(selected? $ (current :bindings)) (saved :granted))
+  (merge saved {:vm vm
     :inspect (and (saved :inspect) (current :inspect)) :rewind (and (saved :rewind) (current :rewind))
     :memory-retrieval (and (saved :memory-retrieval) (current :memory-retrieval))
     :score (max (saved :score) (current :score))}
     (tabseq [k :in [:parallel :tasks :depth :pending :response-bytes :world-bytes :journal-bytes :history-records :summary-bytes :summary-max-bytes]]
       k (min (saved k) (current k)))))
-
-(def parameters
-  [{:name "chat" :type "string" :description "Chat model" :autocomplete "models"}
-   {:name "thinking" :type "string" :description "Reasoning effort" :choices ["default" "none" "minimal" "low" "medium" "high" "xhigh" "max"]}
-   {:name "rounds" :type "integer" :description "Maximum model rounds" :minimum 1}
-   {:name "queue" :type "boolean" :description "Queue behind earlier work"}
-   {:name "path" :type "integer" :description "Continue this path"}
-   {:name "from" :type "integer" :description "Fork this immutable point"}
-   {:name "memory" :type "integer" :description "Use this point's memory"}
-   {:name "temporary" :type "boolean" :description "Run in RAM only; no crash recovery"}])
-
-(def commands
-  [{:name "world-point" :description "Show the selected actual event" :parameters []}
-   {:name "world-view" :description "Render current bindings as Janet source" :parameters [{:name "reference" :type "integer" :description "Nearest earlier point in selected ancestry"}]}
-   {:name "world-inspect" :description "Read an exact execution record" :parameters [{:name "reference" :type "integer" :description "Record reference"}]}
-   {:name "memory-expand" :description "Read original evidence" :parameters [{:name "reference" :type "integer" :description "Nearest earlier memory point in selected ancestry"}]}
-   {:name "models" :description "List available models" :parameters [{:name "role" :type "string" :description "Model role" :choices ["chat" "rerank"]}]}])

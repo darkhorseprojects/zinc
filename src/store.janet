@@ -62,13 +62,13 @@
 (defn image [s point]
   (when point (def r (row s point)) (if (r :image) (r :image)
     (when-let [ref (get-in r [:data :bindings])] (image s ref)))))
-(defn access [s point author]
-  (when point (assert (or (= author (get-in s [:config :handle])) (= author (get-in (row s point) [:data :author])))
-    {:code "NotAuthorized" :message "Point belongs to another author."})) point)
-(defn permit [s h author]
-  (if (h :point) (access s (h :point) author)
-    (assert (or (= author (get-in s [:config :handle]))
-      (= author (get-in h [:run :active :author])) (= author (get (first (get-in h [:run :queue])) :author))) "path belongs to another author")) h)
+(defn access [s point principal]
+  (when point (assert (= principal (get-in (row s point) [:data :principal]))
+    {:code "NotAuthorized" :message "Point belongs to another principal."})) point)
+(defn permit [s h principal]
+  (if (h :point) (access s (h :point) principal)
+    (assert (or (= principal (get-in h [:run :active :author]))
+      (= principal (get (first (get-in h [:run :queue])) :author))) "path belongs to another principal")) h)
 (defn nearest [s point requested author]
   (when requested (assert (and (int? requested) (not= 0 requested)) "point must be a nonzero integer"))
   (var p point)
@@ -89,7 +89,7 @@
   (when (get-in s [:source :read-only]) (close (s :source))))
 (defn open [c &opt initialize source read-only]
   (def s @{:config c :heads @{} :rows @{} :source source :next-head 0 :next-row 0
-    :read-only read-only :identity (digest (string (c :handle) ":" (c :store)))})
+    :read-only read-only :identity (nonce)})
   (try (do
   (unless (c :temporary)
     (assert (= (c :directory) (os/realpath (c :directory))) "canonical instance directory required")
@@ -110,16 +110,20 @@
     (put s :db (sql/open (if read-only (string (uri (c :store)) "?mode=ro") (c :store))))
     (query s "PRAGMA foreign_keys=ON; PRAGMA trusted_schema=OFF;")
     (unless read-only (query s "PRAGMA journal_mode=WAL; PRAGMA synchronous=FULL;"))
-    (if initialize (query s layout)
-      (assert (= ["id" "name" "point" "run"] (tuple/slice (map |($ :name) (query s "PRAGMA table_info(heads)")))) "fresh-history cutover required"))
+    (when initialize
+      (query s layout)
+      (query s "INSERT INTO journal(data) VALUES(?)" [(config/encode {:kind "identity" :handle (c :handle) :stream (s :identity)})]))
+    (def identity (get (first (query s "SELECT data FROM journal WHERE id=1")) :data))
+    (assert (and (= "identity" (get identity :kind)) (= (c :handle) (identity :handle)) (string? (identity :stream)))
+      "store identity mismatch; a fresh-history cutover must be explicitly initialized")
+    (put s :identity (identity :stream))
     (reload s)
     (unless read-only (each a (pending s)
       (assert (= (c :runtime) (get-in a [:policy :runtime])) {:code "RuntimeChanged" :message "Unfinished execution requires its original runtime."}))))
-  (when (c :temporary) (put s :identity (nonce)))
   (unless read-only (each name (c :worlds) (unless (world s name)
     (create s name (when (and source (world source name)) ((world source name) :point)))))) s)
     ([err] (close s) (error err))))
-(defn admit [s supplied c author context &opt owner seed state]
+(defn admit [s supplied c author &opt owner seed]
   (assert (dictionary? supplied) "input must be an object")
   (def input (merge supplied {:queue (get supplied :queue (c :queue))}))
   (assert (not= (nil? (input :text)) (nil? (input :code))) "supply exactly one of text or code")
@@ -137,7 +141,8 @@
   (each image (get input :images []) (assert (index-of (image :type) ["image/png" "image/jpeg" "image/webp"]) "invalid image type"))
   (def token (get input :request (nonce)))
   (assert (and (string? token) (<= 1 (length token) 256)) "request must be a nonempty string of at most 256 bytes")
-  (def signature (digest (config/encode [input (c :profile) author context])))
+  (def signature (digest (config/encode [input author (string (c :role))
+    (tabseq [[k v] :pairs c :unless (index-of k [:registry :role])] k v)])))
   (def active (pending s))
   (def old (or (find |(= token ($ :request)) active)
     (if (s :db) (get (first (query s "SELECT data FROM journal WHERE json_extract(data,'$.request')=? ORDER BY id LIMIT 1" [token])) :data)
@@ -156,9 +161,8 @@
       (def depth (if owner (+ 1 (owner :depth)) 0)) (assert (< depth (c :depth)) "recursion depth limit")
       (def id (if target (target :id) (if (s :db)
         ((first (query s "SELECT coalesce(max(id),0)+1 id FROM heads")) :id) (- (s :next-head) 1))))
-      (def a @{:request token :path id :input input :policy c :author author :context context :signature signature
+      (def a @{:request token :path id :input input :policy c :author author :signature signature
         :owner (when owner (owner :request)) :depth depth :seed seed :order (+ 1 (reduce max 0 (map |($ :order) active)))
-        :state (when state (merge state {(if (c :temporary) :temporary-path :path) id}))
         :deadline (when (> (c :run-seconds) 0) (+ (os/clock) (c :run-seconds)))})
       (def run (get target :run))
       (def queue (array/concat @[] (get run :queue []) [a]))
