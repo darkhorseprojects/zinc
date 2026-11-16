@@ -14,7 +14,7 @@ Keep the complete repository in the chosen agent directory, conventionally
 ```sh
 git clone https://github.com/darkhorseprojects/zinc.git ~/.agents/zinc
 cd ~/.agents/zinc
-jpm setup
+jpm run setup
 ```
 
 Source setup requires Janet 1.42+, JPM, a C compiler, OpenSSL headers, trusted CA
@@ -30,7 +30,7 @@ Edit the Discord user ID in both `callers` and `routes.members` in `ac.json`,
 and select your providers and models. Then initialize the store offline:
 
 ```sh
-jpm init
+jpm run init
 ```
 
 Initialization creates a fresh store and refuses to overwrite an existing one.

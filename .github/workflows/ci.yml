@@ -39,8 +39,8 @@ jobs:
           install -d -m 700 "$HOME/.agents"
           git worktree add --detach "$HOME/.agents/zinc" HEAD
           cd "$HOME/.agents/zinc"
-          jpm setup
-          jpm init
+          jpm run setup
+          jpm run init
           cd "$HOME"
           janet -e "(import $HOME/.agents/zinc/src/main.janet)"
         working-directory: zinc

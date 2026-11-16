@@ -49,7 +49,7 @@ if args.command == "setup":
     for name in ("ac.rego", "models.ini"):
         if not (root / name).exists():
             shutil.copyfile(root / "examples" / name, root / name)
-    print(f"Edit your Discord user ID and model settings in {filename}, then run jpm init.")
+    print(f"Edit your Discord user ID and model settings in {filename}, then run jpm run init.")
 else:
     document = json.loads(filename.read_text(encoding="utf-8"))
     settings = list(document["policies"].values())

@@ -1,8 +1,8 @@
 # Release notes
 
-Zinc owns setup, initialization and deployment files. `jpm setup` installs pinned dependencies into a shared user module
+Zinc owns setup, initialization and deployment files. `jpm run setup` installs pinned dependencies into a shared user module
 directory, builds the agent, and creates agent-local `ac.json`, `ac.rego` and `models.ini` without overwriting them.
-`jpm init` initializes a fresh store offline, with no Connector, OPA or model server. One policy is sufficient.
+`jpm run init` initializes a fresh store offline, with no Connector, OPA or model server. One policy is sufficient.
 
 Zinc's setup tool can install native user services on Linux, macOS and Windows without starting them. OPA and AGC are
 existing executables, not dependencies built by Zinc. Model-server service installation is explicit.
