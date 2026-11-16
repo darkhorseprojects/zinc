@@ -1,10 +1,56 @@
 {
   "opa": "http://127.0.0.1:8181",
   "revision": "zinc",
+  "commands": [
+    {
+      "name": "agent",
+      "description": "Run the agent",
+      "options": [
+        { "type": 3, "name": "prompt", "description": "Input for the agent", "required": true, "max_length": 6000 },
+        { "type": 3, "name": "policy", "description": "Select an authorized routed policy" },
+        { "type": 3, "name": "chat", "description": "Chat model; see /models" },
+        { "type": 3, "name": "thinking", "description": "Reasoning effort" },
+        { "type": 4, "name": "rounds", "description": "Maximum model rounds", "min_value": 1 },
+        { "type": 5, "name": "queue", "description": "Queue behind earlier work" },
+        { "type": 4, "name": "path", "description": "Continue this path" },
+        { "type": 4, "name": "from", "description": "Fork this immutable point" },
+        { "type": 4, "name": "memory", "description": "Use this point's memory" },
+        { "type": 5, "name": "temporary", "description": "Run in RAM only" }
+      ]
+    },
+    { "name": "reset", "description": "Reset navigation without deleting history" },
+    {
+      "name": "models",
+      "description": "List available models",
+      "options": [
+        {
+          "type": 3,
+          "name": "role",
+          "description": "Model role",
+          "choices": [{ "name": "chat", "value": "chat" }, { "name": "rerank", "value": "rerank" }]
+        }
+      ]
+    },
+    { "name": "world-point", "description": "Show the selected actual event" },
+    {
+      "name": "world-view",
+      "description": "Render world bindings",
+      "options": [{ "type": 4, "name": "reference", "description": "Nearest earlier point in selected ancestry" }]
+    },
+    {
+      "name": "world-inspect",
+      "description": "Inspect a journal record",
+      "options": [{ "type": 4, "name": "reference", "description": "Nearest earlier record in selected ancestry" }]
+    },
+    {
+      "name": "memory-expand",
+      "description": "Read original evidence",
+      "options": [{ "type": 4, "name": "reference", "description": "Nearest earlier memory point in selected ancestry" }]
+    }
+  ],
   "policies": {
     "zinc": {
       "handle": "${handle}",
-      "callers": ["discord:user:YOUR_USER_ID"],
       "janet": {
         "module": "${directory}/src/main.janet",
         "directory": "${directory}",
@@ -13,6 +59,7 @@
       },
       "limits": { "stop_ms": 5000 },
       "config": {
+        "rounds": 128,
         "directory": "${directory}",
         "store": "${directory}/private/history.db",
         "inspect": true,

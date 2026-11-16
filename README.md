@@ -31,8 +31,8 @@ Updating an existing installation needs only `jpm build`.
 For a new agent directory, place your `ac.json`, `ac.rego` and `models.ini` beside
 `project.janet`; `examples/` contains starting points. In the JSON, replace
 `${directory}` with the canonical absolute agent directory, `${handle}` with a
-stable unique agent handle, and `YOUR_USER_ID` in both `callers` and
-`routes.members` with your Discord user ID. Select your providers and models.
+stable unique agent handle, and `YOUR_USER_ID` in `routes.members` with your
+Discord user ID. Select your providers and models.
 Initialize a genuinely new database once:
 
 ```sh
@@ -105,7 +105,11 @@ model listing and inspection use `arguments`. Inspection requires
 `inspect: true`; `arguments.reference` resolves the nearest earlier point in the
 selected ancestry and reports that actual point. Configure these operations
 through policies or call Zinc from another Janet program; they are not a shared
-host application protocol.
+host application protocol. The example deployment registers `/reset`, `/models`,
+`/world-point`, `/world-view`, `/world-inspect`, and `/memory-expand`. `/agent`
+accepts per-invocation `chat`, `thinking`, `rounds`, `queue`, `path`, `from`,
+`memory`, and `temporary` options. OPA translates commands into configuration and
+bounds rounds by the configured ceiling. Reset and inspection do not query models.
 
 Completed output is published through a supplied `output` function when present.
 `publish` selects Zinc output categories (default: reasoning, response, tool-call,
@@ -210,7 +214,9 @@ representations. `memory/expand`, `memory/summarize` and `memory/invalidate`
 operate on selected evidence.
 
 Providers support Chat Completions and Responses with native replay retained in
-model traces. Responses reasoning summaries are requested when supported.
+model traces. A successful protocol completion ends the loop only on a final
+response; pending tool calls execute and reasoning-only turns continue. Responses
+commentary remains intermediate. Truncated or unterminated streams fail. Responses reasoning summaries are requested when supported.
 Completed typed messages commit once; `(↻N)` is the store-wide inquiry index,
 including recursive work. Zinc supplies metadata once per inquiry and tool
 call/result; it owns history and work, while the connector formats delivery.

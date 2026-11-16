@@ -191,9 +191,11 @@
       (if (and (= :chat (call :binding)) (= "ok" (result :status)))
         (do
           (def outputs (get-in result [:value :outputs]))
-          (each [i output] (pairs outputs)
-            (def last (= i (- (length outputs) 1)))
-            (def r (record s h a "message" (output :text) output nil (when last {:status (get-in result [:value :stop])})))
+          (def messages (if (and (empty? outputs) (not (get-in call [:arguments 0 :summary]))) [nil] outputs))
+          (each [i output] (pairs messages)
+            (def last (= i (- (length messages) 1)))
+            (def r (record s h a (if output "message" "model") (get output :text "") output nil
+              (when last {:status (get-in result [:value :stop])})))
             (when last
               (put (r :data) :model {:request (first (call :arguments)) :response (get-in result [:value :message])
                 :stop (get-in result [:value :stop]) :usage (get-in result [:value :usage])}) (store/replace s r)))
@@ -299,12 +301,11 @@
   (put host :config c)
   (def s (storage host c (c :initialize))) (put s :config c)
   (when (c :initialize) (break true))
-  (put c :catalogue (effects/catalogue c))
   (def session [(s :identity) caller (c :conversation)])
   (def operation (c :operation)) (def args (c :arguments))
   (case operation
-    "reset" (do (put (host :sessions) session nil) (break true))
-    "models" (break (filter |(= (get args :role "chat") ($ :role)) (c :catalogue)))
+    "reset" (do (put (host :sessions) session nil) (break "Navigation reset; history is unchanged."))
+    "models" (break (filter |(= (get args :role "chat") ($ :role)) (effects/catalogue c)))
     "read" (do (store/permit s (store/head s (get-in c [:work :path])) caller) (break (store/result s (c :work))))
     "cancel" (break (cancel host s (c :work) caller)))
   (when (index-of operation ["world-point" "world-view" "world-inspect" "memory-expand"])
@@ -317,6 +318,7 @@
       "world-inspect" (merge ((store/row s exact) :data) {:point exact})
       "memory-expand" (memory/sources s (get-in (store/row s exact) [:data :memory])))))
   (assert (index-of operation ["submit" "resume"]) "unknown Zinc operation")
+  (put c :catalogue (effects/catalogue c))
   (var cursor (if (s :db) ((first (store/query s "SELECT coalesce(max(id),0) n FROM journal")) :n) (s :next-row)))
   (def work (if (= operation "resume")
     (do (store/permit s (store/head s (get-in c [:work :path])) caller) (c :work))
