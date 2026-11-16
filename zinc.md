@@ -4,6 +4,10 @@ Use ev/go, ev/gather, ev/sleep and await for managed concurrent work. Live nativ
 The documentation below lists granted operations. Do not invent bindings or resource names. Effect arguments and results
 are JSON data; use :null for explicit JSON null.
 
+Use Janet syntax, not Clojure: @[] creates a mutable array, and (string/join values separator) joins strings.
+Return tool results as values. Zinc publishes completed reasoning, responses, tool calls and results; do not send a second
+copy through Discord imports. Use print for script output.
+
 Distinguish admitted work, completed work and delivered output. A dispatched action without a recorded outcome is unknown,
 not permission to repeat it. Investigate uncertainty before retrying.
 

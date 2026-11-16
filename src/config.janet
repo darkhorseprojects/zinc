@@ -33,7 +33,7 @@
   {:world "main" :worlds ["main"] :input "text" :operation "submit" :conversation "default" :initialize false :inspect false :rewind false
    :vm {:user {:bindings ["*"] :fs {} :http {} :processes {} :modules {}}
         :agent {:bindings ["*"] :fs {} :http {} :processes {} :modules {}}}
-   :instructions (path/join directory "zinc.md") :temporary false :queue true :publish ["response"] :arguments {}
+   :instructions (path/join directory "zinc.md") :temporary false :queue true :publish ["reasoning" "response" "tool-call" "tool-result"] :arguments {}
    :providers {} :thinking "default" :summary {} :web-search false :rounds 128 :parallel 4 :tasks 4096 :depth 8
    :seconds 120 :run-seconds 0 :pending 32 :http-ms 600000 :source-bytes 1048576 :image-bytes 4194304
    :response-bytes 8388608 :world-bytes 16777216 :journal-bytes 67108864 :history-records 1024
@@ -86,9 +86,9 @@
     :when (or (index-of name core) (some |(string/has-prefix? $ (string name)) ["array/" "buffer/" "tuple/" "table/" "struct/" "string/" "math/" "peg/" "parser/"]))]
     (string name) {:class "native" :native name}))
   (merge-into result bindings)
-  (each [name binding] (pairs imports)
+  (each [name binding] (pairs imports) (unless (= name 'output)
     (assert (and (symbol? name) (not (has-key? result (string name))) (not (native name))) "binding collision")
-    (put result (string name) {:class "external" :arity [1 1] :import true :doc (binding :doc)}))
+    (put result (string name) {:class "external" :arity [1 1] :import true :doc (binding :doc)})))
   (each [name spec] (pairs (settings :modules))
     (assert (and (not (has-key? result (string name))) (not (native (symbol name)))
       (not (index-of (string name) ["input" "settings" "resources"]))) "binding collision")

@@ -108,10 +108,13 @@ through policies or call Zinc from another Janet program; they are not a shared
 host application protocol.
 
 Completed output is published through a supplied `output` function when present.
-`publish` selects Zinc output categories (default: `["response"]`). Zinc renders
-their Markdown and boundary footers itself; the host need not understand those
-categories. Without `output`, invocation returns its terminal value. Failures
-raise diagnostics without also publishing a duplicate terminal error message.
+`publish` selects Zinc output categories (default: reasoning, response, tool-call,
+and tool-result). Zinc supplies records containing `type`, `text`, optional
+`language` and boundary `footer`; the connector owns presentation. Janet scripts
+use the `clojure` highlighting language. The publication function is private to
+Zinc, not exposed to either VM. Without `output`, invocation returns its terminal
+value. Failures raise diagnostics without also publishing a duplicate terminal
+error message.
 There is no detached publication stream, preview protocol, or
 progress subscription.
 
@@ -207,7 +210,7 @@ representations. `memory/expand`, `memory/summarize` and `memory/invalidate`
 operate on selected evidence.
 
 Providers support Chat Completions and Responses with native replay retained in
-model traces. Completed typed messages commit once; `(↻N)` is the store-wide
-inquiry index, including recursive work. Zinc's output categories, footers,
-memory, and work model are its own implementation, not requirements imposed on
-other agents.
+model traces. Responses reasoning summaries are requested when supported.
+Completed typed messages commit once; `(↻N)` is the store-wide inquiry index,
+including recursive work. Zinc supplies metadata once per inquiry and tool
+call/result; it owns history and work, while the connector formats delivery.

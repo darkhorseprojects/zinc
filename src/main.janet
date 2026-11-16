@@ -33,8 +33,10 @@
   (when changed (put run :dirty false) (put run :bindings-point (r :id)))
   (when output
     (put output :id (get output :id (string (r :id))))
-    (when outcome (put output :footer (string "#" (a :start) " (↻" (a :index) ") → #" (r :id) " · "
-      (if (= "error" (outcome :status)) "failed" (outcome :status)))))
+    (when (or (= "tool-call" (output :type))
+      (and outcome (or (= "tool-result" (output :type)) (index-of (outcome :status) ["ok" "answer" "refused"]))))
+      (put output :footer (string "#" (a :start) " (↻" (a :index) ") → #" (r :id) " · "
+        (if (= "tool-call" (output :type)) "call" (if (= "error" (outcome :status)) "failed" (outcome :status))))))
     (store/replace s r)) r)
 (defn finish [host s h result &opt packet]
   (var outcome result)
@@ -47,7 +49,7 @@
     (set outcome {:status "error" :error {:code "WorldChanged" :message "World changed; local bindings retained, effects not repeated."}}))
   (def value (if (= "ok" (outcome :status)) (outcome :value) (outcome :error)))
   (def output (when (and (= "ok" (outcome :status)) (not (run :final)))
-    {:type "response" :format (if (string? value) "markdown" "json") :text (if (string? value) value (config/encode value))}))
+    {:type "response" :text (if (string? value) value (config/encode value))}))
   (store/transact s
     (def r (record s h a (if output "message" "result") (get output :text "") output image outcome))
     (put (r :data) :terminal true) (store/replace s r)
@@ -82,7 +84,7 @@
             (put run :memory (get-in base [:data :memory] []))
             (put run :bindings-point (when base (if (base :image) (base :id) (get-in base [:data :bindings])))))
           (def text "Cancelled before execution.")
-          (def r (record s h a "message" text {:type "response" :format "markdown" :text text}))
+          (def r (record s h a "message" text {:type "response" :text text}))
           (put (r :data) :outcome outcome) (put (r :data) :terminal true) (store/replace s r))
         (if (owned (get-in run [:active :request])) (finish host s h outcome)
           (do (when (and (not (run :active)) (empty? (run :queue))) (put h :run nil)) (store/save s h))))))) true)
@@ -111,7 +113,7 @@
       (assert (index-of (get-in (store/row s point) [:data :world]) (c :worlds)) "world is not granted")
       (def world (store/world s (run :world)))
       (def r (record s h a "message" (string "World rewound to #" point)
-        {:type "tool-result" :format "markdown" :text (string "World rewound to #" point)} nil {:status "ok"}))
+        {:type "tool-result" :language "text" :text (string "World rewound to #" point)} nil {:status "ok"}))
       (put (r :data) :bindings (get-in (store/row s point) [:data :bindings] point))
       (when ((store/row s point) :image) (put (r :data) :bindings point)) (store/replace s r)
       (put world :point (r :id)) (store/save s world) (r :id))
@@ -139,7 +141,7 @@
       (each [i call] (pairs (run :calls))
         (when (and call (call :result) (not (find |(= i ($ :call)) (packet :waits)))) (put (run :calls) i nil)))
       (when (> (length (packet :output)) 0)
-        (record s h a "message" (packet :output) {:type "response" :format "markdown" :text (packet :output)} (packet :bindings)))
+        (record s h a "message" (packet :output) {:type "response" :text (packet :output)} (packet :bindings)))
       (when-let [op (packet :operation)]
         (def binding (op :binding)) (def args (op :arguments))
         (cond
@@ -150,8 +152,9 @@
               [(merge (model/prepare c (first args) (= binding :rerank)) {:output (string (a :request) "/" index)})] args))
             (array/push (run :calls) @{:binding binding :role (packet :role) :arguments arguments :dispatched false})
             (unless (keyword? binding)
-              (record s h a "message" (config/encode {:binding binding :arguments args})
-                {:id (string (a :request) "/" index "/call") :type "tool-call" :format "json" :text (config/encode {:binding binding :arguments args})} (packet :bindings))))
+              (def text (string "(" binding (if (empty? args) "" " ") (string/join (map |(string/format "%j" $) args) " ") ")"))
+              (record s h a "message" text
+                {:id (string (a :request) "/" index "/call") :type "tool-call" :language "clojure" :text text} (packet :bindings))))
           (= binding :await)
           (do
             (def work (first args)) (assert (and (dictionary? work) (string? (work :request))) "await expects a task or work reference")
@@ -187,9 +190,7 @@
       (put call :result result)
       (if (and (= :chat (call :binding)) (= "ok" (result :status)))
         (do
-          (def outputs (filter |(not (index-of ($ :id) (get call :emitted []))) (get-in result [:value :outputs])))
-          (when (and (empty? outputs) (not (get-in call [:arguments 0 :summary])))
-            (array/push outputs {:id (string (get-in call [:arguments 0 :output]) "/boundary") :type "response" :format "markdown" :text ""}))
+          (def outputs (get-in result [:value :outputs]))
           (each [i output] (pairs outputs)
             (def last (= i (- (length outputs) 1)))
             (def r (record s h a "message" (output :text) output nil (when last {:status (get-in result [:value :stop])})))
@@ -199,7 +200,7 @@
           (when (and (not (get-in call [:arguments 0 :summary])) (index-of (get-in result [:value :stop]) ["answer" "refused"])) (put run :final true)))
         (unless (keyword? (call :binding))
           (record s h a "message" (config/encode result) {:id (string (a :request) "/" index "/result")
-            :type "tool-result" :format "json" :text (config/encode result)} nil result)))
+            :type "tool-result" :language "json" :text (config/encode result)} nil result)))
       (store/save s h))))
 (defn start [host s h]
   (def run (h :run)) (def a (first (run :queue)))
@@ -244,23 +245,13 @@
           (def result (try
             (let [value (if (get spec :import)
                 ((module/value imports (symbol binding)) (first (call :arguments)))
-                (let [reply (ev/thread-chan 64)]
+                (let [reply (ev/thread-chan 1)]
                   (defer (ev/chan-close reply)
                     (ev/thread (fn [[c spec binding args reply]]
-                      (def result (try {:value (with-dyns [:zinc/preview reply]
-                        (effects/invoke c spec (case binding :chat "model/chat" :rerank "model/rerank" binding) args))}
+                      (def result (try {:value (effects/invoke c spec (case binding :chat "model/chat" :rerank "model/rerank" binding) args)}
                         ([err fiber] {:error (config/diagnostic err fiber)})))
                       (ev/give reply result)) [(merge c (get-in c [:vm (call :role)])) spec binding (call :arguments) reply] :n)
-                    (var packet (ev/take reply))
-                    (while (or (packet :preview) (packet :complete))
-                      (when (and (packet :complete) (= (a :request) (get-in h [:run :active :request])))
-                        (store/transact s
-                          (def output (packet :complete))
-                          (record s h a "message" (output :text) output)
-                          (def current (get-in h [:run :calls index]))
-                          (put current :emitted (array/concat @[] (get current :emitted []) [(output :id)])) (store/save s h))
-                        (ev/give (host :events) {:type "wake"}))
-                      (set packet (ev/take reply)))
+                    (def packet (ev/take reply))
                     (when (packet :error) (error (packet :error))) (packet :value))))]
               (assert (<= (length (config/encode value)) (c :response-bytes)) "effect response limit") {:status "ok" :value value})
             ([err fiber] {:status (get-in err [:context :outcome] "unknown") :error (config/diagnostic err fiber)})))
@@ -354,13 +345,7 @@
       (each r rows
         (def output (get-in r [:data :output]))
         (when (and output (requests (get-in r [:data :request])) (index-of (output :type) (c :publish)))
-          (when-let [emit (module/value imports 'output)]
-            (def text (case (output :format)
-              "code" (string "```" (get output :language "janet") "\n" (output :text) "\n```")
-              "json" (string "```json\n" (output :text) "\n```")
-              "quote" (string/join (map |(string "> " $) (string/split "\n" (output :text))) "\n")
-              (output :text)))
-            (emit (string text (when (output :footer) (string "\n\n" (output :footer)))))))
+          (when-let [emit (module/value imports 'output)] (emit output)))
         (set cursor (r :id)))
       (when done (break))
       (set result (store/result s work))

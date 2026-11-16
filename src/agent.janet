@@ -47,7 +47,7 @@
               ([err fiber] {:error (config/diagnostic err fiber)})))])) (response :calls)))
           (each [i task] (pairs tasks)
             (def value (invoke "await" [task]))
-            (invoke :message [{:id (string (response :output) "/result/" i) :type "tool-result" :format "json" :text (config/encode value)}
+            (invoke :message [{:id (string (response :output) "/result/" i) :type "tool-result" :language "json" :text (config/encode value)}
               (if (and (dictionary? value) (value :error)) "error" "ok")])
             (array/push exchanges {:role "tool" :call (((response :calls) i) :id) :parts [{:type "text" :text (config/encode value)}]})))
         "continue" nil
