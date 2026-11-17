@@ -1,0 +1,43 @@
+{
+  "opa": "http://127.0.0.1:8181",
+  "revision": "zinc",
+  "policies": {
+    "zinc": {
+      "handle": "${handle}",
+      "janet": {
+        "module": "${directory}/src/main.janet",
+        "directory": "${directory}",
+        "transport": { "frame-bytes": 33554432, "admission-seconds": 10 }
+      },
+      "limits": { "stop_ms": 5000 },
+      "config": {
+        "rounds": 128,
+        "directory": "${directory}",
+        "store": "${directory}/private/history.db",
+        "inspect": true,
+        "rewind": true,
+        "providers": {
+          "llama": {
+            "url": "http://127.0.0.1:8000",
+            "models": {
+              "chat": { "role": "chat", "context": 131072, "tools": true },
+              "rerank": { "role": "rerank", "context": 4096 }
+            }
+          }
+        },
+        "chat": { "model": "llama:chat", "thinking": "default" },
+        "rerank": { "model": "llama:rerank" },
+        "summary": { "model": "llama:chat", "thinking": "default", "bytes": 512, "max-bytes": 4096 },
+        "vm": {
+          "user": { "bindings": ["*"], "imports": { "discord": { "options": ["chat.model", "chat.thinking", "rerank.model", "summary.model", "summary.thinking", "path", "from", "memory", "queue", "temporary"] }, "exa": false, "tinyfish": false }, "fs": {}, "http": {}, "processes": {}, "modules": {} },
+          "agent": { "bindings": ["*"], "imports": { "discord": true, "exa": false, "tinyfish": false }, "fs": {}, "http": {}, "processes": {}, "modules": {} }
+        }
+      }
+    }
+  },
+  "routes": {
+    "members": { "discord:user:YOUR_USER_ID": "zinc" },
+    "channels": {},
+    "guilds": {}
+  }
+}

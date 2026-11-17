@@ -1,253 +1,177 @@
 # Zinc
 
-Zinc owns Janet execution, effects, queued work, memory and native image-based worlds. Its host owns the process
-lifetime. Connector supplies transport, credentials and external capability imports, not a second work scheduler.
+Zinc executes Janet against selected bindings and evidence. It remembers actual inputs, completed outcomes, and the
+unfinished computation needed to continue. It knows PA, not a connector or policy engine.
 
-```text
-append information ──► source history only
-queue information  ──► admitted work ──► eligible when its lane is available
-self(request)       ──► admitted work ──► eligible immediately within configured limits
-                              │
-                         engine.janet
-                         /          \
-                 inference          vm.janet ──isolated VM + native fibers
-                         \          /                  │
-                           effects ◄──journaled host calls
-                              │
-                     committed events/outcomes ──PA──► Connector
-```
+## Install
 
-## Installation
-
-Use Janet 1.42+, JPM, a C compiler, OpenSSL headers and trusted CA certificates, Python 3.11+ and Git. Install PA from
-the local `portable-agents` checkout into JPM's configured system or user module directory. Zinc imports `pa`; PA owns
-framing and envelopes. Zinc contains no duplicate frame codec.
-
-Install the complete Zinc repository into your user agent directory:
+Keep the complete checkout in the agent directory, conventionally `~/.agents/zinc`:
 
 ```sh
-mkdir -p "$HOME/.agents"
-git clone /path/to/zinc "$HOME/.agents/zinc"
-cd "$HOME/.agents/zinc"
-```
-
-The installed agent is this checkout. Preserve the repository layout; there is no separate runtime distribution or
-development install. A linked Git worktree can supply the checkout instead of a clone.
-
-Install Zinc's third-party dependencies into JPM's configured module directory, then build in the agent checkout.
-SQLite must support FTS5, URI filenames and memdb:
-
-```sh
-JANET_SYSTEM_SQLITE=0 jpm --cflags=-std=c99,-DSQLITE_ENABLE_FTS5,-DSQLITE_USE_URI=1 deps
+git clone https://github.com/darkhorseprojects/zinc.git ~/.agents/zinc
+cd ~/.agents/zinc
 jpm build
 ```
 
-`jpm build` applies the pinned TLS cleanup fix and generates retrieval assets under `build/assets/`. Zinc is an agent,
-not a Janet library; do not use `jpm install` for Zinc.
+Building requires Janet 1.42+, JPM, a C compiler, OpenSSL headers, trusted CA certificates, Python 3.11+ and Git.
+`jpm build` installs pinned dependencies, including PA, into the shared user Janet module directory and builds TLS and
+retrieval assets. `JANET_MODPATH`, `JANET_BINPATH`, `JANET_MANPATH`, and `PYTHON` select other shared locations/tools.
+Windows uses MSVC and requires `VCPKG_ROOT`; macOS can use `OPENSSL_PREFIX`. AGC is installed separately. Neither
+project installs agents through a connector or generates services.
 
-Use `%USERPROFILE%\.agents\zinc` on Windows. See
-[PA's filesystem conventions](https://github.com/darkhorseprojects/portable-agents#filesystem-conventions) for platform
-locations. Place `ac.yaml` at the checkout root and configure `module: ./src/main.janet`. Connector resolves that entry
-relative to `ac.yaml`, independently of the working repository selected by `directory`. Instructions default to
-repository-root `zinc.md`; retrieval assets default to `build/assets/`.
-
-Interrupted asset downloads and builds use replaceable staging files; repeated builds do not require deleting partial
-final files.
-
-MSVC flags are `/nologo,/MD,/DSQLITE_ENABLE_FTS5,/DSQLITE_USE_URI=1`. Jsec uses `VCPKG_ROOT` on Windows and
-`OPENSSL_PREFIX` for nonstandard macOS installations. The `tls` task rebuilds the pinned native dependency with
-its cancellation cleanup fix in a child process without changing the installer's working directory. Set `JANET_PATH` to
-your configured JPM module directory when it is not the runtime default. Janet, PA, SQLite, Spork and Jsec remain in
-their configured runtime and library locations. Do not install a dependency tree inside the agent directory. No
-application searches a sibling checkout for PA at runtime.
-
-Install Connector separately, provision one agent per `ac.yaml`, and initialize a fresh store with `agc init DIRECTORY`.
-Keep writable history under `${instance}` and use `${directory}` for the working repository. Agent-local instructions
-and retrieval assets resolve relative to Zinc's own modules; configure `instructions` explicitly for repository-owned
-text. `ac.yaml`, `private/`, `.agc/` and generated `build/` files are ignored by Git.
-`examples/models.ini` is an optional external model-server preset; Zinc neither provisions that server nor reads or
-verifies its model downloads.
-
-To create another agent from the same repository, use another clone or a worktree:
+Configuration, credentials and history are operator-owned. Build does not generate or rewrite them. Start with
+`examples/ac.json`, `examples/ac.rego`, and `examples/models.ini`. Replace `${directory}` with the canonical absolute
+agent directory, `${handle}` with a stable agent handle, and `YOUR_USER_ID` with your Discord user ID. Configure providers
+and models. For a genuinely new database only:
 
 ```sh
-git -C "$HOME/.agents/zinc" worktree add -b research "$HOME/.agents/research" HEAD
+jpm run init
 ```
 
-Build in that checkout, give it its own `ac.yaml` without copying an existing agent's handle, and initialize its store.
-Worktrees share Git objects, not configuration, databases or generated build files. Runtime dependencies remain in
-the configured shared library directory.
+Initialization is offline and refuses to overwrite existing state. Policies in one directory share its handle,
+directory and store. This replacement has a different two-table layout despite retaining schema number 1. It does not
+migrate old state. Existing installations require a separately authorized fresh-state cutover; do not point this runtime
+at an existing incompatible store and expect conversion.
 
-## Host and interfaces
+## Run
 
-`src/main.janet` owns a live, unversioned Portable Agents connection on stdin/stdout. `PA_FRAME_BYTES` bounds envelopes;
-`PA_HANDLE` supplies the invoker-configured durable author handle before readiness. Connector provisions it in the
-agent's own `ac.yaml`; Zinc does not read that file. Neither environment value is a credential.
-The host authenticates the connection and preserves callers when forwarding. Responses correlate by connection-local
-call IDs, not work or author identities. Committed presentation arrives asynchronously.
+Run the independently installed processes in separate terminals:
 
-The trusted owner connection dispatches `owner/` bindings. Arguments are direct application values, with private
-`config` and a current named `profiles` configuration map where needed; flat binding documentation belongs in the call
-envelope's optional `imports` map. Profiles share the same durable agent identity and store. Execution snapshots retain
-the selected profile name; workers authorize against that profile's current grants, not the last owner call's settings.
-Direct profiles retain their separately named inquiry delegation. Profile configuration is a Zinc owner interface,
-not a PA envelope field. PA validates only the envelope's import documentation map. Zinc rejects binding collisions,
-applies local selections and enforces native resource grants. Connector owns
-external routing, credentials and resource authorization. Documentation grants no authority.
-
-Owner/local bindings retain admission, append, queues, cancellation, memory, configuration, inspection and continuation.
-Owner-only discovery describes command parameters, not peer exports. Native Janet retains the same locally granted
-execution and memory bindings.
-
-Connector's separate peer dispatcher registers only `self`, `status` and `wait`. A locally named `research` import installs
-`research`, `research/status` and `research/wait`; the alias need not match any name in the target's own single-agent
-configuration. The first accepts text or code and optional persistence and returns a work handle. The others accept that
-work handle and require its authenticated author and current grants. There are no
-peer memory, queue, cancellation, diagnostics or recovery bindings. Connector uses the target's own configuration and
-grants on its existing live connection.
-
-An agent's durable handle survives renames, moves and credential changes; these changes may still revoke authority.
-Users retain authenticated provider identities. Store IDs, paths, configured names, deployment revisions and work
-references are not author handles.
-
-Immediate inquiries replace eligible unfinished inquiries in their member/policy/channel lane. Queue admissions do not
-replace them. Direct Janet code is independent. Source positions fence late admissions; a temporary position
-participates only in host RAM. Persistent direct scripts can notify an active same-author inquiry without becoming its
-descendants. `pending-requests` bounds admitted roots; each named profile's `parallel` bounds its concurrent effects,
-inquiries and summaries separately. Waiting scripts do not consume their children's execution slots.
-
-## Concurrency and cancellation
-
-The existing engine is the sole work scheduler. Active ownership is RAM state, not SQL leases. Existing claim rows
-retain source progress and waits; no lease is acquired or renewed. The SQLite schema and its number are unchanged. One
-execution host must own an agent/store at a time. Idle schedulers release their timers; the live process retains its
-RAM sessions without continuing an idle work loop.
-
-Each execution worker runs independently; each script has an isolated evaluator thread with Janet's native fibers,
-channels and timers. Host calls become independently scheduled operations. A call suspends only its calling fiber. A
-root return neither gathers nor cancels siblings, effects or descendants. Explicit `self/wait` waits for a descendant's
-root outcome, not VM drain or world publication.
-
-```janet
-(ev/go (fn [] (discord/add-reaction {:channel "123456789012345678" :message "234567890123456789" :emoji "👋"}) nil))
-(ev/go (fn [] (discord/add-reaction {:channel "123456789012345678" :message "234567890123456789" :emoji "✨"}) nil))
-(print "Reactions started")
-nil
+```sh
+opa run --server --addr=127.0.0.1:8181 --watch --log-level=error ac.rego ac.json
+llama-server --host 127.0.0.1 --port 8000 --models-preset models.ini
+agc connect .
+agc run .
 ```
 
-Model responses admit sibling scripts and their receipts atomically. Each effect, script return and output commits its
-own response and readies its nearest inquiry. A completed assistant response ends that model loop immediately, without
-waiting for descendant drain or scanning for unseen results. The inquiry becomes idle unless another response has
-readied it; later responses resume the same inquiry. Existing claim rows hold this ready/idle state, not a separate queue.
-Successful script settlement after a root return produces neither another response nor a wakeup. Concurrent responses
-coalesce into readiness; each inquiry has at most one active inference. Nested inquiries run independently and return
-answers to their callers without injecting their intermediate execution into parent exchanges.
+Connect a bot once; existing credentials do not need reconnecting after source updates. Zinc does not start or download
+model servers. For Codex, `agc login codex` stores credentials; configure the provider's absolute `credential-command`
+as `["/path/to/agc", "credential", "codex"]`. Secrets stay in the keyring, not JSON or Rego.
 
-Blocking custom bindings do not run on the host's scheduling loop. Native output callbacks coalesce writes by port,
-schedule publication, and flush before host calls and root returns. Whitespace-only output is omitted. Standard Janet
-bindings, including `print`, retain their native behavior and documentation. Native return values that are not JSON
-receive Janet-type descriptors.
+## Entry points and commands
 
-Cancellation fences commits and interrupts cooperative execution; it cannot undo an external effect or forcibly
-interrupt arbitrary CPU-bound/native code. Connector closes the host connection on exit and may terminate the process
-after `stop_ms`. Zinc exits immediately on stdin EOF, including when Connector is lost while an evaluator is
-uncooperative. Persistent work then follows interruption recovery; temporary sessions disappear. An observation timeout
-alone is not a work-cancellation request. Capability arguments identify resources explicitly; no Zinc operation identity
-crosses the capability boundary. Work cancellation does not guarantee interruption of an already dispatched external
-action. No external effect or disconnected RPC is silently retried.
+The agent owns `main` and imports PA. `janet -t src/main.janet` requires `PA_HANDLE` and `PA_FRAME_BYTES`.
+`invoke(input, config, imports)` receives bytes, opaque agent configuration, and callable Janet imports. PA correlates
+concurrent invocations and reverse calls; it does not load agents or schedule application work.
 
-## Failure and replay
+Ordinary source-owned methods are `describe(config)`, `invoke(base64, config, import-documentation)`, `position(config)`,
+and `append(config, records)`. Discovery supplies command descriptors, option schema paths, and effective import
+requirements. Discovery is not an authority grant. Append records contain `key`, `author`, `at`, and `text`; committed
+source provenance supplies the catch-up cursor. Repeated ingestion is idempotent. Append creates evidence, not an inquiry,
+queued input, or model wakeup.
 
-Admission commits before dispatch. Persistent effects and source progress survive ordinary SQLite persistence. On a
-later host start, undispatched work may execute; a dispatched effect without a committed response ends with an
-outcome-unknown diagnostic. Its operation, attempt, arguments and source remain available. Unknown does not mean
-unperformed. No resolution binding, evidence submission or retry-approval state blocks execution. The owning inquiry
-can investigate through ordinary tools and choose fresh actions; subsequent observations do not rewrite the old outcome.
+Commands come from source, never deployment JSON:
 
-Interrupted Janet VMs retain completed source-form progress but not locals or native waits. Zinc records the interruption
-rather than replaying source to reconstruct a continuation. Interrupted model turns continue from committed evidence;
-uncommitted provider tool calls are never admitted. Chat Completions and Responses retain provider-native reasoning
-replay. Both protocols continue on reasoning-only output or tool calls and finish only on an assistant answer, refusal
-or filter outcome; truncated responses are failures, not successful answers.
-
-## Memory
-
-`events.parent` records execution ownership. An input's `parent` selects a historical endpoint; these are separate
-relationships. `memory_range: {start, end}` selects inclusive historical event IDs. Without an explicit range, all history
-through the selected point is available; `parent: 0` selects `[0,0]`. The execution's subsequent responses enter its live
-context normally. Ranges may contain sibling work; they are not ancestral-path selectors. Memory, retrieval, summaries
-and expansion use the same source membership. Recursive `self` calls create durable child inquiries with their own
-ranges and loops. Multiple continuations from one historical point are forks, not separately registered branches.
-
-One implementation serves authorized owner commands and locally granted native Janet:
-
-```janet
-(memory/summarize start end "The actual summary text")
-(memory/expand point-or-summary)
-(memory/invalidate point-or-summary)
+```text
+/agent /reset /models /world-point /world-view /world-inspect /render
+/memory-expand /memory-summarize /memory-invalidate
 ```
 
-Bounds are inclusive source event IDs within granted history; omitted bounds select that history's current range.
-Supplied text is stored unchanged as the summary, never interpreted as generation instructions. Without text, the
-existing summary profile generates it. `summary: {chat: ..., thinking: ...}` overrides those chat settings. Automatic
-compaction uses the same summary cache, source membership and invalidation.
+An option-only `/agent` changes a RAM overlay keyed by agent, policy, participant and conversation. It performs no
+invocation or database write. Prompt-bearing calls combine the overlay with one-shot options. Reset/restart discards the
+overlay. Conversation defaults can be shared; personal path/from selections do not move other participants' defaults.
+Human-facing reads may select the nearest earlier authorized ancestry point and report it. Execution, summary mutations,
+and explicit subtree addresses are exact. A subtree address is `event:slot`.
 
-Expansion recursively resolves a summary to its original source records and returns their stored source text without
-headers, paraphrasing or regenerated content. It is not prompt rendering. An oversized response fails explicitly rather
-than truncating source. Invalidation targets the summary or the most recent applicable summary covering a source point,
-and invalidates dependent ancestors. Unrelated branches remain valid. No old standalone invalidate entry, byte-offset
-expansion interface or compatibility aliases remain. Omitted command points select the latest source/summary.
+`input` selects `text`, `code`, or `json`. JSON contains exactly one of `text` or `code`, with optional `path`, `from`,
+`memory`, `queue`, `request`, `at`, `source`, and `images`. Direct code runs in the user VM; model-created scripts run in
+the agent VM. Grant direct-code access only with appropriate user-VM restrictions. `request` deduplicates durable work;
+reusing it with different input/configuration fails.
 
-Context retains bounded UTF-8 source pages and lazy binary summary branches. Closed replay prefixes use the same
-pipeline; unresolved work remains exact and recent exchanges keep committed order. Explicit summaries participate in
-context selection. Summaries use text-only completion, without tools or web search, and must shrink their sources when
-generated automatically.
+Operations include `submit`, `resume`, `read`, `cancel`, the source-owned inspection/memory commands, and `models`.
+Read/cancel/resume take a `work` reference. Inspection requires `inspect`; summary mutations require the corresponding
+user-VM binding. Summary commands do not invoke the conversational agent or increment the inquiry count. Render uses the
+same prompt assembler in a RAM-only execution.
 
-Retrieval searches authorized originals not already present verbatim. Scoped FTS, concept expansion and fuzzy terms
-produce deterministic excerpts; configured reranking selects evidence within the same memory budget. Identical
-query/model/excerpt manifests reuse rerank results. Scores are provider scores, not probabilities. Inclusion, cutoff and
-budget decisions remain recorded.
+## Configuration and capabilities
 
-`context-percent` defaults to 50, applied to the smaller provider window and configured `context-quota`. Instructions,
-tools, world source, inquiry and live exchanges consume that budget before history and retrieval. Estimates are not
-exact provider token counts; image costs are provider-dependent. Models with `output-field: none` cannot have a provider
-token limit enforced by Zinc.
+`chat`, `rerank`, and `summary` are peer objects. Select models with `chat.model`, `rerank.model`, and `summary.model`;
+reasoning belongs under `chat.thinking` or `summary.thinking`. Unsupported reasoning settings fail instead of being
+ignored. Summary quotas are `summary.bytes` and `summary.max-bytes`.
 
-`/views` and `/render` retain actual prompt composition, summary sources, retrieval decisions, usage and exact requests.
-Omitted points select the latest chat prompt; model results select their admission, and other events select the nearest
-related prompt explicitly. Expansion remains separate from these views.
+Each of `vm.user` and `vm.agent` owns `bindings`, `imports`, `fs`, `http`, `processes`, and `modules`. Discord accepts
+`true` or an object, including `options` containing selected schema paths. Exa/TinyFish are booleans. Named peer imports
+carry `policy` and `documentation`. There is no transport-level import configuration or separate import-options object.
 
-## Worlds and grants
+One effective registry supplies installation, documentation, argument checks, resources and marshaling aliases. Managed
+tasks inherit their role; retained functions cannot bypass the current role's grants. `output` is private caller-supplied
+plumbing, never a VM capability. This is not an OS sandbox; path checks do not provide race-safe confinement.
 
-Scripts restore native world environments without rerunning initializers. Definitions, macros, closures, mutations,
-shared references and cycles persist through native images when supported. Fresh host bindings, ports and invocation
-accessors are rebound; old capability connections are not restored. Unsupported reachable values fail publication rather
-than being discarded.
+## Execution and recovery
 
-Successful changed environments publish only after their fibers settle, against the revision they loaded. Conflicting
-images remain inspectable artifacts without replacing the head, merging or replaying effects. An unchanged environment
-publishes nothing. `world/remove` removes a local binding by symbol. World source shows complete recorded defining
-forms, not current mutable heap values or a replay program.
+One executor handles direct scripts, model-created scripts, recursive `self`, managed tasks, and temporary execution.
+Model tool calls admit scripts immediately and receive one native `accepted`/`rejected` receipt per call. They do not join
+script completion. Effects and script outcomes wake conversational execution independently. A provider answer does not
+close an inquiry with outstanding relevant work. Summary-cache work and catch-up do not wake it.
 
-`/world rewind` requires direct-execution authority, advances the world's epoch and fences unfinished old work. It does
-not undo effects or erase history. Branch configuration initializes a world once. Worlds are not separate memory
-security boundaries. Existing native runtime/ABI checks, authority snapshots, history ranges, quotas and resource grants
-remain enforced.
+Prints are captured per task. A script outcome contains `status`, `value`, and nonempty `output` when present; the model
+and Discord receive that same outcome. Janet errors remain Janet errors: use `(doc binding)` rather than inventing APIs.
 
-Temporary work uses bounded RAM databases with inherited history/world images. Descendants inherit that storage
-boundary. Temporary admissions, summaries, outcomes and metadata are never copied back to a persistent database. They
-disappear with the host; explicit external effects are not made temporary or undone. This is not an OS memory sandbox.
-Filesystem grants reject observed links/traversal but do not provide race-safe confinement against another process
-mutating directories. TLS verifies certificates and hostnames; HTTP follows no redirects. Custom setup/modules remain
-trusted configuration.
+`journal(id, previous, data, image)` stores actual events and changed surviving bindings. `heads(id, point, run)` uses
+integer path IDs and text world names. The predecessor is history, not exclusive ownership. A running path stores one
+aggregate continuation: shared environment, fibers, locals, waits, inboxes, pending inputs and external outcomes. Saving
+it does not add history. Idle paths have no machine. Completion marks the actual final response/result terminal while
+clearing the running inquiry, without an empty duplicate completion record.
 
-Deploy PA, Zinc and Connector together after finishing/cancelling old work. For an upgrade retaining history, preserve
-the existing database, author handle and store identity. For an explicit fresh-history reset, archive the stopped agent's
-entire directory, install into a fresh directory and port only `ac.yaml`; retain the handle for the same author and let
-`agc init` create a new store identity. Do not copy old history or Connector state into that fresh installation. Old
-in-flight snapshots without named-profile authority cannot be silently resumed. Native worlds still require matching
-Janet version, build and configuration. There is no schema-number or release-number bump,
-automatic image conversion or legacy execution mode.
-Connector's retained transport state requires its documented offline ownership cutover. Historical authorship must be
-mapped only from verified evidence; do not relabel ambiguous legacy authors or restore old in-flight snapshots through a
-compatibility path.
+External calls save their intent and suspended machine, commit dispatch, perform the action, then commit the outcome
+before resuming. Opening the store under compatible current authorized settings resumes saved work: recorded outcomes
+are reused; undispatched calls are dispatched; dispatched calls without outcomes return `unknown`, never automatic
+retries. Execution resumes inside saved fibers, not at the start of source. Pure computation since the last save may
+repeat. Unfinished images require the original Janet build and runtime source.
+
+Imported functions are connection-bound. Without a current authorized attachment, imported operations remain
+undispatched. Transport IDs are never persisted as authority. Output delivery is not durable and is not replayed from
+RAM receipts after restart. A work reference authenticates nobody.
+
+`temporary: true` uses the same structures in RAM, including children and summary caches. It may read durable points but
+cannot publish to their durable worlds. It has no crash recovery. External side effects still occur and are not undone.
+
+## Worlds and multiplayer
+
+Use `self` with `:path` to continue, `:from` to fork an exact point, or `:memory` to select evidence independently.
+`self/result` reads a receipt; `self/cancel` cancels unfinished work without undoing effects. Busy paths use the ordinary
+queue rule. Independent paths, scripts, effects, model requests, summaries and reranking can overlap.
+
+One execution host owns one SQLite writer. World grants determine access; authorship is provenance, not a lock.
+Participants granted the same world can share paths and memory. Private policies select separate worlds. Publication
+compares the expected world head; a conflict retains its candidate image and reports the conflict. There is no automatic
+heap merge or effect replay.
+
+World images contain surviving bindings and definition provenance, not print logs, loop-local bindings or scheduler
+state. `world/view` renders defining source for functions and current Janet values for data, including mutations.
+`world/rewind` affects future shared readers, never external actions. Source is not a universal executable export of
+arbitrary closures, sharing or cycles; the binding image preserves those.
+
+## Prompt, memory and presentation
+
+`agent/prompt` composes configuration/capabilities, world source, current input, valid native exchanges, chronology and
+semantic originals. It excludes current/live sources from both memory views before rendering. Overlapping cached
+summaries are opened into children instead of duplicating live material.
+
+For context window `W`, percentage `p`, fixed input `F`, and output reserve `O`, both views share
+`min(floor(W*p/100), W-F-O)` tokens. Fixed input plus output reserve exceeding the window is an error. Byte planning uses
+an approximate four-bytes/token estimate; the complete prompt also passes the model estimator. It is not an exact
+tokenizer. Over-budget prompts use coarser frontiers/fewer excerpts, never truncated originals.
+
+Originals are immutable pages in a persistent binary carry forest, with event-local node slots and byte offsets.
+Chronology reserves its minimum representation; ranked semantic excerpts share that allowance, and unused space opens
+chronological children newest-first. Each selected summary gets a base ceiling and recency-weighted extra space, capped
+by `summary.max-bytes`. Quotas are ceilings, not targets. Larger budgets open children instead of repeatedly lengthening
+paraphrases. Originals/children or adequate cached text that already fit cause zero summary calls.
+
+Missing necessary summaries use direct children, not repeated summaries of themselves. Installation checks UTF-8,
+nonempty text, exact byte limits, savings, authorized membership, citations and unchanged direct inputs/recipe. There is
+no blanket half-size rule or second certification model. Expansion is read-only. Summarize installs a representation;
+invalidate clears it and dependent ancestors, cancels matching work and rejects late results. Rebuild is lazy. Originals
+are never deleted. FTS indexing is incremental and scoped; stopwords, Cygnet expansion, fuzzy vocabulary search and
+reranking retrieve originals hidden behind chronological summaries. There are no embeddings.
+
+Responses API completed items commit and publish at `response.output_item.done`, before generation completion. Chat
+Completions uses the earliest confirmed protocol boundary and preserves OpenRouter usage chunks. Errors, blocking,
+length limits and incomplete streams do not become successful answers. Native provider conversation material is retained
+as required; it is not execution replay.
+
+Zinc emits typed data; AGC renders reasoning as quotes, responses as Markdown, Janet calls in `clojure` fences, and
+results in unlabeled fences. Results reference their script output IDs. Boundary metadata occurs once and attaches to the
+last delivered fragment when possible. Typing follows actual active work. No token-preview journal or second publication
+path exists.
