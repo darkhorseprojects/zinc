@@ -19,7 +19,7 @@
         (return complete [(summarize invoke (first specs) (request :text))]))
       (when (every? (map indexed? specs)) (return complete specs))
       (each spec specs (unless (indexed? spec) (summarize invoke spec))))))
-(defn prompt [invoke input exchanges]
+(defn assemble [invoke input exchanges]
   (def public (invoke :exposure []))
   (def system {:role "system" :parts [{:type "text" :text (string (public :instructions) "\n\n"
     (public :documentation) "\n\nSettings and resources:\n" (config/encode (tabseq [k :in [:settings :resources :bindings]] k (public k)))
@@ -55,7 +55,7 @@
       (def changes (invoke :updates []))
       (each change changes (array/push exchanges {:role "user" :sources [(change :id)]
         :parts [{:type "text" :text (string "Execution outcome [#" (change :id) "]:\n" (change :text))}]}))
-      (def context (prompt invoke input exchanges))
+      (def context (assemble invoke input exchanges))
       (def response (invoke :chat [{:messages (context :messages) :tools true :manifest (context :manifest)}]))
       (array/push exchanges (response :message))
       (each call (response :calls)
@@ -65,7 +65,6 @@
       (case (response :stop)
         "tools" nil
         "continue" nil
-        "interrupted" (array/push exchanges {:role "user" :parts [{:type "text" :text "The generation was interrupted. Investigate committed outcomes; do not repeat uncertain actions."}]})
         "answer" (if (invoke :pending []) (invoke :listen []) (return answer (response :text)))
         "refused" (if (invoke :pending []) (invoke :listen []) (return answer (response :text)))
         "blocked" (error {:code "ModelBlocked" :message "Provider blocked the request."})

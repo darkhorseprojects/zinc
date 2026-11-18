@@ -30,7 +30,7 @@
         (when-let [[minimum maximum] (get-in c [:registry role name :arity])]
           (assert (<= minimum (length args) maximum) "wrong argument count")))
       (def r (yield {:binding name :arguments args :role role}))
-      (if (or (= "ok" (r :status)) (and (= name :chat) (= "unknown" (r :status)) (r :value))) (if (= :null (r :value)) nil (r :value)) (error (r :error)))))
+      (if (= "ok" (r :status)) (if (= :null (r :value)) nil (r :value)) (error (r :error)))))
     (def evaluate (fn [code]
       (var value nil)
       (each form (parse-all code)
@@ -68,7 +68,7 @@
       (put machine :tasks @[@{:fiber (fiber/new (fn []
         (case (c :operation)
           "memory-summarize" (agent/manual invoke (c :arguments))
-          "render" (agent/prompt invoke input [])
+          "render" (agent/assemble invoke input [])
           (if (input :code) (evaluate (input :code)) (agent/run input invoke (c :rounds))))) :a env)
         :role (if (input :code) (c :role) :agent)}])
       (put machine :cursor 0) (put machine :admitted @{}) (put machine :updates @[]) (put machine :revision 0))

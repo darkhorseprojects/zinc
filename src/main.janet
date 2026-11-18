@@ -61,7 +61,7 @@
           :message "World publication conflicted. Candidate bindings are retained; effects were not repeated."}} outcome))
         (def existing (when (and (= "ok" (result :status)) (run :answer)) (store/row s (run :answer))))
         (def r (or existing (record s h a {:kind "result" :outcome result
-          :presentation {:type "tool-result" :id (string (a :request) "/result")
+          :presentation {:type (if (= "ok" (result :status)) "tool-result" "diagnostic") :id (string (a :request) "/result")
             :reply (string (a :request) "/script")}} (get packet :bindings))))
         (when (and existing (run :dirty) (packet :bindings))
           (put r :image (packet :bindings)) (put run :bindings-point (r :id)))
@@ -172,32 +172,18 @@
           :presentation {:type "tool-result" :reply (output :id) :id (string (output :id) "/rejected")}}))
         (put (call :seen) (string (output :id) "/rejected") (failed :id)))
       (unless (run :items) (put run :items @[]))
-      (array/push (run :items) {:model (get-in call [:arguments 0 :output]) :call script :output (output :id)}))))
-  (unless (call :native) (put call :native @[]))
-  (each native (get-in response [:message :replay :items] [])
-    (unless (find |(= (get $ :id) (get native :id)) (call :native)) (array/push (call :native) native))))
+      (array/push (run :items) {:model (get-in call [:arguments 0 :output]) :call script :output (output :id)})))))
 (defn receipt [host s h index outcome]
   (def run (h :run)) (def a (run :active)) (def c (a :policy)) (def call ((run :calls) index))
   (unless (call :result)
     (def result (merge outcome))
     (store/transact s
-      (when (and (= :chat (call :binding)) (not (get-in call [:arguments 0 :summary])))
-        (if (= "ok" (result :status))
-          (do (item s h index (result :value))
-            (put result :value (merge (result :value) {:message (merge (get-in result [:value :message]) {:sources (values (call :seen))})}))
-            (when (index-of (get-in result [:value :stop]) ["answer" "refused"])
-              (def last-output (last (filter |(= "response" ($ :type)) (get-in result [:value :outputs]))))
-              (when last-output (put run :answer (get (call :seen) (last-output :id))))))
-          (do
-            (eprint (config/encode result))
-            (def partial (if (= "responses" (get-in call [:arguments 0 :selected :protocol]))
-              (model/decode (first (call :arguments)) {:status "incomplete" :output (get call :native [])})
-              {:calls [] :output (get-in call [:arguments 0 :output]) :message {:role "assistant" :parts []}}))
-            (put result :value (merge partial {:stop "interrupted"
-              :message (merge (partial :message) {:sources (values (get call :seen {}))})})))))
-      (when (and (keyword? (call :binding)) (not= "ok" (result :status)) (not (get-in call [:arguments 0 :summary])))
-        (def r (record s h a {:kind "result" :outcome (tabseq [key :in [:status :error]] key (result key))
-          :presentation {:type "tool-result" :id (string (a :request) "/" index "/failure")}})) (update run r))
+      (when (and (= :chat (call :binding)) (= "ok" (result :status)) (not (get-in call [:arguments 0 :summary])))
+        (item s h index (result :value))
+        (put result :value (merge (result :value) {:message (merge (get-in result [:value :message]) {:sources (values (call :seen))})}))
+        (when (index-of (get-in result [:value :stop]) ["answer" "refused"])
+          (def last-output (last (filter |(= "response" ($ :type)) (get-in result [:value :outputs]))))
+          (when last-output (put run :answer (get (call :seen) (last-output :id))))))
       (put call :result result)
       (unless (keyword? (call :binding))
         (def r (record s h a {:kind "result" :outcome result
@@ -314,7 +300,7 @@
                     (ev/give reply value))
                     [(merge c (get-in c [:vm (call :role)])) spec binding (call :arguments)
                      (host :events) (s :identity) (h :id) (a :request) index reply cancel] :n)
-                  (def value (ev/take reply)) (unless (= "ok" (value :status)) (error (merge (value :error) {:context {:outcome (value :status)}})))
+                  (def value (ev/take reply)) (unless (= "ok" (value :status)) (error (merge (value :error) {:context (merge (get-in value [:error :context] {}) {:outcome (value :status)})})))
                   (value :value))))]
             (assert (<= (length (config/encode value)) (c :response-bytes)) "effect response limit")
             {:status "ok" :value (if (nil? value) :null value)})
@@ -448,6 +434,8 @@
   (while true
     (each r (rows s cursor)
       (when (and (requests (get-in r [:data :request])) (get-in r [:data :presentation])
+        (not (and (= (work :request) (get-in r [:data :request])) (get-in r [:data :terminal])
+          (not= "ok" (get-in r [:data :outcome :status]))))
         (index-of (get-in r [:data :presentation :type]) (c :publish)))
         (when-let [emit (module/value imports 'output)]
           (def output (merge (get-in r [:data :presentation]) {:text (store/text r)}))

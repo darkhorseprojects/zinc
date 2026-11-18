@@ -34,7 +34,7 @@
   {:world "main" :worlds ["main"] :input "text" :operation "submit" :conversation "default" :initialize false :inspect false :rewind false
    :vm {:user {:bindings ["*"] :imports {} :fs {} :http {} :processes {} :modules {}}
         :agent {:bindings ["*"] :imports {} :fs {} :http {} :processes {} :modules {}}}
-   :instructions (path/join directory "zinc.md") :temporary false :queue true :publish ["reasoning" "response" "tool-call" "tool-result"] :arguments {}
+   :instructions (path/join directory "zinc.md") :temporary false :queue true :publish ["reasoning" "response" "tool-call" "tool-result" "diagnostic"] :arguments {}
    :providers {} :chat {:thinking "default"} :rerank {} :summary {:thinking "default" :bytes 512 :max-bytes 4096} :web-search false :rounds 128 :parallel 4 :tasks 4096 :depth 8
    :seconds 120 :run-seconds 0 :pending 32 :http-ms 600000 :source-bytes 1048576 :image-bytes 4194304
    :response-bytes 8388608 :world-bytes 16777216 :journal-bytes 67108864 :history-records 1024

@@ -49,16 +49,18 @@
               (tls/connect host port {:verify true :hostname host :verify-hostname host :alpn ["http/1.1"]})
               (net/connect host port))))
             (set attempted true) connection)))
-        (if prepared
-          (do
-            (assert (<= 200 (response :status) 299) {:code "ProviderRejected" :message (string "Provider returned HTTP " (response :status)) :context {:outcome "error"}})
-            (model/receive prepared response (c :response-bytes) completed))
+        (if (and prepared (not (prepared :rerank)) (<= 200 (response :status) 299))
+          (model/receive prepared response (c :response-bytes) completed)
           (do
             (def bytes @"")
             (each chunk (:blocks response 4096)
               (assert (<= (+ (length bytes) (length chunk)) (c :response-bytes)) "HTTP response limit")
               (buffer/push-string bytes chunk))
             (assert (utf8/is-valid? bytes) "HTTP response is not UTF-8")
+            (when prepared
+              (assert (<= 200 (response :status) 299)
+                {:code "ProviderRejected" :message (string "Provider returned HTTP " (response :status) "\n" bytes)
+                 :context {:outcome "error" :status (response :status)}}))
             {:status (response :status) :headers (response :headers) :body (string bytes)}))))
     ([err fiber]
       (def d (config/diagnostic err fiber))
@@ -93,8 +95,7 @@
     (let [prepared (first args) endpoint (get-in c [:providers (keyword (prepared :provider))])]
       (set attempted true)
       (if (prepared :rerank)
-        (let [response (request c endpoint "POST" (prepared :path) (prepared :body))]
-          (assert (<= 200 (response :status) 299) {:code "ProviderRejected" :message (string "Provider returned HTTP " (response :status)) :context {:outcome "error"}})
+        (let [response (request c endpoint "POST" (prepared :path) (prepared :body) prepared)]
           (model/decode prepared (json/decode (response :body) true true)))
         (request c endpoint "POST" (prepared :path) (prepared :body) prepared completed)))
     (index-of binding ["fs/list" "fs/read" "fs/write"])
