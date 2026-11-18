@@ -52,6 +52,7 @@
   (array/push (run :updates) {:id (r :id) :text (store/text r)}))
 (defn finish [host s h outcome &opt packet]
   (def run (h :run)) (def a (run :active)) (def c (a :policy))
+  (def started (os/clock))
   (store/transact s
     (if (a :maintenance) (put (host :results) (a :request) outcome)
       (do
@@ -80,7 +81,9 @@
           (put world :point (r :id)) (store/save s world c))))
     (def queue (run :queue))
     (put (host :owners) [(s :identity) (a :request)] nil)
-    (put h :run (when (not (empty? queue)) @{:queue queue})) (store/save s h c)))
+    (put h :run (when (not (empty? queue)) @{:queue queue})) (store/save s h c))
+  (config/trace c "finish" {:path (h :id) :request (a :request) :status (outcome :status)
+    :code (get-in outcome [:error :code]) :ms (* 1000 (- (os/clock) started))}))
 (defn cancel [host s work c]
   (store/permit s (store/head s (work :path)) c)
   (def owned @{(work :request) true})
@@ -220,7 +223,8 @@
         (length (filter |(= "input" (get-in $ [:data :kind])) (values (s :rows))))))
       (when (get-in a [:input :code])
         (put-in r [:data :presentation] {:type "tool-call" :id (string (a :request) "/script") :language "clojure"}) (store/replace s r c)))
-    (store/save s h c)))
+    (store/save s h c))
+  (config/trace c "start" {:path (h :id) :request (a :request) :input (a :start) :world name}))
 (defn commit-step [host s h packet counts c]
   (def run (h :run)) (def a (run :active))
   (if (packet :failure) (finish host s h {:status "error" :error (packet :failure)})
@@ -279,6 +283,7 @@
       (when summary-key (put (s :summary-work) summary-key @{:node (prepared :node) :origin [(a :request) index] :cancel cancel :waiters @[]}))
       (put call :dispatched true) (store/save s h c) (put (host :effects) key true)
       (ev/go (fn []
+        (def started (os/clock))
         (def result (try
           (let [value (if imported (imported (first (call :arguments)))
               (let [reply (ev/thread-chan 1)]
@@ -305,6 +310,8 @@
             (assert (<= (length (config/encode value)) (c :response-bytes)) "effect response limit")
             {:status "ok" :value (if (nil? value) :null value)})
           ([err fiber] {:status (get-in err [:context :outcome] "unknown") :error (config/diagnostic err fiber)})))
+        (config/trace c "effect" {:binding (string binding) :role (string (call :role)) :status (result :status)
+          :code (get-in result [:error :code]) :ms (* 1000 (- (os/clock) started)) :path (h :id) :request (a :request) :index index})
         (ev/give (host :events) {:type "receipt" :identity (s :identity) :path (h :id) :request (a :request) :index index :result result
           :binding binding :policy c :world (run :world)}))))))
 (defn schedule [host]
@@ -344,8 +351,15 @@
                   :results (tabseq [wait :in (get run :waits []) :when (has-key? wait :request) :let [r (store/result s wait)] :when r] (wait :request) r)})
                 (ev/go (fn [] (def reply (ev/thread-chan 1))
                   (defer (ev/chan-close reply)
+                    (def started (os/clock))
                     (ev/thread (fn [[args reply]] (ev/give reply (vm/step args))) [args reply] :n)
-                    (ev/give (host :events) {:type "step" :identity (s :identity) :path (h :id) :request (a :request) :counts counts :config c :packet (ev/take reply)})))))))
+                    (def packet (ev/take reply))
+                    (config/trace c "step" {:path (h :id) :request (a :request) :ms (* 1000 (- (os/clock) started))
+                      :completed (length (get packet :completed [])) :waits (length (get packet :waits []))
+                      :tasks (get-in packet [:profile :tasks]) :pending (get-in packet [:profile :pending])
+                      :operation (when-let [binding (get-in packet [:operation :binding])] (string binding))
+                      :changed (packet :changed) :failure (get-in packet [:failure :code])})
+                    (ev/give (host :events) {:type "step" :identity (s :identity) :path (h :id) :request (a :request) :counts counts :config c :packet packet})))))))
             ([err fiber] (eprint (config/encode (config/diagnostic err fiber)))
               (when (get-in h [:run :active])
                 (finish host s h {:status "error" :error (config/diagnostic err fiber)}) (set retry true)))))))))))
@@ -374,6 +388,7 @@
     {:path (h :id) :point (h :point)}))
 (defn enter [host bytes c caller attachment]
   (def operation (c :operation))
+  (def started (os/clock))
   (when (= operation "render")
     (assert (c :inspect) "inspection not granted")
     (def source (storage host (merge c {:temporary false})))
@@ -381,6 +396,7 @@
     (def point (when (h :point) (store/nearest source (h :point) (get-in c [:arguments :reference]) c)))
     (put c :temporary true) (put c :path nil) (put c :from point))
   (def s (storage host c)) (put attachment :store s)
+  (config/trace c "storage" {:operation operation :temporary (c :temporary) :ms (* 1000 (- (os/clock) started))})
   (when (c :initialize) (break {:value true}))
   (def args (c :arguments))
   (case operation
@@ -415,6 +431,7 @@
   (put attachment :work work) (put attachment :requests @{(work :request) true})
   (each a (sorted (store/pending s) |(< ($0 :depth) ($1 :depth)))
     (when ((attachment :requests) (a :owner)) (put (attachment :requests) (a :request) true)))
+  (config/trace c "admit" {:request (work :request) :path (work :path) :cursor cursor :ms (* 1000 (- (os/clock) started))})
   {:work work :cursor cursor})
 (defn invoke [bytes c imports]
   (def host (dyn :zinc/host)) (def attachment (dyn :zinc/attachment))
@@ -422,7 +439,9 @@
     (break (filter |(= (get-in c [:arguments :role] "chat") ($ :role)) (effects/catalogue c))))
   (when (and (index-of (c :operation) ["submit" "resume" "memory-summarize" "render"])
     (not (and (= "memory-summarize" (c :operation)) (get-in c [:arguments :text]))))
-    (put c :catalogue (effects/catalogue c)))
+    (def started (os/clock))
+    (put c :catalogue (effects/catalogue c))
+    (config/trace c "catalogue" {:ms (* 1000 (- (os/clock) started)) :models (length (c :catalogue))}))
   (def reply (ev/thread-chan 1))
   (def entry (defer (ev/chan-close reply)
     (ev/give (host :events) {:type "call" :method "invoke" :bytes bytes :attachment (attachment :id) :caller (dyn :zinc/caller) :reply reply})
@@ -547,6 +566,8 @@
     (def method (message :method)) (def params (postwalk |(if (= $ :null) nil $) (message :params)))
     (def supplied (case method "describe" params "position" params "append" (params 0) "invoke" (params 1) (error "unknown agent method")))
     (def c (config/parse supplied handle runtime))
+    (def started (os/clock))
+    (defer (config/trace c "call" {:method method :id (message :id) :ms (* 1000 (- (os/clock) started))}))
     (when (= method "describe") (break (config/discover c)))
     (def imports @{})
     (when (= method "invoke")

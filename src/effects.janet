@@ -21,6 +21,7 @@
     (assert (utf8/is-valid? output) "process output is not UTF-8") {:exit exit :output (string output)}))
 
 (defn request [c endpoint method suffix &opt body prepared completed]
+  (def started (os/clock))
   (def headers (merge {:Content-Type "application/json" :Accept "application/json, text/event-stream"} (get endpoint :headers {})))
   (def secrets @[]) (var connection nil) (var secure false) (var attempted false)
   (try
@@ -49,21 +50,28 @@
               (tls/connect host port {:verify true :hostname host :verify-hostname host :alpn ["http/1.1"]})
               (net/connect host port))))
             (set attempted true) connection)))
-        (if (and prepared (not (prepared :rerank)) (<= 200 (response :status) 299))
-          (model/receive prepared response (c :response-bytes) completed)
-          (do
-            (def bytes @"")
-            (each chunk (:blocks response 4096)
-              (assert (<= (+ (length bytes) (length chunk)) (c :response-bytes)) "HTTP response limit")
-              (buffer/push-string bytes chunk))
-            (assert (utf8/is-valid? bytes) "HTTP response is not UTF-8")
-            (when prepared
-              (assert (<= 200 (response :status) 299)
-                {:code "ProviderRejected" :message (string "Provider returned HTTP " (response :status) "\n" bytes)
-                 :context {:outcome "error" :status (response :status)}}))
-            {:status (response :status) :headers (response :headers) :body (string bytes)}))))
+        (def result
+          (if (and prepared (not (prepared :rerank)) (<= 200 (response :status) 299))
+            (model/receive prepared response (c :response-bytes) completed)
+            (do
+              (def bytes @"")
+              (each chunk (:blocks response 4096)
+                (assert (<= (+ (length bytes) (length chunk)) (c :response-bytes)) "HTTP response limit")
+                (buffer/push-string bytes chunk))
+              (assert (utf8/is-valid? bytes) "HTTP response is not UTF-8")
+              (when prepared
+                (assert (<= 200 (response :status) 299)
+                  {:code "ProviderRejected" :message (string "Provider returned HTTP " (response :status) "\n" bytes)
+                   :context {:outcome "error" :status (response :status)}}))
+              {:status (response :status) :headers (response :headers) :body (string bytes)})))
+        (config/trace c "http" {:method method :path suffix :status (response :status)
+          :bytes (length (or body "")) :stream (and prepared (not (prepared :rerank)))
+          :ms (* 1000 (- (os/clock) started))})
+        result))
     ([err fiber]
       (def d (config/diagnostic err fiber))
+      (config/trace c "http-error" {:method method :path suffix :code (d :code)
+        :outcome (get-in d [:context :outcome]) :ms (* 1000 (- (os/clock) started))})
       (each k [:message :detail] (when (d k)
         (put d k (reduce (fn [text secret] (string/replace-all secret "[redacted]" text)) (d k) secrets))))
       (put d :context (merge (or (d :context) {}) {:outcome (get-in d [:context :outcome] (if attempted "unknown" "error"))})) (error d))))

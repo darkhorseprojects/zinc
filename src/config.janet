@@ -31,7 +31,7 @@
    "process/run" {:arity [1 1] :class "external" :doc "(process/run grant) executes granted argv/env."}})
 
 (def defaults
-  {:world "main" :worlds ["main"] :input "text" :operation "submit" :conversation "default" :initialize false :inspect false :rewind false
+  {:world "main" :worlds ["main"] :input "text" :operation "submit" :conversation "default" :initialize false :inspect false :rewind false :profile false
    :vm {:user {:bindings ["*"] :imports {} :fs {} :http {} :processes {} :modules {}}
         :agent {:bindings ["*"] :imports {} :fs {} :http {} :processes {} :modules {}}}
    :instructions (path/join directory "zinc.md") :temporary false :queue true :publish ["reasoning" "response" "tool-call" "tool-result" "diagnostic"] :arguments {}
@@ -60,6 +60,10 @@
         (and (number? value) (< (math/abs value) math/inf))) "value is not JSON data") (string (json/encode value))))))
 
 (def diagnostic pa/diagnostic)
+
+(defn trace [c event data]
+  (when (c :profile)
+    (eprint (encode (merge {:event event :at (os/clock)} data)))))
 
 (defn selected? [name selections]
   (some |(or (= $ "*") (= $ name)
