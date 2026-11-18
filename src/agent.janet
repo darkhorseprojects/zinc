@@ -21,13 +21,14 @@
       (each spec specs (unless (indexed? spec) (summarize invoke spec))))))
 (defn assemble [invoke input exchanges]
   (def public (invoke :exposure []))
-  (def system {:role "system" :parts [{:type "text" :text (string (public :instructions) "\n\n"
-    (public :documentation) "\n\nSettings and resources:\n" (config/encode (tabseq [k :in [:settings :resources :bindings]] k (public k)))
-    "\n\nCurrent world bindings:\n```clojure\n" (invoke "world/view" []) "\n```")}]})
+  (def system {:role "system" :parts [{:type "text" :text (string (public :instructions) "\n\n" (public :documentation))}]})
+  (def state {:role "user" :parts [{:type "text" :text (string "Settings and resources:\n"
+    (config/encode (tabseq [k :in [:settings :resources]] k (public k)))
+    "\n\nSaved world bindings (evidence):\n```clojure\n" (invoke "world/view" []) "\n```")}]})
   (def parts @[{ :type "text" :text (get input :text "")}])
   (each image (get input :images []) (array/push parts {:type "image" :url (string "data:" (image :type) ";base64," (image :data))}))
   (def user {:role "user" :parts parts})
-  (def fixed (model/estimate [system user exchanges model/tool]))
+  (def fixed (model/estimate [system state user exchanges model/tool]))
   (def ceiling (- (public :window) (public :reserve)))
   (assert (<= fixed ceiling) "fixed input and output reserve exceed model window")
   (var room (min (public :memory) (- ceiling fixed)))
@@ -41,7 +42,7 @@
     (while (evidence :summary)
       (summarize invoke (evidence :summary))
       (set evidence (invoke :memory-select [plan ranks])))
-    (def messages @[system])
+    (def messages @[system state])
     (each key [:chronological :semantic] (unless (empty? (evidence key))
       (array/push messages {:role "user" :parts [{:type "text" :text (string key " evidence:\n" (evidence key))}]})))
     (array/push messages user) (array/concat messages exchanges)

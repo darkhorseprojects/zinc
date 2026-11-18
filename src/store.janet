@@ -25,15 +25,32 @@
 (defmacro transact [s & body]
   ~(if (or (not (,s :db)) (= (,s :db) (dyn :zinc/transaction))) (do ,;body)
     (do (,query ,s "BEGIN IMMEDIATE")
-      (try (let [result (with-dyns [:zinc/transaction (,s :db)] ,;body)] (,query ,s "COMMIT") result)
+      (try (let [result (with-dyns [:zinc/transaction (,s :db)] ,;body)]
+             (,query ,s "COMMIT") (table/clear (,s :rows)) result)
         ([err] (,query ,s "ROLLBACK") (,reload ,s) (error err))))))
 (defn row [s id]
   (assert (and (int? id) (not= 0 id)) "point must be a nonzero integer")
-  (def r (or (get (s :rows) id)
+  (def cache (when (or (not (s :db)) (= (s :db) (dyn :zinc/transaction))) (s :rows)))
+  (def r (or (get cache id)
     (if (s :db) (first (query s "SELECT * FROM journal WHERE id=?" [id]))
       (when (> id 0) (def copy (merge (row (s :source) id)))
         (put copy :data (unmarshal (marshal (copy :data)))) copy))))
-  (assert r "point unavailable") (put (s :rows) id r) r)
+  (assert r "point unavailable") (when cache (put cache id r)) r)
+(defn intake [s point conversation keys]
+  (if point
+    (query s `WITH RECURSIVE ancestry(id,previous,through) AS (
+      SELECT id,previous,CASE WHEN json_extract(data,'$.coverage.conversation')=?1
+        THEN json_extract(data,'$.coverage.through') END FROM journal WHERE id=?2
+      UNION ALL SELECT j.id,j.previous,CASE WHEN json_extract(j.data,'$.coverage.conversation')=?1
+        THEN json_extract(j.data,'$.coverage.through') END FROM journal j JOIN ancestry a ON j.id=a.previous
+        WHERE a.through IS NULL OR json_array_length(?3)>0
+    ), coverage AS (
+      SELECT id,null key,through FROM ancestry WHERE through IS NOT NULL ORDER BY id DESC LIMIT 1
+    ) SELECT * FROM coverage UNION ALL
+      SELECT j.id,json_extract(j.data,'$.source.key'),null FROM ancestry a JOIN journal j USING(id)
+      WHERE json_extract(j.data,'$.source.conversation')=?1
+        AND json_extract(j.data,'$.source.key') IN (SELECT value FROM json_each(?3))`
+      [conversation point (config/encode keys)]) []))
 (defn head [s id]
   (def h (get (s :heads) id)) (assert (and (int? id) h) "path unavailable") h)
 (defn world [s name]
@@ -91,6 +108,14 @@
 (defn pending [s]
   (catseq [h :in (values (s :heads)) :when (h :run)]
     (array/concat @[] (if-let [a (get-in h [:run :active])] [a] []) (get-in h [:run :queue] []))))
+(defn admission [s work]
+  (def token (work :request))
+  (or (find |(and (= token ($ :request)) (= (work :path) ($ :path))) (pending s))
+    (let [r (if (s :db)
+      (first (query s "SELECT data FROM journal WHERE json_extract(data,'$.request')=? ORDER BY id LIMIT 1" [token]))
+      (find |(and (= token (get-in $ [:data :request])) (get-in $ [:data :signature])) (values (s :rows))))
+          d (get r :data)]
+      (when (= (work :path) (get d :path)) (merge d {:policy {:scope (get d :scope)}})))))
 (defn reaches? [s from target]
   (def pending (pending s)) (def seen @{})
   (def visit (fn visit [id]
@@ -149,7 +174,8 @@
   (def input (merge supplied {:queue (get supplied :queue (c :queue))}))
   (assert (not= (nil? (input :text)) (nil? (input :code))) "supply exactly one of text or code")
   (each k [:text :code] (when (input k)
-    (assert (and (string? (input k)) (> (length (input k)) 0) (<= (length (input k)) (c :source-bytes))) "invalid source")))
+    (assert (and (string? (input k)) (<= (length (input k)) (c :source-bytes))
+      (or (> (length (input k)) 0) (and (= k :text) (not (empty? (get input :images [])))))) "invalid source")))
   (each k (keys input) (assert (index-of k [:text :code :path :from :memory :queue :request :at :images :source]) (string "unknown input field " k)))
   (assert (not (and (input :path) (input :from))) "path and from are mutually exclusive")
   (assert (boolean? (get input :queue (c :queue))) "queue must be boolean")

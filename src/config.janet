@@ -34,7 +34,7 @@
   {:world "main" :worlds ["main"] :input "text" :operation "submit" :conversation "default" :initialize false :inspect false :rewind false :profile false
    :vm {:user {:bindings ["*"] :imports {} :fs {} :http {} :processes {} :modules {}}
         :agent {:bindings ["*"] :imports {} :fs {} :http {} :processes {} :modules {}}}
-   :instructions (path/join directory "zinc.md") :temporary false :queue true :publish ["reasoning" "response" "tool-call" "tool-result" "diagnostic"] :arguments {}
+   :instructions (path/join directory "zinc.md") :temporary false :queue false :publish ["reasoning" "response" "tool-call" "tool-result" "diagnostic"] :arguments {}
    :providers {} :chat {:thinking "default"} :rerank {} :summary {:thinking "default" :bytes 512 :max-bytes 4096} :web-search false :rounds 128 :parallel 4 :tasks 4096 :depth 8
    :seconds 120 :run-seconds 0 :pending 32 :http-ms 600000 :source-bytes 1048576 :image-bytes 4194304
    :response-bytes 8388608 :world-bytes 16777216 :journal-bytes 67108864 :history-records 1024
@@ -104,7 +104,7 @@
    :documentation (string/join (seq [[name spec] :in (sorted (pairs registry)) :when (spec :doc)] (spec :doc)) "\n")})
 
 (defn parse [supplied handle runtime]
-  (def allowed (array/concat @[:store :directory :context-quota :output :request :path :from :memory :work] (keys defaults)))
+  (def allowed (array/concat @[:store :directory :context-quota :output :request :path :from :memory :work :scope] (keys defaults)))
   (each k (keys supplied) (assert (index-of k allowed) (string "unknown setting " k)))
   (def c (json/decode (encode (merge defaults supplied)) true true))
   (each role [:chat :rerank :summary] (put c role (merge (defaults role) (c role))))
@@ -161,25 +161,66 @@
    "memory" {:type "integer" :description "Select exact memory"}
    "queue" {:type "boolean" :description "Queue on a busy path"}
    "temporary" {:type "boolean" :description "Use RAM only"}})
+(def reference {:name "reference" :type "integer" :description "Selected ancestry point"})
+(def subtree {:name "node" :type "string" :description "Exact subtree address: event:slot"})
 (def commands
   [{:name "agent" :description "Invoke or change personal settings"}
    {:name "reset" :description "Discard personal settings"}
    {:name "models" :description "List available models" :options [{:name "role" :type "string" :description "chat or rerank"}]}
    {:name "world-point" :description "Show the selected event"}
-   {:name "world-view" :description "Render world source" :reference true}
-   {:name "world-inspect" :description "Inspect evidence" :reference true}
-   {:name "render" :description "Inspect the assembled model prompt" :reference true}
-   {:name "memory-expand" :description "Read original evidence" :reference true :node true}
-   {:name "memory-summarize" :description "Install a subtree summary" :reference true :node true
-    :options [{:name "text" :type "string" :description "Optional replacement summary"}]}
-   {:name "memory-invalidate" :description "Invalidate a subtree summary" :reference true :node true}])
+   {:name "world-view" :description "Render world source" :options [reference]}
+   {:name "world-inspect" :description "Inspect evidence" :options [reference]}
+   {:name "render" :description "Inspect the assembled model prompt" :options [reference]}
+   {:name "memory-expand" :description "Read original evidence" :options [reference subtree]}
+   {:name "memory-summarize" :description "Install a subtree summary" :options [reference subtree
+    {:name "text" :type "string" :description "Optional replacement summary"}]}
+   {:name "memory-invalidate" :description "Invalidate a subtree summary" :options [reference subtree]}])
 (defn discover [c]
-  {:schema options :commands commands :imports
+  {:schema options :commands commands :intake {:max_records (c :history-records) :image_bytes (c :image-bytes)} :imports
     (reduce (fn [result role]
       (each [name spec] (pairs (get-in c [:vm role :imports])) (when spec
         (when (and (has-key? result name) (not= true (result name)) (not= true spec))
           (assert (= (encode (result name)) (encode spec)) "conflicting import declarations"))
         (unless (and (= true spec) (dictionary? (result name))) (put result name spec)))) result) @{} [:user :agent])})
+
+(defn prepare [base c source overlay overrides input]
+  (def config (merge base {:conversation (get-in source [:resource :conversation]) :request (get-in source [:event :id])
+    :scope {:platform (source :platform) :connector (source :connector) :application (get-in source [:resource :application])
+      :channel (get-in source [:resource :channel]) :policy (input :policy)}}))
+  (when (input :passive) (break {:config config :input :null :options {} :history (not (c :temporary))}))
+  (def command (get-in source [:event :command :name]))
+  (def operation (if (or (nil? command) (= command "agent")) "submit" command))
+  (def arguments (if (= operation "submit") @{} (merge (get-in source [:event :command :arguments] {}))))
+  (when-let [node (arguments :node)]
+    (assert (and (string? node) (peg/match ~(* (? "-") (some :d) ":" (some :d) -1) node)) "Subtree addresses are event:slot")
+    (put arguments :node (map scan-number (string/split ":" node))))
+  (when (arguments :reference) (put arguments :point (arguments :reference)))
+  (assert (not (and (overrides :from) (overrides :path))) "path and from are mutually exclusive")
+  (def effective (merge overlay overrides))
+  (when (overrides :from) (put effective :path nil))
+  (when (overrides :path) (put effective :from nil))
+  (def grants (get-in (discover c) [:imports :discord]))
+  (each [name value] (pairs effective)
+    (def name (find |(= (string name) (string/replace-all "." "-" $)) (keys options)))
+    (def field (get options name))
+    (assert (and field grants (or (= true grants) (index-of name (get grants :options [])))) "option is not exposed")
+    (def location (map keyword (string/split "." name)))
+    (assert (case (field :type) "string" (and (string? value) (> (length value) 0)) "boolean" (boolean? value)
+      "integer" (and (int? value) (<= (get field :minimum (- math/inf)) value (get field :maximum math/inf)))) "invalid option value")
+    (when (= name "path") (put config :from nil))
+    (when (= name "from") (put config :path nil))
+    (when (= 2 (length location)) (put config (location 0) (merge (get config (location 0) {}))))
+    (put-in config location value))
+  (def kind (get config :input "text"))
+  (def text (get input :text ""))
+  (def body (if (and (= kind "json") (= operation "submit") (not (empty? text)))
+    (merge (json/decode text true true))
+    @{(if (and (= kind "code") (= operation "submit")) :code :text) text}))
+  (when (not (empty? (get input :images []))) (put body :images (input :images)))
+  (put body :at (input :at)) (put body :source {:key (input :key)})
+  (merge-into config {:operation operation :arguments arguments :input "json"})
+  {:config config :input body :options effective
+   :history (and (= operation "submit") (not (get config :temporary false)))})
 
 (defn authorize [current saved]
   (each k [:store :directory :handle :runtime :instructions]

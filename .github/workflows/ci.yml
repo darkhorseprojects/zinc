@@ -2,7 +2,11 @@ name: CI
 on: [push, pull_request]
 jobs:
   check:
-    runs-on: ubuntu-24.04
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-24.04, macos-14, windows-2022]
+    runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v4
         with:
@@ -17,20 +21,83 @@ jobs:
           repository: janet-lang/jpm
           ref: 029d0c4cfefd2d359ddc5344eae61a1771f4e673
           path: jpm
-      - run: sudo apt-get update && sudo apt-get install -y libssl-dev
-      - run: make -C janet -j2 && sudo make -C janet install
-      - run: sudo janet bootstrap.janet
+      - name: Set installation paths
+        shell: pwsh
+        run: |
+          $prefix = "$HOME/.local" -replace '\\','/'
+          @("JANET_PREFIX=$prefix", "JANET_MODPATH=$prefix/lib/janet", "JANET_PATH=$prefix/lib/janet",
+            "JANET_BINPATH=$prefix/bin", "JANET_MANPATH=$prefix/share/man/man1") >> $env:GITHUB_ENV
+          "$prefix/bin" >> $env:GITHUB_PATH
+      - if: runner.os == 'Linux'
+        run: sudo apt-get update && sudo apt-get install -y libssl-dev
+      - if: runner.os == 'macOS'
+        run: |
+          brew install openssl@3
+          echo "OPENSSL_PREFIX=$(brew --prefix openssl@3)" >> "$GITHUB_ENV"
+      - if: runner.os != 'Windows'
+        working-directory: janet
+        run: |
+          make -j2 PREFIX="$JANET_PREFIX"
+          make PREFIX="$JANET_PREFIX" install
+      - if: runner.os == 'Windows'
+        uses: ilammy/msvc-dev-cmd@a102174a2b586eec2ea151a69e6fd14404a8ce7c
+        with:
+          arch: x64
+      - if: runner.os == 'Windows'
+        working-directory: janet
+        shell: pwsh
+        run: |
+          cmd.exe /d /c build_win.bat
+          if ($LASTEXITCODE) { exit $LASTEXITCODE }
+          $inc = "$env:JANET_PREFIX/include/janet"
+          New-Item -ItemType Directory -Force $inc, $env:JANET_BINPATH | Out-Null
+          ./janet.exe tools/patch-header.janet src/include/janet.h src/conf/janetconf.h "$inc/janet.h"
+          if ($LASTEXITCODE) { exit $LASTEXITCODE }
+          Copy-Item janet.exe $env:JANET_BINPATH
+          Copy-Item janet.lib $inc
+          Copy-Item build/libjanet.lib "$env:JANET_PREFIX/lib"
+          $root = $env:VCPKG_INSTALLATION_ROOT
+          & "$root/vcpkg.exe" install openssl:x64-windows
+          if ($LASTEXITCODE) { exit $LASTEXITCODE }
+          "VCPKG_ROOT=$root" >> $env:GITHUB_ENV
+          "$root/installed/x64-windows/bin" >> $env:GITHUB_PATH
+      - run: janet bootstrap.janet
         working-directory: jpm
-      - run: |
-          export JANET_MODPATH="$HOME/.local/lib/janet"
-          export JANET_BINPATH="$HOME/.local/bin"
-          export JANET_MANPATH="$HOME/.local/share/man"
-          export JANET_PATH="$JANET_MODPATH"
-          install -d "$JANET_MODPATH" "$JANET_BINPATH" "$JANET_MANPATH"
-          install -d -m 700 "$HOME/.agents"
-          git worktree add --detach "$HOME/.agents/zinc" HEAD
-          cd "$HOME/.agents/zinc"
-          jpm build
-          cd "$HOME"
-          janet -e "(import $HOME/.agents/zinc/src/main.janet)"
+      - name: Install and resume a committed checkpoint
+        shell: pwsh
         working-directory: zinc
+        run: |
+          New-Item -ItemType Directory -Force "$HOME/.agents" | Out-Null
+          $agent = "$HOME/.agents/zinc"
+          git worktree add --detach $agent HEAD
+          if ($LASTEXITCODE) { exit $LASTEXITCODE }
+          Set-Location $agent
+          jpm build
+          if ($LASTEXITCODE) { exit $LASTEXITCODE }
+          janet -e @'
+          (import ./src/main)
+          (import ./src/vm)
+          (import ./src/store)
+          (import ./src/config)
+          (def dir (os/realpath "."))
+          (def c (config/parse {:directory dir :store (string dir "/private/history.db")} "zinc" "smoke"))
+          (put c :role :user)
+          (put c :registry {:user (config/registry c :user {}) :agent (config/registry c :agent {})})
+          (def input {:code "(do (ev/sleep 1) 42)"})
+          (def args {:config c :request "smoke" :input input :calls []})
+          (defn step [args]
+            (def reply (ev/thread-chan 1))
+            (defer (ev/chan-close reply)
+              (ev/thread (fn [[args reply]] (ev/give reply (vm/step args))) [args reply] :n)
+              (ev/take reply)))
+          (def before (step (merge args {:now 0})))
+          (assert (= 1 (get-in before [:waits 0 :timer])))
+          (let [s (store/open c true) h (store/create s)]
+            (put h :run {:machine (before :image)})
+            (store/save s h c)
+            (store/close s)
+            (let [reopened (store/open c)
+                  image (get-in (store/head reopened (h :id)) [:run :machine])]
+              (store/close reopened)
+              (assert (= 42 (get-in (step (merge args {:now 2 :image image})) [:settled :value])))))
+          '@

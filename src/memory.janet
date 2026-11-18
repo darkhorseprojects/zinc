@@ -10,22 +10,42 @@
   (assert (and (indexed? ref) (= 2 (length ref)) (int? (ref 0)) (int? (ref 1)) (>= (ref 1) 0)) "invalid subtree address")
   (def n (get-in (store/row s (ref 0)) [:data :nodes (ref 1)])) (assert n "subtree unavailable")
   (each key [:left :right] (when (n key) (put n key (tuple/slice (n key))))) n)
-(defn extend [s r roots c &opt link]
-  (def forest (map tuple/slice (or roots []))) (def nodes (get-in r [:data :nodes] @[])) (def text (store/text r))
+(defn header [s page]
+  (def d ((store/row s (page :source)) :data))
+  (string "[#" (page :source) ":" (page :start) "–" (page :end) "] " (d :author) " · " (d :at) "\n"))
+(defn branch [left right l r]
+  @{:left left :right right :count (+ (l :count) (r :count)) :cost (+ 2 (l :cost) (r :cost))
+    :low (min (l :low) (r :low)) :high (max (l :high) (r :high))
+    :worlds (distinct (array/concat @[] (l :worlds) (r :worlds)))})
+(defn measure [s ref]
+  (def n (node s ref))
+  (unless (n :cost)
+    (if-let [source (n :source)]
+      (merge-into n {:cost (+ (length (header s n)) (- (n :end) (n :start))) :low source :high source
+        :worlds [(get-in (store/row s source) [:data :world])]})
+      (merge-into n (branch (n :left) (n :right) (measure s (n :left)) (measure s (n :right))))))
+  n)
+(defn extend [s r roots c &opt link evidence]
+  (def forest (map tuple/slice (or roots []))) (def nodes (get-in r [:data :nodes] @[]))
+  (def original (if evidence (store/row s evidence) r)) (def text (store/text original))
+  (def source (original :id))
   (var start 0)
   (while (< start (length text))
     (var end (min (length text) (+ start (c :page-bytes))))
     (while (and (< end (length text)) (<= 0x80 (text end) 0xbf)) (++ end))
-    (def existing (find-index |(and (= ($ :source) (r :id)) (= ($ :start) start) (= ($ :end) end)) nodes))
+    (def existing (find-index |(and (= ($ :source) source) (= ($ :start) start) (= ($ :end) end)) nodes))
     (array/push forest [(r :id) (or existing (length nodes))])
-    (unless existing (array/push nodes @{:source (r :id) :start start :end end :count 1}))
+    (unless existing
+      (def leaf @{:source source :start start :end end :count 1 :low source :high source :worlds [(get-in original [:data :world])]})
+      (put leaf :cost (+ (length (header s leaf)) (- end start)))
+      (array/push nodes leaf))
     (while (>= (length forest) 2)
       (def right (last forest)) (def left (forest (- (length forest) 2)))
-      (def l (if (= (r :id) (left 0)) (nodes (left 1)) (node s left)))
-      (def rr (if (= (r :id) (right 0)) (nodes (right 1)) (node s right)))
+      (def l (if (and (= (r :id) (left 0)) (get (nodes (left 1)) :cost)) (nodes (left 1)) (measure s left)))
+      (def rr (if (and (= (r :id) (right 0)) (get (nodes (right 1)) :cost)) (nodes (right 1)) (measure s right)))
       (unless (= (l :count) (rr :count)) (break))
       (array/pop forest) (array/pop forest) (array/push forest [(r :id) (length nodes)])
-      (array/push nodes @{:left left :right right :count (+ (l :count) (rr :count))}))
+      (array/push nodes (branch left right l rr)))
     (set start end))
   (put (r :data) :nodes nodes) (unless link (put (r :data) :memory forest)) (store/replace s r c) forest)
 (defn pages [s ref]
@@ -33,9 +53,6 @@
 (defn sources [s roots c]
   (map (fn [id] (store/access s id c) (def d ((store/row s id) :data)) {:reference id :author (d :author) :at (d :at) :text (store/text (store/row s id))})
     (distinct (map |($ :source) (catseq [ref :in roots] (pages s ref))))))
-(defn header [s page]
-  (def d ((store/row s (page :source)) :data))
-  (string "[#" (page :source) ":" (page :start) "–" (page :end) "] " (d :author) " · " (d :at) "\n"))
 (defn render [s ref]
   (string/join (map (fn [p]
     (string (header s p) (string/slice (store/text (store/row s (p :source))) (p :start) (p :end)))) (pages s ref)) "\n\n"))
@@ -67,15 +84,15 @@
     (def existing (find-index |(and (= ($ :left) root) (= ($ :right) right)) nodes))
     (if existing (set root [(r :id) existing])
       (do (def next [(r :id) (length nodes)])
-        (array/push nodes @{:left root :right right :count (+ ((node s root) :count) ((node s right) :count))})
+        (array/push nodes (branch root right (measure s root) (measure s right)))
         (set root next) (store/replace s r c)))) root)
 (defn selected [s roots excluded c]
   (catseq [raw :in roots :let [ref (tuple/slice raw)]]
-    (def n (node s ref))
-    (if (some |(or (index-of ($ :source) excluded)
-        (not (index-of (get-in (store/row s ($ :source)) [:data :world]) (c :worlds)))) (pages s ref))
-      (if (n :left) (selected s [(n :left) (n :right)] excluded c) [])
-      [ref])))
+    (def n (measure s ref))
+    (if (and (every? (map |(index-of $ (c :worlds)) (n :worlds)))
+        (not (some |(and (number? $) (<= (n :low) $ (n :high))) excluded)))
+      [ref]
+      (if (n :left) (selected s [(n :left) (n :right)] excluded c) []))))
 (defn allowed [s reference roots c]
   (def ref (tuple/slice reference))
   (def seen @{})
@@ -103,10 +120,8 @@
   (each [key job] (pairs (get s :summary-work {}))
     (when (and (affected (job :node)) (not (job :cancelled)))
       (put job :cancelled true)
-      (when (and (job :cancel) (not (job :result))) (ev/give (job :cancel) true)))) ref)
-(defn cost [s ref]
-  (def all (pages s ref))
-  (+ (* 2 (- (length all) 1)) (sum (map |(+ (length (header s $)) (- ($ :end) ($ :start))) all))))
+      (ev/give (job :cancel) true))) ref)
+(defn cost [s ref] ((measure s ref) :cost))
 (defn need [s ref c limit &opt replacement]
   (def n (node s ref))
   (unless replacement
@@ -145,11 +160,11 @@
   (invalidate s (spec :node) roots c)
   (def r (store/row s ((spec :node) 0))) (def n (node s (spec :node)))
   (put n :summary {:recipe (recipe s (spec :node) c) :text text}) (store/replace s r c) (spec :node))
-(defn candidates [s rows query c]
-  (if (or (not (c :memory-retrieval)) (empty? rows) (empty? query)) []
+(defn candidates [s ids query c]
+  (if (or (not (c :memory-retrieval)) (empty? ids) (empty? query)) []
     (do
       (unless (s :search)
-        (put s :search (sql/open ":memory:")) (put s :indexed @{})
+        (put s :search (sql/open ""))
         (sql/eval (s :search) "CREATE VIRTUAL TABLE tokens USING fts5(text,tokenize='unicode61 remove_diacritics 0'); CREATE VIRTUAL TABLE words USING fts5vocab(tokens,'instance'); CREATE VIRTUAL TABLE inquiry USING fts5(text,tokenize='unicode61 remove_diacritics 0'); CREATE VIRTUAL TABLE terms USING fts5vocab(inquiry,'instance');"))
       (def db (s :search))
       (sql/eval db "DELETE FROM inquiry")
@@ -171,10 +186,11 @@
             SELECT DISTINCT f.form FROM reachable r JOIN form_concepts f ON f.concept=r.concept WHERE f.language=? ORDER BY f.form LIMIT ?`
             [(c :language) (config/encode terms) (c :expansion-depth) (c :expansion-nodes) (c :language) (c :terms)])
             (when (and (< (length terms) (c :terms)) (not (index-of (r :form) stops)) (not (index-of (r :form) terms))) (array/push terms (r :form))))))
-      (def membership (config/encode (map |($ :reference) rows)))
-      (each row rows (unless (get (s :indexed) (row :reference))
-        (sql/eval db "INSERT INTO tokens(rowid,text) VALUES(?,?)" [(row :reference) (row :text)])
-        (put (s :indexed) (row :reference) true)))
+      (def membership (config/encode ids))
+      (each row (sql/eval db "SELECT e.value id FROM json_each(?) e WHERE NOT EXISTS(SELECT 1 FROM tokens WHERE rowid=e.value)" [membership])
+        (def id (row :id))
+        (def data (if (s :db) (first (store/query s "SELECT data FROM journal WHERE id=?" [id])) (store/row s id)))
+        (sql/eval db "INSERT INTO tokens(rowid,text) VALUES(?,?)" [id (store/text data)]))
       (def fuzzy (sql/eval db `WITH RECURSIVE grams(word,pos) AS (SELECT value,1 FROM json_each(?) WHERE length(value)>=3
         UNION ALL SELECT word,pos+1 FROM grams WHERE pos+2<length(word))
         SELECT DISTINCT term FROM words WHERE term NOT IN (SELECT value FROM json_each(?)) AND doc IN (SELECT value FROM json_each(?))
@@ -184,7 +200,7 @@
       (if (empty? words) [] (map (fn [hit]
         (def text (hit :excerpt)) (var end (min (length text) (c :page-bytes)))
         (while (and (< end (length text)) (<= 0x80 (text end) 0xbf)) (++ end))
-        (merge (find |(= (hit :rowid) ($ :reference)) rows) {:text (string/slice text 0 end)}))
+        {:reference (hit :rowid) :text (string/slice text 0 end)})
         (sql/eval db "SELECT rowid,snippet(tokens,0,'','',' … ',64) excerpt FROM tokens WHERE tokens MATCH ? AND rowid IN (SELECT value FROM json_each(?)) ORDER BY rank,rowid LIMIT ?"
           [(string/join (map |(string "\"" (string/replace-all "\"" "\"\"" $) "\"") words) " OR ") membership (c :candidates)]))))))
 (defn minimum [s ref c]
@@ -193,8 +209,8 @@
 (defn plan [s roots c query room excluded]
   (def selected (selected s roots excluded c))
   {:roots selected :memory roots :room room :excluded excluded
-   :candidates (if (<= (sum (map |(+ 2 (cost s $)) selected)) (* 4 room)) []
-     (candidates s (sources s selected c) query c))})
+   :candidates (if (and (c :memory-retrieval) (> (sum (map |(+ 2 (cost s $)) selected)) (* 4 room)))
+     (candidates s (distinct (map |($ :source) (catseq [ref :in selected] (pages s ref)))) query c) [])})
 (defn finish [s plan ranks c]
   (with-dyns [:zinc/representations (or (dyn :zinc/representations) @{})]
   (label planned

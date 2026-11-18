@@ -5,7 +5,8 @@ unfinished computation needed to continue. It knows PA, not a connector or polic
 
 ## Install
 
-Keep the complete checkout in the agent directory, conventionally `~/.agents/zinc`:
+Keep the complete checkout in the agent directory: `~/.agents/zinc` on Linux, macOS and WSL, or
+`%USERPROFILE%\.agents\zinc` on Windows.
 
 ```sh
 git clone https://github.com/darkhorseprojects/zinc.git ~/.agents/zinc
@@ -54,11 +55,18 @@ The agent owns `main` and imports PA. `janet -t src/main.janet` requires `PA_HAN
 `invoke(input, config, imports)` receives bytes, opaque agent configuration, and callable Janet imports. PA correlates
 concurrent invocations and reverse calls; it does not load agents or schedule application work.
 
-Ordinary source-owned methods are `describe(config)`, `invoke(base64, config, import-documentation)`, `position(config)`,
-and `append(config, records)`. Discovery supplies command descriptors, option schema paths, and effective import
-requirements. Discovery is not an authority grant. Append records contain `key`, `author`, `at`, and `text`; committed
-source provenance supplies the catch-up cursor. Repeated ingestion is idempotent. Append creates evidence, not an inquiry,
-queued input, or model wakeup.
+Discovery supplies command descriptors, option schema paths, import requirements and intake limits. It grants no
+authority. `prepare` translates source events and options into Zinc input and opaque configuration. `position(config)`
+returns the selected configuration and `through`, the last committed coverage cursor. `append(config, {records, scan})`
+commits evidence and, when supplied, a `{after, through}` coverage claim in one transaction. A stale `after` fails with
+`HistoryMoved`. Records carry `key`, `author`, `at` and `text`; live append deduplicates evidence without moving coverage.
+First contact does not import earlier channel history. When upgrading, previously committed evidence stays, but a feed
+without a coverage claim establishes its baseline at the first new trigger. Append creates no work and does not wake an
+inquiry.
+
+Invoke starts work on an available path. Invoke with `queue: true` admits the same work on a busy path, where Zinc starts
+it in order. The source is committed at admission, before waiting; execution records a start without duplicating the
+source. Connector queue state is not needed.
 
 Commands come from source, never deployment JSON:
 
@@ -119,9 +127,11 @@ are reused; undispatched calls are dispatched; dispatched calls without outcomes
 retries. Execution resumes inside saved fibers, not at the start of source. Pure computation since the last save may
 repeat. Unfinished images require the original Janet build and runtime source.
 
-Imported functions are connection-bound. Without a current authorized attachment, imported operations remain
-undispatched. Transport IDs are never persisted as authority. Output delivery is not durable and is not replayed from
-RAM receipts after restart. A work reference authenticates nobody.
+The process owner can supply current local grants at startup via `activate(config, policy)`. Local work can resume and
+queued work can drain under those grants without an observer. Imports and delivery require a live authorized attachment
+for the original caller, policy and destination. Another participant cannot inherit that authority. A retained output is
+not proof of Discord delivery, and delivery is not replayed automatically after restart. A work reference authenticates
+nobody. Restart the host to replace its startup local grants; the connector authorizes its own actions against live policy.
 
 `temporary: true` uses the same structures in RAM, including children and summary caches. It may read durable points but
 cannot publish to their durable worlds. It has no crash recovery. External side effects still occur and are not undone.
@@ -172,6 +182,7 @@ length limits and incomplete streams do not become successful answers. Native pr
 as required; it is not execution replay.
 
 Zinc emits typed data; AGC renders reasoning as quotes, responses as Markdown, Janet calls in `clojure` fences, and
-results in unlabeled fences. Results reference their script output IDs. Boundary metadata occurs once and attaches to the
-last delivered fragment when possible. Typing follows actual active work. No token-preview journal or second publication
+results in unlabeled fences. Results reference their script output IDs. The footer carries the start event, result event
+and status separately from the text. Metadata attaches to the last delivered fragment when possible. Typing follows actual
+active work. No token-preview journal or second publication
 path exists.

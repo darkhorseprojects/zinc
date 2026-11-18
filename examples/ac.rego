@@ -49,15 +49,20 @@ same_invocation if {
 	object.subset(input.settings.limits, current.settings.limits)
 	base := current.settings.config
 	effective := input.settings.config
-	mutable := {"chat", "rerank", "summary", "rounds", "context-percent", "queue", "temporary", "path", "from", "memory", "operation", "arguments", "conversation", "request", "input"}
+	mutable := {"chat", "rerank", "summary", "rounds", "context-percent", "queue", "temporary", "path", "from", "memory", "operation", "arguments", "conversation", "request", "input", "scope"}
 	object.remove(base, mutable) == object.remove(effective, mutable)
 	object.get(effective, "rounds", 128) <= object.get(base, "rounds", 128)
 	object.get(effective, "context-percent", 50) <= object.get(base, "context-percent", 50)
 	object.remove(object.get(base, "summary", {}), {"model", "thinking"}) == object.remove(object.get(effective, "summary", {}), {"model", "thinking"})
 	object.get(effective, "conversation", input.invocation.resource.conversation) == input.invocation.resource.conversation
 	object.get(effective, "request", input.invocation.event.id) == input.invocation.event.id
+	source := input.invocation
+	scope := {"platform": source.platform, "connector": source.connector, "application": source.resource.application, "channel": source.resource.channel, "policy": input.policy}
+	actual := object.get(effective, "scope", scope)
+	every key, value in scope { object.get(actual, key, null) == value }
 }
 allow if { same_invocation; input.operation.kind in {"invoke", "append", "position", "configure", "output", "typing"} }
+allow if { same_invocation; input.operation.kind == "history"; input.operation.channel == input.invocation.resource.channel }
 allow if { same_invocation; input.operation.kind == "thread"; current.route == "channel" }
 allow if {
 	same_invocation
