@@ -69,7 +69,7 @@
         (case (c :operation)
           "memory-summarize" (agent/manual invoke (c :arguments))
           "render" (agent/prompt invoke input [])
-          (if (input :code) (evaluate (input :code)) (agent/run input invoke evaluate (c :rounds))))) :a env)
+          (if (input :code) (evaluate (input :code)) (agent/run input invoke (c :rounds))))) :a env)
         :role (if (input :code) (c :role) :agent)}])
       (put machine :cursor 0) (put machine :admitted @{}) (put machine :updates @[]) (put machine :revision 0))
     (def tasks (machine :tasks)) (def completed @[])

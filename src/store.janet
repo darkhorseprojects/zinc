@@ -38,10 +38,10 @@
   (def h (get (s :heads) id)) (assert (and (int? id) h) "path unavailable") h)
 (defn world [s name]
   (get (s :heads) name))
-(defn save [s h]
+(defn save [s h c]
   (when (s :db)
     (def bytes (when (h :run) (marshal (h :run))))
-    (assert (<= (length (or bytes "")) (get-in s [:config :journal-bytes])) "running graph exceeds byte limit")
+    (assert (<= (length (or bytes "")) (c :journal-bytes)) "running graph exceeds byte limit")
     (query s "UPDATE heads SET point=?,run=? WHERE id=?" [(h :point) (when bytes (buffer bytes)) (h :id)])) h)
 (defn create [s &opt name point]
   (def id (or name (if (s :db) ((first (query s "SELECT coalesce(max(id),0)+1 id FROM heads WHERE typeof(id)='integer'")) :id)
@@ -49,13 +49,13 @@
   (when (s :db) (query s (if name "INSERT INTO heads(id,point) VALUES(?,?)"
     "INSERT INTO heads(id,point) VALUES(CAST(? AS INTEGER),?)") [id point]))
   (def h @{:id id :point point}) (put (s :heads) id h) h)
-(defn replace [s r]
+(defn replace [s r c]
   (def bytes (config/encode (r :data)))
-  (assert (<= (+ (length bytes) (length (or (r :image) ""))) (get-in s [:config :journal-bytes])) "event byte limit")
+  (assert (<= (+ (length bytes) (length (or (r :image) ""))) (c :journal-bytes)) "event byte limit")
   (when (s :db) (query s "UPDATE journal SET data=?,image=? WHERE id=?" [bytes (when (r :image) (buffer (r :image))) (r :id)]))
   (put (s :rows) (r :id) r) r)
-(defn append [s h data &opt image]
-  (assert (<= (+ (length (config/encode data)) (length (or image ""))) (get-in s [:config :journal-bytes])) "event byte limit")
+(defn append [s h data c &opt image]
+  (assert (<= (+ (length (config/encode data)) (length (or image ""))) (c :journal-bytes)) "event byte limit")
   (def id (if (s :db) ((first (query s "INSERT INTO journal(previous,data,image) VALUES(?,?,?) RETURNING id"
     [(h :point) (config/encode data) (when image (buffer image))])) :id)
     (do (put s :next-row (- (s :next-row) 1)) (s :next-row))))
@@ -67,19 +67,19 @@
 (defn image [s point]
   (when point (def r (row s point)) (if (r :image) (r :image)
     (when-let [ref (get-in r [:data :bindings])] (image s ref)))))
-(defn access [s point &opt principal]
-  (when point (assert (index-of (get-in (row s point) [:data :world]) (get-in s [:config :worlds]))
+(defn access [s point c]
+  (when point (assert (index-of (get-in (row s point) [:data :world]) (c :worlds))
     {:code "NotAuthorized" :message "World is not granted."})) point)
-(defn permit [s h &opt principal]
-  (if (h :point) (access s (h :point))
+(defn permit [s h c]
+  (if (h :point) (access s (h :point) c)
     (assert (index-of (or (get-in h [:run :world]) (get-in h [:run :active :policy :world])
-      (get-in (first (get-in h [:run :queue])) [:policy :world]) (get-in s [:config :world])) (get-in s [:config :worlds])) "world is not granted")) h)
-(defn nearest [s point requested author]
+      (get-in (first (get-in h [:run :queue])) [:policy :world]) (c :world)) (c :worlds)) "world is not granted")) h)
+(defn nearest [s point requested c]
   (when requested (assert (and (int? requested) (not= 0 requested)) "point must be a nonzero integer"))
   (var p point)
   (while (and p requested (if (> requested 0) (or (< p 0) (> p requested)) (and (< p 0) (< p requested))))
     (set p ((row s p) :previous)))
-  (assert (and p (or (not requested) (> requested 0) (< p 0))) "no earlier point in the selected ancestry") (access s p author))
+  (assert (and p (or (not requested) (> requested 0) (< p 0))) "no earlier point in the selected ancestry") (access s p c))
 (defn result [s work]
   (def token (if (dictionary? work) (work :request) work))
   (def r (if (s :db) (first (query s "SELECT * FROM journal WHERE json_extract(data,'$.request')=? AND json_extract(data,'$.terminal')=1 ORDER BY id DESC LIMIT 1" [token]))
@@ -105,7 +105,7 @@
   (each key [:db :lock :search] (when (s key) (sql/close (s key))))
   (when (get-in s [:source :read-only]) (close (s :source))))
 (defn open [c &opt initialize source read-only]
-  (def s @{:config c :heads @{} :rows @{} :source source :next-head 0 :next-row 0
+  (def s @{:heads @{} :rows @{} :source source :next-head 0 :next-row 0
     :read-only read-only :identity (nonce)})
   (try (do
   (unless (c :temporary)
@@ -167,9 +167,9 @@
     (do
       (assert (< (length active) (c :pending)) "pending request limit")
       (def base (or (input :from) (when (and (input :path) (s :source) (> (input :path) 0)) ((head (s :source) (input :path)) :point))))
-      (access s base author) (when (input :memory) (access s (input :memory) author))
+      (access s base c) (when (input :memory) (access s (input :memory) c))
       (def target (when (and (input :path) (not base)) (head s (input :path))))
-      (when target (permit s target author))
+      (when target (permit s target c))
       (when (and owner target (target :run))
         (assert (not (reaches? s (target :id) (owner :path))) "recursive admission would form a wait cycle"))
       (def point (or base (get target :point)))

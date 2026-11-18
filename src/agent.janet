@@ -3,7 +3,7 @@
 (import ./memory)
 
 (defn summarize [invoke spec &opt text]
-  (if (and (not text) (<= (length (spec :text)) (spec :limit))) (spec :text)
+  (if (indexed? spec) spec
     (do
       (def response (unless text (invoke :chat [{:summary true :node (spec :node) :recipe (spec :recipe)
         :quota (spec :limit) :messages
@@ -12,9 +12,14 @@
       (when response (assert (= "answer" (response :stop)) "summary generation did not finish"))
       (invoke :memory-save [spec (or text (response :text))]))))
 (defn manual [invoke request]
-  (def specs (invoke :memory-summary [request]))
-  (when (request :text) (assert (= 1 (length specs)) "manual text requires one subtree"))
-  (map |(summarize invoke $ (request :text)) specs))
+  (label complete
+    (while true
+      (def specs (invoke :memory-summary [request]))
+      (when (request :text)
+        (assert (= 1 (length specs)) "manual text requires one subtree")
+        (return complete [(summarize invoke (first specs) (request :text))]))
+      (when (every? (map indexed? specs)) (return complete specs))
+      (each spec specs (unless (indexed? spec) (summarize invoke spec))))))
 (defn prompt [invoke input exchanges]
   (def public (invoke :exposure []))
   (def system {:role "system" :parts [{:type "text" :text (string (public :instructions) "\n\n"
@@ -44,7 +49,7 @@
     (def size (model/estimate [messages model/tool]))
     (if (<= size ceiling) (return assembled {:messages messages :manifest (evidence :manifest)})
       (do (-= room (max 1 (- size ceiling))) (assert (> room 0) "prompt exceeds model window"))))))
-(defn run [input invoke evaluate rounds]
+(defn run [input invoke rounds]
   (label answer
     (def exchanges @[])
     (repeat rounds

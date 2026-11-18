@@ -4,7 +4,7 @@
   :description "Durable Janet execution, binding worlds and selected memory"
   :license "AGPL-3.0-only"
   :dependencies
-  [{:repo "https://github.com/darkhorseprojects/portable-agents.git" :tag "8499694ed46326edf87f82a095ace90f65163be6"}
+  [{:repo "https://github.com/darkhorseprojects/portable-agents.git" :tag "dabf4adab8000696228923e0231e454513a1e7de"}
    {:repo "sqlite3" :tag "9126fe46ff1c7e42ca3d7bb9c8aed95a8236a32c"}
    {:repo "https://github.com/llmII/jsec.git" :tag "08a92f6336f283097298c0f0f917a0fabd2040c8"}
    {:repo "spork" :tag "8a87c5ae1cbbf3a0037eeac7f172bd45da4d9910"}])

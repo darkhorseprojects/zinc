@@ -27,11 +27,11 @@
       (array/pop forest) (array/pop forest) (array/push forest [(r :id) (length nodes)])
       (array/push nodes @{:left left :right right :count (+ (l :count) (rr :count))}))
     (set start end))
-  (put (r :data) :nodes nodes) (unless link (put (r :data) :memory forest)) (store/replace s r) forest)
+  (put (r :data) :nodes nodes) (unless link (put (r :data) :memory forest)) (store/replace s r c) forest)
 (defn pages [s ref]
   (def n (node s ref)) (if (n :source) [n] (array/concat @[] (pages s (n :left)) (pages s (n :right)))))
-(defn sources [s roots]
-  (map (fn [id] (store/access s id) (def d ((store/row s id) :data)) {:reference id :author (d :author) :at (d :at) :text (store/text (store/row s id))})
+(defn sources [s roots c]
+  (map (fn [id] (store/access s id c) (def d ((store/row s id) :data)) {:reference id :author (d :author) :at (d :at) :text (store/text (store/row s id))})
     (distinct (map |($ :source) (catseq [ref :in roots] (pages s ref))))))
 (defn header [s page]
   (def d ((store/row s (page :source)) :data))
@@ -57,8 +57,10 @@
       (when cache (put cache key entry)) entry)))
   (entry :text))
 (defn representation [s ref c]
-  (if-let [text (cached s ref c)] (string (heading s ref) text) (render s ref)))
-(defn combine [s roots]
+  (if-let [text (cached s ref c)] (string (heading s ref) text)
+    (let [n (node s ref)]
+      (if (n :left) (string/join (map |(representation s $ c) [(n :left) (n :right)]) "\n\n") (render s ref)))))
+(defn combine [s roots c]
   (def r (store/row s ((last roots) 0))) (def nodes (get-in r [:data :nodes]))
   (var root (first roots))
   (each right (tuple/slice roots 1)
@@ -66,25 +68,25 @@
     (if existing (set root [(r :id) existing])
       (do (def next [(r :id) (length nodes)])
         (array/push nodes @{:left root :right right :count (+ ((node s root) :count) ((node s right) :count))})
-        (set root next) (store/replace s r)))) root)
-(defn selected [s roots excluded]
+        (set root next) (store/replace s r c)))) root)
+(defn selected [s roots excluded c]
   (catseq [raw :in roots :let [ref (tuple/slice raw)]]
     (def n (node s ref))
     (cond (n :source) (if (or (index-of (n :source) excluded)
-        (not (index-of (get-in (store/row s (n :source)) [:data :world]) (get-in s [:config :worlds])))) [] [ref])
+        (not (index-of (get-in (store/row s (n :source)) [:data :world]) (c :worlds)))) [] [ref])
       (some |(or (index-of ($ :source) excluded)
-        (not (index-of (get-in (store/row s ($ :source)) [:data :world]) (get-in s [:config :worlds])))) (pages s ref)) (selected s [(n :left) (n :right)] excluded)
+        (not (index-of (get-in (store/row s ($ :source)) [:data :world]) (c :worlds)))) (pages s ref)) (selected s [(n :left) (n :right)] excluded c)
       [ref])))
-(defn allowed [s reference roots]
+(defn allowed [s reference roots c]
   (def ref (tuple/slice reference))
   (def seen @{})
   (def visit (fn visit [at]
     (or (= (tuple/slice at) ref) (when-let [n (node s at)]
       (when (and (n :left) (not (seen at))) (put seen at true) (or (visit (n :left)) (visit (n :right))))))))
   (assert (some visit roots) "subtree outside selected memory")
-  (each p (pages s ref) (store/access s (p :source))) ref)
-(defn invalidate [s reference roots]
-  (def ref (allowed s reference roots))
+  (each p (pages s ref) (store/access s (p :source) c)) ref)
+(defn invalidate [s reference roots c]
+  (def ref (allowed s reference roots c))
   (def affected @{ref true})
   (when (get-in s [:source :db])
     (each r (store/query (s :source) "SELECT id FROM journal WHERE json_extract(data,'$.nodes') IS NOT NULL")
@@ -98,30 +100,41 @@
       (def at [(r :id) slot])
       (when (or (affected at) (affected (n :left)) (affected (n :right)))
         (put affected at true) (put n :summary nil) (put n :epoch (store/nonce))
-        (store/replace s r))))
+        (store/replace s r c))))
   (each [key job] (pairs (get s :summary-work {}))
     (when (and (affected (job :node)) (not (job :cancelled)))
       (put job :cancelled true)
       (when (and (job :cancel) (not (job :result))) (ev/give (job :cancel) true)))) ref)
-(defn need [s ref c limit]
+(defn cost [s ref]
+  (def all (pages s ref))
+  (+ (* 2 (- (length all) 1)) (sum (map |(+ (length (header s $)) (- ($ :end) ($ :start))) all))))
+(defn need [s ref c limit &opt replacement]
   (def n (node s ref))
+  (unless replacement
+    (when (or (if-let [text (cached s ref c)] (<= (length text) limit))
+      (<= (cost s ref) (+ (length (heading s ref)) limit))) (break (tuple/slice ref))))
   (def text (if (n :left) (string/join (map |(representation s $ c) [(n :left) (n :right)]) "\n\n") (render s ref)))
-  (def selected (model/select (merge c {:chat (merge (c :chat) (c :summary))}) "chat"))
-  (def fixed (model/estimate [{:role "system" :parts [{:type "text" :text (string instructions " Limit: " limit " UTF-8 bytes, including citations.")}]}
-    {:role "user" :parts [{:type "text" :text ""}]}]))
-  (def room (- (min (selected :context) (get c :context-quota math/inf))
-    (min (get c :output 4096) (get selected :output 4096)) fixed 256))
-  (assert (> room 0) "summary instructions and output reserve exceed model window")
-  (if (> (model/estimate text) room)
-    (do (assert (n :left) "original page exceeds summary input window")
+  (unless replacement
+    (when (<= (length text) (+ (length (heading s ref)) limit)) (break (tuple/slice ref)))
+    (def selected (model/select (merge c {:chat (merge (c :chat) (c :summary))}) "chat"))
+    (def fixed (model/estimate [{:role "system" :parts [{:type "text" :text (string instructions " Limit: " limit " UTF-8 bytes, including citations.")}]}
+      {:role "user" :parts [{:type "text" :text ""}]}]))
+    (def room (- (min (selected :context) (get c :context-quota math/inf))
+      (min (get c :output 4096) (get selected :output 4096)) fixed 256))
+    (assert (> room 0) "summary instructions and output reserve exceed model window")
+    (when (> (model/estimate text) room)
+      (assert (n :left) "original page exceeds summary input window")
       (def child (find |(> (model/estimate (representation s $ c)) (/ room 2)) [(n :left) (n :right)]))
       (assert child "summary children exceed input window")
-      (need s child c (min (get-in c [:summary :max-bytes]) (* 4 (math/floor (/ room 2))))))
-    {:node ref :sources (distinct (map |($ :source) (pages s ref))) :recipe (or (get-in (dyn :zinc/representations) [(tuple/slice ref) :recipe]) (recipe s ref c)) :text text
-     :limit (max 1 (* (max 1 (math/floor (/ (get-in c [:summary :bytes]) 4)))
-       (math/floor (/ limit (max 1 (math/floor (/ (get-in c [:summary :bytes]) 4))))))) :replaces (length text)}))
+      (def source (representation s child c))
+      (def quota (- (math/floor (* (length source) (/ room 2 (model/estimate source)))) (length (heading s child)) 1))
+      (assert (> quota 0) "summary child cannot fit input window")
+      (break (need s child c (min (get-in c [:summary :max-bytes]) quota)))))
+  {:node ref :sources (distinct (map |($ :source) (pages s ref))) :recipe (recipe s ref c) :text text
+   :limit (if replacement limit (let [band (max 1 (math/floor (/ (get-in c [:summary :bytes]) 4)))]
+     (max 1 (* band (math/floor (/ limit band)))))) :replaces (length text)})
 (defn save [s spec text c roots]
-  (allowed s (spec :node) roots)
+  (allowed s (spec :node) roots c)
   (def identity (recipe s (spec :node) c)) (def existing ((node s (spec :node)) :summary))
   (when (and existing (= identity (existing :recipe)) (= text (existing :text))) (break (spec :node)))
   (assert (and (= (spec :recipe) identity)
@@ -130,9 +143,9 @@
     "summary is stale, oversized, empty, or saves no space")
   (each citation (peg/match ~(any (choice (* "[#" (capture (some (if-not "]" 1))) "]") 1)) text)
     (assert (index-of (scan-number citation) (spec :sources)) "summary cites unrelated evidence"))
-  (invalidate s (spec :node) roots)
+  (invalidate s (spec :node) roots c)
   (def r (store/row s ((spec :node) 0))) (def n (node s (spec :node)))
-  (put n :summary {:recipe (recipe s (spec :node) c) :text text}) (store/replace s r) (spec :node))
+  (put n :summary {:recipe (recipe s (spec :node) c) :text text}) (store/replace s r c) (spec :node))
 (defn candidates [s rows query c]
   (if (or (not (c :memory-retrieval)) (empty? rows) (empty? query)) []
     (do
@@ -175,24 +188,21 @@
         (merge (find |(= (hit :rowid) ($ :reference)) rows) {:text (string/slice text 0 end)}))
         (sql/eval db "SELECT rowid,snippet(tokens,0,'','',' … ',64) excerpt FROM tokens WHERE tokens MATCH ? AND rowid IN (SELECT value FROM json_each(?)) ORDER BY rank,rowid LIMIT ?"
           [(string/join (map |(string "\"" (string/replace-all "\"" "\"\"" $) "\"") words) " OR ") membership (c :candidates)]))))))
-(defn cost [s ref]
-  (def all (pages s ref))
-  (+ (* 2 (- (length all) 1)) (sum (map |(+ (length (header s $)) (- ($ :end) ($ :start))) all))))
 (defn minimum [s ref c]
   (min (cost s ref) (+ (length (heading s ref))
     (min (get-in c [:summary :bytes]) (if-let [text (cached s ref c)] (length text) (get-in c [:summary :bytes]))))))
 (defn plan [s roots c query room excluded]
-  (def selected (selected s roots excluded))
+  (def selected (selected s roots excluded c))
   {:roots selected :memory roots :room room :excluded excluded
    :candidates (if (<= (sum (map |(+ 2 (cost s $)) selected)) (* 4 room)) []
-     (candidates s (sources s selected) query c))})
+     (candidates s (sources s selected c) query c))})
 (defn finish [s plan ranks c]
   (with-dyns [:zinc/representations (or (dyn :zinc/representations) @{})]
   (label planned
     (def budget (* 4 (plan :room))) (var frontier (array/slice (plan :roots)))
     (while (> (sum (map |(+ 2 (minimum s $ c)) frontier)) budget)
       (assert (> (length frontier) 1) "minimum chronological frontier exceeds memory allowance")
-      (set frontier @[(combine s frontier)]))
+      (set frontier @[(combine s frontier c)]))
     (def reserve (sum (map |(+ 2 (minimum s $ c)) frontier)))
     (def evidence @[]) (def decisions @[]) (var spent 0)
     (each rank ranks
