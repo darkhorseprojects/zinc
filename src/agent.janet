@@ -16,7 +16,6 @@
     (while true
       (def specs (invoke :memory-summary [request]))
       (when (request :text)
-        (assert (= 1 (length specs)) "manual text requires one subtree")
         (return complete [(summarize invoke (first specs) (request :text))]))
       (when (every? (map indexed? specs)) (return complete specs))
       (each spec specs (unless (indexed? spec) (summarize invoke spec))))))

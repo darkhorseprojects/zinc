@@ -72,10 +72,9 @@
 (defn selected [s roots excluded c]
   (catseq [raw :in roots :let [ref (tuple/slice raw)]]
     (def n (node s ref))
-    (cond (n :source) (if (or (index-of (n :source) excluded)
-        (not (index-of (get-in (store/row s (n :source)) [:data :world]) (c :worlds)))) [] [ref])
-      (some |(or (index-of ($ :source) excluded)
-        (not (index-of (get-in (store/row s ($ :source)) [:data :world]) (c :worlds)))) (pages s ref)) (selected s [(n :left) (n :right)] excluded c)
+    (if (some |(or (index-of ($ :source) excluded)
+        (not (index-of (get-in (store/row s ($ :source)) [:data :world]) (c :worlds)))) (pages s ref))
+      (if (n :left) (selected s [(n :left) (n :right)] excluded c) [])
       [ref])))
 (defn allowed [s reference roots c]
   (def ref (tuple/slice reference))
@@ -248,8 +247,8 @@
     (each ref frontier
       (def slot (index-of ref summaries)) (def quota (when slot (quotas slot)))
       (def cached (cached s ref c))
-      (cond (raw ref) (array/push rendered {:node ref :text (render s ref) :original true})
-        (<= (cost s ref) (+ (length (heading s ref)) quota)) (array/push rendered {:node ref :text (render s ref) :original true})
+      (cond (or (raw ref) (<= (cost s ref) (+ (length (heading s ref)) quota)))
+        (array/push rendered {:node ref :text (render s ref) :original true})
         (and cached (<= (length cached) quota)) (array/push rendered {:node ref :text (string (heading s ref) cached)})
         (let [n (node s ref) children (when (n :left) (string/join (map |(representation s $ c) [(n :left) (n :right)]) "\n\n"))]
           (if (and children (<= (length children) (+ (length (heading s ref)) quota)))
@@ -262,5 +261,5 @@
     (when (some |(index-of ($ :reference) full) evidence)
       (return planned (finish s (merge plan {:covered (distinct (array/concat @[] (get plan :covered []) full))}) ranks c)))
     {:chronological (string/join (map |($ :text) rendered) "\n\n")
-     :semantic (string/join (map |($ :rendered) (filter |(not (index-of ($ :reference) full)) evidence)) "\n\n")
+     :semantic (string/join (map |($ :rendered) evidence) "\n\n")
      :manifest {:memory (plan :memory) :excluded (plan :excluded) :nodes (map |($ :node) rendered) :retrieval decisions}})))

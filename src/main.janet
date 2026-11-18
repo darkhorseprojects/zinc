@@ -279,48 +279,48 @@
   (def summary-key (when (get prepared :summary) [(prepared :node) (prepared :recipe) (prepared :quota)]))
   (unless (s :summary-work) (put s :summary-work @{}))
   (def job (when summary-key (let [job (get (s :summary-work) summary-key)] (unless (get job :cancelled) job))))
-  (var joined false)
-  (when (and job (not (call :result)) (not (call :dispatched)))
+  (cond
+    (call :result) nil
+    (and job (not (call :dispatched)))
     (if (job :result) (receipt host s h index (job :result))
       (do (put call :dispatched true) (store/save s h c) (put (host :effects) key true)
         (array/push (job :waiters) {:path (h :id) :request (a :request) :index index})))
-    (set joined true))
-  (unless (or joined (call :result) (get (host :effects) key) (and (get spec :import) (not imported) (not (call :dispatched))))
-    (if (call :dispatched)
-      (receipt host s h index {:status "unknown" :error {:code "EffectOutcomeUnknown" :message "Dispatched without an outcome; not repeated."}})
-      (do
-        (def cancel (when summary-key (ev/thread-chan 1)))
-        (when summary-key (put (s :summary-work) summary-key @{:node (prepared :node) :origin [(a :request) index] :cancel cancel :waiters @[]}))
-        (put call :dispatched true) (store/save s h c) (put (host :effects) key true)
-        (ev/go (fn []
-          (def result (try
-            (let [value (if imported (imported (first (call :arguments)))
-                (let [reply (ev/thread-chan 1)]
-                  (defer (ev/chan-close reply)
-                    (ev/thread (fn [[c spec binding args events identity path request index reply cancel]]
-                      (def owner (fiber/root))
-                      (def watcher (when cancel (ev/go (fn []
-                        (try (do (ev/take cancel) (ev/cancel owner {:code "SummaryInvalidated" :message "Summary work invalidated."}))
-                          ([err] (unless (= err :finished) (error err))))))))
-                      (def value (try {:status "ok" :value
-                        (effects/invoke c spec (case binding :chat "model/chat" :rerank "model/rerank" binding) args
-                          (fn [item]
-                            (def ack (ev/thread-chan 1))
-                            (defer (ev/chan-close ack)
-                              (ev/give events {:type "item" :identity identity :path path :request request :index index :item item :ack ack})
-                              (ev/take ack))))}
-                        ([err fiber] {:status (get-in err [:context :outcome] "unknown") :error (config/diagnostic err fiber)})))
-                      (when watcher (ev/cancel watcher :finished))
-                      (ev/give reply value))
-                      [(merge c (get-in c [:vm (call :role)])) spec binding (call :arguments)
-                       (host :events) (s :identity) (h :id) (a :request) index reply cancel] :n)
-                    (def value (ev/take reply)) (unless (= "ok" (value :status)) (error (merge (value :error) {:context {:outcome (value :status)}})))
-                    (value :value))))]
-              (assert (<= (length (config/encode value)) (c :response-bytes)) "effect response limit")
-              {:status "ok" :value (if (nil? value) :null value)})
-            ([err fiber] {:status (get-in err [:context :outcome] "unknown") :error (config/diagnostic err fiber)})))
-          (ev/give (host :events) {:type "receipt" :identity (s :identity) :path (h :id) :request (a :request) :index index :result result
-            :binding binding :policy c :world (run :world)})))))))
+    (or (get (host :effects) key) (and (get spec :import) (not imported) (not (call :dispatched)))) nil
+    (call :dispatched)
+    (receipt host s h index {:status "unknown" :error {:code "EffectOutcomeUnknown" :message "Dispatched without an outcome; not repeated."}})
+    (do
+      (def cancel (when summary-key (ev/thread-chan 1)))
+      (when summary-key (put (s :summary-work) summary-key @{:node (prepared :node) :origin [(a :request) index] :cancel cancel :waiters @[]}))
+      (put call :dispatched true) (store/save s h c) (put (host :effects) key true)
+      (ev/go (fn []
+        (def result (try
+          (let [value (if imported (imported (first (call :arguments)))
+              (let [reply (ev/thread-chan 1)]
+                (defer (ev/chan-close reply)
+                  (ev/thread (fn [[c spec binding args events identity path request index reply cancel]]
+                    (def owner (fiber/root))
+                    (def watcher (when cancel (ev/go (fn []
+                      (try (do (ev/take cancel) (ev/cancel owner {:code "SummaryInvalidated" :message "Summary work invalidated."}))
+                        ([err] (unless (= err :finished) (error err))))))))
+                    (def value (try {:status "ok" :value
+                      (effects/invoke c spec (case binding :chat "model/chat" :rerank "model/rerank" binding) args
+                        (fn [item]
+                          (def ack (ev/thread-chan 1))
+                          (defer (ev/chan-close ack)
+                            (ev/give events {:type "item" :identity identity :path path :request request :index index :item item :ack ack})
+                            (ev/take ack))))}
+                      ([err fiber] {:status (get-in err [:context :outcome] "unknown") :error (config/diagnostic err fiber)})))
+                    (when watcher (ev/cancel watcher :finished))
+                    (ev/give reply value))
+                    [(merge c (get-in c [:vm (call :role)])) spec binding (call :arguments)
+                     (host :events) (s :identity) (h :id) (a :request) index reply cancel] :n)
+                  (def value (ev/take reply)) (unless (= "ok" (value :status)) (error (merge (value :error) {:context {:outcome (value :status)}})))
+                  (value :value))))]
+            (assert (<= (length (config/encode value)) (c :response-bytes)) "effect response limit")
+            {:status "ok" :value (if (nil? value) :null value)})
+          ([err fiber] {:status (get-in err [:context :outcome] "unknown") :error (config/diagnostic err fiber)})))
+        (ev/give (host :events) {:type "receipt" :identity (s :identity) :path (h :id) :request (a :request) :index index :result result
+          :binding binding :policy c :world (run :world)}))))))
 (defn schedule [host]
   (var retry true)
   (while retry (set retry false)

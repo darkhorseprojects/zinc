@@ -55,9 +55,10 @@
   (when (s :db) (query s "UPDATE journal SET data=?,image=? WHERE id=?" [bytes (when (r :image) (buffer (r :image))) (r :id)]))
   (put (s :rows) (r :id) r) r)
 (defn append [s h data c &opt image]
-  (assert (<= (+ (length (config/encode data)) (length (or image ""))) (c :journal-bytes)) "event byte limit")
+  (def bytes (config/encode data))
+  (assert (<= (+ (length bytes) (length (or image ""))) (c :journal-bytes)) "event byte limit")
   (def id (if (s :db) ((first (query s "INSERT INTO journal(previous,data,image) VALUES(?,?,?) RETURNING id"
-    [(h :point) (config/encode data) (when image (buffer image))])) :id)
+    [(h :point) bytes (when image (buffer image))])) :id)
     (do (put s :next-row (- (s :next-row) 1)) (s :next-row))))
   (def r @{:id id :previous (h :point) :data (merge data) :image image})
   (put (s :rows) id r) (put h :point id) r)
