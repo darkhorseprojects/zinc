@@ -46,6 +46,7 @@ same_invocation if {
 	current.policy == input.policy
 	current.settings.handle == input.settings.handle
 	current.settings.janet == input.settings.janet
+	object.get(current.settings, "imports", {}) == input.settings.imports
 	object.subset(input.settings.limits, current.settings.limits)
 	base := current.settings.config
 	effective := input.settings.config

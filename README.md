@@ -44,7 +44,7 @@ agc run .
 ```
 
 Connect a bot once; existing credentials do not need reconnecting after source updates. Zinc does not start or download
-model servers. For ChatGPT plan inference, use `agc login chatgpt DIRECTORY`, then configure `credential-command` as `["/absolute/path/to/agc", "credential", "chatgpt", "YOUR_HANDLE"]`. Use `https://api.openai.com` with `/v1/responses`, and a chat catalogue `{ "path": "/v1/models", "format": "chatgpt-plan" }`. Credentials remain in the keyring.
+model servers. For ChatGPT plan inference, use `agc login chatgpt DIRECTORY`, then configure `credential-command` as `["/absolute/path/to/agc", "credential", "chatgpt", "YOUR_HANDLE"]`. Name the provider `chatgpt` and set `"models": {"*": {}}` to allow visible plan models. Zinc uses the same account bearer at `https://api.openai.com` for discovery and Responses. Credentials remain in the keyring.
 
 ## Entry points and commands
 
@@ -52,7 +52,7 @@ The agent owns `main` and imports PA. `janet -t src/main.janet` requires `PA_HAN
 `invoke(input, config, imports)` receives bytes, opaque agent configuration, and callable Janet imports. PA correlates
 concurrent invocations and reverse calls; it does not load agents or schedule application work.
 
-Discovery supplies command descriptors, writable setting IDs and intake limits. It grants no
+Discovery supplies commands, a config schema and intake limits. It grants no
 authority. `prepare` translates source events and options into Zinc input and opaque configuration. `position(config)`
 returns the selected configuration and `through`, the last committed coverage cursor. `append(config, {records, scan})`
 commits evidence and, when supplied, a `{after, through}` coverage claim in one transaction. A stale `after` fails with
@@ -94,7 +94,9 @@ same prompt assembler in a RAM-only execution.
 reasoning belongs under `chat.thinking` or `summary.thinking`. Unsupported reasoning settings fail instead of being
 ignored. Summary quotas are `summary.bytes` and `summary.max-bytes`.
 
-`writable` selects setting IDs independently of VM grants. Host offerings belong in the deployment. Per-role VM `imports` are boolean namespace grants; `bindings` filters individual names. Model `allow` maps `chat` or `rerank` to exact provider IDs or `"*"`. Each role has a `catalogue` path and format (`openai-data` or `chatgpt-plan`). Provider `defaults` and per-ID `models` refine capabilities or context limits; neither creates catalogue entries. `/models` lists current selections followed by concrete allowed references.
+I set a default under each role and list the allowed IDs under `providers.NAME.models`. Zinc reads `/v1/models` once per provider during discovery. An exact ID can override properties from `"*"`. Neither setting creates a model that the provider didn't list. For a mixed provider I set `role` explicitly. `/models` shows my current selections even when one has disappeared.
+
+VM `imports` grant namespaces to each role; `bindings` filters individual names. Neither setting exposes config fields to a host.
 
 One effective registry supplies installation, documentation, argument checks, resources and marshaling aliases. Managed
 tasks inherit their role; retained functions cannot bypass the current role's grants. `output` is private caller-supplied
@@ -172,12 +174,8 @@ are never deleted. FTS indexing is incremental and scoped; stopwords, Cygnet exp
 reranking retrieve originals hidden behind chronological summaries. There are no embeddings.
 
 Responses API completed items commit and publish at `response.output_item.done`, before generation completion. Chat
-Completions uses the earliest confirmed protocol boundary and preserves OpenRouter usage chunks. Errors, blocking,
+Completions requests a complete JSON choice, including any usage the provider reports. Errors, blocking,
 length limits and incomplete streams do not become successful answers. Native provider conversation material is retained
 as required; it is not execution replay.
 
-Zinc emits typed data; AGC renders reasoning as quotes, responses as Markdown, Janet calls in `clojure` fences, and
-results in unlabeled fences. Results reference their script output IDs. The footer carries the start event, result event
-and status separately from the text. Metadata attaches to the last delivered fragment when possible. Typing follows actual
-active work. No token-preview journal or second publication
-path exists.
+Zinc renders a published script as fenced Markdown. Its ID names the durable store and journal row. A result replies to that row, including when an effect has its own call row. RAM-only output has no durable ID. The journal records what happened during execution; it doesn't confirm that anyone received the output.

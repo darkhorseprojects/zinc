@@ -17,14 +17,6 @@
   @{:left left :right right :count (+ (l :count) (r :count)) :cost (+ 2 (l :cost) (r :cost))
     :low (min (l :low) (r :low)) :high (max (l :high) (r :high))
     :worlds (distinct (array/concat @[] (l :worlds) (r :worlds)))})
-(defn measure [s ref]
-  (def n (node s ref))
-  (unless (n :cost)
-    (if-let [source (n :source)]
-      (merge-into n {:cost (+ (length (header s n)) (- (n :end) (n :start))) :low source :high source
-        :worlds [(get-in (store/row s source) [:data :world])]})
-      (merge-into n (branch (n :left) (n :right) (measure s (n :left)) (measure s (n :right))))))
-  n)
 (defn extend [s r roots c &opt link evidence]
   (def forest (map tuple/slice (or roots []))) (def nodes (get-in r [:data :nodes] @[]))
   (def original (if evidence (store/row s evidence) r)) (def text (store/text original))
@@ -41,8 +33,8 @@
       (array/push nodes leaf))
     (while (>= (length forest) 2)
       (def right (last forest)) (def left (forest (- (length forest) 2)))
-      (def l (if (and (= (r :id) (left 0)) (get (nodes (left 1)) :cost)) (nodes (left 1)) (measure s left)))
-      (def rr (if (and (= (r :id) (right 0)) (get (nodes (right 1)) :cost)) (nodes (right 1)) (measure s right)))
+      (def lookup |(if (= (r :id) ($ 0)) (nodes ($ 1)) (node s $)))
+      (def l (lookup left)) (def rr (lookup right))
       (unless (= (l :count) (rr :count)) (break))
       (array/pop forest) (array/pop forest) (array/push forest [(r :id) (length nodes)])
       (array/push nodes (branch left right l rr)))
@@ -84,11 +76,11 @@
     (def existing (find-index |(and (= ($ :left) root) (= ($ :right) right)) nodes))
     (if existing (set root [(r :id) existing])
       (do (def next [(r :id) (length nodes)])
-        (array/push nodes (branch root right (measure s root) (measure s right)))
+        (array/push nodes (branch root right (node s root) (node s right)))
         (set root next) (store/replace s r c)))) root)
 (defn selected [s roots excluded c]
   (catseq [raw :in roots :let [ref (tuple/slice raw)]]
-    (def n (measure s ref))
+    (def n (node s ref))
     (if (and (every? (map |(index-of $ (c :worlds)) (n :worlds)))
         (not (some |(and (number? $) (<= (n :low) $ (n :high))) excluded)))
       [ref]
@@ -121,7 +113,7 @@
     (when (and (affected (job :node)) (not (job :cancelled)))
       (put job :cancelled true)
       (ev/give (job :cancel) true))) ref)
-(defn cost [s ref] ((measure s ref) :cost))
+(defn cost [s ref] ((node s ref) :cost))
 (defn need [s ref c limit &opt replacement]
   (def n (node s ref))
   (unless replacement

@@ -11,26 +11,16 @@
 (def runtime (store/digest (string janet/version janet/build janet/config-bits (slurp (path/join directory "../project.janet"))
   (string/join (map |(slurp (path/join directory $)) ["main.janet" "policy.janet" "executor.janet" "request.janet" "store.janet" "store.sql" "vm.janet" "agent.janet" "model.janet" "memory.janet" "effects.janet"])))))
 (defn settings [supplied] (policy/parse supplied (dyn :pa/handle) runtime))
-(def options
-  {"chat.model" {:type "string" :description "Chat model"}
-   "chat.thinking" {:type "string" :description "Chat reasoning effort"}
-   "rerank.model" {:type "string" :description "Rerank model"}
-   "summary.model" {:type "string" :description "Summary model"}
-   "summary.thinking" {:type "string" :description "Summary reasoning effort"}
-   "rounds" {:type "integer" :minimum 1 :description "Maximum model rounds"}
-   "context-percent" {:type "integer" :minimum 1 :maximum 100 :description "Shared memory allowance"}
-   "path" {:type "integer" :description "Continue an exact path"}
-   "from" {:type "integer" :description "Fork an exact event"}
-   "memory" {:type "integer" :description "Select exact memory"}
-   "queue" {:type "boolean" :description "Queue on a busy path"}
-   "temporary" {:type "boolean" :description "Use RAM only"}})
+(defn fence [source language]
+  (def marker (string/repeat "`" (+ 1 (reduce max 2 (map length (peg/match ~(any (choice (capture (some "`")) 1)) source))))))
+  (string marker language "\n" source "\n" marker))
 (def reference {:name "reference" :type "integer" :description "Selected ancestry point"})
 (def subtree {:name "node" :type "string" :description "Exact subtree address: event:slot"})
 (def commands
   {"models" {:description "List available models" :options [{:name "role" :type "string" :description "chat, rerank or summary"}]}
    "world-point" {:inspect true :description "Show the selected event" :read (fn [_ point _ _ _] (or point "No event selected."))}
    "world-view" {:inspect true :description "Render world source" :options [reference]
-     :read (fn [s point _ c _] {:point point :language "clojure" :text (vm/view (store/image s point) c)})}
+     :read (fn [s point _ c _] (fence (vm/view (store/image s point) c) "clojure"))}
    "world-inspect" {:inspect true :description "Inspect evidence" :options [reference]
      :read (fn [s point _ _ _] (assert point {:code "NoPoint" :message "No event selected."}) {:point point :event ((store/row s point) :data)})}
    "render" {:inspect true :description "Inspect the assembled model prompt" :options [reference]}
@@ -45,14 +35,14 @@
     (policy/selected? (spec :binding) (get-in c [:vm :user :bindings])))))
 (defn describe [supplied]
   (def c (settings supplied))
-  {:schema (tabseq [name :in (c :writable)] name (assert (options name) "unknown writable setting"))
+  {:configSchema policy/schema
    :commands (seq [[name spec] :in (sorted (pairs commands)) :when (exposed? c spec)]
      {:name name :description (spec :description) :options (get spec :options [])})
    :intake {:max_records (c :history-records) :image_bytes (c :image-bytes)}})
-(defn prepare [base context overlay overrides input]
+(defn prepare [base context input]
   (def c (settings base))
   (def config (merge base {:conversation (context :conversation) :request (context :request) :scope (context :scope)}))
-  (when (input :passive) (break {:config config :input :null :options {} :history (not (c :temporary))}))
+  (when (input :passive) (break {:config config :input :null :history (not (c :temporary))}))
   (def command (get-in context [:command :name]))
   (when command (assert (exposed? c (commands command)) "command not granted"))
   (def operation (or command "submit"))
@@ -64,25 +54,10 @@
     (assert (and (string? node) (peg/match ~(* (? "-") (some :d) ":" (some :d) -1) node)) "Subtree addresses are event:slot")
     (put arguments :node (map scan-number (string/split ":" node))))
   (when (arguments :reference) (put arguments :point (arguments :reference)))
-  (assert (not (and (overrides :from) (overrides :path))) "path and from are mutually exclusive")
-  (def effective (merge overlay overrides))
-  (when (overrides :from) (put effective :path nil))
-  (when (overrides :path) (put effective :from nil))
-  (var catalogue nil)
-  (each [name value] (pairs effective)
-    (def name (string name))
-    (def field (get options name))
-    (assert (and field (index-of name (c :writable))) "option is not exposed")
-    (def location (map keyword (string/split "." name)))
-    (assert (case (field :type) "string" (and (string? value) (> (length value) 0)) "boolean" (boolean? value)
-      "integer" (and (int? value) (<= (get field :minimum (- math/inf)) value (get field :maximum math/inf)))) "invalid option value")
-    (when (and (not= "models" operation) (string/has-suffix? ".model" name))
-      (unless catalogue (set catalogue (effects/catalogue c @{})))
-      (model/select (merge c {:catalogue catalogue}) (if (= name "rerank.model") "rerank" "chat") value))
-    (when (= name "path") (put config :from nil))
-    (when (= name "from") (put config :path nil))
-    (when (= 2 (length location)) (put config (location 0) (merge (get config (location 0) {}))))
-    (put-in config location value))
+  (when (and (= operation "submit") (some |(get-in c [$ :model]) [:chat :summary :rerank]))
+    (put c :catalogue (effects/catalogue c))
+    (each role [:chat :summary :rerank] (when-let [ref (get-in c [role :model])]
+      (model/select c (if (= role :rerank) "rerank" "chat") ref))))
   (def kind (get config :input "text"))
   (def text (get input :text ""))
   (def body (if (and (= kind "json") (= operation "submit") (not (empty? text)))
@@ -91,10 +66,11 @@
   (when (not (empty? (get input :images []))) (put body :images (input :images)))
   (put body :at (input :at)) (put body :source {:key (input :key)})
   (merge-into config {:operation operation :arguments arguments :input "json"})
-  {:config config :input body :options effective
+  {:config config :input body
    :history (and (= operation "submit") (not (get config :temporary false)))})
 
-(defn append-evidence [host s c batch]
+(defn append [host supplied batch]
+  (def c (settings supplied)) (def s (store/storage host c))
   (def records (batch :records)) (def scan (batch :scan))
   (assert (and (s :db) (indexed? records) (<= (length records) (c :history-records))) "evidence batch limit")
   (each source records
@@ -110,21 +86,16 @@
     (def seen (tabseq [r :in intake :when (r :key)] (r :key) true))
     (each source records (unless (seen (source :key))
       (put seen (source :key) true)
-      (def base (store/anchor host s h c))
-      (def r (store/append s h (merge base {:kind "evidence"
-        :source {:key (source :key) :conversation (c :conversation)} :author (source :author)
-        :at (source :at) :text (source :text)}) c))
-      (def roots (memory/extend s r (base :memory) c))
-      (when (get-in h [:run :active]) (put-in h [:run :memory] roots))))
+      (executor/append-event host s h c {:kind "evidence" :source {:key (source :key) :conversation (c :conversation)}
+        :author (source :author) :at (source :at) :text (source :text)})))
     (when scan (store/append s h (merge (store/anchor host s h c) {:kind "coverage"
       :coverage {:conversation (c :conversation) :through (scan :through)}}) c))
     (store/save s h c)
     true))
 (defn same-source? [a c caller]
-  (and a (= caller (a :author)) (= (policy/encode (c :scope)) (policy/encode (get-in a [:policy :scope])))))
+  (and a (= caller (a :author)) (= (policy/encode (c :scope)) (policy/encode (get-in a [:policy :scope] (a :scope))))))
 (defn enter [host bytes c caller attachment]
   (def operation (c :operation))
-  (def started (os/clock))
   (def spec (commands operation))
   (when spec (assert (exposed? c spec) "command not granted"))
   (when (= operation "render")
@@ -133,13 +104,13 @@
     (def point (when (h :point) (store/nearest source (h :point) (get-in c [:arguments :reference]) c)))
     (put c :temporary true) (put c :path nil) (put c :from point))
   (def s (store/storage host c)) (put attachment :store s)
-  (policy/trace c "storage" {:operation operation :temporary (c :temporary) :ms (* 1000 (- (os/clock) started))})
   (when (c :initialize) (break {:done true :value true}))
   (def args (c :arguments))
   (when (index-of operation ["read" "cancel" "resume"])
     (def work (c :work))
     (store/permit s (store/head s (work :path)) c)
-    (assert (same-source? (store/admission s work) c caller) {:code "NotAuthorized" :message "Work belongs to another source."})
+    (def a (store/admission s (work :request)))
+    (assert (and (= (get a :path) (work :path)) (same-source? a c caller)) {:code "NotAuthorized" :message "Work belongs to another source."})
     (case operation
       "read" (break {:done true :value (store/result s work)})
       "cancel" (break {:done true :value (executor/cancel host s work c)})))
@@ -169,40 +140,25 @@
       ((attachment :requests) (a :owner)))
       (put (attachment :requests) (a :request) true)
       (put (host :owners) key attachment)))
-  (policy/trace c "admit" {:request (work :request) :path (work :path) :cursor cursor :ms (* 1000 (- (os/clock) started))})
   {:work work :cursor cursor})
-(defn footer [f] (string "#" (f :start) " → #" (f :result) " · " (f :status)))
 (defn observe [host entry attachment c imports]
   (def s (attachment :store)) (def work (entry :work)) (var cursor (entry :cursor))
-  (def requests (attachment :requests)) (def delivered @{}) (var active nil) (var result nil) (var end nil)
+  (def emit (module/value imports 'output)) (var result nil)
   (while true
-    (each r (store/rows s cursor)
-      (when (and (requests (get-in r [:data :request])) (get-in r [:data :presentation])
-        (not (and (= (work :request) (get-in r [:data :request])) (get-in r [:data :terminal])
-          (not= "ok" (get-in r [:data :outcome :status]))))
-        (index-of (get-in r [:data :presentation :type]) (c :publish)))
-        (when-let [emit (module/value imports 'output)]
-          (def output (merge (get-in r [:data :presentation])
-            {:text (store/text (if-let [id (get-in r [:data :evidence])] (store/row s id) r))}))
-          (when (output :footer) (put output :footer (footer (output :footer))))
-          (emit output)
-          (when (and (= "response" (output :type)) (not (output :footer))) (put delivered (output :id) (r :id)))))
-      (set cursor (r :id)))
-    (each [id point] (pairs delivered)
-      (def r (store/row s point)) (def f (get-in r [:data :presentation :footer]))
-      (when (and (get-in r [:data :terminal]) f)
-        ((module/value imports 'output) {:type "metadata" :id id :footer (footer f)}) (put delivered id nil)))
-    (def working (some |(requests (get-in $ [:run :active :request])) (values (s :heads))))
-    (unless (= active working) (set active working)
-      (when-let [emit (module/value imports 'output)] (emit {:type "activity" :active (not (nil? active))})))
     (set result (or (get (host :results) [(s :identity) (work :request)]) (store/result s work)))
-    (if result
-      (do (unless end (set end (store/cursor s)))
-        (when (if (s :db) (>= cursor end) (<= cursor end)) (break)))
-      (ev/take (attachment :changed))))
-  (put (host :results) [(s :identity) (work :request)] nil)
+    (when emit (each r (store/rows s cursor)
+      (def d (r :data)) (def kind (d :publish))
+      (when (and ((attachment :requests) (d :request)) (index-of kind (c :publish))
+        (not (and (= kind "diagnostic") (d :terminal) (= (d :request) (work :request)))))
+        (def text (store/text (if-let [id (d :evidence)] (store/row s id) r)))
+        (emit (merge {:type "text/markdown" :final true :data (case kind
+          "response" text "reasoning" (string "> " (string/replace-all "\n" "\n> " text)) (fence text (get d :language "")))}
+          (if (s :db) {:id (string (s :identity) ":" (r :id))
+            :reply (when (d :reply) (string (s :identity) ":" (d :reply)))} {}))))
+      (set cursor (r :id))))
+    (if result (break) (ev/take (attachment :changed))))
   (unless (= "ok" (result :status)) (error (get result :error {:code "Cancelled" :message "Work cancelled."})))
-  (when (or (not= "submit" (c :operation)) (not (module/value imports 'output)))
+  (when (or (not= "submit" (c :operation)) (not emit))
     (if (result :output) result (result :value))))
 
 (defn invoke [host bytes supplied imports]
@@ -225,7 +181,7 @@
     (ev/give (host :events) {:type "wake"})
     (if (entry :done) (let [value (entry :value)]
       (if (and (= "world-view" (c :operation)) (module/value imports 'output))
-        (do ((module/value imports 'output) (merge value {:type "tool-result"})) nil) value))
+        (do ((module/value imports 'output) {:type "text/markdown" :data value :final true}) nil) value))
       (observe host entry root c imports))))
 
 (defn activate [host supplied authority]
@@ -240,5 +196,3 @@
   (store/transact s
     (def h (store/selected host s c)) (def target (merge supplied {:path (h :id)})) (put target :from nil)
     {:config target :through (get (find |($ :through) (store/intake s (h :point) (c :conversation) [])) :through :null)}))
-(defn append [host supplied batch]
-  (def c (settings supplied)) (append-evidence host (store/storage host c) c batch))

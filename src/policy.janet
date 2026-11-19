@@ -5,7 +5,7 @@
 
 (def directory (path/abspath (path/join (path/dirname (dyn :source)) "..")))
 (def defaults
-  {:writable [] :world "main" :worlds ["main"] :input "text" :operation "submit" :conversation "default" :initialize false :inspect false :rewind false :profile false
+  {:world "main" :worlds ["main"] :input "text" :operation "submit" :conversation "default" :initialize false :inspect false :rewind false :profile false
    :vm {:user {:bindings ["*"] :imports {} :fs {} :http {} :processes {} :modules {}}
         :agent {:bindings ["*"] :imports {} :fs {} :http {} :processes {} :modules {}}}
    :instructions (path/join directory "zinc.md") :temporary false :queue false :publish ["reasoning" "response" "tool-call" "tool-result" "diagnostic"] :arguments {}
@@ -35,30 +35,44 @@
 
 (def diagnostic pa/diagnostic)
 
-(defn trace [c event data]
-  (when (c :profile)
-    (eprint (encode (merge {:event event :at (os/clock)} data)))))
-
 (defn selected? [name selections]
   (some |(or (= $ "*") (= $ name)
     (and (string/has-suffix? "/*" $) (string/has-prefix? (string/slice $ 0 -1) name))) selections))
 
+(def model-field {:type "string" :minLength 1 :description "Provider:model reference"})
+(def thinking {:type "string" :minLength 1 :description "Reasoning effort"})
+(def role {:type "object" :properties {:model model-field :thinking thinking}})
+(def schema {:type "object" :properties
+  {:chat role :summary role :rerank {:type "object" :properties {:model model-field}}
+   :rounds {:type "integer" :minimum 1 :description "Maximum model rounds"}
+   :context-percent {:type "integer" :minimum 1 :maximum 100 :description "Shared memory allowance"}
+   :path {:type "integer" :description "Continue an exact path"} :from {:type "integer" :description "Fork an exact event"}
+   :memory {:type "integer" :description "Select exact memory"} :queue {:type "boolean" :description "Queue on a busy path"}
+   :temporary {:type "boolean" :description "Use RAM only"}}})
+(defn validate [field value]
+  (assert (case (field :type)
+    "object" (and (dictionary? value) (do (each [k child] (pairs (field :properties)) (when (has-key? value k) (validate child (value k)))) true))
+    "string" (and (string? value) (>= (length value) (get field :minLength 0)))
+    "integer" (and (int? value) (<= (get field :minimum (- math/inf)) value (get field :maximum math/inf)))
+    "boolean" (boolean? value)) (string "invalid " (field :description))))
 (defn parse [supplied handle runtime]
   (def allowed (array/concat @[:store :directory :context-quota :output :request :path :from :memory :work :scope] (keys defaults)))
   (each k (keys supplied) (assert (index-of k allowed) (string "unknown setting " k)))
   (def c (json/decode (encode (merge defaults supplied)) true true))
   (each role [:chat :rerank :summary] (put c role (merge (defaults role) (c role))))
+  (validate schema c)
+  (assert (not (and (c :path) (c :from))) "path and from are mutually exclusive")
   (each k [:store :directory :instructions :cygnet :stopwords]
     (assert (and (string? (c k)) (path/abspath? (c k))) (string "absolute path required: " k)))
   (each [k v] (pairs defaults)
-    (when (or (boolean? v) (number? v))
+    (when (and (not (has-key? (schema :properties) k)) (or (boolean? v) (number? v)))
       (assert (= (type v) (type (c k))) (string "invalid setting " k))
       (when (number? v) (assert (and (< (math/abs (c k)) math/inf) (or (= k :score) (>= (c k) 0))) "invalid numeric setting"))))
   (each k [:parallel :tasks :depth :pending :response-bytes :world-bytes :journal-bytes :history-records :page-bytes]
     (assert (and (int? (c k)) (> (c k) 0)) (string "positive integer required: " k)))
-  (assert (and (<= 1 (c :context-percent) 100) (index-of (c :world) (c :worlds))) "invalid context/world selection")
+  (assert (index-of (c :world) (c :worlds)) "invalid context/world selection")
   (assert (index-of (c :input) ["text" "code" "json"]) "invalid input encoding")
-  (each k [:worlds :publish :writable] (assert (and (indexed? (c k)) (every? (map string? (c k)))) "expected an array of strings"))
+  (each k [:worlds :publish] (assert (and (indexed? (c k)) (every? (map string? (c k)))) "expected an array of strings"))
   (each k [:vm :providers :chat :rerank :summary :arguments] (assert (dictionary? (c k)) "expected a configuration object"))
   (each role (keys (c :vm)) (assert (index-of role [:user :agent]) "unknown VM role"))
   (each role [:user :agent]
@@ -73,14 +87,13 @@
     (each endpoint (values (settings :http))
       (assert (and (string? (endpoint :url)) (string/has-suffix? "/" (endpoint :url)) (indexed? (endpoint :methods))) "invalid HTTP grant")))
   (each [name provider] (pairs (c :providers))
-    (assert (and (string? (provider :url)) (index-of (get provider :protocol "chat-completions") ["chat-completions" "responses"])
+    (when (= :chatgpt name)
+      (assert (= "https://api.openai.com" (get provider :url "https://api.openai.com")) "invalid ChatGPT origin")
+      (put provider :url "https://api.openai.com") (put provider :protocol "responses"))
+    (assert (and (string? (provider :url)) (dictionary? (provider :models))
+      (every? (map |(index-of $ [:url :protocol :credential-command :token-env :headers :models :parameters :cache-key :web-tools]) (keys provider)))
       (not (and (provider :token-env) (provider :credential-command)))) "invalid provider")
-    (assert (and (dictionary? (provider :allow)) (not (empty? (provider :allow)))) "provider requires model selectors")
-    (each [role selectors] (pairs (provider :allow))
-      (def endpoint (get-in provider [:catalogue role]))
-      (assert (and (index-of role [:chat :rerank]) (indexed? selectors) (every? (map string? selectors))
-        (index-of (get endpoint :format) ["chatgpt-plan" "openai-data"]) (string? (get endpoint :path))
-        (string/has-prefix? "/" (endpoint :path))) "invalid model catalogue"))
+    (each spec (values (provider :models)) (assert (dictionary? spec) "expected model properties"))
     (when (provider :credential-command) (assert (path/abspath? ((provider :credential-command) 0)) "credential executable must be absolute"))
     (each key (keys (get provider :parameters {}))
       (assert (not (index-of key [:model :messages :input :instructions :tools :tool_choice :stream :stream_options :store :include

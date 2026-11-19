@@ -9,31 +9,25 @@
     {:type "image" :url "[provider-dependent image tokens]"} $) value))) 4)))
 (defn text [parts] (string/join (map |($ :text) (filter |(= "text" ($ :type)) parts)) "\n"))
 
-(defn descriptor [name endpoint r props]
-  (def id (r :id)) (def spec (merge (get endpoint :defaults {}) (get-in endpoint [:models (keyword id)] {})))
+(defn descriptor [name endpoint id r spec]
   (def parameters (get r :supported_parameters []))
-  (def caps (get props :chat_template_caps {}))
-  (def context (min (get r :context_length math/inf) (get-in r [:top_provider :context_length] math/inf)
-    (get-in props [:default_generation_settings :n_ctx] math/inf) (get spec :context math/inf)))
-  (merge {:name (get r :name id)
-    :protocol (get endpoint :protocol "chat-completions")
-    :tools (if props (and (caps :supports_tools) (caps :supports_tool_calls)) (not (nil? (index-of "tools" parameters))))
-    :parallel (if props (caps :supports_parallel_tool_calls) (not (nil? (index-of "parallel_tool_calls" parameters))))
-    :images (if props (get-in props [:modalities :vision]) (not (nil? (index-of "image" (get-in r [:architecture :input_modalities] [])))))
-    :control (if props (when (caps :supports_reasoning_effort) "reasoning_effort")
-      (cond (index-of "reasoning" parameters) "reasoning" (index-of "reasoning_effort" parameters) "reasoning_effort"))
-    :efforts (if props (caps :reasoning_effort_levels) (get-in r [:reasoning :supported_efforts]))
+  (merge {:role (get r :role (when (= name :chatgpt) "chat")) :context (or (r :context_length) (r :context_window))
+    :tools (not (nil? (index-of "tools" parameters))) :parallel (not (nil? (index-of "parallel_tool_calls" parameters)))
+    :images (not (nil? (index-of "image" (get-in r [:architecture :input_modalities] []))))
+    :control (find |(index-of $ parameters) ["reasoning" "reasoning_effort"]) :efforts (get-in r [:reasoning :supported_efforts])
     :reasoning-required (get-in r [:reasoning :mandatory])
     :output (get-in r [:top_provider :max_completion_tokens])
     :output-field (if (= "responses" (endpoint :protocol)) "max_output_tokens" "max_tokens")}
-    spec {:ref (string name ":" id) :provider (string name) :id id :role (r :role) :context (when (< context math/inf) context)}))
+    spec {:ref (string name ":" id) :provider (string name) :id id :name (or (r :display_name) (r :name) id)
+          :protocol (get endpoint :protocol "chat-completions")}))
 
+(defn resolve [catalogue role ref] (find |(and (= ref ($ :ref)) (= role ($ :role))) catalogue))
 (defn describe [c catalogue failures]
   (def role (get-in c [:arguments :role]))
   (assert (or (not role) (index-of role ["chat" "rerank" "summary"])) "unknown model role")
   (def current (seq [key :in [:chat :summary :rerank] :when (or (not role) (= role (string key)))]
     (def ref (or (get-in c [key :model]) (when (= key :summary) (get-in c [:chat :model]))))
-    (string key ": " (or ref "not set") (if (and ref (not (find |(and (= ref ($ :ref)) (= (if (= key :rerank) "rerank" "chat") ($ :role))) catalogue))) " (unavailable)" ""))))
+    (string key ": " (or ref "not set") (if (and ref (not (resolve catalogue (if (= key :rerank) "rerank" "chat") ref))) " (unavailable)" ""))))
   (string "Current\n" (string/join current "\n") "\n\nAllowed\n"
     (string/join (seq [r :in catalogue :when (or (not role) (= (if (= role "summary") "chat" role) (r :role)))]
       (string (r :role) ": " (r :ref) (if (= (r :name) (r :id)) "" (string " — " (r :name))))) "\n")
@@ -41,8 +35,7 @@
 
 (defn select [c role &opt reference]
   (def ref (or reference (get-in c [(if (= role "rerank") :rerank :chat) :model])))
-  (def selected (find |(and (= ref ($ :ref)) (= role ($ :role))) (c :catalogue)))
-  (assert selected (string "model unavailable: " ref)) selected)
+  (assert (resolve (c :catalogue) role ref) (string "model unavailable: " ref)))
 
 (defn window [selected c]
   (def limit (selected :context)) (assert (and (int? limit) (> limit 1)) (string "context capacity required for " (selected :ref)))
@@ -113,10 +106,10 @@
                   {:tool_calls (map |{:id ($ :id) :type "function" :function {:name ($ :name) :arguments ($ :arguments)}} (m :calls))} {}))))))
       (if (= protocol "responses")
         (merge-into body {:input wire :stream true :store false :include ["reasoning.encrypted_content"]})
-        (merge-into body {:messages wire :stream true}))))
+        (put body :messages wire))))
   {:provider (selected :provider) :selected selected :rerank rerank :summary (input :summary) :manifest (input :manifest)
    :node (input :node) :recipe (input :recipe) :quota (input :quota)
-   :path (get endpoint (if rerank :rerank-path :chat-path) (if rerank "/v1/rerank" (if (= protocol "responses") "/v1/responses" "/v1/chat/completions")))
+   :path (if rerank "/v1/rerank" (if (= protocol "responses") "/v1/responses" "/v1/chat/completions"))
    :body (policy/encode body)})
 
 (defn decode [prepared raw]
@@ -232,61 +225,12 @@
     (assert (and (= 0 (length line)) (= 0 (length data))) "incomplete SSE frame")))
 
 (defn receive [prepared response maximum &opt completed]
-  (def protocol (get-in prepared [:selected :protocol]))
-  (def message @{:role "assistant" :content ""}) (def calls @{}) (def details @{})
-  (var finish nil) (var usage nil) (var raw nil) (var terminal false)
+  (label resolved
+
   (each event (events response maximum)
-    (when (= event "[DONE]")
-      (assert (and (= protocol "chat-completions") finish) "unexpected model stream terminator")
-      (set terminal true) (break))
     (when (or (event :error) (index-of (event :type) ["error" "response.failed"]))
       (error {:code "ProviderError" :message (policy/encode (or (event :error) (get-in event [:response :error])))}))
-    (if (= protocol "chat-completions")
-      (do
-        (when (event :usage) (set usage (event :usage)))
-        (assert (<= (length (event :choices)) 1) "expected one assistant choice")
-        (each choice (event :choices)
-          (assert (= 0 (choice :index)) "unexpected assistant choice")
-          (def delta (choice :delta))
-          (when (choice :error)
-            (error {:code "ProviderError" :message (policy/encode (choice :error))}))
-          (when finish
-            (assert (and (event :usage) (= finish (choice :finish_reason))
-              (every? (map (fn [[key value]] (case key
-                :role (= value "assistant") :content (or (nil? value) (= value "")) false)) (pairs delta))))
-              "assistant delta after finish"))
-          (when (delta :role) (assert (= "assistant" (delta :role)) "invalid assistant role"))
-          (each detail (get delta :reasoning_details [])
-            (def index (detail :index))
-            (assert (and (int? index) (>= index 0)) "invalid reasoning index")
-            (unless (details index) (put details index @{}))
-            (each [field value] (pairs detail)
-              (if (index-of field [:text :summary :data])
-                (when value
-                  (assert (string? value) "invalid reasoning delta")
-                  (put (details index) field (string (get (details index) field "") value)))
-                (put (details index) field value))))
-          (each field [:reasoning_content :reasoning :content :refusal]
-            (when-let [text (delta field)]
-              (assert (string? text) "unsupported assistant delta")
-              (put message field (string (get message field "") text))))
-          (when (delta :annotations)
-            (unless (message :annotations) (put message :annotations @[]))
-            (array/concat (message :annotations) (delta :annotations)))
-          (each call (get delta :tool_calls [])
-            (def index (call :index))
-            (assert (and (int? index) (>= index 0)) "invalid tool index")
-            (unless (calls index) (put calls index @{:id "" :type "function" :function @{:name "" :arguments ""}}))
-            (def target (calls index))
-            (when (call :type) (assert (= "function" (call :type)) "unsupported tool type"))
-            (when (call :id) (put target :id (string (target :id) (call :id))))
-            (each field [:name :arguments]
-              (when-let [part (get-in call [:function field])]
-                (assert (string? part) "invalid tool delta")
-                (put (target :function) field (string (get-in target [:function field]) part)))))
-          (when (choice :finish_reason)
-            (set finish (choice :finish_reason)))))
-      (cond
+    (cond
         (= "response.output_item.done" (event :type))
         (when (and completed (not (prepared :summary)))
           (completed (decode (merge prepared {:item-index (event :output_index)})
@@ -294,16 +238,5 @@
         (index-of (event :type) ["response.completed" "response.incomplete"])
         (do (def status (if (= "response.completed" (event :type)) "completed" "incomplete"))
         (assert (= status (get-in event [:response :status] status)) "inconsistent terminal status")
-        (set raw (merge (event :response) {:status status}))
-        (set terminal true))))
-    (when terminal (break)))
-  (assert terminal {:code "IncompleteModelStream" :message "Model stream has no terminal response."})
-  (when (= protocol "chat-completions")
-    (when (> (length calls) 0)
-      (def ordered @[])
-      (each i (sorted (keys calls))
-        (assert (= i (length ordered)) "missing tool call") (array/push ordered (calls i)))
-      (put message :tool_calls ordered))
-    (when (> (length details) 0) (put message :reasoning_details (map |(details $) (sorted (keys details)))))
-    (set raw {:choices [{:message message :finish_reason finish}] :usage usage}))
-  (decode prepared raw))
+        (return resolved (decode prepared (merge (event :response) {:status status}))))))
+  (error {:code "IncompleteModelStream" :message "Model stream has no terminal response."})))

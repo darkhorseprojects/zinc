@@ -22,7 +22,6 @@
 
 (defn request [c endpoint method suffix &opt body prepared completed]
   (assert (and (string? suffix) (or (not (endpoint :credential-command)) (string/has-prefix? "/" suffix))) "invalid credential destination path")
-  (def started (os/clock))
   (def headers (merge {:Content-Type "application/json" :Accept "application/json, text/event-stream"} (get endpoint :headers {})))
   (def secrets @[]) (var connection nil) (var secure false) (var attempted false)
   (try
@@ -51,8 +50,7 @@
               (tls/connect host port {:verify true :hostname host :verify-hostname host :alpn ["http/1.1"]})
               (net/connect host port))))
             (set attempted true) connection)))
-        (def result
-          (if (and prepared (not (prepared :rerank)) (<= 200 (response :status) 299))
+        (if (and (= "responses" (get-in prepared [:selected :protocol])) (not (prepared :rerank)) (<= 200 (response :status) 299))
             (model/receive prepared response (c :response-bytes) completed)
             (do
               (def bytes @"")
@@ -64,47 +62,27 @@
                 (assert (<= 200 (response :status) 299)
                   {:code "ProviderRejected" :message (string "Provider returned HTTP " (response :status) "\n" bytes)
                    :context {:outcome "error" :status (response :status)}}))
-              {:status (response :status) :headers (response :headers) :body (string bytes)})))
-        (policy/trace c "http" {:method method :path suffix :status (response :status)
-          :bytes (length (or body "")) :stream (and prepared (not (prepared :rerank)))
-          :ms (* 1000 (- (os/clock) started))})
-        result))
+              (if prepared (model/decode prepared (json/decode bytes true true))
+                {:status (response :status) :headers (response :headers) :body (string bytes)})))))
     ([err fiber]
       (def d (policy/diagnostic err fiber))
-      (policy/trace c "http-error" {:method method :path suffix :code (d :code)
-        :outcome (get-in d [:context :outcome]) :ms (* 1000 (- (os/clock) started))})
       (each k [:message :detail] (when (d k)
         (put d k (reduce (fn [text secret] (string/replace-all secret "[redacted]" text)) (d k) secrets))))
       (put d :context (merge (or (d :context) {}) {:outcome (get-in d [:context :outcome] (if attempted "unknown" "error"))})) (error d))))
 
 (defn catalogue [c &opt failures]
   (def allowed @[])
-  (def selected (map |(get-in c [$ :model]) [:chat :summary :rerank]))
   (each [name endpoint] (pairs (c :providers))
     (try (do
-      (def rows @[]) (def seen @{}) (def lists @{})
-      (each [role selectors] (pairs (endpoint :allow))
-        (def listing (get-in endpoint [:catalogue role])) (def path (listing :path))
-        (unless (lists path)
-          (def response (request c endpoint "GET" path))
-          (assert (<= 200 (response :status) 299) (string "HTTP " (response :status)))
-          (put lists path (json/decode (response :body) true true)))
-        (def plan (= "chatgpt-plan" (listing :format)))
-        (def items (get (lists path) (if plan :models :data))) (assert (indexed? items) "invalid provider catalogue")
-        (each item items
-          (def id (get item (if plan :slug :id))) (def ref (string name ":" id))
-          (when (and (string? id) (not (empty? id)) (or (not plan) (= "list" (item :visibility)))
-              (or (index-of "*" selectors) (index-of id selectors)) (or failures (index-of ref selected))
-              (not (seen [role id])))
-            (put seen [role id] true)
-            (def props (when (and (not failures) (endpoint :properties))
-              (def encoded (string/join (map |(if (or (<= 48 $ 57) (<= 65 $ 90) (<= 97 $ 122) (index-of $ [45 46 95 126]))
-                (string/from-bytes $) (string/format "%%%02X" $)) (string/bytes id))))
-              (def response (request c endpoint "GET" (string/replace-all "{model}" encoded (endpoint :properties))))
-              (assert (<= 200 (response :status) 299) "model properties failed") (json/decode (response :body) true true)))
-            (array/push rows (model/descriptor name endpoint (merge item {:role (string role) :id id
-              :name (get item :display_name (get item :name id)) :context_length (get item :context_length (item :context_window))}) props)))))
-      (array/concat allowed rows))
+      (def response (request c endpoint "GET" "/v1/models"))
+      (assert (<= 200 (response :status) 299) (string "HTTP " (response :status)))
+      (def plan (= name :chatgpt))
+      (def rows ((json/decode (response :body) true true) (if plan :models :data)))
+      (assert (indexed? rows) "expected model list")
+      (array/concat allowed (seq [r :in rows :let [id (r (if plan :slug :id))]
+        :when (and (string? id) (not (empty? id)) (not= "*" id) (or (not plan) (= "list" (r :visibility))))
+        :let [wild (get-in endpoint [:models :*]) exact (get-in endpoint [:models (keyword id)])] :when (or exact wild)]
+        (model/descriptor name endpoint id r (merge (or wild {}) (or exact {}))))))
       ([err] (if failures (put failures name (if (dictionary? err) (err :message) (string err)))
         (eprint (string name ": catalogue unavailable")))))) allowed)
 
@@ -115,10 +93,7 @@
     (index-of binding ["model/chat" "model/rerank"])
     (let [prepared (first args) endpoint (get-in c [:providers (keyword (prepared :provider))])]
       (set attempted true)
-      (if (prepared :rerank)
-        (let [response (request c endpoint "POST" (prepared :path) (prepared :body) prepared)]
-          (model/decode prepared (json/decode (response :body) true true)))
-        (request c endpoint "POST" (prepared :path) (prepared :body) prepared completed)))
+      (request c endpoint "POST" (prepared :path) (prepared :body) prepared completed))
     (index-of binding ["fs/list" "fs/read" "fs/write"])
     (do
       (assert (= (length args) (if (= binding "fs/write") 3 2)) "invalid filesystem arguments")

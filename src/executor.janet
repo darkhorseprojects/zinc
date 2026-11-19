@@ -11,19 +11,23 @@
     :bindings (run :bindings-point) :world-point (run :expected) :author (c :handle) :at (os/clock)} data) c (when changed image)))
   (put run :memory (memory/extend s r (run :memory) c false evidence))
   (when changed (put run :dirty false) (put run :bindings-point (r :id)))
-  (when (index-of (get-in r [:data :presentation :type]) ["tool-call" "tool-result"])
-    (put (r :data) :presentation (merge (get-in r [:data :presentation])
-      {:footer {:start (a :start) :result (r :id)
-        :status (if (= "tool-call" (get-in r [:data :presentation :type])) "call" (get-in data [:outcome :status] "ok"))}}))
-    (store/replace s r c)) r)
+  r)
 (defn update [run r]
   (unless (run :updates) (put run :updates @[]))
   (array/push (run :updates) {:id (r :id) :text (store/text r)}))
+(defn notify-parent [s a r]
+  (when-let [owner (a :owner) h (find |(= owner (get-in $ [:run :active :request])) (values (s :heads)))]
+    (def run (h :run)) (def c (get-in run [:active :policy]))
+    (put run :memory (memory/extend s r (run :memory) c true)) (update run r) (store/save s h c)))
+(defn append-event [host s h c data]
+  (def base (store/anchor host s h c))
+  (def r (store/append s h (merge base {:at (os/clock)} data) c))
+  (def roots (memory/extend s r (base :memory) c))
+  (when (h :run) (put (h :run) :memory roots)) r)
 (defn finish [host s h outcome &opt packet]
   (def run (h :run)) (def a (run :active)) (def c (a :policy))
-  (def started (os/clock))
   (store/transact s
-    (if (a :maintenance) (put (host :results) [(s :identity) (a :request)] outcome)
+    (if (not= "submit" (c :operation)) (put (host :results) [(s :identity) (a :request)] outcome)
       (do
         (def world (store/world s (run :world)))
         (def conflict (and (= "ok" (outcome :status)) (run :changed) (not= (run :expected) (world :point))))
@@ -31,28 +35,18 @@
           :message "World publication conflicted. Candidate bindings are retained; effects were not repeated."}} outcome))
         (def existing (when (and (= "ok" (result :status)) (run :answer)) (store/row s (run :answer))))
         (def r (or existing (record s h a {:kind "result" :outcome result
-          :presentation {:type (if (= "ok" (result :status)) "tool-result" "diagnostic") :id (string (a :request) "/result")
-            :reply (string (a :request) "/script")}} (get packet :bindings))))
+          :publish (if (= "ok" (result :status)) "tool-result" "diagnostic") :reply (when (get-in a [:input :code]) (a :start))} (get packet :bindings))))
         (when (and existing (run :dirty) (packet :bindings))
           (put r :image (packet :bindings)) (put run :bindings-point (r :id)))
         (merge-into (r :data) {:terminal true :outcome (if existing {:status (result :status)} result)
           :bindings (run :bindings-point)})
-        (put (r :data) :presentation (merge (get-in r [:data :presentation])
-          {:footer {:start (a :start) :result (r :id) :status (result :status)}}))
-        (store/replace s r c)
-        (when (a :owner)
-          (when-let [parent (find |(= (a :owner) (get-in $ [:run :active :request])) (values (s :heads)))]
-            (def parent-run (parent :run)) (def policy (get-in parent-run [:active :policy]))
-            (put parent-run :memory (memory/extend s r (parent-run :memory) policy true)) (update parent-run r)
-            (store/save s parent policy)))
+        (store/replace s r c) (notify-parent s a r)
         (when (and (run :changed) (= "ok" (result :status)))
           (put (r :data) :world-point (r :id)) (store/replace s r c)
           (put world :point (r :id)) (store/save s world c))))
     (def queue (run :queue))
     (put (host :owners) [(s :identity) (a :request)] nil)
-    (put h :run (when (not (empty? queue)) @{:queue queue})) (store/save s h c))
-  (policy/trace c "finish" {:path (h :id) :request (a :request) :status (outcome :status)
-    :code (get-in outcome [:error :code]) :ms (* 1000 (- (os/clock) started))}))
+    (put h :run (when (not (empty? queue)) @{:queue queue})) (store/save s h c)))
 (defn submit [host s input c caller]
   (def operation (c :operation))
   (unless (or (input :path) (input :from)) (put input :path ((store/selected host s c) :id)))
@@ -83,20 +77,9 @@
       (def removed (filter |(owned ($ :request)) (get run :queue [])))
       (put run :queue (filter |(not (owned ($ :request))) (get run :queue [])))
       (each a removed
-        (def previous (when (h :point) (store/row s (h :point))))
-        (def r (store/append s h {:kind "result" :request (a :request) :path (h :id)
-          :world (get-in previous [:data :world] (get-in a [:policy :world]))
-          :author (a :author) :signature (a :signature) :scope (get-in a [:policy :scope])
-          :bindings (when previous (if (previous :image) (previous :id) (get-in previous [:data :bindings])))
-          :world-point (get-in previous [:data :world-point]) :at (os/clock)
-          :terminal true :outcome {:status "cancelled" :error {:code "Cancelled" :message "Cancelled before execution."}}} (a :policy)))
-        (def roots (memory/extend s r (get-in previous [:data :memory] []) (a :policy)))
-        (when (run :active) (put run :memory roots))
-        (when (a :owner)
-          (when-let [parent (find |(= (a :owner) (get-in $ [:run :active :request])) (values (s :heads)))]
-            (def parent-run (parent :run)) (def policy (get-in parent-run [:active :policy]))
-            (put parent-run :memory (memory/extend s r (parent-run :memory) policy true)) (update parent-run r)
-            (store/save s parent policy))))
+        (notify-parent s a (append-event host s h (a :policy) {:kind "result" :request (a :request) :author (a :author)
+          :signature (a :signature) :scope (get-in a [:policy :scope]) :terminal true
+          :outcome {:status "cancelled" :error {:code "Cancelled" :message "Cancelled before execution."}}})))
       (if (owned (get-in run [:active :request]))
         (finish host s h {:status "cancelled" :error {:code "Cancelled" :message "Cancelled; dispatched actions are not undone."}})
         (do (when (and (not (run :active)) (empty? (run :queue))) (put h :run nil)) (store/save s h (or (get-in run [:active :policy]) c))))))) true)
@@ -148,21 +131,20 @@
 (defn item [s h index response]
   (def run (h :run)) (def a (run :active)) (def call ((run :calls) index))
   (unless (call :seen) (put call :seen @{}))
-  (each output (response :outputs) (unless (get (call :seen) (output :id))
+  (var tool 0)
+  (each output (response :outputs)
+    (def script (when (= "tool-call" (output :type)) (get (response :calls) (- (++ tool) 1))))
+    (unless (get (call :seen) (output :id))
     (def r (record s h a {:kind "message" :text (output :text)
-      :presentation (tabseq [[key value] :pairs output :unless (= key :text)] key value)}))
+      :publish (output :type) :language (output :language)}))
     (put (call :seen) (output :id) (r :id))
-    (when (= "tool-call" (output :type))
-      (def position (index-of output (response :outputs)))
-      (def number (length (filter |(= "tool-call" ($ :type)) (tuple/slice (response :outputs) 0 position))))
-      (def script ((response :calls) number))
+    (when script
       (when (script :error)
-        (eprint (policy/encode (script :error)))
         (def failed (record s h a {:kind "result" :outcome {:status "error" :error (script :error)}
-          :presentation {:type "tool-result" :reply (output :id) :id (string (output :id) "/rejected")}}))
+          :publish "tool-result" :reply (r :id)}))
         (put (call :seen) (string (output :id) "/rejected") (failed :id)))
       (unless (run :items) (put run :items @[]))
-      (array/push (run :items) {:model (get-in call [:arguments 0 :output]) :call script :output (output :id)})))))
+      (array/push (run :items) {:model (get-in call [:arguments 0 :output]) :call script :output (r :id)})))))
 (defn receipt [host s h index outcome]
   (def run (h :run)) (def a (run :active)) (def c (a :policy)) (def call ((run :calls) index))
   (unless (call :result)
@@ -177,7 +159,7 @@
       (put call :result result)
       (unless (keyword? (call :binding))
         (def r (record s h a {:kind "result" :outcome result
-          :presentation {:type "tool-result" :id (string (a :request) "/" index "/result") :reply (string (a :request) "/" index "/call")}}))
+          :publish "tool-result" :reply (call :point)}))
         (update run r))
       (store/save s h c))))
 (defn start [host s h c]
@@ -196,9 +178,8 @@
     (get-in (store/row s (store/access s point c)) [:data :memory])
     (get-in a [:seed :memory] (get-in base [:data :memory] []))))
   (put a :seed nil)
-  (unless (= "submit" (c :operation)) (put a :maintenance true))
   (store/transact s
-    (unless (a :maintenance)
+    (when (= "submit" (c :operation))
       (def r (if-let [admitted (a :start)]
         (let [prior (get-in (store/row s admitted) [:data :evidence])]
           (record s h a {:kind "start" :evidence (or prior admitted)} nil (unless prior admitted)))
@@ -210,11 +191,9 @@
           :input {:type (if (get-in a [:input :code]) "code" "text") :images (get-in a [:input :images] [])}})))
       (put a :start (r :id)) (put-in a [:input :source] (get-in r [:data :evidence] (r :id)))
       (when (get-in a [:input :code])
-        (put-in r [:data :presentation] {:type "tool-call" :id (string (a :request) "/script") :language "clojure"
-          :footer {:start (r :id) :result (r :id) :status "call"}})
+        (merge-into (r :data) {:publish "tool-call" :language "clojure"})
         (store/replace s r c)))
-    (store/save s h c))
-  (policy/trace c "start" {:path (h :id) :request (a :request) :input (a :start) :world name}))
+    (store/save s h c)))
 (defn commit-step [host s h packet counts c]
   (def run (h :run)) (def a (run :active))
   (if (packet :failure) (finish host s h {:status "error" :error (packet :failure)})
@@ -223,10 +202,10 @@
       (each [i call] (pairs (run :calls))
         (when (and call (call :result) (not (find |(= i ($ :call)) (packet :waits)))) (put (run :calls) i nil)))
       (when (packet :changed) (put run :dirty true) (put run :changed true))
-      (each [key count] (pairs counts) (repeat count (array/remove (run key) 0)))
+      (each [key count] (pairs counts) (when (> count 0) (array/remove (run key) 0 count)))
       (each complete (packet :completed)
         (def r (record s h a {:kind "result" :outcome (complete :outcome)
-          :presentation {:type "tool-result" :id (string (a :request) "/task/" (complete :task)) :reply (complete :script)}} (packet :bindings))) (update run r))
+          :publish "tool-result" :reply (complete :script)} (packet :bindings))) (update run r))
       (when-let [op (packet :operation)]
         (def binding (op :binding)) (def args (op :arguments))
         (cond
@@ -237,8 +216,8 @@
               [(merge (model/prepare c (first args) (= binding :rerank)) {:output (string (a :request) "/" index)})] args))
             (array/push (run :calls) @{:binding binding :role (packet :role) :arguments arguments})
             (unless (keyword? binding)
-              (record s h a {:kind "message" :text (string "(" binding (if (empty? args) "" " ") (string/join (map |(string/format "%j" $) args) " ") ")")
-                :presentation {:type "tool-call" :language "clojure" :id (string (a :request) "/" index "/call")}} (packet :bindings))))
+              (put (last (run :calls)) :point ((record s h a {:kind "message" :text (string/format "%j" (tuple (symbol binding) ;args))
+                :publish "tool-call" :language "clojure"} (packet :bindings)) :id))))
           (= binding :await)
           (do (def work (first args)) (store/permit s (store/head s (work :path)) c)
             (assert (not= (a :request) (work :request)) "cannot await own inquiry")
@@ -248,6 +227,11 @@
           (put run :reply [(packet :task) (try {:status "ok" :value (local host s h a c packet binding args)}
             ([err fiber] {:status "error" :error (policy/diagnostic err fiber)}))])))
       (if (packet :settled) (finish host s h (packet :settled) packet) (store/save s h c)))))
+(defmacro effect-outcome [c expr]
+  ~(try (let [v ,expr]
+    (assert (<= (length (,policy/encode v)) (,c :response-bytes)) "effect response limit")
+    {:status "ok" :value (if (nil? v) :null v)})
+    ([err fiber] {:status (get-in err [:context :outcome] "unknown") :error (,policy/diagnostic err fiber)})))
 (defn dispatch [host s h index authority c]
   (def run (h :run)) (def a (run :active)) (def call ((run :calls) index))
   (def key [(s :identity) (a :request) index]) (def binding (call :binding))
@@ -272,38 +256,19 @@
       (when summary-key (put (s :summary-work) [summary-key (a :request) index]
         @{:node (prepared :node) :origin [(a :request) index] :key summary-key :cancel cancel :waiters @[]}))
       (put call :dispatched true) (store/save s h c) (put (host :effects) key true)
-      (ev/go (fn []
-        (def started (os/clock))
-        (def result (try
-          (let [value (if imported (imported (first (call :arguments)))
-              (let [reply (ev/thread-chan 1)]
-                (defer (ev/chan-close reply)
-                  (ev/thread (fn [[c spec binding args events identity path request index reply cancel]]
-                    (def owner (fiber/root))
-                    (def watcher (when cancel (ev/go (fn []
-                      (try (do (ev/take cancel) (ev/cancel owner {:code "SummaryInvalidated" :message "Summary work invalidated."}))
-                        ([err] (unless (= err :finished) (error err))))))))
-                    (def value (try {:status "ok" :value
-                      (effects/invoke c spec (case binding :chat "model/chat" :rerank "model/rerank" binding) args
-                        (fn [item]
-                          (def ack (ev/thread-chan 1))
-                          (defer (ev/chan-close ack)
-                            (ev/give events {:type "item" :identity identity :path path :request request :index index :item item :ack ack})
-                            (ev/take ack))))}
-                      ([err fiber] {:status (get-in err [:context :outcome] "unknown") :error (policy/diagnostic err fiber)})))
-                    (when watcher (ev/cancel watcher :finished))
-                    (ev/give reply value))
-                    [(merge c (get-in c [:vm (call :role)])) spec binding (call :arguments)
-                     (host :events) (s :identity) (h :id) (a :request) index reply cancel] :n)
-                  (def value (ev/take reply)) (unless (= "ok" (value :status)) (error (merge (value :error) {:context (merge (get-in value [:error :context] {}) {:outcome (value :status)})})))
-                  (value :value))))]
-            (assert (<= (length (policy/encode value)) (c :response-bytes)) "effect response limit")
-            {:status "ok" :value (if (nil? value) :null value)})
-          ([err fiber] {:status (get-in err [:context :outcome] "unknown") :error (policy/diagnostic err fiber)})))
-        (policy/trace c "effect" {:binding (string binding) :role (string (call :role)) :status (result :status)
-          :code (get-in result [:error :code]) :ms (* 1000 (- (os/clock) started)) :path (h :id) :request (a :request) :index index})
-        (ev/give (host :events) {:type "receipt" :identity (s :identity) :path (h :id) :request (a :request) :index index :result result
-          :binding binding :policy c :world (run :world)}))))))
+      (def event {:type "receipt" :started (when (c :profile) (os/clock)) :identity (s :identity) :path (h :id) :request (a :request) :index index
+        :binding binding :policy c :world (run :world) :reply (call :point)})
+      (def events (host :events)) (def args (call :arguments))
+      (if imported (ev/spawn (ev/give events (merge event {:result (effect-outcome c (imported (first args)))})))
+        (ev/thread (fn [[event events args spec c cancel]]
+          (def owner (fiber/root))
+          (def watcher (when cancel (ev/spawn (ev/take cancel) (ev/cancel owner {:code "SummaryInvalidated" :message "Summary work invalidated."}))))
+          (def result (effect-outcome c (effects/invoke c spec (case (event :binding) :chat "model/chat" :rerank "model/rerank" (event :binding)) args
+            (fn [item] (def ack (ev/thread-chan 1))
+              (defer (ev/chan-close ack) (ev/give events (merge event {:type "item" :item item :ack ack})) (ev/take ack))))))
+          (when watcher (ev/cancel watcher :finished))
+          (ev/give events (merge event {:result result})))
+          [event events args spec (merge c (get-in c [:vm (call :role)])) cancel] :n)))))
 (defn schedule [host]
   (var retry true)
   (while retry (set retry false)
@@ -323,15 +288,7 @@
             (when (get-in h [:run :active])
               (def run (h :run))
               (when (and (a :deadline) (<= (a :deadline) (os/clock))) (error {:code "DeadlineExceeded" :message "Inquiry deadline expired."}))
-              (if (and (not (c :catalogue)) (not (and (= "memory-summarize" (c :operation)) (get-in c [:arguments :text]))))
-                (when (< (length (host :active)) (c :parallel))
-                  (put (host :active) key (a :request))
-                  (ev/go (fn []
-                    (def started (os/clock))
-                    (def result (try {:catalogue (effects/catalogue c)} ([err fiber] {:failure (policy/diagnostic err fiber)})))
-                    (policy/trace c "catalogue" {:ms (* 1000 (- (os/clock) started)) :models (length (get result :catalogue []))})
-                    (ev/give (host :events) (merge result {:type "catalogue" :identity (s :identity) :path (h :id) :request (a :request)})))))
-                (do
+
                   (each [i call] (pairs (run :calls)) (when (and call (< (length (host :effects)) (c :parallel))) (dispatch host s h i authority c)))
                   (def ready (or (run :reply) (not (run :waits)) (not (empty? (get run :items []))) (not (empty? (get run :updates [])))
                     (some |(or (and (has-key? $ :call) (get-in run [:calls ($ :call) :result]))
@@ -344,19 +301,13 @@
                       :reply (run :reply) :now (os/clock) :items (get run :items []) :updates (get run :updates [])
                       :children (some |(= (a :request) ($ :owner)) (store/pending s))
                       :results (tabseq [wait :in (get run :waits []) :when (has-key? wait :request) :let [r (store/result s wait)] :when r] (wait :request) r)})
-                    (ev/go (fn [] (def reply (ev/thread-chan 1))
-                      (defer (ev/chan-close reply)
-                        (def started (os/clock))
-                        (def packet (try (do
-                          (ev/thread (fn [[args reply]] (ev/give reply (vm/step args))) [args reply] :n)
-                          (ev/take reply)) ([err fiber] {:failure (policy/diagnostic err fiber)})))
-                        (policy/trace c "step" {:path (h :id) :request (a :request) :ms (* 1000 (- (os/clock) started))
-                          :completed (length (get packet :completed [])) :waits (length (get packet :waits []))
-                          :tasks (get-in packet [:profile :tasks]) :pending (get-in packet [:profile :pending])
-                          :operation (when-let [binding (get-in packet [:operation :binding])] (string binding))
-                          :changed (packet :changed) :failure (get-in packet [:failure :code])})
-                        (ev/give (host :events) {:type "step" :identity (s :identity) :path (h :id) :request (a :request) :counts counts :config c :packet packet})))))))))
-            ([err fiber] (eprint (policy/encode (policy/diagnostic err fiber)))
+                    (ev/thread (fn [[events event args]]
+                      (def c (args :config))
+                      (def packet (try (do (unless (c :catalogue) (put c :catalogue (effects/catalogue c))) (vm/step args))
+                        ([err fiber] {:failure (policy/diagnostic err fiber)})))
+                      (ev/give events (merge event {:config c :packet packet})))
+                      [(host :events) {:type "step" :started (when (c :profile) (os/clock)) :identity (s :identity) :path (h :id) :request (a :request) :counts counts} args] :n))))
+            ([err fiber] (put (host :active) key nil)
               (when (get-in h [:run :active])
                 (finish host s h {:status "error" :error (policy/diagnostic err fiber)}) (set retry true)))))))))))
 
@@ -369,14 +320,13 @@
       (when (event :identity)
         (def s (find |(= (event :identity) ($ :identity)) (values (host :stores))))
         (def h (store/head s (event :path)))
-        (when (and (index-of (event :type) ["step" "catalogue"]) (= (event :request) (get (host :active) [(s :identity) (h :id)]))) (put (host :active) [(s :identity) (h :id)] nil))
+        (when-let [started (event :started)] (eprint (policy/encode {:event (event :type) :request (event :request) :ms (* 1000 (- (os/clock) started))})))
+        (when (and (= (event :type) "step") (= (event :request) (get (host :active) [(s :identity) (h :id)]))) (put (host :active) [(s :identity) (h :id)] nil))
         (when (= "receipt" (event :type)) (put (host :effects) [(s :identity) (event :request) (event :index)] nil))
         (when (= (event :request) (get-in h [:run :active :request]))
           (try (case (event :type)
-            "step" (commit-step host s h (event :packet) (event :counts) (event :config))
-            "catalogue" (if (event :failure) (finish host s h {:status "error" :error (event :failure)})
-              (let [c (get-in h [:run :active :policy])]
-                (put c :catalogue (event :catalogue)) (store/save s h c)))
+            "step" (do (put (get-in h [:run :active :policy]) :catalogue (get-in event [:config :catalogue]))
+              (commit-step host s h (event :packet) (event :counts) (event :config)))
             "receipt" (receipt host s h (event :index) (event :result))
             "item" (store/transact s (item s h (event :index) (event :item)) (store/save s h (get-in h [:run :active :policy]))))
             ([err fiber] (eprint (policy/encode (policy/diagnostic err fiber)))
@@ -384,15 +334,9 @@
         (when (and (= "receipt" (event :type)) (string? (event :binding))
           (not= (event :request) (get-in h [:run :active :request])))
           (store/transact s
-            (def previous (when (h :point) (store/row s (h :point))))
-            (def r (store/append s h {:kind "result" :request (event :request) :path (h :id) :world (event :world)
-              :author (get-in event [:policy :handle]) :at (os/clock) :outcome (event :result)
-              :bindings (when previous (if (previous :image) (previous :id) (get-in previous [:data :bindings])))
-              :world-point (get-in previous [:data :world-point])
-              :presentation {:type "tool-result" :id (string (event :request) "/" (event :index) "/result")
-                :reply (string (event :request) "/" (event :index) "/call")}} (event :policy)))
-            (def roots (memory/extend s r (get-in h [:run :memory] (get-in previous [:data :memory] [])) (event :policy)))
-            (when (h :run) (put (h :run) :memory roots)) (store/save s h (event :policy))))
+            (append-event host s h (event :policy) {:kind "result" :request (event :request) :world (event :world) :publish "tool-result"
+              :author (get-in event [:policy :handle]) :outcome (event :result) :reply (event :reply)})
+            (store/save s h (event :policy))))
         (when (= "receipt" (event :type))
           (each [key job] (pairs (get s :summary-work {}))
             (when (= (job :origin) [(event :request) (event :index)])

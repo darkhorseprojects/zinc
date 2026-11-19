@@ -22,14 +22,6 @@
             "models": {
               "chat": { "role": "chat", "context": 131072, "tools": true },
               "rerank": { "role": "rerank", "context": 4096 }
-            },
-            "allow": {
-              "chat": ["chat"],
-              "rerank": ["rerank"]
-            },
-            "catalogue": {
-              "chat": { "path": "/v1/models", "format": "openai-data" },
-              "rerank": { "path": "/v1/models", "format": "openai-data" }
             }
           }
         },
@@ -53,10 +45,9 @@
             "processes": {},
             "modules": {}
           }
-        },
-        "writable": ["chat.model", "chat.thinking", "rerank.model", "summary.model", "summary.thinking", "path", "from", "memory", "queue", "temporary"]
+        }
       },
-      "imports": { "discord": true }
+      "imports": { "discord": { "options": ["chat.model", "summary.model", "rerank.model", "queue"] } }
     }
   },
   "routes": {

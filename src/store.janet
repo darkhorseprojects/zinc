@@ -104,18 +104,14 @@
     (find |(and (= token (get-in $ [:data :request])) (get-in $ [:data :terminal])) (values (s :rows)))))
   (when r (when (dictionary? work) (assert (= (work :path) (get-in r [:data :path])) "work reference does not match path"))
     (merge (get-in r [:data :outcome])
-      (if (= "response" (get-in r [:data :presentation :type])) {:value (get-in r [:data :text])} {}) {:point (r :id)})))
+      (if (has-key? (r :data) :text) {:value (get-in r [:data :text])} {}) {:point (r :id)})))
 (defn pending [s]
   (catseq [h :in (values (s :heads)) :when (h :run)]
     (array/concat @[] (if-let [a (get-in h [:run :active])] [a] []) (get-in h [:run :queue] []))))
-(defn admission [s work]
-  (def token (work :request))
-  (or (find |(and (= token ($ :request)) (= (work :path) ($ :path))) (pending s))
-    (let [r (if (s :db)
-      (first (query s "SELECT data FROM journal WHERE json_extract(data,'$.request')=? ORDER BY id LIMIT 1" [token]))
-      (find |(and (= token (get-in $ [:data :request])) (get-in $ [:data :signature])) (values (s :rows))))
-          d (get r :data)]
-      (when (= (work :path) (get d :path)) (merge d {:policy {:scope (get d :scope)}})))))
+(defn admission [s token]
+  (or (find |(= token ($ :request)) (pending s))
+    (get (if (s :db) (first (query s "SELECT data FROM journal WHERE json_extract(data,'$.request')=? ORDER BY id LIMIT 1" [token]))
+      (find |(and (= token (get-in $ [:data :request])) (get-in $ [:data :signature])) (values (s :rows)))) :data)))
 (defn reaches? [s from target]
   (def pending (pending s)) (def seen @{})
   (def visit (fn visit [id]
@@ -187,10 +183,7 @@
   (def signature (digest (policy/encode [input author (string (c :role))
     (tabseq [[k v] :pairs c :unless (index-of k [:registry :role])] k v)])))
   (def active (pending s))
-  (def old (or (find |(= token ($ :request)) active)
-    (if (s :db) (get (first (query s "SELECT data FROM journal WHERE json_extract(data,'$.request')=? ORDER BY id LIMIT 1" [token])) :data)
-      (get (find |(= token (get-in $ [:data :request])) (values (s :rows))) :data))))
-  (if old (do (assert (= signature (old :signature)) "request reused with different work") {:path (old :path) :request token})
+  (if-let [old (admission s token)] (do (assert (= signature (old :signature)) "request reused with different work") {:path (old :path) :request token})
     (do
       (assert (< (length active) (c :pending)) "pending request limit")
       (def base (or (input :from) (when (and (input :path) (s :source) (> (input :path) 0)) ((head (s :source) (input :path)) :point))))
@@ -204,22 +197,13 @@
       (assert (index-of (get seed :world (get-in selected [:data :world] (c :world))) (c :worlds)) "path world is not granted")
       (assert (or (input :queue) (not (get target :run))) {:code "PathBusy" :message "Path is busy; use queue true."})
       (def depth (if owner (+ 1 (owner :depth)) 0)) (assert (< depth (c :depth)) "recursion depth limit")
-      (def id (if target (target :id) (if (s :db)
-        ((first (query s "SELECT coalesce(max(id),0)+1 id FROM heads WHERE typeof(id)='integer'")) :id) (- (s :next-head) 1))))
+      (def h (or target (create s nil point))) (def id (h :id))
       (def a @{:request token :path id :input input :policy c :author author :signature signature
         :owner (when owner (owner :request)) :depth depth :seed seed :order (+ 1 (reduce max 0 (map |($ :order) active)))
         :deadline (when (> (c :run-seconds) 0) (+ (os/clock) (c :run-seconds)))})
-      (def run (get target :run))
-      (def queue (array/concat @[] (get run :queue []) [a]))
-      (def next (merge (or run {}) {:queue queue}))
-      (def bytes (marshal next))
-      (assert (<= (length bytes) (c :journal-bytes)) "running graph exceeds byte limit")
-      (when (s :db)
-        (if target (query s "UPDATE heads SET run=? WHERE id=?" [(buffer bytes) id])
-          (query s "INSERT INTO heads(id,point,run) VALUES(CAST(? AS INTEGER),?,?)" [id point (buffer bytes)])))
-      (if target (if run (put run :queue queue) (put target :run next))
-        (do (unless (s :db) (put s :next-head id))
-          (put (s :heads) id @{:id id :point point :run next})))
+      (def run (get h :run @{})) (def queue (array/concat @[] (get run :queue []) [a]))
+      (unless (s :db) (assert (<= (length (marshal (merge run {:queue queue}))) (c :journal-bytes)) "running graph exceeds byte limit"))
+      (put run :queue queue) (put h :run run) (save s h c)
       {:path id :request token})))
 
 (defn storage [host c]

@@ -227,8 +227,6 @@
     {:image image :changed (not= (string before) (string projected))
      :bindings projected :completed completed
      :operation operation :role (when host-task ((tasks host-task) :role)) :task host-task :settled settled
-     :profile {:tasks (length tasks) :pending (length (filter |(not ($ :outcome)) tasks))
-       :items (length (get p :items [])) :updates (length (get p :updates [])) :image-bytes (length image)}
      :waits (seq [task :in tasks :unless (task :outcome) :when (task :wait)] (task :wait))})
     ([err fiber] {:failure (policy/diagnostic err fiber)})))
 

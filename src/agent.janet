@@ -56,18 +56,14 @@
       (def changes (invoke :updates []))
       (each change changes (array/push exchanges {:role "user" :sources [(change :id)]
         :parts [{:type "text" :text (string "Execution outcome [#" (change :id) "]:\n" (change :text))}]}))
-      (def context (assemble invoke input exchanges))
-      (def response (invoke :chat [{:messages (context :messages) :tools true :manifest (context :manifest)}]))
+      (def response (invoke :chat [(merge (assemble invoke input exchanges) {:tools true})]))
       (array/push exchanges (response :message))
       (each call (response :calls)
         (def admission (invoke :admission [(response :output) (call :id)]))
         (array/push exchanges {:role "tool" :call (call :id)
           :parts [{:type "text" :text (policy/encode admission)}]}))
-      (case (response :stop)
-        "tools" nil
-        "continue" nil
-        "answer" (if (invoke :pending []) (invoke :listen []) (return answer (response :text)))
-        "refused" (if (invoke :pending []) (invoke :listen []) (return answer (response :text)))
-        "blocked" (error {:code "ModelBlocked" :message "Provider blocked the request."})
+      (cond (index-of (response :stop) ["tools" "continue"]) nil
+        (index-of (response :stop) ["answer" "refused"]) (if (invoke :pending []) (invoke :listen []) (return answer (response :text)))
+        (= "blocked" (response :stop)) (error {:code "ModelBlocked" :message "Provider blocked the request."})
         (error {:code "IncompleteModelResponse" :message "Provider did not complete the response."})))
     (error {:code "RoundLimit" :message "Model round limit exhausted."})))
