@@ -3,7 +3,7 @@
 (import spork/path :as path)
 (import spork/base64 :as base64)
 (import jsec/crypto :as crypto)
-(import ./config)
+(import ./policy)
 
 (def layout (string (slurp (path/join (path/dirname (dyn :source)) "store.sql"))))
 (defn digest [bytes] (string/join (map |(string/format "%02x" $) (string/bytes (crypto/digest :sha256 bytes)))))
@@ -50,7 +50,7 @@
       SELECT j.id,json_extract(j.data,'$.source.key'),null FROM ancestry a JOIN journal j USING(id)
       WHERE json_extract(j.data,'$.source.conversation')=?1
         AND json_extract(j.data,'$.source.key') IN (SELECT value FROM json_each(?3))`
-      [conversation point (config/encode keys)]) []))
+      [conversation point (policy/encode keys)]) []))
 (defn head [s id]
   (def h (get (s :heads) id)) (assert (and (int? id) h) "path unavailable") h)
 (defn world [s name]
@@ -67,12 +67,12 @@
     "INSERT INTO heads(id,point) VALUES(CAST(? AS INTEGER),?)") [id point]))
   (def h @{:id id :point point}) (put (s :heads) id h) h)
 (defn replace [s r c]
-  (def bytes (config/encode (r :data)))
+  (def bytes (policy/encode (r :data)))
   (assert (<= (+ (length bytes) (length (or (r :image) ""))) (c :journal-bytes)) "event byte limit")
   (when (s :db) (query s "UPDATE journal SET data=?,image=? WHERE id=?" [bytes (when (r :image) (buffer (r :image))) (r :id)]))
   (put (s :rows) (r :id) r) r)
 (defn append [s h data c &opt image]
-  (def bytes (config/encode data))
+  (def bytes (policy/encode data))
   (assert (<= (+ (length bytes) (length (or image ""))) (c :journal-bytes)) "event byte limit")
   (def id (if (s :db) ((first (query s "INSERT INTO journal(previous,data,image) VALUES(?,?,?) RETURNING id"
     [(h :point) bytes (when image (buffer image))])) :id)
@@ -81,7 +81,7 @@
   (put (s :rows) id r) (put h :point id) r)
 (defn text [r]
   (if (has-key? (r :data) :text) (get-in r [:data :text])
-    (if (has-key? (r :data) :outcome) (config/encode (get-in r [:data :outcome])) "")))
+    (if (has-key? (r :data) :outcome) (policy/encode (get-in r [:data :outcome])) "")))
 (defn image [s point]
   (when point (def r (row s point)) (if (r :image) (r :image)
     (when-let [ref (get-in r [:data :bindings])] (image s ref)))))
@@ -155,7 +155,7 @@
     (unless read-only (query s "PRAGMA journal_mode=WAL; PRAGMA synchronous=FULL;"))
     (when initialize
       (query s layout)
-      (query s "INSERT INTO journal(data) VALUES(?)" [(config/encode {:kind "identity" :handle (c :handle) :stream (s :identity)})]))
+      (query s "INSERT INTO journal(data) VALUES(?)" [(policy/encode {:kind "identity" :handle (c :handle) :stream (s :identity)})]))
     (assert (and (= ["id" "previous" "data" "image"] (tuple/slice (map |($ :name) (query s "PRAGMA table_info(journal)"))))
       (= ["id" "point" "run"] (tuple/slice (map |($ :name) (query s "PRAGMA table_info(heads)")))))
       {:code "FreshStateRequired" :message "Incompatible store layout; a separate fresh-state cutover must be authorized."})
@@ -184,7 +184,7 @@
   (each image (get input :images []) (assert (index-of (image :type) ["image/png" "image/jpeg" "image/webp"]) "invalid image type"))
   (def token (get input :request (nonce)))
   (assert (and (string? token) (<= 1 (length token) 256)) "request must be a nonempty string of at most 256 bytes")
-  (def signature (digest (config/encode [input author (string (c :role))
+  (def signature (digest (policy/encode [input author (string (c :role))
     (tabseq [[k v] :pairs c :unless (index-of k [:registry :role])] k v)])))
   (def active (pending s))
   (def old (or (find |(= token ($ :request)) active)
@@ -221,3 +221,36 @@
         (do (unless (s :db) (put s :next-head id))
           (put (s :heads) id @{:id id :point point :run next})))
       {:path id :request token})))
+
+(defn storage [host c]
+  (def key (if (c :temporary) (string "ram:" (c :store) ":" (get c :request (nonce))) (c :store)))
+  (or (get (host :stores) key)
+    (let [source (when (c :temporary) (or (get (host :stores) (c :store))
+            (when (os/stat (c :store)) (open (merge c {:temporary false}) false nil true))))
+          s (open c (c :initialize) source)]
+      (put (host :stores) key s) s)))
+(defn cursor [s]
+  (if (s :db) ((first (query s "SELECT coalesce(max(id),0) n FROM journal")) :n) (s :next-row)))
+(defn rows [s after]
+  (if (s :db) (query s "SELECT id,data FROM journal WHERE id>? ORDER BY id" [after])
+    (sorted (filter |(< ($ :id) after) (values (s :rows))) |(> ($0 :id) ($1 :id)))))
+(defn selected [host s c &opt reading]
+  (def key [(s :identity) (c :world) (c :conversation)])
+  (def previous (or (get (host :conversations) key)
+    (when (s :db) (get-in (first (query s
+      "SELECT data FROM journal WHERE json_extract(data,'$.conversation')=? AND json_extract(data,'$.world')=? ORDER BY id DESC LIMIT 1" [(c :conversation) (c :world)])) [:data :path]))))
+  (cond (c :from) (if reading {:point (access s (c :from) c)} (create s nil (access s (c :from) c)))
+    (or (c :path) previous) (do (unless (c :path) (put (host :conversations) key previous))
+      (if (and (s :source) (c :path) (> (c :path) 0))
+        (create s nil ((permit s (head (s :source) (c :path)) c) :point))
+        (permit s (head s (or (c :path) previous)) c)))
+    reading (world s (c :world))
+    (let [h (create s nil ((world s (c :world)) :point))]
+      (put (host :conversations) key (h :id)) h)))
+(defn anchor [host s h c]
+  (def base (when (h :point) (row s (h :point))))
+  {:path (h :id) :world (get-in base [:data :world] (c :world))
+   :conversation (when (= (h :id) (get (host :conversations) [(s :identity) (c :world) (c :conversation)])) (c :conversation))
+   :memory (get-in h [:run :memory] (get-in base [:data :memory] []))
+   :world-point (get-in base [:data :world-point])
+   :bindings (when base (if (base :image) (base :id) (get-in base [:data :bindings])))})

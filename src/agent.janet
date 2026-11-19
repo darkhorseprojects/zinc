@@ -1,4 +1,4 @@
-(import ./config)
+(import ./policy)
 (import ./model)
 (import ./memory)
 
@@ -23,7 +23,7 @@
   (def public (invoke :exposure []))
   (def system {:role "system" :parts [{:type "text" :text (string (public :instructions) "\n\n" (public :documentation))}]})
   (def state {:role "user" :parts [{:type "text" :text (string "Settings and resources:\n"
-    (config/encode (tabseq [k :in [:settings :resources]] k (public k)))
+    (policy/encode (tabseq [k :in [:settings :resources]] k (public k)))
     "\n\nSaved world bindings (evidence):\n```clojure\n" (invoke "world/view" []) "\n```")}]})
   (def parts @[{ :type "text" :text (get input :text "")}])
   (each image (get input :images []) (array/push parts {:type "image" :url (string "data:" (image :type) ";base64," (image :data))}))
@@ -62,7 +62,7 @@
       (each call (response :calls)
         (def admission (invoke :admission [(response :output) (call :id)]))
         (array/push exchanges {:role "tool" :call (call :id)
-          :parts [{:type "text" :text (config/encode admission)}]}))
+          :parts [{:type "text" :text (policy/encode admission)}]}))
       (case (response :stop)
         "tools" nil
         "continue" nil

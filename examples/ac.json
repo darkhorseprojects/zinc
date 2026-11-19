@@ -22,6 +22,14 @@
             "models": {
               "chat": { "role": "chat", "context": 131072, "tools": true },
               "rerank": { "role": "rerank", "context": 4096 }
+            },
+            "allow": {
+              "chat": ["chat"],
+              "rerank": ["rerank"]
+            },
+            "catalogue": {
+              "chat": { "path": "/v1/models", "format": "openai-data" },
+              "rerank": { "path": "/v1/models", "format": "openai-data" }
             }
           }
         },
@@ -29,10 +37,26 @@
         "rerank": { "model": "llama:rerank" },
         "summary": { "model": "llama:chat", "thinking": "default", "bytes": 512, "max-bytes": 4096 },
         "vm": {
-          "user": { "bindings": ["*"], "imports": { "discord": { "options": ["chat.model", "chat.thinking", "rerank.model", "summary.model", "summary.thinking", "path", "from", "memory", "queue", "temporary"] }, "exa": false, "tinyfish": false }, "fs": {}, "http": {}, "processes": {}, "modules": {} },
-          "agent": { "bindings": ["*"], "imports": { "discord": true, "exa": false, "tinyfish": false }, "fs": {}, "http": {}, "processes": {}, "modules": {} }
-        }
-      }
+          "user": {
+            "bindings": ["*"],
+            "imports": { "discord": true },
+            "fs": {},
+            "http": {},
+            "processes": {},
+            "modules": {}
+          },
+          "agent": {
+            "bindings": ["*"],
+            "imports": { "discord": true },
+            "fs": {},
+            "http": {},
+            "processes": {},
+            "modules": {}
+          }
+        },
+        "writable": ["chat.model", "chat.thinking", "rerank.model", "summary.model", "summary.thinking", "path", "from", "memory", "queue", "temporary"]
+      },
+      "imports": { "discord": true }
     }
   },
   "routes": {

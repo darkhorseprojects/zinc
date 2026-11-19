@@ -1,46 +1,52 @@
 (import spork/json :as json)
 (import spork/utf8 :as utf8)
-(import ./config)
+(import ./policy)
 
 (def tool {:name "janet" :description "Execute a Janet script. Use self for recursive agent work."
   :parameters {:type "object" :additionalProperties false :required ["code"] :properties {:code {:type "string" :minLength 1}}}})
 (defn estimate [value]
-  (math/ceil (/ (length (config/encode (postwalk |(if (and (dictionary? $) (= "image" ($ :type)))
+  (math/ceil (/ (length (policy/encode (postwalk |(if (and (dictionary? $) (= "image" ($ :type)))
     {:type "image" :url "[provider-dependent image tokens]"} $) value))) 4)))
 (defn text [parts] (string/join (map |($ :text) (filter |(= "text" ($ :type)) parts)) "\n"))
 
-(defn catalogue [c records properties]
-  (catseq [[name endpoint] :pairs (c :providers)]
-    (def raw (get records name []))
-    (def configured (get endpoint :models {}))
-    (def all (if (endpoint :catalogue) raw
-      (seq [[id spec] :pairs configured] {:id (string id) :role (spec :role)})))
-    (seq [r :in all :let [id (r :id) spec (get configured (keyword id))]
-      :when (or (not (has-key? endpoint :models)) spec)]
-      (def props (get properties (string name ":" id)))
-      (def parameters (get r :supported_parameters []))
-      (def caps (get props :chat_template_caps {}))
-      (def context (min (get r :context_length math/inf) (get-in r [:top_provider :context_length] math/inf)
-        (get-in props [:default_generation_settings :n_ctx] math/inf) (get spec :context math/inf)))
-      (assert (and (int? context) (> context 1)) (string "context capacity required for " name ":" id))
-      (merge {:ref (string name ":" id) :provider (string name) :id id :name (get r :name id)
-        :role (get spec :role (get r :role "chat")) :context context
-        :protocol (get endpoint :protocol "chat-completions")
-        :tools (if props (and (caps :supports_tools) (caps :supports_tool_calls)) (not (nil? (index-of "tools" parameters))))
-        :parallel (if props (caps :supports_parallel_tool_calls) (not (nil? (index-of "parallel_tool_calls" parameters))))
-        :images (if props (get-in props [:modalities :vision]) (not (nil? (index-of "image" (get-in r [:architecture :input_modalities] [])))))
-        :control (if props (when (caps :supports_reasoning_effort) "reasoning_effort")
-          (cond (index-of "reasoning" parameters) "reasoning" (index-of "reasoning_effort" parameters) "reasoning_effort"))
-        :efforts (if props (caps :reasoning_effort_levels) (get-in r [:reasoning :supported_efforts]))
-        :reasoning-required (get-in r [:reasoning :mandatory])
-        :output (get-in r [:top_provider :max_completion_tokens])
-        :output-field (if (= "responses" (endpoint :protocol)) "max_output_tokens" "max_tokens")}
-        (or spec {}) {:ref (string name ":" id) :provider (string name) :id id :context context}))))
+(defn descriptor [name endpoint r props]
+  (def id (r :id)) (def spec (merge (get endpoint :defaults {}) (get-in endpoint [:models (keyword id)] {})))
+  (def parameters (get r :supported_parameters []))
+  (def caps (get props :chat_template_caps {}))
+  (def context (min (get r :context_length math/inf) (get-in r [:top_provider :context_length] math/inf)
+    (get-in props [:default_generation_settings :n_ctx] math/inf) (get spec :context math/inf)))
+  (merge {:name (get r :name id)
+    :protocol (get endpoint :protocol "chat-completions")
+    :tools (if props (and (caps :supports_tools) (caps :supports_tool_calls)) (not (nil? (index-of "tools" parameters))))
+    :parallel (if props (caps :supports_parallel_tool_calls) (not (nil? (index-of "parallel_tool_calls" parameters))))
+    :images (if props (get-in props [:modalities :vision]) (not (nil? (index-of "image" (get-in r [:architecture :input_modalities] [])))))
+    :control (if props (when (caps :supports_reasoning_effort) "reasoning_effort")
+      (cond (index-of "reasoning" parameters) "reasoning" (index-of "reasoning_effort" parameters) "reasoning_effort"))
+    :efforts (if props (caps :reasoning_effort_levels) (get-in r [:reasoning :supported_efforts]))
+    :reasoning-required (get-in r [:reasoning :mandatory])
+    :output (get-in r [:top_provider :max_completion_tokens])
+    :output-field (if (= "responses" (endpoint :protocol)) "max_output_tokens" "max_tokens")}
+    spec {:ref (string name ":" id) :provider (string name) :id id :role (r :role) :context (when (< context math/inf) context)}))
+
+(defn describe [c catalogue failures]
+  (def role (get-in c [:arguments :role]))
+  (assert (or (not role) (index-of role ["chat" "rerank" "summary"])) "unknown model role")
+  (def current (seq [key :in [:chat :summary :rerank] :when (or (not role) (= role (string key)))]
+    (def ref (or (get-in c [key :model]) (when (= key :summary) (get-in c [:chat :model]))))
+    (string key ": " (or ref "not set") (if (and ref (not (find |(and (= ref ($ :ref)) (= (if (= key :rerank) "rerank" "chat") ($ :role))) catalogue))) " (unavailable)" ""))))
+  (string "Current\n" (string/join current "\n") "\n\nAllowed\n"
+    (string/join (seq [r :in catalogue :when (or (not role) (= (if (= role "summary") "chat" role) (r :role)))]
+      (string (r :role) ": " (r :ref) (if (= (r :name) (r :id)) "" (string " — " (r :name))))) "\n")
+    (string/join (seq [[name reason] :pairs failures] (string "\n" name ": catalogue unavailable: " reason)) "")))
 
 (defn select [c role &opt reference]
   (def ref (or reference (get-in c [(if (= role "rerank") :rerank :chat) :model])))
   (def selected (find |(and (= ref ($ :ref)) (= role ($ :role))) (c :catalogue)))
   (assert selected (string "model unavailable: " ref)) selected)
+
+(defn window [selected c]
+  (def limit (selected :context)) (assert (and (int? limit) (> limit 1)) (string "context capacity required for " (selected :ref)))
+  (min limit (get c :context-quota math/inf)))
 
 (defn prepare [c input &opt rerank]
   (def settings (if (input :summary) (merge c {:chat (merge (c :chat) (c :summary)) :web-search false}) c))
@@ -50,7 +56,7 @@
   (assert (index-of protocol ["chat-completions" "responses"]) "unsupported model protocol")
   (def messages (input :messages))
   (def size (estimate (if rerank input messages)))
-  (def window (min (selected :context) (get c :context-quota math/inf)))
+  (def window (window selected c))
   (def maximum (min window (get selected :output window) (get c :output 4096) (get input :output window) (- window size 256)))
   (unless rerank (assert (and (> maximum 0) (<= (+ size maximum) window)) "model context budget exhausted"))
   (def body (merge (get endpoint :parameters {}) {:model (selected :id)}))
@@ -111,7 +117,7 @@
   {:provider (selected :provider) :selected selected :rerank rerank :summary (input :summary) :manifest (input :manifest)
    :node (input :node) :recipe (input :recipe) :quota (input :quota)
    :path (get endpoint (if rerank :rerank-path :chat-path) (if rerank "/v1/rerank" (if (= protocol "responses") "/v1/responses" "/v1/chat/completions")))
-   :body (config/encode body)})
+   :body (policy/encode body)})
 
 (defn decode [prepared raw]
   (def selected (prepared :selected)) (def protocol (selected :protocol))
@@ -181,7 +187,7 @@
       (assert (and (= [:code] (tuple/slice (keys args))) (string? (args :code)) (> (length (args :code)) 0)) "tool expects code")
       (put call :code (args :code))
       (put (tool-outputs i) :language "clojure") (put (tool-outputs i) :text (args :code)))
-      ([err] (put call :error (config/diagnostic err)))))
+      ([err] (put call :error (policy/diagnostic err)))))
   (def ending (if (= protocol "responses")
     (let [item (last (raw :output))]
       (case (get item :type)
@@ -234,7 +240,7 @@
       (assert (and (= protocol "chat-completions") finish) "unexpected model stream terminator")
       (set terminal true) (break))
     (when (or (event :error) (index-of (event :type) ["error" "response.failed"]))
-      (error {:code "ProviderError" :message (config/encode (or (event :error) (get-in event [:response :error])))}))
+      (error {:code "ProviderError" :message (policy/encode (or (event :error) (get-in event [:response :error])))}))
     (if (= protocol "chat-completions")
       (do
         (when (event :usage) (set usage (event :usage)))
@@ -243,7 +249,7 @@
           (assert (= 0 (choice :index)) "unexpected assistant choice")
           (def delta (choice :delta))
           (when (choice :error)
-            (error {:code "ProviderError" :message (config/encode (choice :error))}))
+            (error {:code "ProviderError" :message (policy/encode (choice :error))}))
           (when finish
             (assert (and (event :usage) (= finish (choice :finish_reason))
               (every? (map (fn [[key value]] (case key

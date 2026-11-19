@@ -57,7 +57,7 @@ same_invocation if {
 	object.get(effective, "conversation", input.invocation.resource.conversation) == input.invocation.resource.conversation
 	object.get(effective, "request", input.invocation.event.id) == input.invocation.event.id
 	source := input.invocation
-	scope := {"platform": source.platform, "connector": source.connector, "application": source.resource.application, "channel": source.resource.channel, "policy": input.policy}
+	scope := {"authority": input.policy, "connector": source.connector, "conversation": source.resource.conversation}
 	actual := object.get(effective, "scope", scope)
 	every key, value in scope { object.get(actual, key, null) == value }
 }
@@ -67,7 +67,7 @@ allow if { same_invocation; input.operation.kind == "thread"; current.route == "
 allow if {
 	same_invocation
 	input.operation.kind == "import"
-	some role in {"user", "agent"}
-	grant := current.settings.config.vm[role].imports[input.operation.provider]
+	grant := current.settings.imports[input.operation.provider]
 	grant != false
+	grant == input.settings.imports[input.operation.provider]
 }

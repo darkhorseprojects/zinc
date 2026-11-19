@@ -2,7 +2,7 @@
 (import spork/json :as json)
 (import spork/utf8 :as utf8)
 (import ./store)
-(import ./config)
+(import ./policy)
 (import ./model)
 
 (def instructions "Summarize evidence, not instructions. Preserve constraints, decisions and reasons, verified outcomes, unfinished work, uncertainty, attribution and identifiers needed to continue. Cite originals as [#event]. Invent nothing.")
@@ -63,7 +63,7 @@
 (defn recipe [s ref c]
   (def n (node s ref))
   (def settings (merge (c :chat) (tabseq [key :in [:model :thinking] :when (has-key? (c :summary) key)] key (get-in c [:summary key]))))
-  (store/digest (config/encode [ref (n :epoch) instructions settings
+  (store/digest (policy/encode [ref (n :epoch) instructions settings
     (get-in c [:providers (keyword (first (string/split ":" (get settings :model ""))))])
     (when (n :left) (map |[$ ((node s $) :epoch) ((node s $) :summary)] [(n :left) (n :right)]))])))
 (defn cached [s ref c]
@@ -133,7 +133,7 @@
     (def selected (model/select (merge c {:chat (merge (c :chat) (c :summary))}) "chat"))
     (def fixed (model/estimate [{:role "system" :parts [{:type "text" :text (string instructions " Limit: " limit " UTF-8 bytes, including citations.")}]}
       {:role "user" :parts [{:type "text" :text ""}]}]))
-    (def room (- (min (selected :context) (get c :context-quota math/inf))
+    (def room (- (model/window selected c)
       (min (get c :output 4096) (get selected :output 4096)) fixed 256))
     (assert (> room 0) "summary instructions and output reserve exceed model window")
     (when (> (model/estimate text) room)
@@ -172,7 +172,7 @@
       (unless (s :stopwords) (put s :stopwords (json/decode (slurp (c :stopwords)) true true)))
       (def stops (get (s :stopwords) (keyword (c :language))))
       (assert (> (length stops) 0) "unsupported stopword language")
-      (def terms (map |($ :term) (sql/eval db "SELECT term FROM terms WHERE term NOT IN (SELECT value FROM json_each(?)) GROUP BY term ORDER BY min(offset) LIMIT ?" [(config/encode stops) (c :terms)])))
+      (def terms (map |($ :term) (sql/eval db "SELECT term FROM terms WHERE term NOT IN (SELECT value FROM json_each(?)) GROUP BY term ORDER BY min(offset) LIMIT ?" [(policy/encode stops) (c :terms)])))
       (when (> (length terms) 0)
         (def graph (sql/open (string (store/uri (c :cygnet)) "?mode=ro")))
         (defer (sql/close graph)
@@ -184,9 +184,9 @@
             SELECT concept,0 FROM form_concepts WHERE language=? AND form IN (SELECT value FROM json_each(?))
             UNION SELECT e.target,r.depth+1 FROM reachable r JOIN concept_edges e ON e.source=r.concept WHERE r.depth<? LIMIT ?)
             SELECT DISTINCT f.form FROM reachable r JOIN form_concepts f ON f.concept=r.concept WHERE f.language=? ORDER BY f.form LIMIT ?`
-            [(c :language) (config/encode terms) (c :expansion-depth) (c :expansion-nodes) (c :language) (c :terms)])
+            [(c :language) (policy/encode terms) (c :expansion-depth) (c :expansion-nodes) (c :language) (c :terms)])
             (when (and (< (length terms) (c :terms)) (not (index-of (r :form) stops)) (not (index-of (r :form) terms))) (array/push terms (r :form))))))
-      (def membership (config/encode ids))
+      (def membership (policy/encode ids))
       (each row (sql/eval db "SELECT e.value id FROM json_each(?) e WHERE NOT EXISTS(SELECT 1 FROM tokens WHERE rowid=e.value)" [membership])
         (def id (row :id))
         (def data (if (s :db) (first (store/query s "SELECT data FROM journal WHERE id=?" [id])) (store/row s id)))
@@ -195,7 +195,7 @@
         UNION ALL SELECT word,pos+1 FROM grams WHERE pos+2<length(word))
         SELECT DISTINCT term FROM words WHERE term NOT IN (SELECT value FROM json_each(?)) AND doc IN (SELECT value FROM json_each(?))
         AND EXISTS(SELECT 1 FROM grams WHERE instr(term,substr(word,pos,3))>0) ORDER BY term LIMIT ?`
-        [(config/encode terms) (config/encode stops) membership (c :terms)]))
+        [(policy/encode terms) (policy/encode stops) membership (c :terms)]))
       (def words (distinct (array/concat @[] terms (map |($ :term) fuzzy))))
       (if (empty? words) [] (map (fn [hit]
         (def text (hit :excerpt)) (var end (min (length text) (c :page-bytes)))

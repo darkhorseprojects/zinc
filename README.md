@@ -26,13 +26,11 @@ agent directory, `${handle}` with a stable agent handle, and `YOUR_USER_ID` with
 and models. For a genuinely new database only:
 
 ```sh
-jpm run init
+jq '.policies.zinc.config' ac.json | PA_HANDLE="$(jq -r '.policies.zinc.handle' ac.json)" jpm run init
 ```
 
 Initialization is offline and refuses to overwrite existing state. Policies in one directory share its handle,
-directory and store. This replacement has a different two-table layout despite retaining schema number 1. It does not
-migrate old state. Existing installations require a separately authorized fresh-state cutover; do not point this runtime
-at an existing incompatible store and expect conversion.
+directory and store. Finish pending work on its original runtime before updating. This change does not migrate images: older published binding images lack the original source. Keep the original store and runtime to read them; never reinitialize an existing database.
 
 ## Run
 
@@ -46,8 +44,7 @@ agc run .
 ```
 
 Connect a bot once; existing credentials do not need reconnecting after source updates. Zinc does not start or download
-model servers. For Codex, `agc login codex` stores credentials; configure the provider's absolute `credential-command`
-as `["/path/to/agc", "credential", "codex"]`. Secrets stay in the keyring, not JSON or Rego.
+model servers. For ChatGPT plan inference, use `agc login chatgpt DIRECTORY`, then configure `credential-command` as `["/absolute/path/to/agc", "credential", "chatgpt", "YOUR_HANDLE"]`. Use `https://api.openai.com` with `/v1/responses`, and a chat catalogue `{ "path": "/v1/models", "format": "chatgpt-plan" }`. Credentials remain in the keyring.
 
 ## Entry points and commands
 
@@ -55,7 +52,7 @@ The agent owns `main` and imports PA. `janet -t src/main.janet` requires `PA_HAN
 `invoke(input, config, imports)` receives bytes, opaque agent configuration, and callable Janet imports. PA correlates
 concurrent invocations and reverse calls; it does not load agents or schedule application work.
 
-Discovery supplies command descriptors, option schema paths, import requirements and intake limits. It grants no
+Discovery supplies command descriptors, writable setting IDs and intake limits. It grants no
 authority. `prepare` translates source events and options into Zinc input and opaque configuration. `position(config)`
 returns the selected configuration and `through`, the last committed coverage cursor. `append(config, {records, scan})`
 commits evidence and, when supplied, a `{after, through}` coverage claim in one transaction. A stale `after` fails with
@@ -97,9 +94,7 @@ same prompt assembler in a RAM-only execution.
 reasoning belongs under `chat.thinking` or `summary.thinking`. Unsupported reasoning settings fail instead of being
 ignored. Summary quotas are `summary.bytes` and `summary.max-bytes`.
 
-Each of `vm.user` and `vm.agent` owns `bindings`, `imports`, `fs`, `http`, `processes`, and `modules`. Discord accepts
-`true` or an object, including `options` containing selected schema paths. Exa/TinyFish are booleans. Named peer imports
-carry `policy` and `documentation`. There is no transport-level import configuration or separate import-options object.
+`writable` selects setting IDs independently of VM grants. Host offerings belong in the deployment. Per-role VM `imports` are boolean namespace grants; `bindings` filters individual names. Model `allow` maps `chat` or `rerank` to exact provider IDs or `"*"`. Each role has a `catalogue` path and format (`openai-data` or `chatgpt-plan`). Provider `defaults` and per-ID `models` refine capabilities or context limits; neither creates catalogue entries. `/models` lists current selections followed by concrete allowed references.
 
 One effective registry supplies installation, documentation, argument checks, resources and marshaling aliases. Managed
 tasks inherit their role; retained functions cannot bypass the current role's grants. `output` is private caller-supplied
@@ -148,7 +143,7 @@ compares the expected world head; a conflict retains its candidate image and rep
 heap merge or effect replay.
 
 World images contain surviving bindings and definition provenance, not print logs, loop-local bindings or scheduler
-state. `world/view` renders defining source for functions and current Janet values for data, including mutations.
+state. `world/view` renders the original defining forms stored on local binding entries. Mutations change the saved values, not the defining source.
 `world/rewind` affects future shared readers, never external actions. Source is not a universal executable export of
 arbitrary closures, sharing or cycles; the binding image preserves those.
 
